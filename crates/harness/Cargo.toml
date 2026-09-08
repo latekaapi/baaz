@@ -1,0 +1,29 @@
+[package]
+name = "harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The harness: a macOS chat interface to Meta's Muse Code agent, built on the aui component library."
+
+[dependencies]
+# `test-support` exposes `Window::render_to_image`, which `--screenshot` uses,
+# exactly as the gallery's own capture path does.
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+gpui-kit.workspace = true
+aui.workspace = true
+aui-protocol.workspace = true
+aui-motion.workspace = true
+aui-tokens.workspace = true
+aui-icons.workspace = true
+muse-client.workspace = true
+muse-adapter.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-channel.workspace = true
+futures.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+image.workspace = true

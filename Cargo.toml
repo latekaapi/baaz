@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/harness"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,12 +15,28 @@ serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 crossbeam-channel = "0.5"
+futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = "0.25"
+
+# gpui, pinned to the exact version agentic-ui resolves, so `cargo tree -d` shows
+# one gpui-pre and one gpui-kit here and the two repositories build the same
+# library code. agentic-ui states `^0.3.1`; its lock is 0.3.3.
+gpui = { package = "gpui-pre", version = "=0.3.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.3" }
+gpui-kit = "0.6.0"
 
 # Path dependencies on the aui library.
+aui = { path = "../agentic-ui/crates/aui" }
 aui-protocol = { path = "../agentic-ui/crates/aui-protocol" }
+aui-motion = { path = "../agentic-ui/crates/aui-motion" }
+aui-tokens = { path = "../agentic-ui/crates/aui-tokens" }
+aui-icons = { path = "../agentic-ui/crates/aui-icons" }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }
+muse-adapter = { path = "crates/muse-adapter" }
 
 [profile.dev]
 opt-level = 1

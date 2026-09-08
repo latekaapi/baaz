@@ -1,4 +1,6 @@
 target/
 *.png
+# The phase gates are reviewed on screenshots, so the docs' images are kept.
+!docs/images/*.png
 .DS_Store
 __pycache__/
