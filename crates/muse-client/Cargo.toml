@@ -1,0 +1,21 @@
+[package]
+name = "muse-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport for Meta's Muse Code agent: a `muse serve` child speaking MSP (JSON-RPC 2.0 over NDJSON stdio)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+# A dev-only cycle Cargo allows: the live test asserts on what the *fold* makes
+# of a real echo turn, and the fold lives one crate up. Nothing in the library
+# target depends on it, so `muse-client` still ships free of `aui`.
+muse-adapter = { path = "../muse-adapter" }
+aui-protocol = { workspace = true }

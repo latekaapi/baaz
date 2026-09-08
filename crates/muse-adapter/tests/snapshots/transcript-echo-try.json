@@ -1,0 +1,69 @@
+[
+  {
+    "sessionId": "01a081e5-dbbf-7201-9320-1a3448bf5caa",
+    "session": {
+      "id": "01a081e5-dbbf-7201-9320-1a3448bf5caa",
+      "agent": "muse",
+      "model": "",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "branch": "main",
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "7c42696d-2971-443a-bad9-0febe8c0b192",
+          "text": "say hi",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081e5-dbfb-744c-820f-82e3a51f5353",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Hi.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 4592,
+            "tokens_in": 19208,
+            "tokens_out": 95,
+            "reasoning_tokens": 83,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": {
+        "pressure": "normal",
+        "usedTokens": 19303,
+        "windowTokens": 1007997
+      },
+      "cumulative": {
+        "outputTokens": 95,
+        "promptTokens": 19208,
+        "totalTokens": 19303
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:01a081e5-dbbf-7201-9320-1a3448bf5caa:9",
+      "command_text": {
+        "01a081e5-dbfb-744c-820f-82e3a51f5353": "say hi"
+      },
+      "restored_prompt": null
+    }
+  }
+]

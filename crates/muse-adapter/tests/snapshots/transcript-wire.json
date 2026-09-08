@@ -1,0 +1,330 @@
+[
+  {
+    "sessionId": "01a081ee-3995-7820-b7d4-53491ce72f8d",
+    "session": {
+      "id": "01a081ee-3995-7820-b7d4-53491ce72f8d",
+      "agent": "muse",
+      "model": "",
+      "mode": "denyUnmatched",
+      "plan": false,
+      "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "branch": "main",
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "marker:v:01a081ee-3995-7820-b7d4-53491ce72f8d:1",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "permission_mode_changed",
+                "mode": "denyUnmatched"
+              },
+              "text": "Approval mode · Read-only"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081ee-39d1-7897-9936-c2edb978f83f",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "56b3002b-2080-4488-a431-0c5f613d781c",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "error",
+              "duration_ms": 9,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "tool denied: deny_unmatched: no policy rule allows this action"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "c44e8673-7ddd-46a9-934a-d9d50fc449f4",
+              "tool": "shell",
+              "command": "echo hi && ls",
+              "reason": "",
+              "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "state": {
+                "kind": "auto_denied",
+                "rule": "echo hi && ls"
+              },
+              "rule": "Always allow in this workspace: echo ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: echo ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: echo ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 2,
+                  "argv": [
+                    "echo",
+                    "hi"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: echo ..."
+                },
+                {
+                  "position": 2,
+                  "total": 2,
+                  "argv": [
+                    "ls"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: ls ..."
+                }
+              ],
+              "current_stage": 0,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "policy"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081ee-5145-7571-b22b-30958f0b69ba",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "e9a98861-0d7c-457b-af59-4c7fb098d07f",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "curl https://example.com",
+              "status": "error",
+              "duration_ms": 15,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "tool denied: deny_unmatched: no policy rule allows this action"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "de37d859-cf10-4f3c-bafb-7899355c3d14",
+              "tool": "shell",
+              "command": "curl https://example.com",
+              "reason": "",
+              "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "state": {
+                "kind": "auto_denied",
+                "rule": "curl https://example.com"
+              },
+              "rule": "Always allow in this workspace: curl ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: curl ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: curl ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 1,
+                  "argv": [
+                    "curl",
+                    "https://example.com"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: curl ..."
+                }
+              ],
+              "current_stage": 0,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "policy"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "marker:v:01a081ee-3995-7820-b7d4-53491ce72f8d:15",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "turn_retracted"
+              },
+              "text": "Prompt retracted"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "denyUnmatched",
+      "last_cursor": "v:01a081ee-3995-7820-b7d4-53491ce72f8d:17",
+      "command_text": {
+        "01a081ee-70bb-719f-a35e-85cc42903110": "one"
+      },
+      "restored_prompt": "one"
+    }
+  },
+  {
+    "sessionId": "01a081ee-98db-7ad2-b67d-dbca81eaeb24",
+    "session": {
+      "id": "01a081ee-98db-7ad2-b67d-dbca81eaeb24",
+      "agent": "muse",
+      "model": "muse-spark-1.3-contributor",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "marker:01a081ee-98db-7ad2-b67d-dbca81eaeb24:1",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "forked_from"
+              },
+              "text": "Forked from 01a081ee-3995-7820-b7d4-53491ce72f8d"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]
