@@ -10,8 +10,8 @@ the `aui` library at /Users/latekaapi/Projects/agentic-ui (path dependencies; gp
 + gpui-kit 0.6; library changes go on agentic-ui branch `muse-support`, never main).
 
 Read first, in order: docs/00-spec.md (frozen spec: crates, decisions, keymap, five phases
-with gates), docs/CHANGELOG.md, docs/01-transport.md (Phase 1 findings), docs/02-app.md if it
-exists (Phase 2), agentic-ui/docs/10-muse-research.md §1, §3, §4, §7 (wire contract, auth,
+with gates), docs/CHANGELOG.md, docs/01-transport.md (Phase 1 findings), docs/02-app.md
+(Phase 2), docs/03-composer.md (Phase 3), agentic-ui/docs/10-muse-research.md §1, §3, §4, §7 (wire contract, auth,
 what is not on the wire, adapter mapping), agentic-ui/docs/00-agent-brief.md, and your memory
 file project-harness-muse-slice-2026-09-08.
 
@@ -32,30 +32,32 @@ State on 2026-09-09:
   `session/list` matches `workspaceRoot` by exact string (canonicalize `/tmp` → `/private/tmp`),
   and a new session appears in `session/list` only after its log flushes (sidebar refreshes on
   `turn/completed`).
-- Review findings from the Phase 2 screenshots, to fix in Phase 3/4 (not blocking):
-  1. Muse's file-read tool folds as a shell card with verb "Ran" — map Muse tool names
-     (`read`/`read_file`/`write`/`edit`/`grep`/`glob`/`web_*`, check `rawArgs`) onto
-     `ToolKind::{Read, Edit, Search, Web}` in `muse-adapter::tool_shape` so the verb and
-     body match (a read should render as `Read path` with the file body, not shell output).
-  2. A `turn/completed` `failed` reason such as `resume_reconcile:orphaned_by_process_loss`
-     is shown raw as a marker; humanize known reasons ("Muse restarted while this turn was
-     running") and keep the raw code in a tooltip/detail line. The `modelError` card had an
-     empty detail; show `error.message`.
-  3. Live fold and backfill fold disagree: the live view showed the `modelError` card for the
-     failed first turn, the resumed session (view/page) did not. Make the replay path produce
-     the same blocks as the live path (write a test that folds a capture live and via
-     `view/page` and compares).
-  4. Hide the `$0.00` cost cell in the turn footer when the catalog reports no price.
-  5. The marker turn synthesized at session start ("Approval mode · Auto") renders before the
-     first user message; consider suppressing the initial mode marker unless the mode differs
-     from the default.
-- Phases 3 (composer controls: model/effort/mode menus, context meter + compaction, queue
-  strip + steer, mentions + command menu with skills, client-side plan mode with the /plan
-  skill probe, prompt history, images), 4 (approval card v2 multi-stage + feedback + policy
-  and judge resolutions, question previews/timeout/clarify, error banners/dialogs, retry and
-  retry-scheduled, markers, fork, todo, goal) and 5 (polish, motion, focus, docs, CI) are
-  not started. Each is one Opus lead session briefed with the spec sections named in
-  docs/00-spec.md §5; the owner reviews at each gate on screenshots and the diff.
+- Phase 3 DONE on 2026-09-09: harness `main` head, "Phase 3: the composer's
+  controls, and the plan probe that settled plan mode" (composer controls: model /
+  effort / mode pickers, context meter + compaction, queue strip with steer,
+  `@` mentions and the `/` menu with skills, client-side plan mode, prompt
+  history, images, the `Overlays` entity, toasts, and scripting flag `--steps`);
+  agentic-ui `muse-support` 21dcccb (`composer::{model_menu, effort_menu,
+  mode_menu}`, `data::context_meter`, `composer::queue_strip`, the composer's
+  `.context()` / `.context_open()` / `.plan()` / `.chip_menu()` slots, new
+  `ComposerIntent::{Steer, ExitPlan, Attach, Compact}` and `QueueIntent::Steer`,
+  gallery entry `composer/pickers`). Gates green in both repos; screenshots in
+  `docs/images/phase3-*.png`, light and dark; `docs/03-composer.md` describes it
+  all. Spend: one real `meta` turn (the plan probe), four of the five unspent.
+- Phase 3 findings: `/plan <text>` **does** fire the bundled plan skill
+  server-side (evidence in `fixtures/msp/transcript-plan-probe.jsonl`);
+  `reasoningEffort` is on `turn/start` and `turn/steer` only and is never
+  reflected back, so the effort chip is the one client-side value; an `image`
+  part is admitted without being decoded; `session/setModel` on echo is rejected
+  `invalid_target`. Review findings F1, F4 and F5 are closed; F2 and F3 remain
+  for Phase 4.
+- Phases 4 (approval card v2 multi-stage + feedback + policy and judge
+  resolutions, question previews/timeout/clarify, error banners/dialogs, retry
+  and retry-scheduled, markers, fork, todo, goal — plus findings F2 and F3) and
+  5 (polish, motion, focus, docs, CI, and the `/name` `/resume` commands that
+  currently only toast) are not started. Each is one Opus lead session briefed
+  with the spec sections named in docs/00-spec.md §5; the owner reviews at each
+  gate on screenshots and the diff.
 
 Facts that cost time to learn (details in docs/01-transport.md and the research doc):
 - `muse serve --no-session-log` accepts turns but emits NO view events; always run durable.

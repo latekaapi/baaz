@@ -1,0 +1,84 @@
+[
+  {
+    "sessionId": "01a08285-997d-72c3-8722-c22f56922de6",
+    "session": {
+      "id": "01a08285-997d-72c3-8722-c22f56922de6",
+      "agent": "muse",
+      "model": "muse-spark-1.3-contributor",
+      "mode": "denyUnmatched",
+      "plan": false,
+      "cwd": "/Users/latekaapi/Projects/harness/fixtures/msp/ws",
+      "branch": "main",
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "26a55ebf-7ebc-4227-afd8-8c1f296b68bd",
+          "text": "/plan reply with a one-line plan for printing hello",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a08285-99b5-7850-b1c7-aaad5ab4af92",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "ad65c172-d547-4644-b3bf-aa5a5667c528",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read skill",
+              "target": "bundled:plan",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 338
+              }
+            },
+            {
+              "kind": "text",
+              "text": "**Plan:** Print `hello` to stdout (e.g. `printf 'hello\\n'`) and verify by observing output.\n\nNo file was created. Reply Approve, Request changes, or Cancel.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3-contributor",
+            "duration_ms": 25421,
+            "tokens_in": 42908,
+            "tokens_out": 1143,
+            "reasoning_tokens": 1018,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": {
+        "pressure": "normal",
+        "usedTokens": 24565,
+        "windowTokens": 1007997
+      },
+      "cumulative": {
+        "outputTokens": 1143,
+        "promptTokens": 42908,
+        "totalTokens": 44051
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "denyUnmatched",
+      "last_cursor": "v:01a08285-997d-72c3-8722-c22f56922de6:21",
+      "command_text": {
+        "01a08285-99b5-7850-b1c7-aaad5ab4af92": "/plan reply with a one-line plan for printing hello"
+      },
+      "restored_prompt": null
+    }
+  }
+]

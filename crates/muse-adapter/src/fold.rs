@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use aui_protocol::{
     ApprovalBadges, ApprovalChoice, ApprovalScope, ApprovalStage, ApprovalState, Answer, Block,
     Delta, MarkerKind, PermissionMode, Provider, QuestionOption, QuestionPreview, ResolvedBy,
-    Session, ThinkingState, ToolBody, ToolKind, ToolStatus, TodoItem, TodoState, Turn, TurnMeta,
+    SearchHit, Session, ThinkingState, ToolBody, ToolKind, ToolStatus, TodoItem, TodoState, Turn,
+    TurnMeta,
 };
 use muse_client::schema::{self as msp, ApprovalMode};
 use muse_client::MuseEvent;
@@ -51,6 +52,12 @@ struct Folded {
     seen_requests: HashMap<String, ()>,
     /// Counter for naming a marker turn raised by an event with no cursor.
     marker_seq: u64,
+    /// Whether an approval mode has been observed for this session yet.
+    ///
+    /// A session emits `session/approvalModeChanged` at start-up, so the first
+    /// observation is not a change; drawing "Approval mode · Auto" above the
+    /// first user message would be a marker for something nobody did.
+    mode_seen: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -169,6 +176,30 @@ impl MuseFold {
         self.sessions.get_mut(session_id)?.side.restored_prompt.take()
     }
 
+    /// Append a block the **client** authored, in a turn of its own.
+    ///
+    /// The one block the harness writes itself is the plan card: MSP has no plan
+    /// mode, so the proposal is derived from the reply's text (spec §3.1) and
+    /// has to enter the transcript from this side. `id` is the turn's id, so a
+    /// later [`MuseFold::replace_client_block`] can find it again.
+    pub fn append_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
+        let folded = self.folded(session_id);
+        let mut deltas = Vec::new();
+        let turn = folded.standalone_turn(id, &mut deltas);
+        let (added, _) = folded.push_block(turn, block);
+        deltas.extend(added);
+        deltas
+    }
+
+    /// Replace the first block of a client-authored turn.
+    pub fn replace_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
+        let folded = self.folded(session_id);
+        let Some(turn) = folded.session.turns.iter().position(|t| t.id() == id) else {
+            return Vec::new();
+        };
+        folded.update_block(Slot { turn, block: 0 }, block)
+    }
+
     fn folded(&mut self, session_id: &str) -> &mut Folded {
         self.last_touched = Some(session_id.to_owned());
         self.sessions
@@ -218,6 +249,7 @@ impl Folded {
             usage: HashMap::new(),
             seen_requests: HashMap::new(),
             marker_seq: 0,
+            mode_seen: false,
         }
     }
 
@@ -262,6 +294,7 @@ impl Folded {
         if let Some(mode) = &session.approval_mode {
             self.side.approval_mode = mode.mode.clone();
             self.session.mode = permission_mode(&mode.mode);
+            self.mode_seen = true;
         }
         let mut deltas = Vec::new();
         if let Some(fork) = &session.forked_from {
@@ -292,7 +325,16 @@ impl Folded {
         };
         self.side.approval_mode = mode.clone();
         let mode = permission_mode(&mode);
+        let first = !std::mem::replace(&mut self.mode_seen, true);
+        let unchanged = mode == self.session.mode;
         self.session.mode = mode;
+        // A mode change that changed nothing is not a change; and the first
+        // observation is the session announcing what it already is, which is
+        // only worth a row when it is *not* the default — then it is a fact
+        // about this session rather than about every session.
+        if unchanged || (first && mode == PermissionMode::default()) {
+            return Vec::new();
+        }
         self.marker_turn(
             MarkerKind::PermissionModeChanged { mode },
             format!("Approval mode · {}", mode.label()),
@@ -658,19 +700,8 @@ impl Folded {
             msp::ItemKind::ToolCall => {
                 let tool = item.tool.clone().unwrap_or_default();
                 let (kind, verb, target) = tool_shape(&tool, item.args.as_deref());
-                Block::ToolCall {
-                    id: item.item_id.clone(),
-                    kind,
-                    verb,
-                    target,
-                    status: tool_status(&item.status),
-                    duration_ms: item.duration_ms,
-                    body: ToolBody::Shell {
-                        output_lines: split_lines(item.visible_output.as_deref().unwrap_or("")),
-                        exit_code: None,
-                        live: !terminal,
-                    },
-                }
+                let body = tool_body(&kind, item.visible_output.as_deref().unwrap_or(""), None, !terminal);
+                Block::ToolCall { id: item.item_id.clone(), kind, verb, target, status: tool_status(&item.status), duration_ms: item.duration_ms, body }
             }
             msp::ItemKind::UserShell => Block::ToolCall {
                 id: item.item_id.clone(),
@@ -1052,27 +1083,91 @@ fn resolved_by(by: &msp::ApprovalResolvedBy) -> Option<ResolvedBy> {
 
 /// `args` is model-authored JSON **as a verbatim string**, so it is parsed
 /// per-tool and falls back to raw display when it is not valid JSON.
+///
+/// There is no tool *kind* taxonomy on the wire — `Item.tool` is a bare name —
+/// so the mapping is by name and by which `rawArgs` field is present. The
+/// families are the ones Muse actually ships (`read_file`, `read_skill`,
+/// `bash`, the write/edit family, the search family and the web family); a name
+/// this table has never seen is still presented honestly as a Muse-provided
+/// tool rather than guessed at.
 fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     let parsed: Option<Value> = args.and_then(|args| serde_json::from_str(args).ok());
     let field = |name: &str| {
         parsed.as_ref().and_then(|v| v.get(name)).and_then(Value::as_str).map(str::to_owned)
     };
+    let raw = || args.unwrap_or_default().to_owned();
+    let path = || field("path").or_else(|| field("file_path")).or_else(|| field("filename"));
     match tool {
-        "bash" | "shell" => (
-            ToolKind::Shell,
-            "Ran".to_owned(),
-            field("command").unwrap_or_else(|| args.unwrap_or_default().to_owned()),
+        "bash" | "shell" => (ToolKind::Shell, "Ran".to_owned(), field("command").unwrap_or_else(raw)),
+        "read" | "read_file" | "view" | "cat" => (ToolKind::Read, "Read".to_owned(), path().unwrap_or_else(raw)),
+        "read_skill" => (
+            ToolKind::Read,
+            "Read skill".to_owned(),
+            field("name").or_else(path).unwrap_or_else(raw),
+        ),
+        "write" | "write_file" | "create" | "create_file" => {
+            (ToolKind::Write, "Wrote".to_owned(), path().unwrap_or_else(raw))
+        }
+        "edit" | "edit_file" | "str_replace" | "apply_patch" => {
+            (ToolKind::Edit, "Edited".to_owned(), path().unwrap_or_else(raw))
+        }
+        "grep" | "glob" | "search" | "search_files" | "ripgrep" => (
+            ToolKind::Search,
+            "Searched".to_owned(),
+            field("pattern").or_else(|| field("query")).or_else(path).unwrap_or_else(raw),
+        ),
+        "fetch" | "web_fetch" | "web_search" | "web_read" => (
+            ToolKind::Web,
+            if tool == "web_search" { "Searched the web".to_owned() } else { "Fetched".to_owned() },
+            field("url").or_else(|| field("query")).unwrap_or_else(raw),
         ),
         _ => (
             // There is no tool *kind* taxonomy on the wire, so anything the app
             // does not recognise is presented as a Muse-provided tool.
             ToolKind::Mcp { server: "muse".to_owned(), tool: tool.to_owned() },
             "Ran".to_owned(),
-            field("command")
-                .or_else(|| field("path"))
-                .unwrap_or_else(|| args.unwrap_or_default().to_owned()),
+            field("command").or_else(path).unwrap_or_else(raw),
         ),
     }
+}
+
+/// The body that goes with a tool's kind.
+///
+/// The rule is "never draw a body the wire did not send". MSP carries one
+/// rendering surface per tool call — `visibleOutput`, a plain string — and no
+/// diffs, no structured hits and no result lists, so:
+///
+/// * a **read** renders as its header plus the line count, which is the
+///   library's own rendering for a read and what the Phase 2 review asked for;
+/// * a **search** promotes `path:line:text` output to real hits when every
+///   line parses, and otherwise keeps the raw output;
+/// * everything else keeps the raw output, because a card with no body would
+///   hide what the tool actually said.
+fn tool_body(kind: &ToolKind, visible_output: &str, exit_code: Option<i32>, live: bool) -> ToolBody {
+    let lines = split_lines(visible_output);
+    match kind {
+        ToolKind::Read => ToolBody::Read { lines: lines.len() },
+        ToolKind::Search => match search_hits(&lines) {
+            Some(hits) => ToolBody::Search { hits },
+            None => ToolBody::Shell { output_lines: lines, exit_code, live },
+        },
+        _ => ToolBody::Shell { output_lines: lines, exit_code, live },
+    }
+}
+
+/// `path:line:text` on every non-empty line, or nothing.
+fn search_hits(lines: &[String]) -> Option<Vec<SearchHit>> {
+    let mut hits = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (path, rest) = line.split_once(':')?;
+        let (number, snippet) = rest.split_once(':')?;
+        let line_no: u32 = number.trim().parse().ok()?;
+        hits.push(SearchHit { path: path.to_owned(), line: line_no, snippet: snippet.trim().to_owned() });
+    }
+    (!hits.is_empty()).then_some(hits)
 }
 
 fn compaction_text(item: &msp::Item) -> String {

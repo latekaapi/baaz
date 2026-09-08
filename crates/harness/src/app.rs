@@ -48,26 +48,66 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::auth::{self, Identity, LoginEvent};
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
+use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays};
 use crate::session::{SessionEvent, SessionView};
 use crate::sidebar::{self, SessionEntry};
-use crate::Args;
+use crate::{files, skills, Args};
 
 actions!(
     harness,
     [
         /// Send the composer's draft (Enter).
         SendTurn,
+        /// Interject into the running turn (⌘↩).
+        SteerTurn,
         /// Stop the running turn and retract its prompt (⌃C).
         Interrupt,
         /// Start a new session in this workspace (⌘N).
         NewSession,
+        /// Toggle plan mode (Shift+Tab).
+        TogglePlan,
+        /// Open the model picker (⌘⇧M).
+        OpenModelMenu,
+        /// Open the reasoning-effort picker (⌘⇧E).
+        OpenEffortMenu,
+        /// Open the approval-mode picker (⌘⇧P).
+        OpenModeMenu,
+        /// Move the open menu's selection up.
+        MenuUp,
+        /// Move the open menu's selection down.
+        MenuDown,
+        /// Activate the open menu's selected row.
+        MenuConfirm,
+        /// Walk back through this workspace's prompt history (↑).
+        HistoryPrev,
+        /// Walk forward through it (↓).
+        HistoryNext,
+        /// ⌘V, which is an image attachment when the clipboard holds one.
+        PasteMaybeImage,
     ]
 );
 
 /// The context the composer holder wears, so Enter reaches [`SendTurn`] instead
 /// of the textarea. Shift+Enter matches no binding and falls through to the
 /// editor as a newline, which is exactly the behaviour §3.9 asks for.
+///
+/// Three more identifiers join it as the frame's state changes, and they are
+/// what lets one key mean two things without either meaning being guessed at:
+/// `menu` while a popover is open (↑/↓/↩ drive the list), and `histup` /
+/// `histdown` while the caret is on the draft's first or last line (↑/↓ walk
+/// the prompt history). With none of them set, the arrow keys belong to the
+/// editor, where they always did.
 const COMPOSER_CONTEXT: &str = "HarnessComposer";
+
+/// The toast stack's own width, the library's `.toast{width:320px}`.
+const TOAST_W: f32 = 320.0;
+/// Where the stack hangs from: under the window header, at the right edge.
+/// The stack lays its toasts out **downward** from its own box, so it is
+/// anchored by its top; hanging it off the bottom would draw the newest toast
+/// off the end of the window.
+const TOAST_TOP: f32 = 56.0;
+/// How much room the fanned stack is given before it would clip.
+const TOAST_STACK_H: f32 = 260.0;
 
 /// Binds the harness's own keys on top of the library's.
 ///
@@ -75,9 +115,20 @@ const COMPOSER_CONTEXT: &str = "HarnessComposer";
 /// triad; these are the ones only this app knows about.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("enter", SendTurn, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new("enter", SendTurn, Some("HarnessComposer && !menu")),
+        KeyBinding::new("enter", MenuConfirm, Some("HarnessComposer && menu")),
+        KeyBinding::new("cmd-enter", SteerTurn, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new("up", MenuUp, Some("HarnessComposer && menu")),
+        KeyBinding::new("down", MenuDown, Some("HarnessComposer && menu")),
+        KeyBinding::new("up", HistoryPrev, Some("HarnessComposer && histup && !menu")),
+        KeyBinding::new("down", HistoryNext, Some("HarnessComposer && histdown && !menu")),
+        KeyBinding::new("cmd-v", PasteMaybeImage, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new("shift-tab", TogglePlan, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("ctrl-c", Interrupt, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-n", NewSession, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-shift-m", OpenModelMenu, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-shift-e", OpenEffortMenu, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-shift-p", OpenModeMenu, Some(aui::keys::ROOT_CONTEXT)),
     ]);
 }
 
@@ -101,26 +152,6 @@ enum Wire {
     Reconnecting,
     /// The respawn failed. The dialog offers another try.
     Down(String),
-}
-
-/// One modal on screen. Only one at a time in this phase.
-struct Dialog {
-    title: String,
-    detail: String,
-    kind: DialogKind,
-    primary: &'static str,
-    action: DialogAction,
-}
-
-/// What a dialog's primary button does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DialogAction {
-    /// Close it and carry on.
-    Dismiss,
-    /// Respawn `muse serve` and resume.
-    Reconnect,
-    /// Go to the login screen.
-    SignIn,
 }
 
 /// The login screen's own state, plus the child that drives it.
@@ -149,7 +180,10 @@ pub struct Harness {
     sessions: Vec<SessionEntry>,
     index: HashMap<String, IndexEntry>,
     active: Option<Entity<SessionView>>,
-    dialog: Option<Dialog>,
+    /// Everything that floats: the modal, the open menu and the toasts. One
+    /// entity, shared with the session view, which renders the halves that hang
+    /// off the composer's own chips (spec §2.3).
+    overlays: Entity<Overlays>,
     sidebar_open: bool,
     /// The right pane's slot exists; nothing opens it in this phase.
     right_open: bool,
@@ -173,7 +207,7 @@ impl Harness {
             sessions: Vec::new(),
             index: HashMap::new(),
             active: None,
-            dialog: None,
+            overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             right_open: false,
             focus_root: cx.focus_handle(),
@@ -191,6 +225,7 @@ impl Harness {
         }
         this.connect(cx);
         this.load_index(cx);
+        this.load_menu_sources(cx);
         this
     }
 
@@ -233,7 +268,7 @@ impl Harness {
                 }
                 Err(error) => {
                     this.wire = Wire::Down(error.to_string());
-                    this.dialog = Some(Dialog {
+                    this.set_dialog(cx, Dialog {
                         title: "Muse could not be started".into(),
                         detail: error.to_string(),
                         kind: DialogKind::Error,
@@ -318,7 +353,7 @@ impl Harness {
                 }
                 Err(error) => {
                     this.wire = Wire::Down(error.to_string());
-                    this.dialog = Some(Dialog {
+                    this.set_dialog(cx, Dialog {
                         title: conn::title(&error),
                         detail: error.to_string(),
                         kind: DialogKind::Error,
@@ -505,8 +540,9 @@ impl Harness {
     /// has arrived. Consumed, so a later refresh does not re-open it.
     fn open_boot_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wanted) = self.args.session.take() else {
-            // A scripted turn with no session named needs somewhere to go.
-            if self.args.send.is_some() && self.active.is_none() {
+            // A scripted turn or a scripted capture with no session named needs
+            // somewhere to go.
+            if (self.args.send.is_some() || !self.args.steps.is_empty()) && self.active.is_none() {
                 self.new_session(cx);
             }
             return;
@@ -535,6 +571,21 @@ impl Harness {
         });
     }
 
+    /// `--steps`: drive the open session from the command line so a screenshot
+    /// is reproducible. Consumed, so a later refresh does not replay them.
+    fn run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let steps = std::mem::take(&mut self.args.steps);
+        if steps.is_empty() {
+            return;
+        }
+        let Some(view) = self.active.clone() else { return };
+        view.update(cx, |view, cx| {
+            for step in &steps {
+                view.step(step, window, cx);
+            }
+        });
+    }
+
     /// Re-label the rows after the index arrives (it usually beats the wire,
     /// but the order is not guaranteed).
     fn rejoin(&mut self) {
@@ -546,8 +597,13 @@ impl Harness {
     }
 
     /// `session/start` in this workspace, on the configured provider.
+    ///
+    /// A new session is also the moment to re-walk the workspace: files come
+    /// and go while the window is open, and the `@` picker should not offer a
+    /// path that was deleted an hour ago.
     fn new_session(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
+        self.load_menu_sources(cx);
         let (workspace, provider) = (self.workspace(), self.args.provider.clone());
         let call = cx.background_spawn(async move {
             client.session_start(&SessionStartParams {
@@ -601,7 +657,8 @@ impl Harness {
     fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
-        let view = cx.new(|cx| SessionView::new(session_id, client, provider, workspace, window, cx));
+        let overlays = self.overlays.clone();
+        let view = cx.new(|cx| SessionView::new(session_id, client, provider, workspace, overlays, window, cx));
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
         if backfill {
@@ -610,6 +667,7 @@ impl Harness {
         self.active = Some(view);
         self.focus_composer = true;
         self.send_scripted(window, cx);
+        self.run_steps(window, cx);
         cx.notify();
     }
 
@@ -617,7 +675,7 @@ impl Harness {
     fn on_session_event(&mut self, event: &SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Dialog { title, detail } => {
-                self.dialog = Some(Dialog {
+                self.set_dialog(cx, Dialog {
                     title: title.clone(),
                     detail: detail.clone(),
                     kind: DialogKind::Error,
@@ -626,7 +684,7 @@ impl Harness {
                 });
             }
             SessionEvent::SignedOut { message } => {
-                self.dialog = Some(Dialog {
+                self.set_dialog(cx, Dialog {
                     title: "Signed out of Muse".into(),
                     detail: format!("Muse refused the turn: {message}"),
                     kind: DialogKind::Warning,
@@ -636,8 +694,52 @@ impl Harness {
             }
             // The child's exit already reached `route`, which owns the reconnect.
             SessionEvent::Closed => {}
+            SessionEvent::NewSession => self.new_session(cx),
+            SessionEvent::Logout => self.logout(cx),
+            SessionEvent::Status { detail } => {
+                self.set_dialog(cx, Dialog {
+                    title: "Session status".into(),
+                    detail: detail.clone(),
+                    kind: DialogKind::Info,
+                    primary: "Done",
+                    action: DialogAction::Dismiss,
+                });
+            }
         }
         cx.notify();
+    }
+
+    /// Put a modal up. Only one at a time, which is what makes Escape's order
+    /// (menu, then modal) a single rule.
+    fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
+        self.overlays.update(cx, |overlays, _| overlays.dialog = Some(dialog));
+        cx.notify();
+    }
+
+    fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        self.overlays.update(cx, |overlays, _| overlays.dialog = None);
+        cx.notify();
+    }
+
+    /// The two lists the `/` and `@` menus are built from, walked once at boot
+    /// on the background executor and re-walked when a new session starts.
+    ///
+    /// Neither is on the wire: skills reach MSP only as `toolCall` items, and
+    /// a mention is plain text inside the prompt (research §1.5).
+    fn load_menu_sources(&mut self, cx: &mut Context<Self>) {
+        let program = self.args.program.clone();
+        let root = self.args.workspace.clone();
+        let call = cx.background_spawn(async move { (skills::list(&program), files::walk(&root)) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let (skills, files) = call.await;
+            let _ = this.update(cx, |this, cx| {
+                this.overlays.update(cx, |overlays, _| {
+                    overlays.skills = skills;
+                    overlays.files = files;
+                });
+                cx.notify();
+            });
+        }));
     }
 
     /// A failed command that the application, rather than a session, issued.
@@ -656,8 +758,7 @@ impl Harness {
                 Severity::Banner => DialogAction::Dismiss,
             },
         };
-        self.dialog = Some(dialog);
-        cx.notify();
+        self.set_dialog(cx, dialog);
     }
 
     // ---------------------------------------------------------------- render
@@ -753,15 +854,82 @@ impl Harness {
         };
         v_flex()
             .size_full()
-            .key_context(COMPOSER_CONTEXT)
+            .key_context(gpui::KeyContext::parse(&self.composer_context(cx)).unwrap_or_default())
             .on_action(cx.listener(|this, _: &SendTurn, window, cx| {
-                if let Some(view) = this.active.clone() {
-                    view.update(cx, |view, cx| view.send(window, cx));
-                }
+                this.with_session(cx, |view, cx| view.send(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &SteerTurn, window, cx| {
+                this.with_session(cx, |view, cx| view.steer(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &MenuConfirm, window, cx| {
+                this.with_session(cx, |view, cx| view.confirm_menu(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &MenuUp, _, cx| this.move_menu(-1, cx)))
+            .on_action(cx.listener(|this, _: &MenuDown, _, cx| this.move_menu(1, cx)))
+            .on_action(cx.listener(|this, _: &HistoryPrev, window, cx| {
+                this.with_session(cx, |view, cx| view.history_prev(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &HistoryNext, window, cx| {
+                this.with_session(cx, |view, cx| view.history_next(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &TogglePlan, _, cx| {
+                this.with_session(cx, |view, cx| {
+                    let on = !view.plan_mode();
+                    view.set_plan(on, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &PasteMaybeImage, window, cx| this.paste(window, cx)))
             .children(banner)
             .child(body)
             .into_any_element()
+    }
+
+    /// The composer holder's key context for this frame.
+    ///
+    /// `menu`, `histup` and `histdown` are what let ↑, ↓ and ↩ mean the menu,
+    /// the history or the editor without any of the three being guessed at.
+    fn composer_context(&self, cx: &gpui::App) -> String {
+        let mut context = String::from(COMPOSER_CONTEXT);
+        if self.overlays.read(cx).menu.is_some() {
+            context.push_str(" menu");
+        }
+        if let Some(view) = &self.active {
+            let (first, last) = view.read(cx).caret_edges(cx);
+            if first {
+                context.push_str(" histup");
+            }
+            if last {
+                context.push_str(" histdown");
+            }
+        }
+        context
+    }
+
+    fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| f(view, cx));
+        }
+    }
+
+    /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
+    fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let rows = view.read(cx).menu_rows(cx);
+        self.overlays.update(cx, |overlays, _| overlays.move_selection(delta, rows));
+        cx.notify();
+    }
+
+    /// ⌘V. An image on the clipboard becomes an attachment; anything else is
+    /// the textarea's own paste, which is re-dispatched rather than reimplemented.
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handled = self
+            .active
+            .clone()
+            .map(|view| view.update(cx, |view, cx| view.paste_image(cx)))
+            .unwrap_or(false);
+        if !handled {
+            window.dispatch_action(Box::new(gpui_kit::base::input::Paste), cx);
+        }
     }
 
     /// No session open: the one thing to do is start one.
@@ -785,10 +953,14 @@ impl Harness {
     }
 
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let modal = self.dialog.as_ref()?;
-        let action = modal.action;
+        // Read the modal out whole before anything asks `cx` for a listener:
+        // the entity's borrow and `cx.listener` cannot be alive at once.
+        let (title, detail, kind, primary_label, action) = {
+            let modal = self.overlays.read(cx).dialog.as_ref()?;
+            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action)
+        };
         let primary = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.dialog = None;
+            this.close_dialog(cx);
             match action {
                 DialogAction::Dismiss => {}
                 DialogAction::Reconnect => {
@@ -803,31 +975,22 @@ impl Harness {
             }
             cx.notify();
         });
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.dialog = None;
-            cx.notify();
-        });
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.dialog = None;
-            cx.notify();
-        });
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         Some(
             popover_layer(
                 div()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| {
-                        this.dialog = None;
-                        cx.notify();
-                    }))
+                    .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
                     .child(
-                        dialog("dialog", modal.title.clone())
-                            .kind(modal.kind)
-                            .body(modal.detail.clone())
+                        dialog("dialog", title)
+                            .kind(kind)
+                            .body(detail)
                             .secondary("Dismiss")
-                            .primary(modal.primary)
+                            .primary(primary_label)
                             .on_primary(move |w, cx| primary(&(), w, cx))
                             .on_secondary(move |w, cx| close(&(), w, cx))
                             .on_dismiss(move |w, cx| dismiss(&(), w, cx)),
@@ -876,12 +1039,16 @@ impl Render for Harness {
             self.render_login(cx).into_any_element()
         };
         let dialog = self.render_dialog(cx);
+        let toasts = self.render_toasts(cx);
         aui::keys::track_pointer(
             div()
                 .size_full()
                 .relative()
                 .key_context(aui::keys::ROOT_CONTEXT)
                 .track_focus(&self.focus_root)
+                .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
+                .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
+                .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
                 // The slot is wired and does nothing: the keymap should not
                 // grow a hole when the right pane arrives.
@@ -898,6 +1065,7 @@ impl Render for Harness {
                     window.focus_prev(cx);
                 })
                 .child(body)
+                .children(toasts)
                 .children(dialog),
         )
     }
@@ -912,6 +1080,41 @@ impl Harness {
     /// The right pane is out of scope this phase; the toggle stays wired.
     fn toggle_right(&mut self, _cx: &mut Context<Self>) {}
 
+    /// ⌘⇧M / ⌘⇧E / ⌘⇧P: the same toggle the chip's own click does.
+    fn open_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        self.with_session(cx, |view, cx| view.toggle_picker(kind, cx));
+    }
+
+    /// The toast stack, bottom right. Toasts here are informational — a
+    /// compaction that did nothing, a command a later phase brings — so they
+    /// carry no action, only a close.
+    fn render_toasts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let toasts = self.overlays.read(cx).toasts.clone();
+        if toasts.is_empty() {
+            return None;
+        }
+        let newest = toasts.last().map(|t| t.id.to_string()).unwrap_or_default();
+        let close = cx.listener(move |this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));
+            cx.notify();
+        });
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .right(px(scale::SP_5))
+                    .top(px(TOAST_TOP))
+                    .w(px(TOAST_W))
+                    .h(px(TOAST_STACK_H))
+                    .child(
+                        aui::feedback::toast_stack("toasts", toasts)
+                            .on_close(move |window, cx| close(&(), window, cx)),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
     /// ⌃C, and Escape on an empty composer: stop and retract.
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self.active.clone() {
@@ -922,7 +1125,8 @@ impl Harness {
     /// Escape: close whatever is open, and otherwise stop the running turn if
     /// the composer is empty (spec §3.9).
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.dialog.take().is_some() {
+        let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
+        if closed {
             cx.notify();
             return;
         }

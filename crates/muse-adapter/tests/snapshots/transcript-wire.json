@@ -15,28 +15,6 @@
       "turns": [
         {
           "kind": "assistant",
-          "id": "marker:v:01a081ee-3995-7820-b7d4-53491ce72f8d:1",
-          "blocks": [
-            {
-              "kind": "marker",
-              "marker_kind": {
-                "kind": "permission_mode_changed",
-                "mode": "denyUnmatched"
-              },
-              "text": "Approval mode · Read-only"
-            }
-          ],
-          "meta": {
-            "model": "",
-            "duration_ms": 0,
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "reasoning_tokens": 0,
-            "cost_usd": 0.0
-          }
-        },
-        {
-          "kind": "assistant",
           "id": "01a081ee-39d1-7897-9936-c2edb978f83f",
           "blocks": [
             {
