@@ -203,7 +203,8 @@ The status row while a turn runs is "Working…" with the elapsed time and the
 `esc to interrupt` hint, plus the queued count when there is one.
 
 The model, effort, mode and context chips render the **server's** current values,
-read back out of `SideState`; their menus are Phase 3.
+read back out of `SideState`; their menus arrived in Phase 3
+(`docs/03-composer.md`).
 
 ---
 
@@ -235,7 +236,8 @@ The banner stays up until the new child answers.
 - **Approvals and questions are read-only.** A card that looked actionable and
   did nothing would be worse than one that plainly is not. Stop still works.
 - **No queue strip, no menus, no context meter, no plan mode, no mentions, no
-  images.** Phase 3.
+  images** — in *this* phase. Phase 3 built all of them; `docs/03-composer.md`
+  describes them, and the `Overlays` entity that the dialog field became.
 - **No rename, hide or search.** Phase 5, and none of them are on the wire.
 - **The `Overlays` entity is one field.** There is one modal and nothing else to
   stack yet.

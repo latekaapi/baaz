@@ -77,3 +77,73 @@ Findings and decisions worth keeping:
   editable docked composer is `aui::composer::composer(...).docked(true)` —
   `aui::shell::docked_composer` is the design card's non-editable placeholder.
   The app uses the editable one.
+
+## 2026-09-09 — Phase 3: composer controls
+
+The docked composer grew every control spec §5 phase 3 names: the model, effort
+and approval-mode pickers, the context meter with compaction, the queued strip
+with steering, `@` mentions, the `/` command menu with skills, client-side plan
+mode, prompt history and images. Full detail in `docs/03-composer.md`; the
+library side landed on agentic-ui `muse-support`.
+
+Spend: **one real `meta` turn** — the plan probe. Every screenshot and every
+other exercise ran on `echo` (`HARNESS_PROVIDER=echo`), which leaves four of the
+five the spec allows.
+
+Probe findings, from `fixtures/msp/probe_phase3.py` and the two captures it
+wrote:
+
+- **`/plan <text>` fires the bundled skill server-side.**
+  `fixtures/msp/transcript-plan-probe.jsonl` (one `meta` turn, started in
+  `denyUnmatched`) shows `toolCall read_skill {"name":"bundled:plan"}` followed
+  by an agent message in the skill's own shape ("**Plan:** … Reply Approve,
+  Request changes, or Cancel."). Plan mode therefore sends `/plan <text>` as the
+  model-visible input with `displayText` carrying the person's words, and the
+  spec's preamble stays only as a fallback behind `HARNESS_PLAN_PREAMBLE=1`.
+- **Reasoning effort has no server reflection.** `reasoningEffort` occurs twice
+  in `msp.d.ts` — `TurnStartParams` and `TurnSteerParams` — and nowhere else: no
+  echo on the `userMessage` item, none on `turn/started`, no `…Changed`
+  notification. The chip shows the client's value and says so in
+  `docs/03-composer.md`. `high`, `ultra` and `none` were all admitted on echo
+  (`fixtures/msp/transcript-phase3.jsonl`), so the picker is live, not disabled.
+- **An image part is admitted without being decoded.** `turn/start` answered
+  `status: accepted` for a payload whose PNG IDAT CRC was wrong. The wire checks
+  the base64 and the media type and nothing else, so the app decodes before it
+  sends and refuses what it cannot read. (The probe's own bytes have since been
+  replaced with a valid 1×1 PNG.)
+- **`session/compact` on a session with no run is rejected `missing_run`.** The
+  schema documents the reason; it is confirmed live, and it is a banner rather
+  than the `noop` toast.
+- **`session/setModel` on an echo session is rejected `invalid_target`**, not
+  the `unsupported_route` the phase brief predicted. Either way it is a
+  `commandRejected` and goes to the inline banner, which is correct behaviour:
+  `docs/images/phase3-banner-*.png`.
+
+Review findings closed this phase:
+
+- **F1** — Muse tool names now map onto `ToolKind::{Read, Write, Edit, Search,
+  Web}` in `muse-adapter::tool_shape`, keyed on the name and on which `rawArgs`
+  field is present, and the body follows the kind: a read renders as
+  `Read <path>` with its line count, a search promotes `path:line:text` output
+  to real hits when every line parses, and everything else keeps the raw output
+  because a card with no body would hide what the tool said. Fold snapshots
+  regenerated.
+- **F4** — the `$0.00` cost cell is not drawn when the catalog reports no price,
+  which on a subscription catalog is every row.
+- **F5** — the initial "Approval mode · Auto" marker is suppressed. A session
+  announces its mode at start-up, and that announcement is only worth a row when
+  the mode is *not* the default; a change that changes nothing raises none
+  either.
+
+F2 (humanized failure reasons) and F3 (live vs backfill fold parity) remain for
+Phase 4, as the brief said.
+
+Two smaller decisions, recorded because they are deviations worth knowing:
+
+- **The pickers get no `on_hover` from the app.** The component already lets the
+  pointer win the highlight; an app that also wrote the hovered row into
+  `selected` gave the selection two owners, and the check — which marks what the
+  session is on — followed the mouse. The keyboard owns `selected` now.
+- **The caret popovers scroll.** `command_menu` has no height cap of its own and
+  the `/` menu lists thirteen commands plus every installed skill, so the app
+  caps it at 560 px and scrolls, and offers at most eight skill rows.

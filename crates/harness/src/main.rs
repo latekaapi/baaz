@@ -19,10 +19,16 @@
 mod app;
 mod auth;
 mod conn;
+mod files;
+mod history;
+mod images;
 mod index;
+mod overlays;
+mod plan;
 mod session;
 mod shot;
 mod sidebar;
+mod skills;
 mod transcript;
 
 use std::path::PathBuf;
@@ -65,6 +71,28 @@ pub struct Args {
     /// `--no-connect`: render the chrome without spawning `muse serve`, which
     /// is what a screenshot of the login screen wants.
     pub offline: bool,
+    /// `--steps <a;b;c>`: what to do to the open session before the capture.
+    ///
+    /// One step per item, `;`-separated because a step's payload may contain a
+    /// comma. Every Phase 3 screenshot is one of these, so every screenshot is
+    /// reproducible from a command line rather than from a pointer.
+    ///
+    /// | step | what it does |
+    /// |---|---|
+    /// | `draft:<text>` | put text in the composer |
+    /// | `send:<text>` | send a turn |
+    /// | `steer:<text>` | steer the running turn |
+    /// | `model` / `effort` / `mode` | open that chip picker |
+    /// | `confirm` | activate the open menu's selected row |
+    /// | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
+    /// | `compact` | `session/compact` |
+    /// | `command:<filter>` / `mention:<filter>` | open the caret popover |
+    /// | `meter` | pin the context meter's breakdown open |
+    /// | `context:<used>/<window>/<level>` | a synthetic `session/contextUsage` |
+    /// | `plan` | turn plan mode on |
+    /// | `image:<path>` | attach an image |
+    /// | `plus` / `drop` | open the `+` menu; raise the drop overlay |
+    pub steps: Vec<String>,
 }
 
 fn parse_args() -> Args {
@@ -81,6 +109,7 @@ fn parse_args() -> Args {
         session: None,
         send: None,
         offline: false,
+        steps: Vec::new(),
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -108,6 +137,10 @@ fn parse_args() -> Args {
             }
             "--session" => out.session = Some(args.next().unwrap_or_else(|| usage("--session needs an id or `latest`"))),
             "--send" => out.send = Some(args.next().unwrap_or_else(|| usage("--send needs the prompt text"))),
+            "--steps" => {
+                let value = args.next().unwrap_or_else(|| usage("--steps needs `;`-separated steps"));
+                out.steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "--no-connect" => out.offline = true,
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument `{other}`")),
@@ -123,7 +156,7 @@ fn usage(err: &str) -> ! {
     }
     eprintln!(
         "usage: harness [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
-         \x20              [--session <id>|latest] [--send <text>]\n\
+         \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
          \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\n\
          environment: HARNESS_PROVIDER=echo picks the free provider; HARNESS_MUSE names the binary."
     );

@@ -35,10 +35,27 @@ pub struct Folds {
     pub toggled: HashSet<String>,
     /// Called with the key of the card whose header was clicked.
     pub toggle: ToggleHandler,
+    /// Called when a plan card's action row is used. `None` renders the plan
+    /// card read-only, which is what a replayed transcript wants.
+    pub plan: Option<PlanHandler>,
 }
 
 /// What a card header click reports: the key of the card that was clicked.
 pub type ToggleHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+/// What the person chose on a plan card (spec §3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanAction {
+    /// Restore the previous approval mode and implement the plan.
+    Accept,
+    /// Keep plan mode and go back to the composer.
+    Refine,
+    /// Restore the previous approval mode and do nothing else.
+    Reject,
+}
+
+/// Called with the plan block's id and the action taken.
+pub type PlanHandler = Rc<dyn Fn(String, PlanAction, &mut Window, &mut App)>;
 
 impl Folds {
     /// Whether the card at `key` is open, given what it does by default.
@@ -167,7 +184,23 @@ fn block(
                 .allow_other(*allow_other)
                 .into_any_element()
         }
-        Block::Plan { items, state, .. } => plan_card(id, items.clone()).state(*state).into_any_element(),
+        Block::Plan { id: plan_id, items, state } => {
+            let mut card = plan_card(id, items.clone()).state(*state);
+            if let Some(handler) = folds.plan.clone() {
+                let act = |action: PlanAction| {
+                    let handler = handler.clone();
+                    let plan_id = plan_id.clone();
+                    move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                        handler(plan_id.clone(), action, window, cx)
+                    }
+                };
+                card = card
+                    .on_accept(act(PlanAction::Accept))
+                    .on_edit(act(PlanAction::Refine))
+                    .on_reject(act(PlanAction::Reject));
+            }
+            card.into_any_element()
+        }
         Block::Todo { items } => todo_list(id, items.clone()).open(folds.open(key, true)).on_toggle(toggle).into_any_element(),
         Block::Summary { title, files, checks, duration_ms, cost_usd } => {
             summary_card(id, title.clone(), format!("{} · ${cost_usd:.2}", elapsed(*duration_ms)))
@@ -221,8 +254,11 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, cx: &mut App) -> AnyElem
     match kind {
         MarkerKind::SessionStarted => row.glyph(IconName::Play, None).text(text.to_owned()),
         MarkerKind::ContextCompacted => row.glyph(IconName::Layout, None).text(text.to_owned()),
+        // The fold's own text already ends in the mode's label, so the row does
+        // not name it twice; the emphasis goes on the label inside the text.
         MarkerKind::PermissionModeChanged { mode } => {
-            row.glyph(IconName::Shield, None).text(text.to_owned()).strong(mode.label())
+            let head = text.strip_suffix(mode.label()).unwrap_or(text);
+            row.glyph(IconName::Shield, None).text(head.to_owned()).strong(mode.label())
         }
         MarkerKind::TurnCancelled | MarkerKind::TurnRetracted => row.glyph(IconName::X, None).text(text.to_owned()),
         MarkerKind::RetryScheduled => row.glyph(IconName::Refresh, Some(p.warning)).text(text.to_owned()),

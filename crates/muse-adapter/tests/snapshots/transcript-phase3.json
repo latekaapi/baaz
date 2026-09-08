@@ -1,0 +1,113 @@
+[
+  {
+    "sessionId": "01a08284-e3e5-70b0-9383-29724a202d21",
+    "session": {
+      "id": "01a08284-e3e5-70b0-9383-29724a202d21",
+      "agent": "muse",
+      "model": "",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/Users/latekaapi/Projects/harness/fixtures/msp/ws",
+      "branch": "main",
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "e7fedeaf-5e43-4958-88de-daf49657df3d",
+          "text": "effort probe high",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a08284-e45b-7c90-8c73-245f5e76b670",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "d4c7871d-ca1e-47f9-9ebb-1ff169548448",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read skill",
+              "target": "bundled:manage-settings",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 244
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "6eec4f57-f48e-4a89-808b-1fae39f4e2d1",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "python3 -c 'import os; print(os.path.join(os.environ.get(\"XDG_CONFIG_HOME\") or os.path.join(os.environ[\"HOME\"], \".config\"), \"muse\", \"settings.json\"))'",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "/Users/latekaapi/.config/muse/settings.json"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "ba8a0e63-eea9-4baa-a36c-ffd294038b29",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/Users/latekaapi/.config/muse/settings.json",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 7
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": {
+        "pressure": "normal",
+        "usedTokens": 23127,
+        "windowTokens": 1007997
+      },
+      "cumulative": {
+        "outputTokens": 912,
+        "promptTokens": 64382,
+        "totalTokens": 65294
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:01a08284-e3e5-70b0-9383-29724a202d21:16",
+      "command_text": {
+        "01a08284-e45b-7c90-8c73-245f5e76b670": "effort probe high"
+      },
+      "restored_prompt": null
+    }
+  }
+]

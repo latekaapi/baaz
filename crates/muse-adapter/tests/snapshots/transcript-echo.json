@@ -14,28 +14,6 @@
       },
       "turns": [
         {
-          "kind": "assistant",
-          "id": "marker:v:01a081e5-3361-7952-94ce-456eda0dd590:1",
-          "blocks": [
-            {
-              "kind": "marker",
-              "marker_kind": {
-                "kind": "permission_mode_changed",
-                "mode": "onRequest"
-              },
-              "text": "Approval mode · Auto"
-            }
-          ],
-          "meta": {
-            "model": "",
-            "duration_ms": 0,
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "reasoning_tokens": 0,
-            "cost_usd": 0.0
-          }
-        },
-        {
           "kind": "user",
           "id": "0f47e444-3e8f-4933-8e71-d2881590a7ee",
           "text": "hello from the probe",
