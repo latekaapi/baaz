@@ -115,13 +115,17 @@ fn parse_args() -> Args {
     // the metadata record carries the path the server resolved, so `/tmp/x`
     // and `/private/tmp/x` are two different workspaces to the wire.
     let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    let mut provider_explicit = std::env::var_os("HARNESS_PROVIDER").is_some();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--workspace" => {
                 let value = args.next().unwrap_or_else(|| usage("--workspace needs a path"));
                 out.workspace = PathBuf::from(shellexpand(&value));
             }
-            "--provider" => out.provider = args.next().unwrap_or_else(|| usage("--provider needs an id")),
+            "--provider" => {
+                out.provider = args.next().unwrap_or_else(|| usage("--provider needs an id"));
+                provider_explicit = true;
+            }
             "--theme" => {
                 let value = args.next().unwrap_or_default();
                 out.theme = ThemeKind::parse(&value).unwrap_or_else(|| usage(&format!("unknown theme `{value}`")));
@@ -147,6 +151,16 @@ fn parse_args() -> Args {
         }
     }
     out.workspace = canonical(out.workspace);
+
+    // Scripted runs — screenshots, `--steps`, `--send` — are how a phase burns
+    // real turns by accident: Phase 3 spent 25 against a cap of five because the
+    // screenshot commands omitted `HARNESS_PROVIDER=echo`. A scripted run is
+    // therefore `echo` unless the provider was named explicitly.
+    let scripted = out.screenshot.is_some() || !out.steps.is_empty() || out.send.is_some();
+    if scripted && !provider_explicit && out.provider != "echo" {
+        eprintln!("harness: scripted run, using the free `echo` provider (pass --provider meta to spend real turns)");
+        out.provider = "echo".into();
+    }
     out
 }
 

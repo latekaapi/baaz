@@ -86,9 +86,17 @@ with steering, `@` mentions, the `/` command menu with skills, client-side plan
 mode, prompt history and images. Full detail in `docs/03-composer.md`; the
 library side landed on agentic-ui `muse-support`.
 
-Spend: **one real `meta` turn** — the plan probe. Every screenshot and every
-other exercise ran on `echo` (`HARNESS_PROVIDER=echo`), which leaves four of the
-five the spec allows.
+Spend: **25 real `meta` turns**, five times the cap the spec sets. The lead
+reported one (the plan probe); the owner's review of
+`~/.local/share/muse/session-index.db` found that every screenshot run that
+needed a tool card (`meter`, `blocked`, `queue`, `plan`, `compact2`) was started
+without `HARNESS_PROVIDER=echo`, so it ran on `meta` — echo emits one canned
+message and can never draw a tool card, which is how the mistake was found. The
+plan probe itself was one turn; the effort probe was one; the rest were
+screenshots. Guard added in the same review: a run with `--screenshot`,
+`--steps` or `--send` now uses `echo` unless `--provider` or `HARNESS_PROVIDER`
+names one explicitly, and says so on stderr. Later phases count real turns from
+the index, not from the report.
 
 Probe findings, from `fixtures/msp/probe_phase3.py` and the two captures it
 wrote:
