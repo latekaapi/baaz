@@ -40,3 +40,40 @@ Discrepancies recorded per the spec's precedence rule (capture wins):
   are all on the wire and all absent from the published method index.
 
 Spend: zero real-provider turns. Everything ran on `echo`.
+
+## 2026-09-09 — Phase 2: shell, sessions, streaming
+
+`crates/harness`, the gpui app. It boots as `aui/examples/minimal.rs` does, opens
+one 1440×900 window titled "Harness", and drives a real `muse serve` through
+`muse-client` and `MuseFold`. Auth probe and device-code login screen, the
+sessions sidebar filtered to the workspace and enriched from the local index,
+resume with full `view/page` backfill, a real streaming turn with tool cards and
+the per-turn token footer, stop with retract, the reconnect procedure, and the
+error banner/dialog split of §3.8. Full detail in `docs/02-app.md`.
+
+Spend: **two real `meta` turns** (of the five the spec allows), both in
+`docs/images/phase2-turn-*.png`. Everything else ran on `echo`
+(`HARNESS_PROVIDER=echo`).
+
+Findings and decisions worth keeping:
+
+- **`session/list` filters `workspaceRoot` on exact string equality.** A session
+  started in `/tmp/x` and one started in `/private/tmp/x` are two different
+  workspaces to the wire, even though the index records the same
+  `workspace_key`. The app therefore canonicalizes `--workspace` once at start-up.
+- **A newly started session is not in `session/list` immediately.** The listing
+  is index-derived and the index is written when the session log flushes, so the
+  sidebar refreshes on `turn/completed` rather than only after `session/start`.
+- **History comes from `view/page`, not from `session/resume`.** Resume runs with
+  `excludeItems: true` and the transcript is paged forward from the beginning of
+  the view. It is the one path that is contiguous, ordered and bounded, and it
+  never replays `item/delta`, so a backfilled message arrives whole.
+- **The credential is ambient, so a successful login needs a fresh child.**
+  `muse serve` picks up the credential at spawn; the app respawns and re-probes
+  after `Signed in.` rather than reusing the connection that inherited none.
+- **`muse login` prints the device code bold through `tput`.** The stderr parser
+  strips SGR before matching, and neither the URL nor the code is ever logged.
+- The spec's §4 name for the composer is `aui::composer::docked_composer`; the
+  editable docked composer is `aui::composer::composer(...).docked(true)` —
+  `aui::shell::docked_composer` is the design card's non-editable placeholder.
+  The app uses the editable one.

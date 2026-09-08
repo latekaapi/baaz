@@ -1,0 +1,178 @@
+//! # harness
+//!
+//! A macOS chat interface to Meta's Muse Code agent, built on the `aui`
+//! component library.
+//!
+//! ```bash
+//! cargo run -p harness -- --workspace ~/code/thing
+//! HARNESS_PROVIDER=echo cargo run -p harness      # free provider, for demos
+//! ```
+//!
+//! The window boots exactly the way `aui/examples/minimal.rs` does — the asset
+//! source, then `aui::init`, then the text scale, then the window — because
+//! that order is the library's contract and nothing here has earned an
+//! exception to it.
+
+#![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
+mod app;
+mod auth;
+mod conn;
+mod index;
+mod session;
+mod shot;
+mod sidebar;
+mod transcript;
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use aui_tokens::{scale, AuiTheme, ThemeKind};
+use gpui::{px, size, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui_kit::component::{Root, TitleBar};
+
+/// The window the spec asks for.
+const WINDOW_W: f32 = 1440.0;
+const WINDOW_H: f32 = 900.0;
+const WINDOW_MIN_W: f32 = 900.0;
+const WINDOW_MIN_H: f32 = 600.0;
+/// How long a `--screenshot` render waits for fonts, layout and the first
+/// frames to settle.
+const SHOT_DELAY: Duration = Duration::from_millis(600);
+
+/// Everything the command line and the environment decide.
+#[derive(Clone, Debug)]
+pub struct Args {
+    /// The workspace every session in this window runs in.
+    pub workspace: PathBuf,
+    /// `meta`, or `echo` under `HARNESS_PROVIDER=echo`.
+    pub provider: String,
+    /// The `muse` binary to drive.
+    pub program: String,
+    /// Which theme to open in.
+    pub theme: ThemeKind,
+    /// `--screenshot <png>`: render, save and quit.
+    pub screenshot: Option<PathBuf>,
+    /// How long to wait before that capture.
+    pub delay: Duration,
+    /// `--session <id>`: resume this session at boot; `latest` picks the most
+    /// recently updated one in the workspace.
+    pub session: Option<String>,
+    /// `--send <text>`: send one turn once a session is open. The scripting
+    /// hook a screenshot needs, modelled on the gallery's `AUI_GALLERY_STEPS`.
+    pub send: Option<String>,
+    /// `--no-connect`: render the chrome without spawning `muse serve`, which
+    /// is what a screenshot of the login screen wants.
+    pub offline: bool,
+}
+
+fn parse_args() -> Args {
+    let mut args = std::env::args().skip(1);
+    let mut out = Args {
+        workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        // The spec caps real-provider turns; `echo` is free and is what demos
+        // and tests run on.
+        provider: std::env::var("HARNESS_PROVIDER").unwrap_or_else(|_| "meta".into()),
+        program: std::env::var("HARNESS_MUSE").unwrap_or_else(|_| "muse".into()),
+        theme: ThemeKind::Dark,
+        screenshot: None,
+        delay: SHOT_DELAY,
+        session: None,
+        send: None,
+        offline: false,
+    };
+    // Resolve it once, here: `session/list` filters on exact path equality and
+    // the metadata record carries the path the server resolved, so `/tmp/x`
+    // and `/private/tmp/x` are two different workspaces to the wire.
+    let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--workspace" => {
+                let value = args.next().unwrap_or_else(|| usage("--workspace needs a path"));
+                out.workspace = PathBuf::from(shellexpand(&value));
+            }
+            "--provider" => out.provider = args.next().unwrap_or_else(|| usage("--provider needs an id")),
+            "--theme" => {
+                let value = args.next().unwrap_or_default();
+                out.theme = ThemeKind::parse(&value).unwrap_or_else(|| usage(&format!("unknown theme `{value}`")));
+            }
+            "--screenshot" => {
+                let value = args.next().unwrap_or_else(|| usage("--screenshot needs <out.png>"));
+                out.screenshot = Some(PathBuf::from(value));
+            }
+            "--screenshot-delay" => {
+                let value = args.next().unwrap_or_default();
+                let ms: u64 = value.parse().unwrap_or_else(|_| usage("--screenshot-delay needs milliseconds"));
+                out.delay = Duration::from_millis(ms);
+            }
+            "--session" => out.session = Some(args.next().unwrap_or_else(|| usage("--session needs an id or `latest`"))),
+            "--send" => out.send = Some(args.next().unwrap_or_else(|| usage("--send needs the prompt text"))),
+            "--no-connect" => out.offline = true,
+            "-h" | "--help" => usage(""),
+            other => usage(&format!("unknown argument `{other}`")),
+        }
+    }
+    out.workspace = canonical(out.workspace);
+    out
+}
+
+fn usage(err: &str) -> ! {
+    if !err.is_empty() {
+        eprintln!("error: {err}\n");
+    }
+    eprintln!(
+        "usage: harness [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
+         \x20              [--session <id>|latest] [--send <text>]\n\
+         \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\n\
+         environment: HARNESS_PROVIDER=echo picks the free provider; HARNESS_MUSE names the binary."
+    );
+    std::process::exit(if err.is_empty() { 0 } else { 2 });
+}
+
+/// `~` at the start of a path, the one expansion a shell would have done.
+fn shellexpand(path: &str) -> String {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => format!("{}/{rest}", home.to_string_lossy()),
+        _ => path.to_owned(),
+    }
+}
+
+fn main() {
+    let args = parse_args();
+    let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
+    // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
+    gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
+        // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
+        aui::init(theme, cx);
+        // 3. The product text scale.
+        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
+        app::bind_keys(cx);
+
+        let bounds = match screenshot {
+            // A capture renders at the display's top-left, away from the
+            // pointer, so no hover state leaks into the PNG.
+            Some(_) => Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H))),
+            None => Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx),
+        };
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_MIN_H))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Harness".into()),
+                ..TitleBar::window_options().titlebar.unwrap_or_default()
+            }),
+            ..TitleBar::window_options()
+        };
+        let handle = cx
+            .open_window(options, |window, cx| {
+                let view = cx.new(|cx| app::Harness::new(args.clone(), window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+            .expect("open the harness window");
+        match screenshot {
+            Some(path) => shot::capture_and_quit(handle, path, delay, cx),
+            None => cx.activate(true),
+        }
+    });
+}
