@@ -22,14 +22,33 @@ State on 2026-09-09:
   `harness-probe` binary); agentic-ui `muse-support` 3572bb9 (aui-protocol extensions:
   Provider::Muse, four MSP approval modes + Session::plan, new Delta/Block/Marker/Intent
   variants). Gates green in both repos.
-- Phase 2 (gpui app: shell, auth probe + device-code login screen, sessions sidebar with
-  view/page backfill, live streaming transcript, stop/retract, reconnect, error dialog;
-  library gains `aui::screens::login` and `aui::overlay::dialog` with gallery entries) was
-  running as one Opus lead when this handoff was written. Check `git log --oneline | head`
-  in both repos: if the top harness commit is still 0d6417a and `crates/harness/` is
-  untracked, the lead was interrupted — review what exists, finish Phase 2 against the spec's
-  phase-2 gate (screenshots light/dark in docs/images/phase2-*.png, docs/02-app.md, commits in
-  both repos), otherwise review its commit and screenshots, then move on.
+- Phase 2 DONE and reviewed on 2026-09-09: harness fd04244 (crates/harness boots on the aui
+  shell, auth probe + device-code login, sessions sidebar with view/page backfill, live
+  streaming of real turns, stop/retract, reconnect, dialog; scripting flags `--session
+  <id>|latest`, `--send <text>`, `--no-connect`, env `HARNESS_PROVIDER=echo`); agentic-ui
+  `muse-support` 857ddb1 (`aui::screens::login`, `aui::overlay::dialog`, `Provider::Muse`
+  mark, `SidebarFooter::detail`, assistant footer reasoning tokens). Gates green; screenshots
+  in docs/images/phase2-*.png; docs/02-app.md describes the app. Two more wire facts:
+  `session/list` matches `workspaceRoot` by exact string (canonicalize `/tmp` → `/private/tmp`),
+  and a new session appears in `session/list` only after its log flushes (sidebar refreshes on
+  `turn/completed`).
+- Review findings from the Phase 2 screenshots, to fix in Phase 3/4 (not blocking):
+  1. Muse's file-read tool folds as a shell card with verb "Ran" — map Muse tool names
+     (`read`/`read_file`/`write`/`edit`/`grep`/`glob`/`web_*`, check `rawArgs`) onto
+     `ToolKind::{Read, Edit, Search, Web}` in `muse-adapter::tool_shape` so the verb and
+     body match (a read should render as `Read path` with the file body, not shell output).
+  2. A `turn/completed` `failed` reason such as `resume_reconcile:orphaned_by_process_loss`
+     is shown raw as a marker; humanize known reasons ("Muse restarted while this turn was
+     running") and keep the raw code in a tooltip/detail line. The `modelError` card had an
+     empty detail; show `error.message`.
+  3. Live fold and backfill fold disagree: the live view showed the `modelError` card for the
+     failed first turn, the resumed session (view/page) did not. Make the replay path produce
+     the same blocks as the live path (write a test that folds a capture live and via
+     `view/page` and compares).
+  4. Hide the `$0.00` cost cell in the turn footer when the catalog reports no price.
+  5. The marker turn synthesized at session start ("Approval mode · Auto") renders before the
+     first user message; consider suppressing the initial mode marker unless the mode differs
+     from the default.
 - Phases 3 (composer controls: model/effort/mode menus, context meter + compaction, queue
   strip + steer, mentions + command menu with skills, client-side plan mode with the /plan
   skill probe, prompt history, images), 4 (approval card v2 multi-stage + feedback + policy
