@@ -43,7 +43,11 @@ State on 2026-09-09:
   `ComposerIntent::{Steer, ExitPlan, Attach, Compact}` and `QueueIntent::Steer`,
   gallery entry `composer/pickers`). Gates green in both repos; screenshots in
   `docs/images/phase3-*.png`, light and dark; `docs/03-composer.md` describes it
-  all. Spend: one real `meta` turn (the plan probe), four of the five unspent.
+  all. Spend: **25 real `meta` turns** — the screenshot runs were started
+  without `HARNESS_PROVIDER=echo`; the lead reported one. Scripted runs
+  (`--screenshot`/`--steps`/`--send`) now default to `echo`; verify spend from
+  `~/.local/share/muse/session-index.db` (`provider_id`, `workspace_root`), never
+  from a lead's report.
 - Phase 3 findings: `/plan <text>` **does** fire the bundled plan skill
   server-side (evidence in `fixtures/msp/transcript-plan-probe.jsonl`);
   `reasoningEffort` is on `turn/start` and `turn/steer` only and is never
