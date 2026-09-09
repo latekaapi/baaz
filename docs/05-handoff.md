@@ -32,8 +32,8 @@ State on 2026-09-09:
   `session/list` matches `workspaceRoot` by exact string (canonicalize `/tmp` → `/private/tmp`),
   and a new session appears in `session/list` only after its log flushes (sidebar refreshes on
   `turn/completed`).
-- Phase 3 DONE on 2026-09-09: harness `main` head, "Phase 3: the composer's
-  controls, and the plan probe that settled plan mode" (composer controls: model /
+- Phase 3 DONE and reviewed on 2026-09-09: harness bb964b4 plus the review commit
+  3452b02 (composer controls: model /
   effort / mode pickers, context meter + compaction, queue strip with steer,
   `@` mentions and the `/` menu with skills, client-side plan mode, prompt
   history, images, the `Overlays` entity, toasts, and scripting flag `--steps`);
@@ -55,6 +55,15 @@ State on 2026-09-09:
   part is admitted without being decoded; `session/setModel` on echo is rejected
   `invalid_target`. Review findings F1, F4 and F5 are closed; F2 and F3 remain
   for Phase 4.
+- Review findings from the Phase 3 screenshots, to fix in Phase 4 (not blocking):
+  6. The plan card numbers markdown headings as steps alongside list items
+     (`plan::steps`); headings should become section labels, list items the steps.
+  7. `/plan` appears twice in the `/` menu (client command + bundled skill); hide a
+     skill when a client command shares its name.
+  8. The model menu truncates labels (`muse-spark-1...`); widen it or wrap.
+- The Phase 3 brief that worked is kept at docs/briefs/phase3-brief.md; write the Phase 4
+  brief in the same shape (read list, scope, numbered decisions, wire facts, deliverables)
+  and save it as docs/briefs/phase4-brief.md.
 - Phases 4 (approval card v2 multi-stage + feedback + policy and judge
   resolutions, question previews/timeout/clarify, error banners/dialogs, retry
   and retry-scheduled, markers, fork, todo, goal — plus findings F2 and F3) and
@@ -79,7 +88,13 @@ Facts that cost time to learn (details in docs/01-transport.md and the research 
 Working rules (owner's instructions): the main session is Fable and spends its tokens on
 design decisions and reviews only; ONE Opus (or Sonnet) lead per phase does the work,
 briefed with a self-contained prompt, and Fable spot-checks the diff, reruns one gate and
-reads the screenshots. Prefix shell commands with
+reads the screenshots. SendMessage is not available to the main session: if a lead dies
+mid-phase (rate limit), launch a fresh lead told to inventory the uncommitted trees first.
+Spend rule after Phase 3: the brief must tell the lead to prefix EVERY app invocation with
+`HARNESS_PROVIDER=echo` and to name each real turn before spending it; at the gate, count
+real turns yourself with
+`sqlite3 ~/.local/share/muse/session-index.db "select workspace_root, first_user_prompt from sessions where session_dir like '%/<date>/%' and provider_id='meta'"`
+and `grep -c runtime.user_intent.accepted <session_dir>/session.jsonl` per session. Prefix shell commands with
 `export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"`. Library rules:
 no literal colours/sizes/durations, stateless RenderOnce components, intents out,
 popover_layer for overflow, both themes, gallery entry for every new component, gates
