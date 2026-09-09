@@ -156,10 +156,22 @@ starts a new session; `/logout` runs `muse logout`; `/status` and `/usage` open
 one dialog built out of `SideState` (model, mode, effort, plan, context,
 cumulative tokens, queue depth, session id, workspace, branch) under the
 billing tier and its two percentages; `/help` reopens the menu unfiltered.
-`/fork` landed in Phase 4; `/name`, `/hide` and `/resume` landed in Phase 5 —
-nothing in the list says "not in this build yet" any more. `/empty` toggles
-the sidebar's empty-session filter: sessions with no turns are hidden by
-default, and the command shows them again (or hides them once shown).
+`/fork` landed in Phase 4 and grew a picker afterwards; `/name`, `/hide`
+and `/resume` landed in Phase 5 — nothing in the list says "not in this build
+yet" any more. `/empty` toggles the sidebar's empty-session filter: sessions
+with no turns are hidden by default, and the command shows them again (or
+hides them once shown).
+
+**`/fork` names a turn two ways.** Typed bare, or picked from the `/` menu, it
+opens the turn picker: the session's completed assistant turns, newest first,
+each row the first line of the user prompt that started the turn plus the
+turn's time. Picking a row forks that turn. Typed with a number (`/fork 2`) it
+skips the picker and forks the nth newest completed turn directly — `1` is the
+newest. A number with no turn behind it is a banner, never a fork of whatever
+the server thinks is newest. Choosing a row, like every fork, only sends
+`session/fork`; the new session opens when the server's resume envelope
+arrives, never before. The picker is scripted as `--steps fork-picker` (see
+`docs/images/improve-fork-picker-dark.png`).
 
 A command can also be **typed in full and sent**. `send()` parses the whole
 line, so `/name Fix the parser` renames the session rather than asking Muse
