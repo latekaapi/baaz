@@ -831,6 +831,7 @@ impl Harness {
             }
             "palette" => self.open_palette(PaletteKind::Commands, cx),
             "resume" => self.open_palette(PaletteKind::Resume, cx),
+            "fork-picker" => self.open_palette(PaletteKind::Fork, cx),
             "rename" => {
                 let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
                 if let Some(session_id) = session_id {
@@ -1063,6 +1064,7 @@ impl Harness {
                 self.show_empty = !self.show_empty;
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
+            SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
         }
         cx.notify();
     }
@@ -1389,6 +1391,17 @@ impl Harness {
                     (entry.id.clone().into(), entry.label.clone().into(), meta)
                 })
                 .collect(),
+            // The active session's completed turns, newest first; the rows
+            // come from the view because the window does not keep a transcript.
+            PaletteKind::Fork => self
+                .active
+                .as_ref()
+                .map(|view| view.read(cx).fork_turns())
+                .unwrap_or_default()
+                .into_iter()
+                .take(PALETTE_ROWS)
+                .map(|(id, label, detail)| (id.into(), label.into(), detail.into()))
+                .collect(),
         }
     }
 
@@ -1402,6 +1415,9 @@ impl Harness {
         self.overlays.update(cx, |overlays, _| overlays.palette = None);
         match kind {
             PaletteKind::Resume => self.resume(id.to_string(), window, cx),
+            PaletteKind::Fork => {
+                self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));
+            }
             PaletteKind::Commands => {
                 if let Some(command) = Command::parse(&id) {
                     self.with_session(cx, |view, cx| view.run_command(command, window, cx));
@@ -1809,6 +1825,9 @@ impl Harness {
         let (title, placeholder, icon) = match kind {
             PaletteKind::Commands => ("Commands", "Every command in this build", PaletteIcon::Glyph(IconName::Slash)),
             PaletteKind::Resume => ("Sessions", "Resume a session in this workspace", PaletteIcon::Glyph(IconName::Clock)),
+            PaletteKind::Fork => {
+                ("Fork from", "Pick a completed turn to branch from", PaletteIcon::Glyph(IconName::Git))
+            }
         };
         let items: Vec<PaletteItem> = rows
             .iter()

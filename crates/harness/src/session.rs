@@ -150,6 +150,9 @@ pub enum SessionEvent {
     ToggleEmpty,
     /// `/resume`: open the session picker.
     Resume,
+    /// `/fork` with nothing named: open the turn picker over the session's
+    /// completed assistant turns.
+    ForkPicker,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
     /// for the rest of this app run.
     TierOverride,
@@ -1363,7 +1366,19 @@ impl SessionView {
                 self.overlays.update(cx, |overlays, _| overlays.open(Menu::caret(MenuKind::Command, 0)));
                 cx.notify();
             }
-            Command::Fork => self.fork(None, cx),
+            // `/fork` with nothing named opens the turn picker; `/fork <n>`
+            // forks the nth newest completed turn with no picker in between.
+            Command::Fork => {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    cx.emit(SessionEvent::ForkPicker);
+                } else {
+                    match argument.parse::<usize>() {
+                        Ok(n) => self.fork_nth(n, cx),
+                        Err(_) => self.set_banner("`/fork` takes a turn number, e.g. `/fork 2`.", None, cx),
+                    }
+                }
+            }
             // `/name Fix the parser` renames; `/name` on its own opens the
             // row's field, and `/name ` with nothing after it clears the name.
             Command::Name => {
@@ -2735,24 +2750,60 @@ impl SessionView {
         }));
     }
 
+    /// The completed assistant turns, newest first: the rows of the `/fork`
+    /// picker. Each row is the turn id, the first line of the user prompt that
+    /// started the turn, and the turn's wall-clock time.
+    ///
+    /// The filter is the same one a fork may name: no running turn (naming an
+    /// in-progress one is `forkBoundaryInvalid`), no client-authored marker or
+    /// plan turn. A `Turn::User`'s id is the message item's, not a turn id, so
+    /// user turns only lend their text to the row that follows them.
+    pub fn fork_turns(&self) -> Vec<(String, String, String)> {
+        let Some(session) = self.session() else { return Vec::new() };
+        let running = self.running.as_ref().map(|r| r.turn_id.as_str());
+        let mut prompt = String::new();
+        let mut rows = Vec::new();
+        for turn in session.turns.iter() {
+            match turn {
+                aui_protocol::Turn::User { text, .. } => prompt = text.clone(),
+                aui_protocol::Turn::Assistant { id, blocks, meta } => {
+                    if Some(id.as_str()) == running {
+                        continue;
+                    }
+                    // The client authors two kinds of turn of its own — marker rows and
+                    // plan cards — and neither is a turn the server could fork at.
+                    if id.starts_with("marker:") || id.starts_with("plan-") {
+                        continue;
+                    }
+                    rows.push((id.clone(), fork_label(&prompt, blocks), fork_time(meta)));
+                }
+            }
+        }
+        rows.reverse();
+        rows
+    }
+
+    /// The nth newest completed turn, 1-based: what `/fork <n>` names.
+    fn nth_completed_turn(&self, n: usize) -> Option<String> {
+        self.fork_turns().into_iter().nth(n.saturating_sub(1)).map(|(id, _, _)| id)
+    }
+
     /// The newest turn the server has finished, which is the only boundary a
     /// fork may name.
     fn newest_completed_turn(&self) -> Option<String> {
-        let session = self.session()?;
-        let running = self.running.as_ref().map(|r| r.turn_id.as_str());
-        session
-            .turns
-            .iter()
-            .rev()
-            .filter_map(|turn| match turn {
-                aui_protocol::Turn::Assistant { id, .. } => Some(id.as_str()),
-                // A `Turn::User`'s id is the message item's, not a turn id.
-                aui_protocol::Turn::User { .. } => None,
-            })
-            // The client authors two kinds of turn of its own — marker rows and
-            // plan cards — and neither is a turn the server could fork at.
-            .find(|id| Some(*id) != running && !id.starts_with("marker:") && !id.starts_with("plan-"))
-            .map(str::to_owned)
+        self.nth_completed_turn(1)
+    }
+
+    /// `/fork <n>`: fork the nth newest completed turn with no picker. A
+    /// number with no turn behind it is a banner, never a fork of whatever the
+    /// server thinks is newest.
+    fn fork_nth(&mut self, n: usize, cx: &mut Context<Self>) {
+        match self.nth_completed_turn(n) {
+            Some(last_turn_id) => self.fork(Some(last_turn_id), cx),
+            None => {
+                self.set_banner(&format!("There is no completed turn #{n} to fork from yet."), None, cx);
+            }
+        }
     }
 
     // ---------------------------------------------------------- full output
@@ -3177,9 +3228,56 @@ fn page_all(client: &MuseClient, session_id: &str) -> Vec<MuseEvent> {
     }
 }
 
+/// The `/fork` picker's row label: the first line of the user prompt that
+/// started the turn, falling back to the turn's own first text line.
+fn fork_label(prompt: &str, blocks: &[Block]) -> String {
+    let first = prompt.lines().next().unwrap_or("").trim();
+    if !first.is_empty() {
+        return first.to_owned();
+    }
+    blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Text { text, .. } => {
+                let line = text.lines().next().unwrap_or("").trim();
+                (!line.is_empty()).then(|| line.to_owned())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "(no prompt)".to_owned())
+}
+
+/// The `/fork` picker's row detail: the turn's wall-clock time, in the same
+/// words as the per-turn footer.
+fn fork_time(meta: &aui_protocol::TurnMeta) -> String {
+    aui::transcript::format_duration(meta.duration_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_takes_an_optional_turn_number() {
+        assert_eq!(Command::parse_line("/fork"), Some((Command::Fork, "")));
+        assert_eq!(Command::parse_line("/fork 2"), Some((Command::Fork, "2")));
+        assert_eq!(Command::parse_line("/fork  "), Some((Command::Fork, "")));
+    }
+
+    #[test]
+    fn a_fork_row_is_the_prompt_first_line() {
+        let blocks = vec![Block::Text { text: "reply".into(), streaming: false }];
+        assert_eq!(fork_label("Fix the parser\nmore detail", &blocks), "Fix the parser");
+        assert_eq!(fork_label("  padded  ", &blocks), "padded");
+        assert_eq!(fork_label("", &blocks), "reply");
+        assert_eq!(fork_label("", &[]), "(no prompt)");
+    }
+
+    #[test]
+    fn a_fork_time_is_the_turn_time_in_footer_words() {
+        let meta = aui_protocol::TurnMeta { duration_ms: 12_400, ..Default::default() };
+        assert_eq!(fork_time(&meta), "12.4 s");
+    }
 
     #[test]
     fn a_slash_opens_the_command_menu_only_at_a_line_start() {

@@ -1,5 +1,28 @@
 # Harness changelog
 
+## 2026-09-09 — Improvements (E) — fork picker
+
+`/fork` used to fork the newest completed turn with no say in the matter; the
+TUI picks from a list, and now so does the harness. Typed bare, or picked from
+the `/` menu, `/fork` opens the turn picker over the command palette's
+`PaletteKind::Fork`: the session's completed assistant turns, newest first,
+each row the first line of the user prompt that started the turn plus the
+turn's wall-clock time in footer words. Picking a row forks that turn through
+the same `session/fork` call as before — the new session still opens only when
+the server's resume envelope arrives, so nothing is optimistic. Typed with a
+number (`/fork 2`), it skips the picker and forks the nth newest completed
+turn directly (`1` is the newest); a number with no turn behind it is a banner,
+never a fork of whatever the server thinks is newest. The picker rows come
+from one `SessionView::fork_turns` helper that the direct path reuses, so the
+picker and `/fork <n>` can never disagree about what "newest" means. Scripted
+as `--steps fork-picker`, beside the window's other palette verbs.
+
+- Screenshot: `docs/images/improve-fork-picker-dark.png` shows the open picker
+  over a replayed real capture (`fixtures/msp/transcript-real.jsonl`), taken
+  with `--replay` so it cost nothing.
+- Covered by three offline unit tests (the `/fork [n]` parse, the row label,
+  the row time); no test opens a real session.
+
 ## 2026-09-09 — Improvements (D) — silent reasoning footer
 
 Improvement candidate 3 in `docs/09-handoff-improvements.md` §8: a turn can
