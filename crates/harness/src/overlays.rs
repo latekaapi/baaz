@@ -92,6 +92,9 @@ pub enum PaletteKind {
     Commands,
     /// `/resume`: the workspace's sessions, under the titles the sidebar shows.
     Resume,
+    /// `/fork` with nothing named: the session's completed assistant turns,
+    /// newest first, under the user prompt that started each one.
+    Fork,
 }
 
 /// The open command palette: which list, and where the keyboard is in it.
@@ -297,7 +300,7 @@ impl Command {
             Command::Mode => "Set the approval mode",
             Command::Plan => "Plan first, then approve",
             Command::Compact => "Summarize the conversation to free up context",
-            Command::Fork => "Branch this session from the latest message",
+            Command::Fork => "Branch this session from an earlier turn",
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
             Command::Hide => "Hide this session from the sidebar",
