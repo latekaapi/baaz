@@ -379,6 +379,7 @@ pub fn effort_detail(effort: Option<ReasoningEffort>) -> &'static str {
         Some(ReasoningEffort::Medium) => "The middle budget, and the usual default.",
         Some(ReasoningEffort::High) => "A long budget.",
         Some(ReasoningEffort::Xhigh) => "Longer than high.",
+        Some(ReasoningEffort::Max) => "Between xhigh and ultra.",
         Some(ReasoningEffort::Ultra) => "The largest budget MSP accepts.",
     }
 }
