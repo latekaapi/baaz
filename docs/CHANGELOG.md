@@ -1,5 +1,23 @@
 # Harness changelog
 
+## 2026-09-09 — Improvements (D) — silent reasoning footer
+
+Improvement candidate 3 in `docs/09-handoff-improvements.md` §8: a turn can
+bill reasoning tokens and emit no `reasoning` item, and the footer showed the
+count with nothing saying the thinking happened off-screen. A finished
+assistant turn with `reasoning_tokens > 0` and no `Block::Thinking` now gets
+one more row under the footer — `Thought silently · 419 reasoning` — in the
+footer's own style (mono, `FS_11`, `ink_4`).
+
+The decision is the pure `transcript::silent_reasoning` in
+`crates/harness/src/transcript.rs` (assistant turn, count above zero, no
+thinking card), covered by five unit tests; the fold already accumulated the
+count (`TurnUsage::reasoning` → `TurnMeta::reasoning_tokens`), so no snapshot
+changed. `fixtures/msp/transcript-real.jsonl` is the real capture that
+exercises it: 419 billed reasoning tokens, no `reasoning` item. Screenshots
+`docs/images/improve-silent-reasoning-{dark,light}.png` are `--replay` of that
+capture. Footer documented in `docs/02-app.md` §6.
+
 ## 2026-09-09 — tier probe leak
 
 The billing probe orphaned its `muse` TUI. The probe runs on a background

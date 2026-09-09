@@ -348,9 +348,9 @@ impl Command {
     }
 }
 
-/// The effort tiers the picker offers: MSP's whole closed enum, and never the
-/// catalog's `max`, which MSP rejects.
-pub const EFFORTS: [Option<ReasoningEffort>; 8] = [
+/// The effort tiers the picker offers: MSP's whole closed enum, driven from
+/// `aui_protocol::ReasoningEffort` (muse 1.1.1 added `max`, which MSP accepts).
+pub const EFFORTS: [Option<ReasoningEffort>; 9] = [
     None,
     Some(ReasoningEffort::None),
     Some(ReasoningEffort::Minimal),
@@ -358,6 +358,7 @@ pub const EFFORTS: [Option<ReasoningEffort>; 8] = [
     Some(ReasoningEffort::Medium),
     Some(ReasoningEffort::High),
     Some(ReasoningEffort::Xhigh),
+    Some(ReasoningEffort::Max),
     Some(ReasoningEffort::Ultra),
 ];
 
@@ -379,6 +380,7 @@ pub fn effort_detail(effort: Option<ReasoningEffort>) -> &'static str {
         Some(ReasoningEffort::Medium) => "The middle budget, and the usual default.",
         Some(ReasoningEffort::High) => "A long budget.",
         Some(ReasoningEffort::Xhigh) => "Longer than high.",
+        Some(ReasoningEffort::Max) => "Longer than extra high, below ultra.",
         Some(ReasoningEffort::Ultra) => "The largest budget MSP accepts.",
     }
 }
