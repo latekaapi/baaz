@@ -26,8 +26,8 @@ use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, Turn, TurnMeta};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
-use gpui::{div, prelude::*, px, AnyElement, App, ElementId, SharedString, Window};
-use gpui_kit::base::v_flex;
+use gpui::{div, prelude::*, px, relative, AnyElement, App, ElementId, SharedString, Window};
+use gpui_kit::base::{h_flex, v_flex};
 
 /// The title the pending approval card asks its question with.
 ///
@@ -156,6 +156,50 @@ pub fn block_key(turn_id: &str, index: usize) -> String {
     format!("{turn_id}:{index}")
 }
 
+/// The reasoning tokens a finished turn billed without showing any work, if any.
+///
+/// A turn can bill a reasoning budget and emit no `reasoning` item at all —
+/// the fold records the count on [`TurnMeta::reasoning_tokens`] either way —
+/// so a count with no thinking card means the model thought silently. Returns
+/// the count when the turn is an assistant turn with `reasoning_tokens > 0`
+/// and no [`Block::Thinking`], and `None` otherwise (user turns, no billed
+/// reasoning, or a visible trace that speaks for itself).
+pub fn silent_reasoning(turn: &Turn) -> Option<u64> {
+    let Turn::Assistant { blocks, meta, .. } = turn else { return None };
+    if meta.reasoning_tokens == 0 {
+        return None;
+    }
+    if blocks.iter().any(|block| matches!(block, Block::Thinking { .. })) {
+        return None;
+    }
+    Some(meta.reasoning_tokens)
+}
+
+/// The "thought silently" line for a turn [`silent_reasoning`] fired on.
+///
+/// The wording names the library footer's own cell (`"419 reasoning"`), so the
+/// two read as one fact; the style is the footer's (mono, `FS_11`, `ink_4`).
+pub fn silent_reasoning_text(count: u64) -> String {
+    format!("Thought silently · {count} reasoning")
+}
+
+/// The [`silent_reasoning_text`] line as a footer-styled row under the turn.
+fn silent_reasoning_row(count: u64, cx: &mut App) -> AnyElement {
+    use aui_tokens::{ActiveAui, AuiStyled};
+    let p = cx.aui().colors;
+    h_flex()
+        .w_full()
+        .mt(px(10.0))
+        .gap(px(10.0))
+        .font_family(scale::FONT_MONO)
+        .text_px(scale::FS_11)
+        .line_height(relative(1.0))
+        .medium()
+        .text_color(p.ink_4)
+        .child(silent_reasoning_text(count))
+        .into_any_element()
+}
+
 /// Render one turn: the person's bubble, or every block of an assistant reply.
 ///
 /// `settled` is false only for the newest turn, so history does not replay the
@@ -170,7 +214,7 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
             .into_any_element()],
         Turn::Assistant { id, blocks, meta } => {
             let last = blocks.len().saturating_sub(1);
-            blocks
+            let mut rows: Vec<AnyElement> = blocks
                 .iter()
                 .enumerate()
                 .map(|(index, b)| {
@@ -179,7 +223,15 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
                     let body = block(&key, id, b, index == last, meta, folds, cx);
                     div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
                 })
-                .collect()
+                .collect();
+            // A turn can bill reasoning tokens and emit no reasoning item at
+            // all (improvement candidate 3 in docs/09-handoff-improvements.md
+            // §8). The library footer already carries the count; this row says
+            // what the count meant, in the footer's own style.
+            if let Some(count) = silent_reasoning(turn) {
+                rows.push(silent_reasoning_row(count, cx));
+            }
+            rows
         }
     }
 }
@@ -517,3 +569,70 @@ const SUGGESTIONS: [&str; 3] = [
     "Explain how this project is laid out",
     "Find the entry point and walk me through it",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant(blocks: Vec<Block>, reasoning_tokens: u64) -> Turn {
+        Turn::Assistant {
+            id: "turn-1".to_owned(),
+            blocks,
+            meta: TurnMeta {
+                model: "muse-spark-1.3-contributor".to_owned(),
+                duration_ms: 17_339,
+                tokens_in: 58_527,
+                tokens_out: 625,
+                reasoning_tokens,
+                cost_usd: 0.0,
+            },
+        }
+    }
+
+    fn text_block() -> Block {
+        Block::Text { text: "done".to_owned(), streaming: false }
+    }
+
+    fn thinking_block() -> Block {
+        Block::Thinking {
+            text: "hmm".to_owned(),
+            elapsed_ms: 0,
+            summary: None,
+            state: ThinkingState::Done,
+        }
+    }
+
+    #[test]
+    fn billed_reasoning_with_no_thinking_card_is_silent() {
+        assert_eq!(silent_reasoning(&assistant(vec![text_block()], 419)), Some(419));
+    }
+
+    #[test]
+    fn no_billed_reasoning_is_not_silent() {
+        assert_eq!(silent_reasoning(&assistant(vec![text_block()], 0)), None);
+    }
+
+    #[test]
+    fn a_visible_thinking_card_speaks_for_itself() {
+        assert_eq!(
+            silent_reasoning(&assistant(vec![thinking_block(), text_block()], 419)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_user_turn_never_thinks_silently() {
+        let turn = Turn::User {
+            id: "user-1".to_owned(),
+            text: "hi".to_owned(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+        };
+        assert_eq!(silent_reasoning(&turn), None);
+    }
+
+    #[test]
+    fn the_silent_line_names_the_footer_count() {
+        assert_eq!(silent_reasoning_text(419), "Thought silently · 419 reasoning");
+    }
+}
