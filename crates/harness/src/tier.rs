@@ -59,6 +59,11 @@ const COLS: u16 = 200;
 const CARD: Duration = Duration::from_secs(6);
 /// One poll of the master side.
 const TICK: Duration = Duration::from_millis(60);
+/// How long past [`PROBE_CEILING`] an exit waits for a probe thread before
+/// leaving anyway. `probe` always finishes below the ceiling, so the wait
+/// always succeeds; the bound is what keeps a stuck probe from holding an
+/// exit open, and the kill that follows is what keeps it from leaking.
+const JOIN_GRACE: Duration = Duration::from_secs(5);
 /// The most terminal output one probe will hold. The card arrives in the first
 /// few tens of kilobytes; a TUI that decided to redraw forever is a bug, not a
 /// reason to grow without bound.
@@ -189,7 +194,11 @@ pub fn remember(tier: &Tier) {
 /// without launching the app. It prints the parsed fields and never the
 /// terminal's own bytes, and it makes **no model call**.
 pub fn print_and_exit(muse: &str) -> ! {
-    let probed = probe(muse);
+    // Joined, not called: `process::exit` below runs no destructors, so a
+    // `Pty` still alive at that point would never be dropped and its child
+    // would orphan. Joining first means the child is SIGKILLed and reaped
+    // before the process leaves.
+    let probed = probe_blocking(muse);
     // A probe is a probe: the window's cache is refreshed by this one too, so
     // checking the plan from a script saves the next boot the wait.
     if let Ok(tier) = &probed {
@@ -226,6 +235,134 @@ fn probe_workspace() -> PathBuf {
     let dir = crate::store::support_dir().join("tier-probe");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// The pids of probe children this process still owns. [`kill_live_probes`]
+/// SIGKILLs them on exit paths that cannot wait for the probe thread; every
+/// [`Pty`] removes its own pid on drop.
+static LIVE_PROBES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// SIGKILL every probe child this process still owns.
+///
+/// For exit paths that cannot join the probe thread (the screenshot's
+/// `quit`): the thread then finishes against a dead child and its `Drop`
+/// reaps it. SIGKILL, not SIGTERM — the TUI ignores SIGTERM, and on
+/// 2026-09-09 two orphaned probes survived it for six hours and died on
+/// SIGKILL. A SIGKILLed child whose `Pty` is already gone is reaped by init;
+/// one whose `Pty` is still here is reaped by its `Drop`.
+pub fn kill_live_probes() {
+    let live: Vec<u32> = LIVE_PROBES.lock().map(|live| live.clone()).unwrap_or_default();
+    for pid in live {
+        // SAFETY: `kill` with a pid and a signal neither reads nor writes.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// Wait, bounded, for every live probe to be dropped and reaped after
+/// [`kill_live_probes`]: the probe thread sees the dead child on its next
+/// pump tick and its `Drop` removes the pid file. For exits that want the
+/// pid file gone — not just the child dead — before they leave. Bounded
+/// either way: the quit proceeds when the wait expires.
+pub fn wait_for_probes_gone(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let gone = LIVE_PROBES.lock().map(|live| live.is_empty()).unwrap_or(true);
+        if gone {
+            return;
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+/// `~/Library/Application Support/harness/tier-probe/probe.pid`: the live
+/// probe child's pid, or nothing when no probe is running.
+///
+/// A harness that is force-quit mid-probe never drops its `Pty`, so the TUI —
+/// its own session leader — is reparented to pid 1 and lives on. The pid file
+/// is how the next probe finds and SIGKILLs it.
+fn probe_pid_path() -> PathBuf {
+    probe_workspace().join("probe.pid")
+}
+
+/// Read the pid file, or `None` when it is missing or does not parse: either
+/// way there is nothing to sweep.
+fn read_probe_pid() -> Option<u32> {
+    parse_probe_pid(&std::fs::read_to_string(probe_pid_path()).ok()?)
+}
+
+/// The pid file holds one decimal pid. Anything else — empty, truncated,
+/// pid 1 and below — reads as absent rather than as someone to kill.
+fn parse_probe_pid(text: &str) -> Option<u32> {
+    let pid: u32 = text.trim().parse().ok()?;
+    if pid <= 1 { None } else { Some(pid) }
+}
+
+/// Decide about one pid-file entry. The pid is killed only when `is_probe`
+/// says its command line is still a probe's, never on the pid alone: pids
+/// are recycled, and killing one blind takes out whatever came next.
+fn sweep_stale_with(current: Option<u32>, is_probe: &dyn Fn(u32) -> bool, kill: &dyn Fn(u32)) {
+    if let Some(pid) = current {
+        if is_probe(pid) {
+            kill(pid);
+        }
+    }
+}
+
+/// SIGKILL the previous probe's child when it outlived its harness.
+fn sweep_stale_probe() {
+    sweep_stale_with(read_probe_pid(), &is_probe_child, &|pid| {
+        // SAFETY: as in `kill_live_probes`.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    });
+}
+
+/// Whether `pid` is still a probe child: its command line names the probe
+/// workspace. The workspace path is the check, not the bare word
+/// "tier-probe" — pid reuse aside, other command lines can contain that.
+fn is_probe_child(pid: u32) -> bool {
+    let probe_dir = probe_workspace().to_string_lossy().into_owned();
+    probe_cmdline(pid).is_some_and(|line| line.contains(&probe_dir))
+}
+
+/// One process's command line, through `ps`.
+fn probe_cmdline(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("command=")
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        None
+    }
+}
+
+/// Run [`probe`] on a thread and join it with a bounded wait, so exiting
+/// after it cannot orphan the child: the `Pty` is dropped — the child
+/// SIGKILLed and reaped — before this returns.
+///
+/// A thread that somehow outlives the wait has its child SIGKILLed out from
+/// under it and the pid file swept, so nothing it owns outlives the harness
+/// either; the stuck probe then reports instead of hanging the exit open.
+fn probe_blocking(muse: &str) -> Result<Tier, String> {
+    let muse = muse.to_owned();
+    let probe = std::thread::spawn(move || probe(&muse));
+    let deadline = Instant::now() + PROBE_CEILING + JOIN_GRACE;
+    while !probe.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(TICK);
+    }
+    if !probe.is_finished() {
+        kill_live_probes();
+        sweep_stale_probe();
+        return Err("the /upgrade card did not answer in time".to_owned());
+    }
+    match probe.join() {
+        Ok(probed) => probed,
+        Err(_) => Err("the tier probe panicked".to_owned()),
+    }
 }
 
 /// Drive the TUI and read the `/upgrade` card. Blocking for up to
@@ -265,8 +402,8 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
         tier = parse_card(&text);
     }
 
-    // 4. Two interrupts is how the TUI is asked to leave; the drop kills it if
-    //    it declines.
+    // 4. Two interrupts is how the TUI is asked to leave; the drop SIGKILLs
+    //    it if it declines.
     let _ = pty.write(b"\x03");
     pty.pump(&mut text, Duration::from_millis(200));
     let _ = pty.write(b"\x03");
@@ -427,10 +564,36 @@ struct Pty {
 }
 
 impl Pty {
-    /// `openpty`, then `muse` on the slave side with its own session and the
-    /// slave as its controlling terminal — which is what makes it draw a TUI
-    /// rather than refuse for want of a tty.
+    /// The probe's TUI in the throwaway workspace, swept and tracked: the
+    /// previous run's orphan is SIGKILLed first, and this child's pid joins
+    /// the live registry and the pid file so every exit can find it.
     fn open(muse: &str) -> Result<Self, String> {
+        // A harness that was force-quit mid-probe left its child behind;
+        // SIGKILL it before starting the next one.
+        sweep_stale_probe();
+        let mut command = std::process::Command::new(muse);
+        command
+            .arg("--workspace")
+            .arg(probe_workspace())
+            .env("TERM", "xterm-256color")
+            .env("LINES", ROWS.to_string())
+            .env("COLUMNS", COLS.to_string());
+        let pty = Self::spawn(command)?;
+        let pid = pty.child.id();
+        if let Ok(mut live) = LIVE_PROBES.lock() {
+            live.push(pid);
+        }
+        // Best-effort: without it the next probe cannot sweep this one when
+        // this harness is force-quit.
+        let _ = std::fs::write(probe_pid_path(), pid.to_string());
+        Ok(pty)
+    }
+
+    /// `openpty`, then `command` on the slave side with its own session and
+    /// the slave as its controlling terminal — which is what makes a TUI draw
+    /// rather than refuse for want of a tty. The probe and the SIGKILL unit
+    /// test share this path, so the test exercises the real kill.
+    fn spawn(mut command: std::process::Command) -> Result<Self, String> {
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
         let mut size =
             libc::winsize { ws_row: ROWS, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
@@ -450,16 +613,7 @@ impl Pty {
                 std::process::Stdio::from_raw_fd(libc::dup(slave)),
             )
         };
-        let mut command = std::process::Command::new(muse);
-        command
-            .arg("--workspace")
-            .arg(probe_workspace())
-            .env("TERM", "xterm-256color")
-            .env("LINES", ROWS.to_string())
-            .env("COLUMNS", COLS.to_string())
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(stderr);
+        command.stdin(stdin).stdout(stdout).stderr(stderr);
         // SAFETY: `setsid` and `ioctl` are async-signal-safe, which is the
         // whole contract `pre_exec` asks for.
         unsafe {
@@ -489,6 +643,13 @@ impl Pty {
         let until = Instant::now() + window;
         let mut buffer = [0u8; 8192];
         while Instant::now() < until {
+            // The child may have been SIGKILLed out from under the probe by
+            // an exit that could not join this thread: stop pumping a dead
+            // child so the probe finishes and the drop — with its pid-file
+            // cleanup — happens promptly instead of at the window's end.
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
             // SAFETY: `master` is an open fd owned by `self`; the borrow ends
             // with the read.
             let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(self.master) });
@@ -523,8 +684,22 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let pid = self.child.id();
+        // SIGKILL, not SIGTERM: the TUI ignores SIGTERM, and a `Child::kill`
+        // that named the wrong signal would read as a fix while leaking the
+        // same orphan. The `wait` reaps it, so no zombie outlives the probe
+        // while the harness is still running.
+        // SAFETY: `kill` with a pid and a signal neither reads nor writes.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         let _ = self.child.wait();
+        if let Ok(mut live) = LIVE_PROBES.lock() {
+            live.retain(|popped| *popped != pid);
+        }
+        // Only this probe's own entry: a newer probe may have written the
+        // file since, and removing its pid would blind the next sweep.
+        if read_probe_pid() == Some(pid) {
+            let _ = std::fs::remove_file(probe_pid_path());
+        }
         // SAFETY: `master` is owned by `self` and closed exactly once.
         unsafe { libc::close(self.master) };
     }
@@ -612,5 +787,53 @@ mod tests {
     fn escapes_and_box_drawing_never_reach_the_matcher() {
         assert_eq!(flatten("\u{1b}[31m\u{2502} a \u{2502}\u{1b}[0m\r\n b"), "a b");
         assert_eq!(flatten("\u{1b}]0;title\u{7}x"), "x");
+    }
+
+    #[test]
+    fn the_pid_file_parses_or_it_is_ignored() {
+        assert_eq!(parse_probe_pid("1234\n"), Some(1234));
+        assert_eq!(parse_probe_pid("1234"), Some(1234));
+        assert_eq!(parse_probe_pid(""), None);
+        assert_eq!(parse_probe_pid("nope"), None);
+        assert_eq!(parse_probe_pid("12x4"), None);
+        // Pid 1 and below are never someone to kill.
+        assert_eq!(parse_probe_pid("1"), None);
+        assert_eq!(parse_probe_pid("0"), None);
+    }
+
+    #[test]
+    fn only_a_live_probe_is_swept_never_a_pid_alone() {
+        let killed = std::cell::RefCell::new(Vec::new());
+        let kill = |pid: u32| killed.borrow_mut().push(pid);
+        // A pid whose command line is still a probe's is killed.
+        sweep_stale_with(Some(4242), &|_| true, &kill);
+        assert_eq!(*killed.borrow(), vec![4242]);
+        // A recycled pid — same number, some other command line — is not.
+        killed.borrow_mut().clear();
+        sweep_stale_with(Some(4242), &|_| false, &kill);
+        assert!(killed.borrow().is_empty());
+        // No pid file at all sweeps nothing.
+        sweep_stale_with(None, &|_| true, &kill);
+        assert!(killed.borrow().is_empty());
+    }
+
+    /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same
+    /// `spawn` the probe uses is gone — reaped, not a zombie — after drop.
+    /// It never opens the real `muse`.
+    #[test]
+    fn dropping_the_pty_sigkills_the_child() {
+        let pty = Pty::spawn({
+            let mut sleep = std::process::Command::new("/bin/sleep");
+            sleep.arg("60");
+            sleep
+        })
+        .expect("spawn /bin/sleep");
+        let pid = pty.child.id() as libc::pid_t;
+        // Signal 0 checks without killing: the child is alive.
+        // SAFETY: `kill` with a pid and signal 0 neither reads nor writes.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        drop(pty);
+        // Gone, not a zombie: the drop SIGKILLed and reaped it.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
     }
 }

@@ -71,6 +71,11 @@ Opening the TUI **writes a session record and makes no model call**, so the
 probe costs nothing. It runs in a throwaway workspace under
 `~/Library/Application Support/harness/tier-probe`, deliberately not the
 window's own, so probe sessions never appear in the sidebar of a real project.
+The probe's child is SIGKILLed on every exit — the TUI ignores SIGTERM, which
+once left two orphans alive for six hours. Its pid is written to
+`tier-probe/probe.pid` so the next probe can sweep a child orphaned by a
+force-quit (the sweep checks the command line still names the probe workspace,
+never the pid alone).
 
 ### Two things the card does that a reasonable person would not expect
 

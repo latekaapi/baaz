@@ -112,6 +112,15 @@ pub fn capture_and_quit(
             Ok(Err(err)) => eprintln!("screenshot failed: {err:#}"),
             Err(err) => eprintln!("screenshot failed: {err:#}"),
         }
+        // The billing probe may still be driving the `muse` TUI on a
+        // background thread, and quitting now would orphan it: the child is
+        // its own session leader, so it is reparented to pid 1 and the
+        // `Pty` drop that would SIGKILL it never runs. Kill the live probe
+        // first — the thread then finishes against a dead child and reaps it
+        // on drop — and wait, bounded, for that drop, so the pid file is
+        // gone too and no `muse` process outlives this quit.
+        crate::tier::kill_live_probes();
+        crate::tier::wait_for_probes_gone(std::time::Duration::from_secs(3));
         cx.update(|cx| cx.quit());
     })
     .detach();
