@@ -77,6 +77,13 @@ struct Folded {
     /// ever arrives on the item. So the card is drawn with the approval mode's
     /// name and corrected the moment the item lands.
     awaiting_reason: HashMap<String, AwaitingReason>,
+    /// `itemId` → the stored-output reference of a tool or user-shell item
+    /// whose visible output the server truncated (`truncated: true` with an
+    /// `outputRef`). The transcript cannot hold it — `Block::ToolCall` is a
+    /// library type — so it lives here, keyed by the block id the item renders
+    /// as (a `ToolCall` block's id is its item's id). The app fetches the full
+    /// bytes with `item/readOutput`.
+    stored_outputs: HashMap<String, msp::OutputRef>,
     /// The other order, which a backfill produces: the item's refusal reason,
     /// keyed by its `commandId`, waiting for the approval that gated it.
     ///
@@ -168,6 +175,18 @@ impl MuseFold {
     /// The side state for a Muse session id.
     pub fn side(&self, session_id: &str) -> Option<&SideState> {
         self.sessions.get(session_id).map(|s| &s.side)
+    }
+
+    /// The stored-output reference of a truncated tool or user-shell item, by
+    /// Muse session id and item id — the handle a "Show full output" action
+    /// fetches with `item/readOutput`. `None` when the item never truncated,
+    /// has no `outputRef`, or a newer revision cleared it.
+    pub fn stored_output(
+        &self,
+        session_id: &str,
+        item_id: &str,
+    ) -> Option<&msp::OutputRef> {
+        self.sessions.get(session_id)?.stored_outputs.get(item_id)
     }
 
     /// Every Muse session id this fold has seen, in id order.
@@ -336,6 +355,7 @@ impl Folded {
             usage: HashMap::new(),
             seen_requests: HashMap::new(),
             awaiting_reason: HashMap::new(),
+            stored_outputs: HashMap::new(),
             item_reasons: HashMap::new(),
             marker_seq: 0,
             mode_seen: false,
@@ -777,6 +797,19 @@ impl Folded {
             && item.tool.as_deref() == Some("request_user_input")
         {
             return Vec::new();
+        }
+        // A truncated tool or user-shell output keeps its fetch handle here.
+        // `item()` only reaches this far when the revision is newer, so a
+        // later revision that drops the flag clears the entry too.
+        if matches!(item.kind, msp::ItemKind::ToolCall | msp::ItemKind::UserShell) {
+            match (&item.truncated, &item.output_ref) {
+                (Some(true), Some(output_ref)) => {
+                    self.stored_outputs.insert(item.item_id.clone(), output_ref.clone());
+                }
+                _ => {
+                    self.stored_outputs.remove(&item.item_id);
+                }
+            }
         }
         let Some(block) = self.block_for(item, terminal) else { return Vec::new() };
         match self.items.get(&item.item_id).copied() {

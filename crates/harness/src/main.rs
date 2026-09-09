@@ -39,6 +39,7 @@ mod app;
 mod auth;
 mod conn;
 mod files;
+mod full_output;
 mod history;
 mod images;
 mod index;
