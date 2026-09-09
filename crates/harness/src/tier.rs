@@ -88,12 +88,20 @@ pub enum Tier {
 
 impl Tier {
     /// The sidebar footer's third row.
+    ///
+    /// The plan drops a leading "Muse Code": the footer sits in a Muse client,
+    /// under a Muse account, beside the Muse mark, and the sidebar is narrow
+    /// enough that the product's name is what crowds out the part that
+    /// matters. `/status` keeps the full name.
     pub fn footer_label(&self) -> String {
         match self {
-            Tier::Subscription { plan, weekly_pct, .. } => match weekly_pct {
-                Some(pct) => format!("{plan} · {pct}% this week"),
-                None => plan.clone(),
-            },
+            Tier::Subscription { plan, weekly_pct, .. } => {
+                let plan = plan.strip_prefix("Muse Code ").unwrap_or(plan);
+                match weekly_pct {
+                    Some(pct) => format!("{plan} · {pct}% weekly"),
+                    None => plan.to_owned(),
+                }
+            }
             Tier::PayAsYouGo => "Pay-as-you-go".to_owned(),
             Tier::Unavailable(_) => "Plan unknown".to_owned(),
         }
@@ -587,12 +595,12 @@ mod tests {
     #[test]
     fn the_footer_row_names_the_plan_and_warns_on_anything_else() {
         let plan = Tier::Subscription {
-            plan: "High Usage".into(),
+            plan: "Muse Code High Usage".into(),
             current_pct: Some(1),
             weekly_pct: Some(2),
             resets: vec![],
         };
-        assert_eq!(plan.footer_label(), "High Usage · 2% this week");
+        assert_eq!(plan.footer_label(), "High Usage · 2% weekly");
         assert!(!plan.is_warning());
         assert_eq!(Tier::PayAsYouGo.footer_label(), "Pay-as-you-go");
         assert!(Tier::PayAsYouGo.is_warning());

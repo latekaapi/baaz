@@ -47,7 +47,7 @@
               "scope": "this_worktree",
               "state": {
                 "kind": "auto_denied",
-                "rule": "echo hi && ls"
+                "rule": "no policy rule allows this action"
               },
               "rule": "Always allow in this workspace: echo ...",
               "choices": [
@@ -148,7 +148,7 @@
               "scope": "this_worktree",
               "state": {
                 "kind": "auto_denied",
-                "rule": "curl https://example.com"
+                "rule": "no policy rule allows this action"
               },
               "rule": "Always allow in this workspace: curl ...",
               "choices": [

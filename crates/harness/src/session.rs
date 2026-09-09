@@ -135,6 +135,18 @@ pub enum SessionEvent {
         /// The lines of the dialog body, already formatted.
         detail: String,
     },
+    /// `/name <text>`: rename the active session, or clear the name when the
+    /// text was empty. The store is the application's (spec §3.7).
+    Rename {
+        /// The new name, or `None` to fall back to what the index calls it.
+        name: Option<String>,
+    },
+    /// `/name` with nothing after it: open the sidebar row's inline field.
+    RenameStart,
+    /// `/hide`: take this session out of the list.
+    Hide,
+    /// `/resume`: open the session picker.
+    Resume,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
     /// for the rest of this app run.
     TierOverride,
@@ -731,12 +743,20 @@ impl SessionView {
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
         // `!` is the shell escape hatch (research §1.12): a command, not a turn,
         // outside any turn, and still subject to the approval policy.
-        match text.strip_prefix('!') {
-            Some(command) if !command.trim().is_empty() => {
-                self.run_user_shell(command.trim().to_owned(), cx)
+        if let Some(command) = text.strip_prefix('!') {
+            if !command.trim().is_empty() {
+                self.run_user_shell(command.trim().to_owned(), cx);
+                return;
             }
-            _ => self.submit(text, cx),
         }
+        // A `/` command typed in full and sent is the command, not a prompt.
+        // The menu is one way to reach these; typing is the other, and it is
+        // the only way to reach the one that takes an argument (`/name`).
+        if let Some((command, argument)) = Command::parse_line(&text) {
+            self.run_command_with(command, argument.to_owned(), window, cx);
+            return;
+        }
+        self.submit(text, cx);
     }
 
     /// Send `text` without touching the composer — the scripting hook.
@@ -1300,7 +1320,15 @@ impl SessionView {
     }
 
     /// Run one client-side slash command (spec §3.10).
-    fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// `argument` is whatever followed the command when it was typed; the `/`
+    /// menu always passes an empty one, because a menu row carries no text.
+    pub fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_command_with(command, String::new(), window, cx);
+    }
+
+    /// [`SessionView::run_command`] with whatever followed the command.
+    fn run_command_with(&mut self, command: Command, argument: String, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_token("", window, cx);
         if !command.available() {
             let label = command.slash().to_owned();
@@ -1327,7 +1355,18 @@ impl SessionView {
                 cx.notify();
             }
             Command::Fork => self.fork(None, cx),
-            Command::Name | Command::Resume => {}
+            // `/name Fix the parser` renames; `/name` on its own opens the
+            // row's field, and `/name ` with nothing after it clears the name.
+            Command::Name => {
+                let text = argument.trim();
+                match (text.is_empty(), argument.is_empty()) {
+                    (true, true) => cx.emit(SessionEvent::RenameStart),
+                    (true, false) => cx.emit(SessionEvent::Rename { name: None }),
+                    _ => cx.emit(SessionEvent::Rename { name: Some(text.to_owned()) }),
+                }
+            }
+            Command::Hide => cx.emit(SessionEvent::Hide),
+            Command::Resume => cx.emit(SessionEvent::Resume),
         }
     }
 
@@ -1479,6 +1518,11 @@ impl SessionView {
             "effort" => self.toggle_picker(MenuKind::Effort, cx),
             "mode" => self.toggle_picker(MenuKind::Mode, cx),
             "confirm" => self.confirm_menu(window, cx),
+            // The Phase 5 session operations, so their screenshots come from a
+            // command line rather than from a pointer.
+            "name" => self.run_command_with(Command::Name, rest.to_owned(), window, cx),
+            "hide" => cx.emit(SessionEvent::Hide),
+            "resume" => cx.emit(SessionEvent::Resume),
             "setmodel" => self.set_model(rest, cx),
             "compact" => self.compact(cx),
             "meter" => {
@@ -1620,6 +1664,25 @@ impl SessionView {
         })
     }
 
+    /// F10. The first shell command in this session's transcript, as a title.
+    ///
+    /// The fold is already in memory, so this costs nothing at all — and it
+    /// reaches the case `session/read` cannot, because the history of a session
+    /// nobody has loaded is not served.
+    pub fn first_shell_title(&self) -> Option<String> {
+        let session = self.session()?;
+        session
+            .turns
+            .iter()
+            .flat_map(|turn| turn.blocks().iter())
+            .find_map(|block| match block {
+                Block::ToolCall { kind: aui_protocol::ToolKind::Shell, target, .. } => {
+                    crate::sessions::shell_title(target)
+                }
+                _ => None,
+            })
+    }
+
     /// The newest turn that ended in an error card, for `--steps retry`.
     fn newest_failed_turn(&self) -> Option<String> {
         let session = self.session()?;
@@ -1638,6 +1701,9 @@ impl SessionView {
         if let Some(text) = self.pending_prompt.take() {
             self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        // A `--screenshot` run that asked for an approval waits for one; this
+        // is where the capture learns that it arrived (finding F9).
+        crate::shot::set_pending_approval(self.newest_pending_approval().is_some());
         let transcript = self.render_transcript(window, cx);
         let status = self.render_status();
         let needs_you = self.render_needs_you(cx);
@@ -1683,11 +1749,28 @@ impl SessionView {
                 self.scroll.scroll_to_bottom();
             }
         }
+        let empty = |view: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            // A replayed capture is read-only, so its empty state offers
+            // nothing to type: the chips would be three buttons that refuse.
+            let pick = (!view.replay).then(|| {
+                let pick = cx.listener(|this: &mut Self, index: &usize, window, cx| {
+                    if let Some(text) = transcript::suggestion(*index) {
+                        this.set_draft(text.to_owned(), window, cx);
+                        this.focus_composer(window, cx);
+                    }
+                });
+                std::rc::Rc::new(move |index: usize, window: &mut Window, cx: &mut gpui::App| {
+                    pick(&index, window, cx)
+                }) as transcript::PickSuggestion
+            });
+            let _ = window;
+            transcript::empty_state(&view.workspace, pick, cx)
+        };
         let Some(session) = self.fold.session(&self.session_id).cloned() else {
-            return transcript::empty_state(&self.workspace, cx);
+            return empty(self, window, cx);
         };
         if session.turns.is_empty() {
-            return transcript::empty_state(&self.workspace, cx);
+            return empty(self, window, cx);
         }
         let folds = Folds {
             toggled: self.toggled.clone(),

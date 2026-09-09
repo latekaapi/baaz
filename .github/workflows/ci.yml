@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test-lint:
+    runs-on: macos-latest
+    steps:
+      # The harness depends on the `aui` library by **path**, as
+      # `../agentic-ui/crates/*`, so the library has to be checked out beside
+      # it — on `muse-support`, which is the branch every library change for
+      # this slice lands on.
+      - uses: actions/checkout@v4
+        with:
+          path: harness
+
+      - uses: actions/checkout@v4
+        with:
+          repository: latekaapi/agentic-ui
+          ref: muse-support
+          path: agentic-ui
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: harness
+
+      - name: Build workspace
+        working-directory: harness
+        run: cargo build --workspace
+
+      - name: Test workspace
+        working-directory: harness
+        # The two tests that spawn a real `muse serve` are `#[ignore]`d and
+        # stay that way: each one spends a real, billed turn (docs/06-billing.md
+        # and docs/04-approvals.md §0). The offline gates replace them —
+        # `fixtures.rs` folds every checked-in capture, compares it to its
+        # snapshot, and proves live and backfilled folds agree.
+        run: cargo test --workspace
+
+      - name: Clippy
+        working-directory: harness
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Doc
+        working-directory: harness
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # One `gpui-pre` and one `gpui-kit`: the harness pins the exact versions
+      # agentic-ui resolves, and two copies of gpui in one binary is a class of
+      # bug that shows up as a blank window rather than as an error.
+      - name: One gpui
+        working-directory: harness
+        run: |
+          duplicates="$(cargo tree -d | grep -E '^(gpui-pre|gpui-kit) v' || true)"
+          if [ -n "$duplicates" ]; then
+            echo "duplicate gpui in the tree:"
+            echo "$duplicates"
+            exit 1
+          fi

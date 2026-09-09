@@ -41,6 +41,10 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 | `--screenshot-delay <ms>` | how long to wait first (default 600). |
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
 | `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
+| `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). |
+| `--approval-mode <mode>` | the mode every session this window **starts** in. Not the same as the `setmode:` step: `session/start` is the only surface that declares a session's policy, and on this server `session/setApprovalMode` does not reach `promptUnmatched`. |
+| `--tier subscription\|payg\|unknown` | fake the billing probe, for a screenshot of the guard (`docs/06-billing.md`). |
+| `--print-tier` | probe the billing tier, print it and exit, without opening a window. Free. |
 
 | environment | meaning |
 |---|---|

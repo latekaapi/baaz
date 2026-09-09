@@ -358,3 +358,153 @@ bar), light and dark. Almost all of them come from `--replay` and cost nothing:
 server, kept because it is the evidence that the `userInput/answer` round-trip
 happened on a real session; `phase4-answered-{light,dark}.png` are the matched
 pair replayed from the same capture.
+
+---
+
+## 2026-09-09 — Phase 5: the billing guard, session operations, polish, docs, CI
+
+The last phase of the Muse Code chat slice. The slice is complete;
+`docs/05-handoff.md` is now a maintenance handoff.
+
+### The finding this phase exists for
+
+**Muse has two credential tiers, and nothing on the wire says which one you are
+on.** `initialize` and `model/list` carry no account or plan field, `auth.json`
+carries only the mechanism and the identity, and the session log records a
+`credential_backend`. The owner's login token from 2026-09-08 was on
+**pay-as-you-go**, so roughly 110 sessions and 40 turns across Phases 1–4 were
+billed as API usage while every document in this repository called them
+subscription turns. A logout and a fresh login on 2026-09-09 14:46 put the token
+on the **Muse Code High Usage** plan.
+
+The one oracle is the TUI's `/upgrade` card, and `crates/harness/src/tier.rs`
+drives it under a pseudo-terminal: answer the cursor-position query the TUI opens
+with (`ESC [ 6 n`, without which it paints nothing), type `/upgrade`, press
+Enter, read the card. Opening the TUI writes a session record and makes **no
+model call**, so the probe costs nothing. Two things about the card are not
+guessable and are pinned by a test against the wording this machine draws:
+
+- the sentence is `subscribed to the {plan} usage plan.`, so the plan arrives
+  glued to the template's own word;
+- the slash palette's own row for `/upgrade` contains "pay-as-you-go", so a
+  matcher that ran before the Enter reports the opposite of the truth on a
+  subscribed account. The read buffer is cleared after the Enter for exactly
+  that reason.
+
+**The raw terminal output is never logged** — the card's footer carries a URL.
+`HARNESS_TIER_DEBUG=1` reports byte counts and a fixed list of harmless words.
+
+What the app does: the sidebar footer's third row names the plan or warns
+"Pay-as-you-go" / "Plan unknown"; a pay-as-you-go login raises a warning banner
+over the composer with "Sign out" beside "Send anyway", and `SessionView::submit`
+— the single funnel every send reaches — refuses the turn until "Send anyway" is
+pressed once per app run, handing the draft back rather than queueing it. An
+unknown plan is a quiet banner that blocks nothing, and a probe that fails is
+always `Unavailable` and never a failed boot. `/status` and `/usage` lead with
+the plan and both percentages, and re-probe behind the dialog. The answer is
+cached in `~/Library/Application Support/harness/tier.json` keyed by
+`auth.json`'s mtime, so a logout and a re-login re-probe and an ordinary boot
+does not. `docs/06-billing.md` is the whole story.
+
+New flags: `--print-tier` probes and prints without a window;
+`--tier subscription|payg|unknown` fakes the probe for a screenshot and fakes
+nothing else.
+
+### Session operations that are not on the wire (spec §3.7)
+
+`~/Library/Application Support/harness/sessions.json` — per session a name, a
+hidden flag and a derived title — written atomically through the new `store`
+module, which also owns `tier.json`.
+
+- **`/name <text>`** renames the active session; `/name` with nothing after it
+  opens the row's inline field; `/name ` with an empty argument clears the name.
+  The sidebar row grows a pencil, and the field it opens is the app's — the same
+  slot pattern the composer's editor uses.
+- **A typed `/` command is now a command.** `send()` parses the whole line, so
+  every command is reachable by typing and the one that takes an argument is
+  reachable at all. A prompt that merely begins with a slash is still a prompt.
+- **`/hide` and the row's eye** take a session out of this window's list: a toast
+  with Undo for eight seconds, "Show hidden (n)" in the footer, and a hidden
+  session is never loaded — `resume` refuses it and `--session latest` skips it.
+- **⌘⇧F** opens the sidebar's search field (the library's frame, the app's
+  field): a case-insensitive **subsequence** over the name, the title, the first
+  prompt and the index's `search_text`, so `fxparse` finds "fix the parser
+  panic". Escape clears it and gives the keyboard back.
+- **`/resume` and ⌘K** open the command palette — the same primitive for both,
+  because they are the same gesture. `/resume` lists the twelve newest sessions
+  under the titles the sidebar shows; ⌘K lists every `/` command.
+
+**F10 — the fourteen rows reading "New session".** The cause was not an absent
+title: **Muse's own index writes the literal string `"New session"` into
+`title`**, a placeholder wearing a title's clothes. `IndexEntry::label` now
+rejects it, so `session_name` and `first_user_prompt` win where they exist. For a
+session with none of those, the first `userShell` command is the title — taken
+from the fold when the session is open (free, and the reliable path) and
+otherwise from a `session/read`, cached in `sessions.json`. A `session/read` of a
+session no host has loaded can legitimately serve no history, and a row with
+nothing left to be called is honestly "New session".
+
+### Phase 4 review findings
+
+- **F9 — `phase4-approval-stage1-*.png` showed only the shell card.** The
+  capture raced the wire: `--screenshot`'s delay is measured from the first
+  frame. The screenshot path now waits for the `--steps` list to finish, and for
+  a pending approval when a `shell:` step was given, before its settling delay.
+  The retake could not be made live: **this machine's managed shell sandbox is
+  unavailable**, so a `userShell` under `promptUnmatched` never completes and no
+  approval is minted (under `denyUnmatched` the policy refuses it before the
+  sandbox is consulted, which is why that path still works). The two images are
+  therefore `--replay` of `fixtures/msp/transcript-approve-stage1.jsonl`, the
+  real capture truncated at its `approval/requested` — a prefix of a real wire
+  log, not an invented one. Free and reproducible to the byte.
+- **F11 — "Rule echo hi && ls".** The fold used the subject's command as the
+  rule, so a card claimed the policy contained a rule that it did not. It now
+  uses the amendment's `rulePreview`, else the reason the gated item carries
+  (`deny_unmatched: no policy rule allows this action` → "no policy rule allows
+  this action"), else the approval mode's name. The join is `toolCallId`, which
+  is `<tool>_<commandId>`, and it works in **both** stream orders — live the
+  approval resolves before the item completes, backfilled the item comes first —
+  because F3 is the standing rule. On the library side, an allowed policy
+  resolution still names its rule in mono; a denied one prints the reason in the
+  UI face, because there was no rule. Two snapshot values changed and were read.
+- `no_capture_needs_a_generic_fallback` still passes: no `Block::Generic`.
+
+### Other corrections found while building this
+
+- **A session started with an explicit approval mode drew the wrong chip.**
+  `session/start` with an `approvalMode` raises no `session/approvalModeChanged`,
+  and the result's session object was not being folded. It is now. New flag
+  `--approval-mode <mode>`, which is a different thing from the `setmode:` step:
+  `session/start` is the only surface that declares a session's policy, and on
+  this server `session/setApprovalMode` does not reach `promptUnmatched`.
+- The store is written **synchronously** on a gesture. A background write can
+  lose a rename to a window that closed a moment later, which is the one outcome
+  a store exists to prevent.
+
+### Polish
+
+Empty states in the library's voice, each saying why it is empty: no session
+(the workspace's name and "⌘N to start one"), a fresh session (three suggestion
+chips that fill the composer and never send — and none at all on a read-only
+replay), no search match, hidden-only, logged out. The window's title is the
+session's. `/fork`, `/name` and `/resume` no longer say "not in this build yet",
+because they are.
+
+### Docs and CI
+
+`README.md`, `docs/06-billing.md`, `docs/07-architecture.md`,
+`docs/08-keymap.md`, and `docs/05-handoff.md` rewritten as a maintenance
+handoff. `.github/workflows/ci.yml` mirrors agentic-ui's — build, test, clippy
+`-D warnings`, rustdoc `-D warnings` on macOS — with agentic-ui checked out
+beside the harness on `muse-support` so the path dependencies resolve, plus a
+one-`gpui-pre`-and-one-`gpui-kit` check. The two live tests stay `#[ignore]`d:
+each spends a real, billed turn.
+
+### Real turns spent this phase
+
+**Zero.** Verified from the session logs rather than from a report:
+`grep -c runtime.user_intent.accepted ~/.local/share/muse/sessions/*/*/*/*/session.jsonl`
+summed to **46 before and 46 after** the phase. Every screenshot came from
+`--replay`, from `--no-connect`, or from a live session that only ran
+`session/start` and `session/userShell`; the billing probe opens the TUI, which
+writes a session record and makes no model call.

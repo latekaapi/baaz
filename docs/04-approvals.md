@@ -344,6 +344,18 @@ grammar). Steps are `;`-separated because a payload may contain a comma.
 | `retry` | retry the newest failed turn |
 | `wait:<ms>` | let the wire catch up before the next step |
 
+Phase 5 adds five more, four of which belong to the window rather than to a
+session: `name:<text>` renames, `hide` hides, `resume` opens the session picker,
+`palette` opens the command palette, `search:<text>` opens and fills the
+sidebar's search field, and `rename[:<text>]` opens the row's inline field.
+
+A `--screenshot` run now **waits for its steps to finish** before capturing, and
+for a pending approval as well when a `shell:` step was given. The delay is
+measured from the first frame, so a step list with a `wait:` in it used to
+outlive the capture — which is how
+`docs/images/phase4-approval-stage1-*.png` came to show the shell card alone
+(finding F9).
+
 Every one of these is free. None of them invents a fact: there is deliberately no
 step that fabricates a todo list or a goal — those come from
 `fixtures/msp/synthetic-todo-goal.jsonl` instead, which is labelled as

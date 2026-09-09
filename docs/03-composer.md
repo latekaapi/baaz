@@ -154,10 +154,16 @@ would otherwise push the list past the top of the window.
 `/mode` open pickers; `/plan` toggles plan mode; `/compact` compacts; `/clear`
 starts a new session; `/logout` runs `muse logout`; `/status` and `/usage` open
 one dialog built out of `SideState` (model, mode, effort, plan, context,
-cumulative tokens, queue depth, session id, workspace, branch); `/help` reopens
-the menu unfiltered. `/fork` is Phase 4 and `/name` and `/resume` are Phase 5:
-they stay in the list, because a command that vanished would read as one that
-does not exist, and they answer with a toast saying which phase brings them.
+cumulative tokens, queue depth, session id, workspace, branch) under the
+billing tier and its two percentages; `/help` reopens the menu unfiltered.
+`/fork` landed in Phase 4; `/name`, `/hide` and `/resume` landed in Phase 5 —
+nothing in the list says "not in this build yet" any more.
+
+A command can also be **typed in full and sent**. `send()` parses the whole
+line, so `/name Fix the parser` renames the session rather than asking Muse
+about it — which is the only way to reach the one command that takes an
+argument. A prompt that merely begins with a slash is still a prompt: the head
+has to be a command this build knows.
 
 **Skills** come from `muse skills list --json`, run once at boot on a background
 thread, tagged with the scope prefix of the skill's `id`

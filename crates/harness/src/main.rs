@@ -45,6 +45,7 @@ mod index;
 mod overlays;
 mod plan;
 mod session;
+mod sessions;
 mod shot;
 mod sidebar;
 mod skills;
@@ -148,6 +149,15 @@ pub struct Args {
     /// `--print-tier`: run the billing probe, print what it found and exit,
     /// without opening a window. Costs nothing.
     pub print_tier: bool,
+    /// `--approval-mode <mode>`: the mode every session this window starts is
+    /// **started** in.
+    ///
+    /// Not the same thing as the `setmode:` step, which changes a running
+    /// session's mode: `session/start` is the only surface that declares a
+    /// non-interactive run's policy, and it is what a scripted capture of an
+    /// approval needs — a shell command under `promptUnmatched` raises a real,
+    /// server-minted approval and makes no model call.
+    pub approval_mode: Option<muse_client::schema::ApprovalMode>,
 }
 
 fn parse_args() -> Args {
@@ -171,6 +181,7 @@ fn parse_args() -> Args {
         steps: Vec::new(),
         tier: None,
         print_tier: false,
+        approval_mode: None,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -221,6 +232,21 @@ fn parse_args() -> Args {
                 });
             }
             "--print-tier" => out.print_tier = true,
+            "--approval-mode" => {
+                use muse_client::schema::ApprovalMode;
+                let value = args.next().unwrap_or_default();
+                out.approval_mode = Some(
+                    [
+                        ApprovalMode::AllowAll,
+                        ApprovalMode::OnRequest,
+                        ApprovalMode::PromptUnmatched,
+                        ApprovalMode::DenyUnmatched,
+                    ]
+                    .into_iter()
+                    .find(|mode| mode.as_wire().eq_ignore_ascii_case(&value))
+                    .unwrap_or_else(|| usage(&format!("unknown approval mode `{value}`"))),
+                );
+            }
             "--no-connect" => out.offline = true,
             "--replay" => {
                 let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
@@ -257,7 +283,7 @@ fn usage(err: &str) -> ! {
          \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
          \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\
          \x20              [--replay <capture.jsonl>] [--tier subscription|payg|unknown]\n\
-         \x20              [--print-tier]\n\n\
+         \x20              [--print-tier] [--approval-mode <mode>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing."
@@ -281,6 +307,10 @@ fn main() {
         tier::print_and_exit(&args.program);
     }
     let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
+    // A `shell:` step raises a real approval over a live wire, which does not
+    // land inside a fixed delay (finding F9).
+    let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
+    let await_steps = !args.steps.is_empty();
     // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
     gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
@@ -311,7 +341,7 @@ fn main() {
             })
             .expect("open the harness window");
         match screenshot {
-            Some(path) => shot::capture_and_quit(handle, path, delay, cx),
+            Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, cx),
             None => cx.activate(true),
         }
     });

@@ -314,6 +314,27 @@ fn replay_as_backfill(path: &Path) -> MuseFold {
     fold
 }
 
+/// Whether the capture ends with an item that started and never completed.
+fn has_an_unfinished_item(text: &str) -> bool {
+    let mut open: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in text.lines() {
+        let Some(body) = line.strip_prefix("<-- ") else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else { continue };
+        let method = value.get("method").and_then(|m| m.as_str()).unwrap_or_default();
+        let Some(id) = value.pointer("/params/item/itemId").and_then(|v| v.as_str()) else { continue };
+        match method {
+            "item/started" => {
+                open.insert(id.to_owned());
+            }
+            "item/completed" => {
+                open.remove(id);
+            }
+            _ => {}
+        }
+    }
+    !open.is_empty()
+}
+
 /// Strip what a backfill genuinely cannot know, so the comparison is about the
 /// fold and not about the transport.
 ///
@@ -363,6 +384,14 @@ fn a_live_fold_and_a_backfilled_fold_agree() {
         // two folds would be fed the identical byte stream.
         let text = std::fs::read_to_string(&path).expect("capture is readable");
         if !text.contains("\"item/started\"") && !text.contains("\"item/delta\"") {
+            continue;
+        }
+        // A capture cut off mid-item — `transcript-approve-stage1.jsonl` stops
+        // at the pending approval, on purpose — has an item that never
+        // completed. A backfill would never serve a half-finished item, so the
+        // two folds legitimately differ on the tool card that is still running,
+        // and comparing them here would test the scissors rather than the fold.
+        if has_an_unfinished_item(&text) {
             continue;
         }
         exercised += 1;
