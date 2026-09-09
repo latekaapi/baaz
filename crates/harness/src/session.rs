@@ -3043,6 +3043,7 @@ fn effort_wire(effort: ReasoningEffort) -> muse_client::schema::ReasoningEffort 
         ReasoningEffort::Medium => Wire::Medium,
         ReasoningEffort::High => Wire::High,
         ReasoningEffort::Xhigh => Wire::Xhigh,
+        ReasoningEffort::Max => Wire::Max,
         ReasoningEffort::Ultra => Wire::Ultra,
     }
 }

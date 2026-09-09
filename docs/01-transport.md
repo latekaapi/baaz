@@ -165,15 +165,16 @@ the schema and a capture disagree, the capture wins and it is written down.
    omits `approval/request` and `userInput/request`. All three are on the wire.
    The index is not exhaustive and is not treated as such.
 
-6. **~~`ReasoningEffort` has `ultra` and no `max`~~ — retired by muse 1.1.1.**
+6. **~~`ReasoningEffort` has `ultra` and no `max`~~ — retired by muse 1.1.1;
+   ~~the picker omits `max`~~ — retired: the picker now offers it.**
    Under 1.0.3 the MSP enum had `ultra` and no `max` while the CLI and the
    on-disk catalog both advertised `max`, so sending `max` was `invalidParams`.
    The 1.1.1 schema adds `max` between `xhigh` and `ultra`
    (`docs/10-msp-1.1.1-diff.md`), so the wire accepts what the CLI and the
-   catalog advertise. The effort picker is still driven by the MSP enum — but
-   the picker's tiers are the library's `aui_protocol::ReasoningEffort`, which
-   has no `max` yet, so the picker still does not offer it. Offering `max` is
-   library work (agentic-ui), not a harness change.
+   catalog advertise — and the effort picker now offers the whole enum:
+   the library's `aui_protocol::ReasoningEffort` gained `Max`, the picker's
+   tiers list it between `xhigh` and `ultra`, and the wire map sends
+   `Wire::Max`.
 
 7. **`cost` is `null` on every catalog row** on this subscription, and
    `model/list` ignores `providerId` — an echo session is still served the meta
