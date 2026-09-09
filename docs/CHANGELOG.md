@@ -1,5 +1,30 @@
 # Harness changelog
 
+## 2026-09-09 — tier probe leak
+
+The billing probe orphaned its `muse` TUI. The probe runs on a background
+thread (`probe_tier` → `background_spawn`), while the process can leave
+without it: a `--screenshot` run quits ~3 s in, long before the ~11–20 s
+probe finishes. The quitting process kills the thread without running
+`Pty`'s `Drop`, and the child — its own session leader since `pre_exec`'s
+`setsid` — is reparented to pid 1 and lives on. Two such orphans were found
+alive after 6 hours; they ignored SIGTERM and died on SIGKILL. Reproduced on
+the screenshot boot path (orphan at ppid 1, confirmed); the `--print-tier`
+path was always clean (synchronous probe, `Drop` runs before `exit`).
+
+The fix, in `crates/harness/src/tier.rs` plus the two exit paths: the `Drop`
+SIGKILLs explicitly (the TUI ignores SIGTERM) and reaps; every probe writes
+its child's pid to `tier-probe/probe.pid` and removes it on drop, and each
+new probe SIGKILLs a previous pid whose command line still names the probe
+workspace — never on the pid alone. `--print-tier` joins a probe thread with
+a bounded wait (`PROBE_CEILING` + 5 s) before exiting; the screenshot's quit
+SIGKILLs live probes and waits, bounded, for their drops, so the pid file is
+gone too. The pump stops on a dead child (`try_wait`), so a killed probe
+finishes within a tick. Covered by three offline unit tests (pid-file parse,
+sweep-only-a-probe, drop-SIGKILLs-`/bin/sleep`); no test opens the real
+`muse`. Residual: closing the interactive window mid-probe still orphans —
+the next probe sweeps it.
+
 ## 2026-09-09 — muse 1.1.1 schema
 
 The `muse` CLI self-updated 1.0.3 → 1.1.1, so the MSP schema exports were
