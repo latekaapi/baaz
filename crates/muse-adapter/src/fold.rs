@@ -58,6 +58,17 @@ struct Folded {
     /// observation is not a change; drawing "Approval mode · Auto" above the
     /// first user message would be a marker for something nobody did.
     mode_seen: bool,
+    /// The log sequence of the event being folded right now, if it named one.
+    ///
+    /// Set once per notification and read by [`Folded::push_block`], so that a
+    /// block lands where the **log** puts it rather than where the wire happened
+    /// to deliver it.
+    current_seq: Option<u64>,
+    /// Turn id → the log sequence of each of its blocks, in block order.
+    ///
+    /// Parallel to the turn's `blocks`, and the reason a backfilled transcript
+    /// reads the same as a live one (finding F3).
+    block_order: HashMap<String, Vec<u64>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -200,6 +211,51 @@ impl MuseFold {
         folded.update_block(Slot { turn, block: 0 }, block)
     }
 
+    /// Settle an approval card from a **losing** `approval/decide`.
+    ///
+    /// `approvalAlreadyResolved` carries the winning resolution in its error
+    /// data, and `approvalNotFound` carries nothing at all. Both mean the card
+    /// on screen is a lie, and neither will be followed by an
+    /// `approval/resolved` the client has not already missed — so this is the
+    /// one path where a resolution enters the fold from the command plane
+    /// rather than from the view stream.
+    pub fn resolve_approval(
+        &mut self,
+        session_id: &str,
+        approval_id: &str,
+        resolution: Option<msp::ApprovalResolutionSummary>,
+    ) -> Vec<Delta> {
+        let folded = self.folded(session_id);
+        let request = folded.side.pending_approvals.remove(approval_id);
+        let Some(slot) = folded.approvals.get(approval_id).copied() else { return Vec::new() };
+        let Some(request) = request else { return Vec::new() };
+        let (state, by) = match &resolution {
+            Some(resolution) => {
+                let by = match resolution.resolved_by.as_str() {
+                    "user" => Some(ResolvedBy::User),
+                    "policy" => Some(ResolvedBy::Policy),
+                    "llmJudge" => Some(ResolvedBy::LlmJudge),
+                    _ => None,
+                };
+                let allowed = resolution.decision.starts_with("approved");
+                let rule = request.subject.command.clone().unwrap_or_else(|| resolution.decision.clone());
+                let state = match (by, allowed) {
+                    (Some(ResolvedBy::User), true) => ApprovalState::Approving,
+                    (Some(ResolvedBy::User), false) => ApprovalState::Denied,
+                    (_, true) => ApprovalState::AutoAllowed { rule },
+                    (_, false) => ApprovalState::AutoDenied { rule },
+                };
+                (state, by)
+            }
+            // `approvalNotFound`: the server has forgotten it and will never say
+            // how it ended. "Denied" would be a guess; the honest card is the
+            // quiet resolved one with nobody's name on it.
+            None => (ApprovalState::Denied, None),
+        };
+        let block = approval_block(&request, state, by, None);
+        folded.update_block(slot, block)
+    }
+
     fn folded(&mut self, session_id: &str) -> &mut Folded {
         self.last_touched = Some(session_id.to_owned());
         self.sessions
@@ -250,10 +306,20 @@ impl Folded {
             seen_requests: HashMap::new(),
             marker_seq: 0,
             mode_seen: false,
+            current_seq: None,
+            block_order: HashMap::new(),
         }
     }
 
     fn notification(&mut self, method: &str, params: &Value) -> Vec<Delta> {
+        // Where this event sits in the session's own log. It is what orders the
+        // blocks the event adds, rather than the order the events arrived in —
+        // see [`Folded::push_block`] and finding F3.
+        self.current_seq = params
+            .get("sourceRange")
+            .and_then(|range| range.get("first"))
+            .and_then(|first| first.get("sequence"))
+            .and_then(Value::as_u64);
         match method {
             "session/started" => self.session_started(params),
             "session/branchChanged" => self.branch_changed(params),
@@ -389,6 +455,14 @@ impl Folded {
             .get("items")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        // An empty list is the agent saying it has no tasks any more, so the
+        // card goes: a todo card with nothing in it is not a todo card.
+        if items.is_empty() {
+            return match self.todo.take() {
+                Some(slot) => self.remove_block(slot),
+                None => Vec::new(),
+            };
+        }
         let block = Block::Todo {
             items: items
                 .iter()
@@ -468,16 +542,16 @@ impl Folded {
 
         if terminal == "failed" {
             let error = params.get("error");
-            let title = error
-                .and_then(|e| e.get("kind"))
-                .and_then(Value::as_str)
-                .unwrap_or("modelError")
-                .to_owned();
-            let detail = error
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+            // The wire's `kind` is a log token and its `reason` is a code; both
+            // go through one table (`failure.rs`) so the card reads as a
+            // sentence and still carries what a bug report needs.
+            let kind =
+                error.and_then(|e| e.get("kind")).and_then(Value::as_str).unwrap_or("modelError");
+            let message =
+                error.and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or_default();
+            let reason = params.get("reason").and_then(Value::as_str);
+            let crate::failure::Failure { title, detail } =
+                crate::failure::humanize(kind, message, reason);
             let retryable =
                 error.and_then(|e| e.get("retryable")).and_then(Value::as_bool).unwrap_or(false);
             let turn = self.ensure_assistant_turn(&turn_id, &mut deltas);
@@ -573,25 +647,20 @@ impl Folded {
             ),
             None => "retrying".to_owned(),
         };
+        let _ = text;
         self.side.retry = retry;
-        let turn_id = params.get("turnId").and_then(Value::as_str).map(str::to_owned);
-        let mut deltas = Vec::new();
-        match turn_id.and_then(|id| self.assistant_turns.get(&id).copied()) {
-            Some(turn) => {
-                let (added, _) = self
-                    .push_block(turn, Block::Marker { kind: MarkerKind::RetryScheduled, text });
-                deltas.extend(added);
-            }
-            None => deltas.extend(self.marker_turn(MarkerKind::RetryScheduled, text)),
-        }
-        deltas
+        // A scheduled retry is a **live** fact, not a transcript row: it is the
+        // countdown above the composer, and the turn's own terminal replaces it.
+        // Drawing a marker as well would leave a permanent "retrying in 4s" in
+        // the history for something that finished a minute ago.
+        Vec::new()
     }
 
     fn view_gap(&mut self, params: &Value) -> Vec<Delta> {
         let next = params.get("next").and_then(Value::as_str).unwrap_or_default();
         self.marker_turn(
             MarkerKind::ViewGap,
-            format!("Some events were dropped; backfilling to {next}"),
+            format!("Some events were missed while disconnected; backfilling to {next}"),
         )
     }
 
@@ -966,12 +1035,75 @@ impl Folded {
         deltas
     }
 
+    /// Add a block to a turn, in **log** order.
+    ///
+    /// # Why this is not a plain append (finding F3)
+    ///
+    /// The same turn arrives two ways. Live, an item announces itself with
+    /// `item/started` the moment it begins, so a shell tool call that then
+    /// raises an approval is already in the transcript when the approval lands:
+    /// tool card, then approval card. Backfilled, `view/page` serves no
+    /// `item/started` at all — the tool call only appears at its
+    /// `item/completed`, which the log records *after* the approval it was
+    /// waiting on. Appending in arrival order therefore reverses the two, and a
+    /// session read a second time no longer says what it said the first time.
+    ///
+    /// Both events carry the item's own `sourceRange.first.sequence` — the same
+    /// number on `item/started` and on `item/completed` — so the log's order is
+    /// knowable from either path, and it is the order used here.
+    ///
+    /// gpui's transcript is an append-only list of [`Delta`]s with no insert, so
+    /// an out-of-order arrival is expressed as an append plus the
+    /// [`Delta::BlockUpdated`]s that rotate the tail. Every cached [`Slot`] past
+    /// the insertion point shifts with it.
     fn push_block(&mut self, turn: usize, block: Block) -> (Vec<Delta>, Slot) {
         let turn_id = self.session.turns[turn].id().to_owned();
-        let delta = Delta::BlockAdded { turn_id, block };
-        self.session.apply(delta.clone());
-        let index = self.session.turns[turn].blocks().len() - 1;
-        (vec![delta], Slot { turn, block: index })
+        // An event with no sequence (a synthesised marker, a `session/*` fact)
+        // belongs after everything already filed, which is what `u64::MAX` says.
+        let order = self.current_seq.unwrap_or(u64::MAX);
+        let keys = self.block_order.entry(turn_id.clone()).or_default();
+        // `<=` so that two blocks from the same log record keep the order they
+        // were folded in, which is the order the fold created them.
+        let at = keys.partition_point(|&key| key <= order);
+        keys.insert(at, order);
+
+        let mut deltas = vec![Delta::BlockAdded { turn_id: turn_id.clone(), block: block.clone() }];
+        self.session.apply(deltas[0].clone());
+        let last = self.session.turns[turn].blocks().len() - 1;
+        if at == last {
+            return (deltas, Slot { turn, block: at });
+        }
+
+        // Rotate `[at, last]` right by one: each old occupant moves down a slot
+        // and the new block takes `at`.
+        let mut moved: Vec<Block> = self.session.turns[turn].blocks()[at..last].to_vec();
+        moved.insert(0, block);
+        for (offset, block) in moved.into_iter().enumerate() {
+            let delta = Delta::BlockUpdated {
+                turn_id: turn_id.clone(),
+                block_index: at + offset,
+                block,
+            };
+            if self.session.apply(delta.clone()) {
+                deltas.push(delta);
+            }
+        }
+        self.shift_slots(turn, at);
+        (deltas, Slot { turn, block: at })
+    }
+
+    /// Every cached slot at or past `at` in `turn` moved down one.
+    fn shift_slots(&mut self, turn: usize, at: usize) {
+        let bump = |slot: &mut Slot| {
+            if slot.turn == turn && slot.block >= at {
+                slot.block += 1;
+            }
+        };
+        self.items.values_mut().for_each(bump);
+        self.approvals.values_mut().for_each(bump);
+        self.inputs.values_mut().flatten().for_each(bump);
+        self.todo.iter_mut().for_each(bump);
+        self.goal.iter_mut().for_each(bump);
     }
 
     fn update_block(&mut self, slot: Slot, block: Block) -> Vec<Delta> {
@@ -990,13 +1122,29 @@ impl Folded {
 
     fn remove_block(&mut self, slot: Slot) -> Vec<Delta> {
         let Some(turn) = self.session.turns.get(slot.turn) else { return Vec::new() };
-        let delta =
-            Delta::BlockRemoved { turn_id: turn.id().to_owned(), block_index: slot.block };
-        if self.session.apply(delta.clone()) {
-            vec![delta]
-        } else {
-            Vec::new()
+        let turn_id = turn.id().to_owned();
+        let delta = Delta::BlockRemoved { turn_id: turn_id.clone(), block_index: slot.block };
+        if !self.session.apply(delta.clone()) {
+            return Vec::new();
         }
+        // The order keys are parallel to the blocks, and every slot past the
+        // hole moved up one.
+        if let Some(keys) = self.block_order.get_mut(&turn_id) {
+            if slot.block < keys.len() {
+                keys.remove(slot.block);
+            }
+        }
+        let unshift = |s: &mut Slot| {
+            if s.turn == slot.turn && s.block > slot.block {
+                s.block -= 1;
+            }
+        };
+        self.items.values_mut().for_each(unshift);
+        self.approvals.values_mut().for_each(unshift);
+        self.inputs.values_mut().flatten().for_each(unshift);
+        self.todo.iter_mut().for_each(unshift);
+        self.goal.iter_mut().for_each(unshift);
+        vec![delta]
     }
 
     fn remove_turn(&mut self, turn_id: &str) -> Vec<Delta> {
@@ -1039,6 +1187,9 @@ impl Folded {
                 self.goal = None;
             }
         }
+        // A turn that is gone takes its block ordering with it, or a turn id
+        // reused after a retraction would inherit the old turn's keys.
+        self.block_order.retain(|id, _| positions.contains_key(id));
     }
 }
 

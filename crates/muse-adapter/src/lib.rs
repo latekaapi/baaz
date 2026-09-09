@@ -34,8 +34,10 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod failure;
 mod fold;
 mod side;
 
+pub use failure::{humanize, Failure};
 pub use fold::MuseFold;
 pub use side::{QueuedTurn, SideState};

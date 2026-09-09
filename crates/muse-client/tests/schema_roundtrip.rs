@@ -17,7 +17,13 @@ const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/m
 
 /// Methods present in the captures that deliberately have no typed params: `nope/nope` is a
 /// probe for `methodNotFound`, `initialized` carries none.
-const UNTYPED_METHODS: &[&str] = &["nope/nope", "initialized"];
+/// Methods a capture may carry with no `params` at all.
+///
+/// `initialized` is the notification that takes none; `nope/nope` is the probe
+/// that proves an unknown method is rejected. `model/list` takes none either —
+/// it asks for the whole catalog — and `muse-client` sends it bare, which
+/// `transcript-userinput-answer.jsonl` records.
+const UNTYPED_METHODS: &[&str] = &["nope/nope", "initialized", "model/list"];
 
 fn fixture_files() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(FIXTURE_DIR)
@@ -157,6 +163,18 @@ fn every_recorded_frame_round_trips() {
 
     for path in fixture_files() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        // This test asserts that a frame the server actually sent survives a
+        // trip through the typed schema **byte for byte**, which is what makes
+        // it evidence about the wire. A `synthetic-*` capture is hand-written —
+        // it exists to drive the fold through a state no recording covers — so
+        // it is not evidence about anything and cannot meet a byte-exact bar: it
+        // omits the nullable fields the server always spells out, and its
+        // enum-shaped strings are ours rather than the server's. Those captures
+        // are covered by `muse-adapter`'s fixture tests, which is where they
+        // belong.
+        if name.starts_with("synthetic-") {
+            continue;
+        }
         let text = fs::read_to_string(&path).expect("read fixture");
         // Requests keyed by direction: each side owns its own id space.
         let mut pending: HashMap<(bool, String), String> = HashMap::new();
@@ -176,7 +194,10 @@ fn every_recorded_frame_round_trips() {
 
         for (lineno, line) in text.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() {
+            // A blank line, or the `#` header a hand-written `synthetic-*`
+            // capture carries to say which of its lines came off the wire and
+            // which did not. Neither is a frame.
+            if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let (dir, json) = line.split_once(' ').expect("`--> ` / `<-- ` prefix");

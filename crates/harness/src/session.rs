@@ -46,7 +46,7 @@ use aui::composer::{
 use aui::data::{ContextMeterState, ContextPressure};
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::overlay::popover_layer;
-use aui::transcript::{status_row, StatusLead};
+use aui::transcript::{needs_you_banner, retry_row, status_row, StatusLead};
 use aui_icons::IconName;
 use aui_protocol::{Block, PermissionMode, PlanState, ReasoningEffort, Session};
 use aui_tokens::scale;
@@ -55,23 +55,35 @@ use gpui::{
     FocusHandle, Focusable, ScrollHandle, SharedString, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, Position, TextareaState};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
 use muse_adapter::MuseFold;
 use muse_client::schema::{
-    ApprovalMode, ContextPressureLevel, ContextUsage, ModelCatalogEntry, ModelListParams,
-    ModelSelection, SessionCompactParams, SessionSetApprovalModeParams, SessionSetModelParams,
-    TurnInputPart, TurnInterruptParams, TurnStartDisposition, TurnStartParams, TurnStartResult,
-    TurnSteerParams, TurnUnqueueParams, ViewPageParams,
+    ApprovalDecideParams, ApprovalListPendingParams, ApprovalMode, ApprovalResolutionSummary,
+    ContextPressureLevel, ContextUsage, ErrorKind, ForkCutPoint, ModelCatalogEntry,
+    ModelListParams, ModelSelection, SessionCompactParams, SessionForkParams,
+    SessionSetApprovalModeParams, SessionSetModelParams, SessionUserShellParams, TurnInputPart,
+    TurnInterruptParams, TurnStartDisposition, TurnStartParams, TurnStartResult, TurnSteerParams,
+    TurnUnqueueParams, UserInputAnswer, UserInputAnswerParams, UserInputCancelParams,
+    UserInputClarification, UserInputClarifyParams, UserInputSelectionMode, ViewPageParams,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
-use crate::transcript::{self, Folds, PlanAction};
+use crate::transcript::{self, Cards, Folds, PlanAction};
 use crate::{files, history, images, plan, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock.
 const TICK: Duration = Duration::from_millis(250);
+/// How often a countdown — a question's auto-resolution, a scheduled retry —
+/// re-reads it. Once a second, because that is all a countdown in seconds can
+/// show.
+const COUNTDOWN_TICK: Duration = Duration::from_secs(1);
+/// How long the app waits before retrying a command the wire refused with
+/// `overloaded` or `backpressured`. The wire carries no `retryAfter`, so this is
+/// a client-side choice and a deliberately unhurried one.
+const RETRY_BACKOFF: Duration = Duration::from_secs(3);
 /// `view/page` takes 1–1000; the transport uses the ceiling and so does the
 /// history backfill.
 const PAGE_LIMIT: u32 = 1000;
@@ -108,6 +120,14 @@ pub enum SessionEvent {
     Closed,
     /// `/clear`: start a new session in this workspace.
     NewSession,
+    /// `session/fork` succeeded: open the new session as the active one.
+    Forked {
+        /// The new session's id. Its resume envelope has already been served.
+        session_id: String,
+        /// The envelope's own `session` object, so the new view can fold it and
+        /// draw the `ForkedFrom` marker its `forkedFrom` carries.
+        session: serde_json::Value,
+    },
     /// `/logout`.
     Logout,
     /// `/status` or `/usage`: the application owns the dialog stack.
@@ -140,7 +160,11 @@ pub struct SessionView {
     /// The Muse session id this view follows.
     pub session_id: String,
     fold: MuseFold,
-    client: Arc<MuseClient>,
+    /// The child, or `None` for a replayed capture, which has no child at all.
+    client: Option<Arc<MuseClient>>,
+    /// A `--replay` session: the transcript is a file, and every command is
+    /// refused rather than quietly dropped.
+    replay: bool,
     /// `meta`, or `echo` under `HARNESS_PROVIDER=echo`.
     provider_id: String,
     /// The workspace the session runs in, for the header and the empty state.
@@ -163,6 +187,48 @@ pub struct SessionView {
     loading_history: bool,
     /// The inline banner over the composer: one recoverable command error.
     banner: Option<String>,
+    /// The banner's action, when the error is one the person can do something
+    /// about: the label and what pressing it does.
+    banner_action: Option<BannerAction>,
+    /// Which approval's feedback field is open, as `(approvalId, choiceId)`.
+    feedback_open: Option<(String, String)>,
+    /// The feedback field itself. The card never owns text; this does.
+    feedback: Entity<TextareaState>,
+    /// Which question block has its "Explain instead" field open.
+    clarify_open: Option<String>,
+    /// That field.
+    clarify: Entity<TextareaState>,
+    /// What is selected on each pending question, keyed by the question block's
+    /// id. The card is stateless, so the selection lives here until it is sent.
+    selections: HashMap<String, Vec<usize>>,
+    /// Which option previews are expanded, keyed by the question block's id.
+    previews: HashMap<String, Vec<usize>>,
+    /// Answers gathered so far for a multi-question request, keyed by
+    /// `userInputId` then `questionId`. MSP settles the whole prompt at once, so
+    /// the app holds the earlier answers until the last question is answered.
+    answers: HashMap<String, HashMap<String, muse_client::schema::UserInputAnswer>>,
+    /// When each pending question's auto-resolution clock started, keyed by
+    /// `userInputId`. MSP sends a duration, never a deadline.
+    question_started: HashMap<String, Instant>,
+    /// When the live `turn/retryScheduled` was observed, for the same reason.
+    retry_started: Option<(String, Instant)>,
+    /// A 1 s clock, held only while a countdown is on screen.
+    countdown: Option<Task<()>>,
+    /// A reconnect or a resume happened; `approval/listPending` needs
+    /// re-reading before the next frame is trusted.
+    refresh_pending: bool,
+    /// Whether `initialize` granted the `userShell` capability. Without it the
+    /// `!` path is disabled and says so rather than failing on the wire.
+    user_shell: bool,
+    /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
+    /// marker can name its source rather than print a uuid.
+    titles: HashMap<String, String>,
+    /// Draw the cards settled rather than entering.
+    ///
+    /// A `--screenshot` run renders a handful of frames and then quits, so a
+    /// staggered button that is still fading in is simply missing from the PNG.
+    /// The capture wants the card as a person sees it a moment later.
+    at_rest: bool,
     /// A prompt handed back by a retraction, waiting for a frame with a
     /// `Window` in it to reach the composer.
     pending_prompt: Option<String>,
@@ -213,7 +279,7 @@ impl SessionView {
     /// started the session or is about to [`SessionView::backfill`] it.
     pub fn new(
         session_id: String,
-        client: Arc<MuseClient>,
+        client: Option<Arc<MuseClient>>,
         provider_id: String,
         workspace: String,
         overlays: Entity<Overlays>,
@@ -228,11 +294,14 @@ impl SessionView {
                 this.on_draft_changed(cx);
             }
         });
+        let feedback = cx.new(|cx| composer_state_rows("Why not? Muse reads this.", 2, 4, window, cx));
+        let clarify = cx.new(|cx| composer_state_rows("Say what you would rather Muse did", 2, 4, window, cx));
         let workspace_key = workspace.clone();
         Self {
             session_id,
             fold: MuseFold::new(),
             client,
+            replay: false,
             provider_id,
             workspace,
             composer,
@@ -244,6 +313,21 @@ impl SessionView {
             submitting: false,
             loading_history: false,
             banner: None,
+            banner_action: None,
+            feedback_open: None,
+            feedback,
+            clarify_open: None,
+            clarify,
+            selections: HashMap::new(),
+            previews: HashMap::new(),
+            answers: HashMap::new(),
+            question_started: HashMap::new(),
+            retry_started: None,
+            countdown: None,
+            refresh_pending: false,
+            user_shell: true,
+            titles: HashMap::new(),
+            at_rest: false,
             pending_prompt: None,
             models: Vec::new(),
             effort: None,
@@ -332,15 +416,139 @@ impl SessionView {
         self.composer.read(cx).value().trim().is_empty()
     }
 
+    /// Whether a card field (an approval's feedback, a question's
+    /// clarification) is open, which is what Enter and Escape branch on.
+    pub fn card_field_open(&self) -> bool {
+        self.feedback_open.is_some() || self.clarify_open.is_some()
+    }
+
+    /// Whether a pending card should own the digit keys this frame (spec §3.9).
+    ///
+    /// Only with an empty draft: `1` in a half-typed sentence is a `1`, and a
+    /// person mid-thought must never have a keystroke mean "allow".
+    pub fn card_has_keys(&self, cx: &gpui::App) -> bool {
+        self.draft_is_empty(cx) && !self.card_field_open() && self.newest_pending_approval().is_some()
+    }
+
+    /// Pick the n-th choice of the newest pending approval (`1`–`9`).
+    pub fn choose_nth(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let step = format!("choose:{}", index + 1);
+        self.step(&step, window, cx);
+    }
+
     /// Whether plan mode is on, for the app's Shift+Tab.
     pub fn plan_mode(&self) -> bool {
         self.plan
     }
 
+    /// What the application knows and the session does not: what the other
+    /// sessions in this workspace are called (for a `ForkedFrom` marker), and
+    /// whether `initialize` granted `userShell`.
+    pub fn set_context(&mut self, titles: HashMap<String, String>, user_shell: bool) {
+        self.titles = titles;
+        self.user_shell = user_shell;
+    }
+
+    /// Draw the cards settled, for a `--screenshot` run.
+    pub fn set_at_rest(&mut self, at_rest: bool) {
+        self.at_rest = at_rest;
+    }
+
+    /// Fold a session envelope the app was handed as a **result**.
+    ///
+    /// `session/start`, `session/resume` and `session/fork` all return the
+    /// session object that `session/started` would have carried, and the view
+    /// stream never repeats it. Without this the provenance a fork records —
+    /// `session.forkedFrom` — would never reach the transcript, and the new
+    /// session would open with no sign of where it came from.
+    pub fn seed_session(&mut self, session: serde_json::Value, cx: &mut Context<Self>) {
+        if session.is_null() {
+            return;
+        }
+        let session_id = self.session_id.clone();
+        self.fold.apply(MuseEvent::Notification {
+            method: "session/started".to_owned(),
+            params: serde_json::json!({ "session": session }),
+            cursor: None,
+            session_id: Some(session_id),
+        });
+        self.follow = true;
+        cx.notify();
+    }
+
     /// Point the view at the respawned child after a reconnect. The fold and
     /// the transcript are untouched: the resume streamed only the suffix.
     pub fn reconnected(&mut self, client: Arc<MuseClient>) {
-        self.client = client;
+        self.client = Some(client);
+        // A reconnect can have missed an `approval/request`, and the server does
+        // not re-issue one it has already sent. The pull dual closes that hole.
+        self.refresh_pending = true;
+    }
+
+    /// The child, or the banner explaining why there isn't one.
+    ///
+    /// Every command goes through here, so "this transcript came out of a file"
+    /// is said once and refused once, instead of each call site quietly doing
+    /// nothing and leaving the person to wonder.
+    fn wire_client(&mut self, cx: &mut Context<Self>) -> Option<Arc<MuseClient>> {
+        if let Some(client) = self.client.clone() {
+            return Some(client);
+        }
+        if self.replay {
+            self.banner = Some("Replayed capture — read-only".to_owned());
+            self.banner_action = None;
+            cx.notify();
+        }
+        None
+    }
+
+    /// Fold a capture file into this view: `--replay` (decision A0).
+    ///
+    /// The same `<-- ` lines the fixture test folds, through the same fold, with
+    /// no child and no wire. It is how most of Phase 4's screenshots are taken,
+    /// and it costs nothing at all.
+    pub fn load_replay(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.replay = true;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.banner = Some(format!("{}: {error}", path.display()));
+                cx.notify();
+                return;
+            }
+        };
+        let mut sent: Vec<(String, String)> = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            // A capture holds both directions. The client-to-server half is what
+            // the fixture tests skip, but it is the only record of what a turn
+            // was *sent* with — and that is what an error card's retry needs, so
+            // the prompts are read back out of it here.
+            if let Some(body) = line.strip_prefix("--> ") {
+                sent.extend(submitted_text(body));
+                continue;
+            }
+            let Some(body) = line.strip_prefix("<-- ") else { continue };
+            match muse_client::frame::parse_line(body) {
+                Ok(Some(frame)) => {
+                    if let Some(event) = MuseEvent::from_frame(frame) {
+                        self.fold.apply(event);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("harness: {}:{}: {error}", path.display(), number + 1),
+            }
+        }
+        // The capture names its own session; the view was opened on whatever the
+        // caller guessed, so it follows the file rather than the guess.
+        if let Some(id) = self.fold.session_ids().next() {
+            self.session_id = id.to_owned();
+        }
+        for (command_id, text) in sent {
+            self.fold.record_command(&self.session_id, &command_id, &text);
+        }
+        self.observe_clocks(cx);
+        self.follow = true;
+        cx.notify();
     }
 
     /// Put text in the composer. Only the scripted `--send` uses this; a person
@@ -417,6 +625,12 @@ impl SessionView {
         if changed {
             self.follow = true;
         }
+        // Every event can start or end a countdown; the clock is started and
+        // stopped in one place rather than by each event that might matter.
+        self.observe_clocks(cx);
+        if std::mem::take(&mut self.refresh_pending) {
+            self.refresh_pending_now(cx);
+        }
         cx.notify();
     }
 
@@ -451,9 +665,9 @@ impl SessionView {
     /// `item/delta`, so a backfilled message arrives whole and the fold takes
     /// it that way.
     pub fn backfill(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.wire_client(cx) else { return };
         self.loading_history = true;
         cx.notify();
-        let client = self.client.clone();
         let session_id = self.session_id.clone();
         let pages = cx.background_spawn(async move { page_all(&client, &session_id) });
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -482,7 +696,14 @@ impl SessionView {
             return;
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
-        self.submit(text, cx);
+        // `!` is the shell escape hatch (research §1.12): a command, not a turn,
+        // outside any turn, and still subject to the approval policy.
+        match text.strip_prefix('!') {
+            Some(command) if !command.trim().is_empty() => {
+                self.run_user_shell(command.trim().to_owned(), cx)
+            }
+            _ => self.submit(text, cx),
+        }
     }
 
     /// Send `text` without touching the composer — the scripting hook.
@@ -491,6 +712,12 @@ impl SessionView {
     }
 
     fn submit(&mut self, text: String, cx: &mut Context<Self>) {
+        // Nothing leaves a replayed capture, and nothing about the person's
+        // draft or their history is touched on the way to finding that out.
+        if self.wire_client(cx).is_none() {
+            self.restore_prompt(text, cx);
+            return;
+        }
         self.banner = None;
         self.submitting = true;
         self.history.set(history::append(&self.workspace_key, &text));
@@ -511,7 +738,7 @@ impl SessionView {
             ..Default::default()
         };
         self.images.clear();
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let planning = self.plan;
         let call = cx.background_spawn(async move { client.turn_start(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -555,8 +782,10 @@ impl SessionView {
             }
             Err(error) => {
                 self.submitting = false;
-                self.report(&error, cx);
-                // The turn never left, so the person keeps their words.
+                // The turn never left, so the person keeps their words — and,
+                // when the wire only said "not now", the banner offers to send
+                // them again rather than making the person press Enter twice.
+                self.report_retryable(&error, BannerAction::RetryTurn(text.clone()), cx);
                 self.restore_prompt(text, cx);
             }
         }
@@ -594,7 +823,7 @@ impl SessionView {
             reasoning_effort: self.effort.map(effort_wire),
         };
         self.images.clear();
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.turn_steer(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             if let Err(error) = call.await {
@@ -616,7 +845,7 @@ impl SessionView {
             retract: Some(true),
             turn_id: self.running.as_ref().map(|r| r.turn_id.clone()),
         };
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.turn_interrupt(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             let result = call.await;
@@ -631,13 +860,16 @@ impl SessionView {
     /// `turn/unqueue`, remembering why so `turn/unqueued` knows what to do with
     /// the text it hands back.
     fn unqueue(&mut self, turn_id: &str, why: Unqueue, cx: &mut Context<Self>) {
+        if self.wire_client(cx).is_none() {
+            return;
+        }
         self.unqueueing.insert(turn_id.to_owned(), why);
         let params = TurnUnqueueParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
             turn_id: turn_id.to_owned(),
         };
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let turn_id = turn_id.to_owned();
         let call = cx.background_spawn(async move { client.turn_unqueue(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -668,7 +900,7 @@ impl SessionView {
                 provider_id: row.map(|r| r.provider_id.clone()),
             },
         };
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.session_set_model(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             if let Err(error) = call.await {
@@ -687,7 +919,7 @@ impl SessionView {
             session_id: self.session_id.clone(),
             mode: wire_mode(mode),
         };
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.session_set_approval_mode(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             if let Err(error) = call.await {
@@ -703,7 +935,7 @@ impl SessionView {
             session_id: self.session_id.clone(),
             turn_id: None,
         };
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.session_compact(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             let result = call.await;
@@ -721,7 +953,7 @@ impl SessionView {
     /// Fetch the catalog for this session. A snapshot, on every open: MSP has
     /// no catalog subscription, so a stale list would be worse than a wait.
     fn load_models(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+        let Some(client) = self.wire_client(cx) else { return };
         let params = ModelListParams { session_id: Some(self.session_id.clone()) };
         let call = cx.background_spawn(async move { client.model_list(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -795,8 +1027,8 @@ impl SessionView {
         }
         self.plan_turn = None;
         let Some(reply) = self.last_assistant_text() else { return };
-        let steps = plan::steps(&reply);
-        if steps.is_empty() {
+        let (items, sections) = plan::steps(&reply);
+        if items.is_empty() {
             return;
         }
         self.plan_seq += 1;
@@ -804,7 +1036,7 @@ impl SessionView {
         self.fold.append_client_block(
             &self.session_id,
             &id,
-            Block::Plan { id: id.clone(), items: steps, state: PlanState::Proposed },
+            Block::Plan { id: id.clone(), items, sections, state: PlanState::Proposed },
         );
         self.follow = true;
         cx.notify();
@@ -836,8 +1068,9 @@ impl SessionView {
         };
         if action != PlanAction::Refine {
             if let Some(block) = self.plan_block(id) {
-                let Block::Plan { items, .. } = &block else { return };
-                let replaced = Block::Plan { id: id.to_owned(), items: items.clone(), state };
+                let Block::Plan { items, sections, .. } = &block else { return };
+                let replaced =
+                    Block::Plan { id: id.to_owned(), items: items.clone(), sections: sections.clone(), state };
                 self.fold.replace_client_block(&self.session_id, id, replaced);
             }
         }
@@ -1052,7 +1285,8 @@ impl SessionView {
                 self.overlays.update(cx, |overlays, _| overlays.open(Menu::caret(MenuKind::Command, 0)));
                 cx.notify();
             }
-            Command::Fork | Command::Name | Command::Resume => {}
+            Command::Fork => self.fork(None, cx),
+            Command::Name | Command::Resume => {}
         }
     }
 
@@ -1233,8 +1467,127 @@ impl SessionView {
                 self.set_draft(text, window, cx);
                 self.on_draft_changed(cx);
             }
+            // `session/userShell`: free on every provider, and the only way to
+            // raise a real approval without spending a turn.
+            "shell" => self.run_user_shell(rest.to_owned(), cx),
+            "setmode" => {
+                match MODES.iter().copied().find(|m| format!("{m:?}").eq_ignore_ascii_case(rest) || m.label().eq_ignore_ascii_case(rest)) {
+                    Some(mode) => self.set_mode(mode, cx),
+                    None => eprintln!("harness: unknown approval mode `{rest}`"),
+                }
+            }
+            // The n-th choice of the newest pending approval, 1-based, exactly
+            // as the digits on the card are.
+            "choose" => {
+                let Ok(n) = rest.parse::<usize>() else { return };
+                let Some((approval_id, choices)) = self.newest_pending_approval() else { return };
+                let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
+                if choice.accepts_feedback && self.feedback_open.is_none() {
+                    // The same two-press dance a person does: the first press
+                    // opens the field, `feedback:` fills it, the second sends.
+                    self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+                    return;
+                }
+                let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
+                self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
+            }
+            // Type into whichever field is open — an approval's feedback or a
+            // question's clarification — without sending it.
+            "feedback" => {
+                let field = if self.feedback_open.is_some() { self.feedback.clone() } else { self.clarify.clone() };
+                field.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+                cx.notify();
+            }
+            "answer" | "answers" => {
+                let Some((block_id, labels)) = self.newest_pending_question() else { return };
+                for wanted in rest.split('|').map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(index) = labels.iter().position(|l| l == wanted) {
+                        self.select_option(block_id.clone(), index, cx);
+                    } else {
+                        eprintln!("harness: no option labelled `{wanted}`");
+                    }
+                }
+                self.answer_question(block_id, cx);
+            }
+            // `clarify` with no text only opens the field, which is what a
+            // screenshot of the open field wants; with text it opens, fills and
+            // sends, which is what the round-trip wants.
+            "clarify" => {
+                let Some((block_id, _)) = self.newest_pending_question() else { return };
+                self.clarify_open = Some(block_id.clone());
+                self.clarify.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+                if rest.trim().is_empty() {
+                    cx.notify();
+                    return;
+                }
+                self.send_clarification(&block_id, window, cx);
+            }
+            // The n-th option's preview on the newest question, 0-based.
+            "preview" => {
+                let Ok(n) = rest.parse::<usize>() else { return };
+                if let Some((block_id, _)) = self.newest_pending_question() {
+                    self.toggle_preview(block_id, n, cx);
+                }
+            }
+            // Pick without sending, for a capture of a half-answered card.
+            "select" => {
+                let Some((block_id, labels)) = self.newest_pending_question() else { return };
+                if let Some(index) = labels.iter().position(|l| l == rest) {
+                    self.select_option(block_id, index, cx);
+                }
+            }
+            "skip" => {
+                if let Some((block_id, _)) = self.newest_pending_question() {
+                    self.skip_question(block_id, cx);
+                }
+            }
+            "fork" => self.fork(None, cx),
+            "retry" => {
+                if let Some(turn_id) = self.newest_failed_turn() {
+                    self.retry_turn(turn_id, cx);
+                }
+            }
+            // `wait` is handled by the runner, which is the only thing that can
+            // let the wire catch up; seeing it here means it slipped through.
+            "wait" => {}
             other => eprintln!("harness: unknown step `{other}`"),
         }
+    }
+
+    /// The newest approval still awaiting a decision, and its current choices.
+    ///
+    /// Read from the transcript rather than from the pending map, because the
+    /// transcript is in wire order and "newest" is a question about order.
+    fn newest_pending_approval(&self) -> Option<(String, Vec<aui_protocol::ApprovalChoice>)> {
+        let session = self.session()?;
+        session.turns.iter().rev().flat_map(|turn| turn.blocks().iter().rev()).find_map(|block| match block {
+            Block::Approval { id, state, choices, .. } if *state == aui_protocol::ApprovalState::Pending => {
+                Some((id.clone(), choices.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The newest question still awaiting an answer, and its option labels.
+    fn newest_pending_question(&self) -> Option<(String, Vec<String>)> {
+        let session = self.session()?;
+        session.turns.iter().rev().flat_map(|turn| turn.blocks().iter().rev()).find_map(|block| match block {
+            Block::Question { id, options, answer: None, .. } => {
+                Some((id.clone(), options.iter().map(|o| o.label.clone()).collect()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The newest turn that ended in an error card, for `--steps retry`.
+    fn newest_failed_turn(&self) -> Option<String> {
+        let session = self.session()?;
+        session.turns.iter().rev().find_map(|turn| {
+            turn.blocks()
+                .iter()
+                .any(|block| matches!(block, Block::Error { .. }))
+                .then(|| turn.id().to_owned())
+        })
     }
 
     // ----------------------------------------------------------------- render
@@ -1246,6 +1599,7 @@ impl SessionView {
         }
         let transcript = self.render_transcript(window, cx);
         let status = self.render_status();
+        let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
         let queue = self.render_queue(cx);
         let caret_menu = self.render_caret_menu(cx);
@@ -1256,6 +1610,7 @@ impl SessionView {
             .relative()
             .child(transcript)
             .children(status)
+            .children(needs_you)
             .children(banner)
             .children(queue)
             .child(div().w_full().relative().px(px(TRANSCRIPT_PAD_X)).children(caret_menu))
@@ -1310,6 +1665,12 @@ impl SessionView {
                     act(&(id, action), window, cx)
                 }))
             },
+            // A replayed capture gets the same wiring: opening a preview and
+            // picking an option are local, and anything that would reach the
+            // wire is refused by `wire_client` with a banner that says why.
+            cards: Some(self.card_intents(window, cx)),
+            titles: self.titles.clone(),
+            at_rest: self.at_rest,
         };
         let last = session.turns.len().saturating_sub(1);
         let mut list = div()
@@ -1333,9 +1694,75 @@ impl SessionView {
         list.into_any_element()
     }
 
+    /// Everything the pending approval and question cards need to talk back.
+    ///
+    /// One struct built once a frame: every closure here is a `cx.listener`, so
+    /// a click on a card and a keystroke on the same card run the same code.
+    fn card_intents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Cards {
+        let choose = cx.listener(|this: &mut Self, (approval, choice, feedback): &(String, String, Option<String>), _, cx| {
+            this.decide_approval(approval.clone(), choice.clone(), feedback.clone(), cx);
+        });
+        let feedback_toggle = cx.listener(|this: &mut Self, (approval, choice): &(String, Option<String>), window, cx| {
+            this.toggle_feedback(approval.clone(), choice.clone(), window, cx);
+        });
+        let select = cx.listener(|this: &mut Self, (id, index): &(String, usize), _, cx| {
+            this.select_option(id.clone(), *index, cx);
+        });
+        let toggle_preview = cx.listener(|this: &mut Self, (id, index): &(String, usize), _, cx| {
+            this.toggle_preview(id.clone(), *index, cx);
+        });
+        let answer = cx.listener(|this: &mut Self, id: &String, _, cx| this.answer_question(id.clone(), cx));
+        let skip = cx.listener(|this: &mut Self, id: &String, _, cx| this.skip_question(id.clone(), cx));
+        let clarify = cx.listener(|this: &mut Self, id: &String, window, cx| {
+            this.clarify_question(id.clone(), window, cx);
+        });
+        let retry = cx.listener(|this: &mut Self, id: &String, _, cx| this.retry_turn(id.clone(), cx));
+        // The two text fields are the app's, exactly as the composer's editor
+        // is: the cards are handed an element and never a character.
+        let feedback_slot = self.feedback_open.is_some().then(|| {
+            Textarea::new(&self.feedback).text_size(aui_tokens::scaled(scale::FS_12)).into_any_element()
+        });
+        let clarify_slot = self.clarify_open.is_some().then(|| {
+            Textarea::new(&self.clarify).text_size(aui_tokens::scaled(scale::FS_12)).into_any_element()
+        });
+        let feedback_text = self.feedback.read(cx).value().to_string();
+        let _ = window;
+        Cards {
+            choose: Rc::new(move |a, c, f, window, cx| choose(&(a, c, f), window, cx)),
+            feedback_toggle: Rc::new(move |a, c, window, cx| feedback_toggle(&(a, c), window, cx)),
+            feedback_open: self.feedback_open.clone(),
+            feedback_slot: std::cell::RefCell::new(feedback_slot),
+            feedback_text,
+            select: Rc::new(move |id, index, window, cx| select(&(id, index), window, cx)),
+            selections: self.selections.clone(),
+            toggle_preview: Rc::new(move |id, index, window, cx| toggle_preview(&(id, index), window, cx)),
+            previews: self.previews.clone(),
+            answer: Rc::new(move |id, window, cx| answer(&id, window, cx)),
+            skip: Rc::new(move |id, window, cx| skip(&id, window, cx)),
+            clarify: Rc::new(move |id, window, cx| clarify(&id, window, cx)),
+            clarify_open: self.clarify_open.clone(),
+            clarify_slot: std::cell::RefCell::new(clarify_slot),
+            countdowns: self.countdowns(),
+            retry: Rc::new(move |id, window, cx| retry(&id, window, cx)),
+            retryable_turns: self.retryable_turns(),
+        }
+    }
+
     /// The live status line: history loading, or a running turn with its
     /// elapsed time and the interrupt hint.
     fn render_status(&self) -> Option<AnyElement> {
+        // A scheduled retry outranks "Working…": the turn is not working, it is
+        // waiting out a backoff, and saying which is the whole point of the row.
+        if let Some((attempt, max, remaining_ms, reason)) = self.retry_countdown() {
+            return Some(
+                h_flex()
+                    .w_full()
+                    .px(px(TRANSCRIPT_PAD_X))
+                    .pb(px(scale::SP_4))
+                    .child(retry_row("retry", attempt, max, remaining_ms, reason))
+                    .into_any_element(),
+            );
+        }
         let row = if self.loading_history {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
         } else if self.busy() {
@@ -1366,10 +1793,48 @@ impl SessionView {
     }
 
     /// The inline banner over the composer, for a recoverable command error.
+    ///
+    /// Its action is the error's own way out where there is one — "Retry" for a
+    /// wire that said "not now" — and a plain dismiss otherwise.
     fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let message = self.banner.clone()?;
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.banner = None;
+        let label = match self.banner_action {
+            Some(_) => "Retry",
+            None => "Dismiss",
+        };
+        let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.run_banner_action(cx));
+        Some(
+            div()
+                .w_full()
+                .px(px(TRANSCRIPT_PAD_X))
+                .pb(px(scale::SP_3))
+                .child(
+                    banner("session-banner", BannerKind::Error, vec![BannerRun::Text(message.into())])
+                        .action(label, BannerActionStyle::Ghost)
+                        .on_action(move |window, cx| press(&(), window, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The needs-you banner: something is waiting on the person and they are
+    /// not looking at it.
+    ///
+    /// Only when the pending card is actually out of view — a banner pointing at
+    /// a card the reader is already reading is noise.
+    fn render_needs_you(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (approvals, questions) = self.waiting_on_you()?;
+        let at_tail = (-self.scroll.offset().y) >= self.scroll.max_offset().y - px(TAIL_SLACK);
+        if at_tail {
+            return None;
+        }
+        let detail = match (approvals, questions) {
+            (a, 0) => format!("{a} approval{} above.", plural(a)),
+            (0, q) => format!("{q} question{} above.", plural(q)),
+            (a, q) => format!("{a} approval{} and {q} question{} above.", plural(a), plural(q)),
+        };
+        let jump = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.scroll.scroll_to_bottom();
             cx.notify();
         });
         Some(
@@ -1378,9 +1843,8 @@ impl SessionView {
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_3))
                 .child(
-                    banner("session-banner", BannerKind::Error, vec![BannerRun::Text(message.into())])
-                        .action("Dismiss", BannerActionStyle::Ghost)
-                        .on_action(move |window, cx| dismiss(&(), window, cx)),
+                    needs_you_banner("needs-you", "Muse is waiting for you.", detail)
+                        .on_jump(move |_, window, cx| jump(&(), window, cx)),
                 )
                 .into_any_element(),
         )
@@ -1520,6 +1984,10 @@ impl SessionView {
             .skills
             .iter()
             .filter(|s| s.name.to_lowercase().starts_with(&needle))
+            // F7: a skill whose name is already a client command is hidden.
+            // Muse ships `plan`, and the menu offering both `/plan` the mode and
+            // `/plan` the skill — which do different things — was a trap.
+            .filter(|s| !Command::ALL.iter().any(|c| c.slash().trim_start_matches('/') == s.name))
             .take(SKILL_ROWS)
             .cloned()
             .collect();
@@ -1702,6 +2170,604 @@ impl SessionView {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Approvals, questions, shell, fork, retry (spec §5 phase 4)
+// ---------------------------------------------------------------------------
+
+/// What the inline banner's action does, when the failure is one the person can
+/// do something about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BannerAction {
+    /// Resend a turn that never left, with the text it carried.
+    RetryTurn(String),
+    /// Re-run a user shell command that never left.
+    RetryShell(String),
+}
+
+impl SessionView {
+    /// A server-minted choice was pressed: `approval/decide`.
+    ///
+    /// The `requirementId` is the guard MSP requires: it must equal the
+    /// approval's **current** stage token, or the wire answers
+    /// `approvalRequirementStale`. It is read from the pending request the fold
+    /// keeps rather than from the card, because the block has no room for it and
+    /// the choices change between stages.
+    pub fn decide_approval(&mut self, approval_id: String, choice_id: String, feedback: Option<String>, cx: &mut Context<Self>) {
+        let Some(requirement_id) = self
+            .fold
+            .side(&self.session_id)
+            .and_then(|side| side.pending_approvals.get(&approval_id))
+            .map(|request| request.current_requirement_id.clone())
+        else {
+            // Nothing pending under that id: the resolution already landed.
+            return;
+        };
+        let Some(client) = self.wire_client(cx) else { return };
+        self.feedback_open = None;
+        let params = ApprovalDecideParams {
+            approval_id: approval_id.clone(),
+            choice_id,
+            command_id: new_command_id(),
+            feedback,
+            requirement_id,
+            session_id: self.session_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.approval_decide(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                // The ack's `terminal` flag is admission only: what the card
+                // shows next comes from `approval/updated` or
+                // `approval/resolved`, never from here.
+                if let Err(error) = result {
+                    this.decide_failed(&approval_id, &error, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The four ways `approval/decide` can lose (research §1.14).
+    fn decide_failed(&mut self, approval_id: &str, error: &MuseError, cx: &mut Context<Self>) {
+        match error.kind() {
+            // Somebody else — a policy, the judge, another window — got there
+            // first, and the error carries the winning resolution.
+            Some(ErrorKind::ApprovalAlreadyResolved) => {
+                self.fold.resolve_approval(&self.session_id, approval_id, resolution_of(error));
+                cx.notify();
+            }
+            // The choices moved under the press, which only happens between
+            // stages; the update that moved them is already on its way, so
+            // saying anything here would be noise.
+            Some(ErrorKind::ApprovalRequirementStale) => {}
+            Some(ErrorKind::ApprovalChoiceInvalid) => {
+                self.set_banner("That choice is no longer offered for this command.", None, cx);
+            }
+            Some(ErrorKind::ApprovalNotFound) => {
+                self.fold.resolve_approval(&self.session_id, approval_id, None);
+                self.set_banner("Muse no longer knows about that approval.", None, cx);
+            }
+            _ => self.report(error, cx),
+        }
+    }
+
+    /// Open (or close) the feedback field a choice asks for.
+    pub fn toggle_feedback(&mut self, approval_id: String, choice_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback_open = choice_id.map(|choice| (approval_id, choice));
+        self.feedback.update(cx, |state, cx| state.set_value("", window, cx));
+        if self.feedback_open.is_some() {
+            window.focus(&self.feedback.focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
+    /// Enter in an open feedback or clarification field; `false` when neither is
+    /// open, so the caller can let the key mean what it usually means.
+    pub fn confirm_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some((approval_id, choice_id)) = self.feedback_open.clone() {
+            let text = self.feedback.read(cx).value().to_string();
+            let feedback = (!text.trim().is_empty()).then_some(text);
+            self.decide_approval(approval_id, choice_id, feedback, cx);
+            return true;
+        }
+        if let Some(block_id) = self.clarify_open.clone() {
+            self.send_clarification(&block_id, window, cx);
+            return true;
+        }
+        false
+    }
+
+    /// Escape: close an open card field, and say whether it closed one.
+    pub fn close_card_field(&mut self, cx: &mut Context<Self>) -> bool {
+        let closed = self.feedback_open.take().is_some() || self.clarify_open.take().is_some();
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
+    // ------------------------------------------------------------- questions
+
+    /// A radio or checkbox on a pending question.
+    pub fn select_option(&mut self, block_id: String, index: usize, cx: &mut Context<Self>) {
+        let multi = self.question(&block_id).is_some_and(|q| q.multi);
+        let selected = self.selections.entry(block_id).or_default();
+        match (multi, selected.iter().position(|i| *i == index)) {
+            (true, Some(at)) => {
+                selected.remove(at);
+            }
+            (true, None) => selected.push(index),
+            (false, _) => *selected = vec![index],
+        }
+        cx.notify();
+    }
+
+    /// An option's "Preview" chevron.
+    pub fn toggle_preview(&mut self, block_id: String, index: usize, cx: &mut Context<Self>) {
+        let open = self.previews.entry(block_id).or_default();
+        match open.iter().position(|i| *i == index) {
+            Some(at) => {
+                open.remove(at);
+            }
+            None => open.push(index),
+        }
+        cx.notify();
+    }
+
+    /// The pending question a block id names.
+    ///
+    /// The fold names a question block `"<userInputId>:<questionId>"`, because
+    /// one MSP request may carry several questions and each is its own card.
+    fn question(&self, block_id: &str) -> Option<Pending> {
+        let (input_id, question_id) = block_id.split_once(':')?;
+        let side = self.fold.side(&self.session_id)?;
+        let request = side.pending_inputs.get(input_id)?;
+        let question = request.questions.iter().find(|q| q.id == question_id)?;
+        Some(Pending {
+            input_id: input_id.to_owned(),
+            question_id: question_id.to_owned(),
+            multi: matches!(question.selection.mode, UserInputSelectionMode::Multiple),
+            labels: question.options.iter().map(|o| o.label.clone()).collect(),
+            questions: request.questions.len(),
+        })
+    }
+
+    /// "Continue" on a question.
+    ///
+    /// MSP settles the whole prompt at once and keys answers on option
+    /// **labels**, so a request with several questions gathers its answers here
+    /// and sends one `userInput/answer` when the last one is answered.
+    pub fn answer_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        let Some(pending) = self.question(&block_id) else { return };
+        let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
+        if selected.is_empty() {
+            return;
+        }
+        let chosen: Vec<String> = selected.iter().filter_map(|i| pending.labels.get(*i).cloned()).collect();
+        let answer = UserInputAnswer {
+            free_text: None,
+            note: None,
+            question_id: pending.question_id.clone(),
+            // Exactly one of `selectedLabel` and `selectedLabels`, chosen by the
+            // question's own mode: sending both is `userInputAnswerInvalid`.
+            selected_label: (!pending.multi).then(|| chosen.first().cloned()).flatten(),
+            selected_labels: pending.multi.then(|| chosen.clone()),
+        };
+        let gathered = self.answers.entry(pending.input_id.clone()).or_default();
+        gathered.insert(pending.question_id.clone(), answer);
+        if gathered.len() < pending.questions {
+            // Not the last question of the prompt: the answers wait here until
+            // its siblings are answered, and the prompt settles once.
+            cx.notify();
+            return;
+        }
+        let answers: Vec<UserInputAnswer> =
+            self.answers.remove(&pending.input_id).unwrap_or_default().into_values().collect();
+        let Some(client) = self.wire_client(cx) else { return };
+        let input_id = pending.input_id.clone();
+        let params = UserInputAnswerParams {
+            answers,
+            command_id: new_command_id(),
+            session_id: self.session_id.clone(),
+            user_input_id: input_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.user_input_answer(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.settle_failed(&input_id, &error, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// "Skip": `userInput/cancel`.
+    pub fn skip_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        let Some(pending) = self.question(&block_id) else { return };
+        let Some(client) = self.wire_client(cx) else { return };
+        self.answers.remove(&pending.input_id);
+        let input_id = pending.input_id.clone();
+        let params = UserInputCancelParams {
+            command_id: new_command_id(),
+            reason: Some("The person declined to answer.".to_owned()),
+            session_id: self.session_id.clone(),
+            user_input_id: input_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.user_input_cancel(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.settle_failed(&input_id, &error, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// "Explain instead": open the field, or send what is in it.
+    pub fn clarify_question(&mut self, block_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clarify_open.as_deref() == Some(block_id.as_str()) {
+            self.send_clarification(&block_id, window, cx);
+            return;
+        }
+        self.clarify_open = Some(block_id);
+        self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
+        window.focus(&self.clarify.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn send_clarification(&mut self, block_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.question(block_id) else { return };
+        let content = self.clarify.read(cx).value().to_string();
+        if content.trim().is_empty() {
+            return;
+        }
+        let Some(client) = self.wire_client(cx) else { return };
+        self.clarify_open = None;
+        self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
+        let input_id = pending.input_id.clone();
+        let params = UserInputClarifyParams {
+            // `format` is `"text"` in v1 and the field is open, so it is named
+            // rather than left to a default that might change.
+            clarification: UserInputClarification { content, format: "text".to_owned() },
+            command_id: new_command_id(),
+            session_id: self.session_id.clone(),
+            user_input_id: input_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.user_input_clarify(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.settle_failed(&input_id, &error, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The two ways a `userInput/*` settlement can lose.
+    fn settle_failed(&mut self, input_id: &str, error: &MuseError, cx: &mut Context<Self>) {
+        match error.kind() {
+            // Something already settled it — a timeout, most likely — and
+            // `userInput/settled` is on its way with the real outcome.
+            Some(ErrorKind::UserInputAlreadySettled) => {}
+            Some(ErrorKind::UserInputAnswerInvalid) => {
+                self.answers.remove(input_id);
+                self.set_banner("Muse refused that answer; pick again.", None, cx);
+            }
+            _ => self.report(error, cx),
+        }
+    }
+
+    // ------------------------------------------------------------ user shell
+
+    /// A draft starting with `!` is a shell command, not a turn (research
+    /// §1.12).
+    ///
+    /// It is also the free way to raise a real approval, and free here means
+    /// what it says: a user shell command is run by the **server**, not by the
+    /// model, so no provider turn is started and nothing is billed on any
+    /// provider. (`echo` itself is not a free provider — see the `main.rs`
+    /// header — but this path never reaches one.) Under `promptUnmatched`,
+    /// `!echo hi && ls` raises the two-stage approval that
+    /// `fixtures/msp/transcript-approve.jsonl` records.
+    pub fn run_user_shell(&mut self, command_text: String, cx: &mut Context<Self>) {
+        if !self.user_shell {
+            self.set_banner("Muse did not grant this build the userShell capability.", None, cx);
+            return;
+        }
+        let Some(client) = self.wire_client(cx) else { return };
+        self.banner = None;
+        self.banner_action = None;
+        let command_id = new_command_id();
+        // The shell item is filed under its own `commandId`, and so is any
+        // approval it raises, so remembering the text here is what makes the
+        // retry offer honest.
+        self.fold.record_command(&self.session_id, &command_id, &format!("!{command_text}"));
+        let params = SessionUserShellParams {
+            command_id,
+            command_text: command_text.clone(),
+            session_id: self.session_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.session_user_shell(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.report_retryable(&error, BannerAction::RetryShell(command_text.clone()), cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------------ fork
+
+    /// `/fork`, and an assistant turn's "Fork from here".
+    ///
+    /// The cut point is a **turn id** of a completed turn: naming an in-progress
+    /// one is `forkBoundaryInvalid`. Invoked from `/fork` with nothing named, it
+    /// is the newest completed turn.
+    pub fn fork(&mut self, last_turn_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(client) = self.wire_client(cx) else { return };
+        let cut_point =
+            last_turn_id.or_else(|| self.newest_completed_turn()).map(|last_turn_id| ForkCutPoint { last_turn_id });
+        let params = SessionForkParams {
+            command_id: new_command_id(),
+            cut_point,
+            // The fork's history comes through `view/page`, like every other
+            // attach in this app.
+            exclude_items: Some(true),
+            session_id: self.session_id.clone(),
+        };
+        let call = cx.background_spawn(async move { client.session_fork(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(forked) => cx.emit(SessionEvent::Forked {
+                    session_id: forked.session.session_id.clone(),
+                    session: serde_json::to_value(&forked.session).unwrap_or_default(),
+                }),
+                Err(error) if error.kind() == Some(&ErrorKind::ForkBoundaryInvalid) => {
+                    this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
+                }
+                Err(error) => this.report(&error, cx),
+            });
+        }));
+    }
+
+    /// The newest turn the server has finished, which is the only boundary a
+    /// fork may name.
+    fn newest_completed_turn(&self) -> Option<String> {
+        let session = self.session()?;
+        let running = self.running.as_ref().map(|r| r.turn_id.as_str());
+        session
+            .turns
+            .iter()
+            .rev()
+            .filter_map(|turn| match turn {
+                aui_protocol::Turn::Assistant { id, .. } => Some(id.as_str()),
+                // A `Turn::User`'s id is the message item's, not a turn id.
+                aui_protocol::Turn::User { .. } => None,
+            })
+            // The client authors two kinds of turn of its own — marker rows and
+            // plan cards — and neither is a turn the server could fork at.
+            .find(|id| Some(*id) != running && !id.starts_with("marker:") && !id.starts_with("plan-"))
+            .map(str::to_owned)
+    }
+
+    // ----------------------------------------------------------------- retry
+
+    /// "Retry" on an error card: resend the failed turn's own input.
+    ///
+    /// The wire never gives a prompt back, so this only works where the app
+    /// remembered it — which is every turn it sent itself. A turn that arrived
+    /// through a backfill has no text here, and the card hides the button.
+    pub fn retry_turn(&mut self, turn_id: String, cx: &mut Context<Self>) {
+        let Some(text) = self.remembered_text(&turn_id) else { return };
+        match text.strip_prefix('!') {
+            Some(command) => self.run_user_shell(command.to_owned(), cx),
+            None => self.submit(text, cx),
+        }
+    }
+
+    /// What a turn was sent with, if this app sent it.
+    ///
+    /// A fresh `turn/start`'s `commandId` **equals** its `turnId`, which is what
+    /// makes the command-text map a turn-text map for free.
+    fn remembered_text(&self, turn_id: &str) -> Option<String> {
+        self.fold.side(&self.session_id)?.command_text.get(turn_id).cloned()
+    }
+
+    /// Which failed turns the retry button may be offered on.
+    fn retryable_turns(&self) -> HashSet<String> {
+        self.fold
+            .side(&self.session_id)
+            .map(|side| side.command_text.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// A failure the person can try again, with the button that would do it.
+    ///
+    /// `overloaded` and `backpressured` also retry themselves once, after the
+    /// backoff: they are the wire saying "not now", and "not now" deserves one
+    /// unattended attempt before it deserves a person's attention.
+    fn report_retryable(&mut self, error: &MuseError, action: BannerAction, cx: &mut Context<Self>) {
+        let auto = matches!(error.kind(), Some(ErrorKind::Overloaded | ErrorKind::Backpressured));
+        self.set_banner(&format!("{}. {error}", conn::title(error)), Some(action.clone()), cx);
+        if !auto {
+            return;
+        }
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RETRY_BACKOFF).await;
+            let _ = this.update(cx, |this, cx| {
+                // Only if nothing else has happened to the banner since: a
+                // person who dismissed it, or a newer error, wins.
+                if this.banner_action.as_ref() == Some(&action) {
+                    this.run_banner_action(cx);
+                }
+            });
+        }));
+    }
+
+    /// Press the banner's action.
+    pub fn run_banner_action(&mut self, cx: &mut Context<Self>) {
+        let action = self.banner_action.take();
+        self.banner = None;
+        match action {
+            Some(BannerAction::RetryTurn(text)) => self.submit(text, cx),
+            Some(BannerAction::RetryShell(command)) => self.run_user_shell(command, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// One place that writes the banner, so its message and its action can never
+    /// disagree.
+    fn set_banner(&mut self, message: &str, action: Option<BannerAction>, cx: &mut Context<Self>) {
+        self.banner = Some(message.to_owned());
+        self.banner_action = action;
+        cx.notify();
+    }
+
+    // ---------------------------------------------------------------- clocks
+
+    /// Notice a countdown that has started, and start (or stop) the 1 s clock.
+    ///
+    /// MSP sends durations, never deadlines — an `autoResolutionMs` and a
+    /// `retryDelayMs` — so the moment each one was observed is the app's to
+    /// remember and the countdown is the app's to derive.
+    fn observe_clocks(&mut self, cx: &mut Context<Self>) {
+        let Some(side) = self.fold.side(&self.session_id) else { return };
+        let pending: Vec<String> = side.pending_inputs.keys().cloned().collect();
+        let retry = side.retry.as_ref().map(|r| format!("{}:{}", r.turn_id, r.attempt));
+        for id in &pending {
+            self.question_started.entry(id.clone()).or_insert_with(Instant::now);
+        }
+        self.question_started.retain(|id, _| pending.contains(id));
+        match retry {
+            Some(key) => {
+                if self.retry_started.as_ref().map(|(k, _)| k.as_str()) != Some(key.as_str()) {
+                    self.retry_started = Some((key, Instant::now()));
+                }
+            }
+            None => self.retry_started = None,
+        }
+        let wanted = !self.question_started.is_empty() || self.retry_started.is_some();
+        match (wanted, self.countdown.is_some()) {
+            (true, false) => self.start_countdown(cx),
+            (false, true) => self.countdown = None,
+            _ => {}
+        }
+    }
+
+    /// One frame a second while anything is counting down. Deliberately not the
+    /// 250 ms turn ticker: a countdown that changes once a second has no
+    /// business waking the window four times as often.
+    fn start_countdown(&mut self, cx: &mut Context<Self>) {
+        self.countdown = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(COUNTDOWN_TICK).await;
+            let alive = this.update(cx, |this, cx| {
+                cx.notify();
+                !this.question_started.is_empty() || this.retry_started.is_some()
+            });
+            if !matches!(alive, Ok(true)) {
+                return;
+            }
+        }));
+    }
+
+    /// How long each pending question has left, keyed by its block id.
+    fn countdowns(&self) -> HashMap<String, (u64, u64)> {
+        let Some(side) = self.fold.side(&self.session_id) else { return HashMap::new() };
+        let mut out = HashMap::new();
+        for (input_id, request) in &side.pending_inputs {
+            let Some(total) = request.auto_resolution_ms else { continue };
+            let Some(started) = self.question_started.get(input_id) else { continue };
+            let remaining = total.saturating_sub(started.elapsed().as_millis() as u64);
+            for question in &request.questions {
+                out.insert(format!("{input_id}:{}", question.id), (remaining, total));
+            }
+        }
+        out
+    }
+
+    /// Re-read what is pending, after a resume or a reconnect.
+    ///
+    /// The server does not re-issue an `approval/request` it already sent, so a
+    /// client that was away has to pull. `approval/listPending` is that pull;
+    /// the fold dedupes on ids it has already seen, so folding both lists is
+    /// safe even when nothing was missed.
+    fn refresh_pending_now(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else { return };
+        let params = ApprovalListPendingParams { session_id: self.session_id.clone() };
+        let session_id = self.session_id.clone();
+        let call = cx.background_spawn(async move { client.approval_list_pending(&params) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let Ok(pending) = call.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let fold = |this: &mut Self, method: &str, value: &serde_json::Value| {
+                    this.fold.apply(MuseEvent::Notification {
+                        method: method.to_owned(),
+                        params: value.clone(),
+                        cursor: value.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned),
+                        session_id: Some(session_id.clone()),
+                    });
+                };
+                for approval in &pending.approvals {
+                    if let Ok(value) = serde_json::to_value(approval) {
+                        fold(this, "approval/requested", &value);
+                    }
+                }
+                for request in &pending.user_inputs {
+                    if let Ok(value) = serde_json::to_value(request) {
+                        fold(this, "userInput/requested", &value);
+                    }
+                }
+                this.observe_clocks(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Whether anything is waiting on the person, for the needs-you banner.
+    fn waiting_on_you(&self) -> Option<(usize, usize)> {
+        let side = self.fold.side(&self.session_id)?;
+        let (approvals, questions) = (side.pending_approvals.len(), side.pending_inputs.len());
+        (approvals + questions > 0).then_some((approvals, questions))
+    }
+
+    /// The live retry row's data: attempt, bound, what is left of the backoff,
+    /// and the reason the provider gave.
+    fn retry_countdown(&self) -> Option<(u32, u32, u64, String)> {
+        let retry = self.fold.side(&self.session_id)?.retry.clone()?;
+        let started = self.retry_started.as_ref()?.1;
+        let remaining = retry.retry_delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        Some((retry.attempt, retry.max_attempts, remaining, retry.reason))
+    }
+}
+
+/// The pending question a block id names, resolved once so the callers do not
+/// each re-walk the fold.
+struct Pending {
+    input_id: String,
+    question_id: String,
+    multi: bool,
+    labels: Vec<String>,
+    questions: usize,
+}
+
+/// The winning resolution an `approvalAlreadyResolved` error carries.
+fn resolution_of(error: &MuseError) -> Option<ApprovalResolutionSummary> {
+    match error {
+        MuseError::Rpc(rpc) => rpc.data.as_ref().and_then(|data| data.resolution.clone()),
+        _ => None,
+    }
+}
+
 impl Focusable for SessionView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -1736,6 +2802,40 @@ fn position_of(text: &str, offset: usize) -> Position {
     let line = head.matches('\n').count() as u32;
     let column = head.rsplit('\n').next().unwrap_or("").encode_utf16().count() as u32;
     Position::new(line, column)
+}
+
+/// The `(commandId, text)` a captured `turn/start` was submitted with.
+///
+/// `displayText` is what the person typed and is preferred; the text parts are
+/// the fallback, joined the way the server joins them. A fresh `turn/start`'s
+/// `commandId` equals its `turnId`, which is what makes this a turn-text map.
+fn submitted_text(line: &str) -> Option<(String, String)> {
+    let frame: serde_json::Value = serde_json::from_str(line).ok()?;
+    if frame.get("method")?.as_str()? != "turn/start" {
+        return None;
+    }
+    let params = frame.get("params")?;
+    let command_id = params.get("commandId")?.as_str()?.to_owned();
+    let text = match params.get("displayText").and_then(|v| v.as_str()) {
+        Some(text) => text.to_owned(),
+        None => params
+            .get("input")?
+            .as_array()?
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+    };
+    (!text.is_empty()).then_some((command_id, text))
+}
+
+/// The `s` a count needs, so a banner never says "1 approvals".
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// `1.0M`, `200k` — a context limit at the width a menu row has for it.

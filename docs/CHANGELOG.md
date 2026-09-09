@@ -155,3 +155,206 @@ Two smaller decisions, recorded because they are deviations worth knowing:
 - **The caret popovers scroll.** `command_menu` has no height cap of its own and
   the `/` menu lists thirteen commands plus every installed skill, so the app
   caps it at 560 px and scrolls, and offers at most eight skill rows.
+
+## 2026-09-09 — Phase 4: approvals, questions, errors
+
+Everything the agent has to stop and ask about, and everything that goes wrong.
+Approval card v2 with server-minted choices, multi-stage subjects, feedback,
+badges and policy/judge resolutions, driven by a real `approval/decide`
+round-trip; the question card with headers, per-option previews, a timeout
+countdown, clarify and cancel over `userInput/*`; F2 humanized failures with
+retry and `turn/retryScheduled`; every marker kind; `session/fork`; todo and
+goal; the mandated generic-item fallback; and `--replay <capture.jsonl>`, an
+offline mode that folds a checked-in capture with no server at all. Full detail
+in `docs/04-approvals.md`.
+
+harness `main`; library work on agentic-ui `muse-support`.
+
+### Finding, and a correction to the record: `echo` is not a free provider
+
+Phase 1 recorded that `session/start { providerId: "echo" }` was free, research
+§2.4 says echo "emits one canned message, no usage", and `docs/01-transport.md`
+§6 repeated it. **All three are wrong on a machine that is signed in**, and the
+owner's review of `~/.local/share/muse/sessions/*/session.jsonl` proved it.
+
+How to read the truth out of a session log:
+
+- the `command_intake` record at the top of `session.jsonl` carries
+  `provider_id: echo` — that is the route that was *asked for*, and it is the
+  only place `echo` ever appears;
+- a later **metadata** record in the same file names what actually served the
+  turn: `provider_id: meta`, `model_id: muse-spark-1.3-contributor`;
+- `~/.local/share/muse/session-index.db` follows the **metadata** record, not the
+  intake, so the index reports `meta` for a session started as `echo`. That is
+  the number the owner counts spend from.
+
+The corroboration is in the fixtures we already had: turns routed through `echo`
+bill reasoning tokens (`fixtures/msp/transcript-echo.jsonl` carries a
+`session/tokenUsage` with `reasoningTokens: 94` — a canned string does not
+reason), carry provider response ids, and come back with varied real replies
+("Hello — what do you want to work on?", "Hello! I'm Muse Code powered by Meta
+Muse Spark…") rather than one fixed line.
+
+`--provider` picks a **route, not a bill**. Every turn on every provider is a
+real subscription turn, and the cap of five per phase covers all of them.
+
+Wording corrected in `crates/harness/src/main.rs` (module header, the
+`parse_args` comment, the scripted-run notice and `--help`),
+`crates/harness/src/session.rs` (the user-shell doc comment, which was right for
+the wrong reason), `crates/muse-client/tests/live.rs` (both the module header and
+`live_backfill_parity`'s doc comment), `docs/00-spec.md` §2.1,
+`docs/01-transport.md` §6, `docs/02-app.md` §1 and `docs/03-composer.md`.
+
+What actually costs nothing: `--replay` and `--no-connect`; and on a live server
+`session/start`, `session/userShell` (the `!` path), `approval/*`, `userInput/*`,
+`session/fork`, `session/list` and `view/page` — none of them make a model call.
+Anything that reaches `turn/start` spends a turn.
+
+### Real turns spent this phase
+
+Six, against a cap of five — **all six spent by the two previous leads**, before
+the finding above was made and while they believed `echo` was free. This lead
+spent **zero**: every screenshot and every gate in this entry came from
+`--replay` or from an offline test.
+
+| turns | prompt | run |
+|---|---|---|
+| 4 | `hello there` | four `live_echo` runs of `muse-client/tests/live.rs` |
+| 1 | `parity, please` | one `live_backfill_parity` run |
+| 1 | `Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it.` | the `userInput/answer` capture, `fixtures/msp/transcript-userinput-answer.jsonl` |
+
+The one turn that bought something irreplaceable is the third: a
+`request_user_input` request only exists when the model calls the tool, so there
+was no other way to capture the question flow. The first five bought nothing that
+`--replay` could not have produced.
+
+Both `live.rs` tests now carry a doc comment saying they spend a turn per run and
+naming the offline gate that replaces them.
+
+### Findings closed
+
+- **F2 — humanized failures.** `muse_adapter::failure::humanize(kind, message,
+  reason)`: the title from `TurnErrorKind`, the detail from `error.message`, and
+  a `reason` code turned into a sentence with the raw code kept on a second mono
+  line. One table, nine known reasons, a unit test each.
+  `resume_reconcile:orphaned_by_process_loss` reads "The turn was orphaned when
+  the session's process was lost". A code with no sentence keeps only the mono
+  line; nothing is invented.
+
+- **F3 — live vs backfill parity, and the bug it found.** The two folds
+  **disagreed**, and the disagreement was block order inside a turn. In
+  `transcript-approve.jsonl` a `userShell` item starts (log sequence 6), raises a
+  two-stage approval (sequence 9), and only completes afterwards. Live, the tool
+  card is added at `item/started` and the approval lands below it. Backfilled,
+  there is no `item/started` at all — a `view/page` serves finished items — so
+  the approval arrives first and the tool card only at its `item/completed`, and
+  the two blocks came out in opposite orders. A session read a second time did
+  not say what it said the first time.
+
+  Fixed in `MuseFold::push_block`: a block is placed by its item's own
+  `sourceRange.first.sequence`, which is the **same number** on `item/started`
+  and on `item/completed`, rather than by arrival order. `aui_protocol::Delta`
+  has no insert variant, so an out-of-order arrival is expressed as an append
+  plus the `BlockUpdated`s that rotate the tail, and every cached `Slot` past the
+  insertion point shifts with it. `remove_block` and `reindex` keep the parallel
+  order keys honest.
+
+  **The gate is offline.**
+  `muse-adapter/tests/fixtures.rs::a_live_fold_and_a_backfilled_fold_agree`
+  derives the backfill stream from every checked-in capture that carries a
+  streamed item — drop `item/started` and `item/delta`, keep `item/completed` and
+  every session-level notification, in cursor order, the shape
+  `transcript-wire.jsonl`'s `view/page` result confirms — folds both ways,
+  normalises the streaming flags and the turn metas a backfill cannot know, and
+  asserts equality. It refuses to pass if fewer than four captures exercise it.
+  `a_tool_card_that_raised_an_approval_stays_above_it_in_both_folds` pins the
+  specific regression. The live `live_backfill_parity` is kept, still `#[ignore]`d
+  and now documented as costing a turn per run; it is no longer the gate.
+
+- **F6 — plan sections.** `aui_protocol::Block::Plan` gains
+  `#[serde(default)] sections: Vec<PlanSection { label, first_item }>`;
+  `plan_card.sections(..)` draws the label as an unnumbered row before its first
+  item and the numbering keeps counting steps only. `plan::steps` returns
+  (items, sections): headings become sections, list items become steps, and a
+  heading with no items under it is dropped.
+
+- **F7 — duplicate skill names.** A skill whose name equals a client command's
+  name is hidden from the `/` menu. Muse ships `plan`, and a menu offering both
+  `/plan` the mode and `/plan` the skill — which do different things — was a trap.
+
+- **F8 — model menu labels.** The picker menu is now a floor and a ceiling rather
+  than a fixed width, and nothing in it is ever ellipsised. The floor had to be a
+  width that is actually right (360, the widest name Muse's catalog ships with
+  its context limit and two badges) rather than a token minimum, because gpui's
+  layout cannot shrink-to-fit a column of stretched rows: a row that fills its
+  parent and a parent that sizes to its rows is circular, and taffy resolves that
+  circle at the floor. `w_full` is off every row; stretch does the job.
+
+### The clarify path was verified with a synthetic capture
+
+`fixtures/msp/transcript-userinput-answer.jsonl` is a real capture of the whole
+**answer** path — the prompt, the model's `request_user_input` with two options,
+`userInput/answer { selectedLabel: "README.md" }`, `userInput/settled` with
+`outcome: "answered"`, and the reply. It cost the one turn named above and it was
+read line by line before being committed: it carries no credential, no token and
+no header — only local paths under a scratch workspace (`/private/tmp/h4meta`).
+
+**The CLARIFY path was never captured live**, and this lead did not spend a turn
+to get it. `fixtures/msp/synthetic-userinput-clarify.jsonl` was built instead:
+every line down to and including `userInput/requested` is **verbatim from the
+real capture** — the request the provider actually minted — and from the
+`userInput/clarify` command on, the lines are hand-written to the shapes in
+`msp.d.ts` (`outcome: "clarified"`, `answers: []`, a `clarification` object with
+`content` and `format`). Its `#` header says exactly which half is which, and it
+is named `synthetic-` so nobody mistakes the second half for the wire. It folds
+to `QuestionOutcome::Clarified` and renders as `phase4-clarified-*.png`. The
+answered row it produces has been seen; a live `outcome: "clarified"` has not.
+
+### Smaller things worth knowing
+
+- **Three `synthetic-*` captures had a `session/started` the schema rejected.**
+  They omitted the required `path` (and `activeTurnId`), so the frame failed to
+  deserialize and the fold silently ignored it — those captures folded with an
+  empty model, cwd and approval mode and nobody noticed, because nothing asserted
+  on them. Fields added; the three snapshots now carry the real values.
+
+- **`every_recorded_frame_round_trips` is scoped to recordings.** It asserts a
+  frame survives the typed schema *byte for byte*, which is what makes it
+  evidence about the wire. A hand-written `synthetic-*` capture is not evidence
+  about anything and cannot meet a byte-exact bar — it omits the nullable fields
+  the server always spells out. Those captures are excluded, with the reason in
+  the code; `muse-adapter`'s fixture tests cover them. The test also now skips
+  the `#` header lines, and `model/list` joined `UNTYPED_METHODS` because it
+  genuinely takes no params and `muse-client` sends it bare.
+
+- **Eight `clippy::type_complexity` errors** in `harness::transcript::Cards` were
+  fixed by naming the shapes rather than silencing the lint: `CardHandler`
+  (a block id, out), `RowHandler` (a block id and a row index), `ChooseHandler`
+  and `FeedbackToggleHandler`. The names say more than the types did.
+
+- **`cargo tree -d` shows `gpui-pre-collections v0.3.3` twice**, at the same
+  version. Not a version split, not introduced here, and no `gpui-pre` or
+  `gpui-kit` itself is duplicated — the gate holds.
+
+### Screenshots
+
+`docs/images/phase4-*.png`, 1440×869 (the window is 1440×900 including its title
+bar), light and dark. Almost all of them come from `--replay` and cost nothing:
+
+| pair | source |
+|---|---|
+| `approval-stage1`, `approval-stage2`, `approval-feedback`, `approval-resolved`, `approve` | the live `!echo hi && ls` flow and `transcript-approve.jsonl` |
+| `wire` | `transcript-wire.jsonl` — the policy denial under `denyUnmatched` |
+| `real` | `transcript-real.jsonl` |
+| `question`, `clarify` | the question card with a header and a preview open |
+| `question-timeout` | `synthetic-question-error.jsonl` — the "Auto-resolves in 1 m 59 s" pill |
+| `answered` | `--replay` of `transcript-userinput-answer.jsonl` |
+| `clarified` | `--replay` of `synthetic-userinput-clarify.jsonl` |
+| `error-retry` | `synthetic-error-retry.jsonl` — the humanized card **and** the retry-scheduled row in one shot |
+| `todo-goal` | `synthetic-todo-goal.jsonl` (hand-written; no capture carries either event) |
+| `fork`, `plan-sections`, `model-menu`, `banner` | as named |
+
+`phase4-answered-live-light.png` is the one screenshot taken against the real
+server, kept because it is the evidence that the `userInput/answer` round-trip
+happened on a real session; `phase4-answered-{light,dark}.png` are the matched
+pair replayed from the same capture.

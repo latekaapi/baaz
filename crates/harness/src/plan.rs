@@ -19,6 +19,8 @@
 //! a later Muse build drops the skill, and [`PREAMBLE_ENV`] is how to reach it
 //! without a rebuild.
 
+use aui_protocol::PlanSection;
+
 /// What plan mode prefixes the model-visible text with.
 ///
 /// The `/plan` slash form, because the probe proved the skill fires on it.
@@ -47,31 +49,44 @@ pub fn prefix(text: &str) -> String {
 /// What Accept sends once the person approves the plan.
 pub const ACCEPT_PROMPT: &str = "Implement the plan above.";
 
-/// Turn a plan reply into the steps a `Block::Plan` renders.
+/// Turn a plan reply into the steps and section labels a `Block::Plan` renders.
 ///
-/// The skill answers in markdown, and the shape it uses is headings and list
-/// items, so those are the steps. A reply with neither — the one-line plan the
-/// probe got back is exactly that — degrades to its paragraphs, because an
-/// empty plan card would be worse than a one-item one.
-pub fn steps(reply: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// The skill answers in markdown, and the shape it uses has **two** levels:
+/// headings that group the work, and list items that are the work. Folding both
+/// into one numbered list, as this used to, numbered the headings as if they
+/// were steps — "3. Prove it" is not something anybody does (finding F6). So
+/// headings become unnumbered section labels and only list items are counted.
+///
+/// A reply with neither — the one-line plan the probe got back is exactly that
+/// — degrades to its paragraphs, because an empty plan card would be worse than
+/// a one-item one. A heading with no items under it is dropped: a label with
+/// nothing to label is a heading the model wrote for itself.
+pub fn steps(reply: &str) -> (Vec<String>, Vec<PlanSection>) {
+    let mut items: Vec<String> = Vec::new();
+    let mut sections: Vec<PlanSection> = Vec::new();
     for line in reply.lines() {
         let line = line.trim();
         if let Some(rest) = heading(line) {
-            out.push(rest.to_owned());
+            // A heading replaces an earlier one that gathered no items rather
+            // than stacking on it: the later heading is the one in force.
+            sections.retain(|s: &PlanSection| s.first_item < items.len());
+            sections.push(PlanSection { label: rest.to_owned(), first_item: items.len() });
         } else if let Some(rest) = list_item(line) {
-            out.push(rest.to_owned());
+            items.push(rest.to_owned());
         }
     }
-    if out.is_empty() {
-        out = reply
+    // A trailing heading covers nothing at all.
+    sections.retain(|s| s.first_item < items.len());
+    if items.is_empty() {
+        sections.clear();
+        items = reply
             .split("\n\n")
             .map(|p| p.trim().replace('\n', " "))
             .filter(|p| !p.is_empty())
             .collect();
     }
-    out.retain(|s| !s.is_empty());
-    out
+    items.retain(|s| !s.is_empty());
+    (items, sections)
 }
 
 /// `## Step one` → `Step one`.
@@ -120,22 +135,36 @@ mod tests {
     }
 
     #[test]
-    fn headings_and_list_items_become_steps() {
-        let reply = "## Read the code\nsome prose\n\n1. Change the validator\n2) Run the tests\n- Update the docs";
+    fn headings_become_sections_and_list_items_become_the_numbered_steps() {
+        let reply = "## Read the code\nsome prose\n\n1. Change the validator\n2) Run the tests\n\n## Prove it\n- Update the docs";
+        let (items, sections) = steps(reply);
+        assert_eq!(items, vec!["Change the validator", "Run the tests", "Update the docs"]);
         assert_eq!(
-            steps(reply),
-            vec!["Read the code", "Change the validator", "Run the tests", "Update the docs"]
+            sections,
+            vec![
+                PlanSection { label: "Read the code".into(), first_item: 0 },
+                PlanSection { label: "Prove it".into(), first_item: 2 },
+            ]
         );
+    }
+
+    #[test]
+    fn a_heading_with_nothing_under_it_is_dropped() {
+        let (items, sections) = steps("## Read the code\n## Change it\n- do the thing\n## Later");
+        assert_eq!(items, vec!["do the thing"]);
+        assert_eq!(sections, vec![PlanSection { label: "Change it".into(), first_item: 0 }]);
     }
 
     #[test]
     fn a_plan_with_no_structure_falls_back_to_paragraphs() {
         let reply = "**Plan:** Print `hello` to stdout.\n\nNo file was created.";
-        assert_eq!(steps(reply), vec!["**Plan:** Print `hello` to stdout.", "No file was created."]);
+        let (items, sections) = steps(reply);
+        assert_eq!(items, vec!["**Plan:** Print `hello` to stdout.", "No file was created."]);
+        assert!(sections.is_empty());
     }
 
     #[test]
     fn a_hash_with_no_space_is_not_a_heading() {
-        assert_eq!(steps("#tag only"), vec!["#tag only"]);
+        assert_eq!(steps("#tag only").0, vec!["#tag only"]);
     }
 }

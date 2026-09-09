@@ -52,6 +52,6 @@ mod error;
 pub mod frame;
 pub mod schema;
 
-pub use client::{new_command_id, MuseClient, MuseConfig, MuseEvent, SchemaWarning};
+pub use client::{new_command_id, MuseClient, MuseConfig, MuseEvent, SchemaWarning, CAPTURE_ENV};
 pub use error::{MuseError, Result};
 pub use frame::Frame;

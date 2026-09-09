@@ -80,8 +80,14 @@ crates/harness        the gpui app.                          Entities, views, in
   (`limit: 1000`), splice, discard overlap.
 - Child exit → `MuseEvent::Closed`; the app respawns, `initialize`, `session/resume` with the
   last observed `viewCursor` (history mode `none`) and shows a banner while reconnecting.
-- Provider is per session: tests use `session/start { providerId: "echo" }`, which is free;
-  the app uses `"meta"`.
+- Provider is per session: tests use `session/start { providerId: "echo" }`; the app uses
+  `"meta"`. **`echo` is not free** (corrected in phase 4): on a signed-in machine the session
+  log records `provider_id: echo` at intake and then a metadata record naming
+  `provider_id: meta, model_id: muse-spark-1.3-contributor`, and the turn bills reasoning
+  tokens. `--provider` picks a route, not a bill; the cap of five real turns per phase covers
+  every provider. Only `--replay` and `--no-connect` cost nothing — plus `session/start`,
+  `session/userShell`, `session/fork` and `approval/*`, which make no model call. See
+  `01-transport.md` §6.
 
 ### 2.2 muse-adapter
 

@@ -1,0 +1,135 @@
+[
+  {
+    "sessionId": "synthetic-todo-goal",
+    "session": {
+      "id": "synthetic-todo-goal",
+      "agent": "muse",
+      "model": "muse-echo",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-1",
+          "text": "Tighten address validation for CA and GB.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "goal:synthetic-todo-goal",
+          "blocks": [
+            {
+              "kind": "goal",
+              "objective": "Ship the checkout fix",
+              "status": "wrapping up",
+              "percent_complete": 120.0,
+              "current_work": "Re-running the focused tests",
+              "next_work": "Summarise the change"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "todo:synthetic-todo-goal",
+          "blocks": [
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "Read validators and the form",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Branch validation per country",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Add CA and GB tests",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Run the focused tests",
+                  "state": "running",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Summarise the change",
+                  "state": "pending",
+                  "elapsed_ms": null
+                }
+              ]
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Done: CA and GB now validate, and the tests cover both.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-echo",
+            "duration_ms": 41000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": {
+        "currentWork": "Re-running the focused tests",
+        "nextWork": "Summarise the change",
+        "objective": "Ship the checkout fix",
+        "percentComplete": 120.0,
+        "status": "wrapping up"
+      },
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:syn:11",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

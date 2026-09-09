@@ -47,6 +47,16 @@ impl SessionEntry {
         }
     }
 
+    /// The one row a `--replay` window shows: the capture it is reading.
+    ///
+    /// It is labelled by the file rather than by the index, because a replayed
+    /// session is not one this host ever ran and the index has nothing to say
+    /// about it.
+    pub fn replayed(session_id: &str, capture: &std::path::Path) -> Self {
+        let label = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
+        Self { id: session_id.to_owned(), label, updated: Local::now(), running: false, turns: 0 }
+    }
+
     /// The row's state dot: running sessions pulse, everything else is idle.
     fn state(&self) -> AgentState {
         if self.running {

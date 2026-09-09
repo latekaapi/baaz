@@ -20,8 +20,16 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 cargo run -p harness                                  # workspace = $PWD, provider = meta
 cargo run -p harness -- --workspace ~/code/thing      # a different workspace
-HARNESS_PROVIDER=echo cargo run -p harness            # the free provider
+HARNESS_PROVIDER=echo cargo run -p harness            # routed through echo — still a real turn
+cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 ```
+
+> **`echo` is not a free provider.** On a signed-in machine the session log
+> records `provider_id: echo` at intake and then a metadata record naming
+> `provider_id: meta, model_id: muse-spark-1.3-contributor`; the turn bills
+> reasoning tokens and answers with real text. `--provider` picks a route, not a
+> bill. Only `--replay` and `--no-connect` cost nothing — plus `session/start`
+> and `session/userShell`, which make no model call. See `01-transport.md` §6.
 
 | flag | meaning |
 |---|---|
@@ -32,10 +40,11 @@ HARNESS_PROVIDER=echo cargo run -p harness            # the free provider
 | `--screenshot <png>` | render the window off-screen once it settles, save a 1× PNG and quit. |
 | `--screenshot-delay <ms>` | how long to wait first (default 600). |
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
+| `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
 
 | environment | meaning |
 |---|---|
-| `HARNESS_PROVIDER=echo` | the free provider, for demos and tests. The spec caps real (`meta`) turns at five per phase. |
+| `HARNESS_PROVIDER=echo` | route turns through `echo`. **Not free** — see the note above; it is simply the cheapest route and the one scripted runs default to. The spec caps real turns at five per phase and every provider's turns count. |
 | `HARNESS_MUSE=<path>` | the `muse` binary to drive; `muse` on `PATH` otherwise. |
 
 The window is 1440×900 and titled **Harness**. It boots exactly as
