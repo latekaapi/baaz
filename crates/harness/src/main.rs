@@ -340,6 +340,27 @@ fn main() {
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("open the harness window");
+        // Closing the window — or quitting the app — with a tier probe still
+        // driving the `muse` TUI would orphan it, the way quitting
+        // mid-screenshot once did: the child is its own session leader, so
+        // the `Pty` drop that would SIGKILL it never runs. Same kill plus
+        // bounded wait as the screenshot path, on both hooks: macOS does not
+        // quit when the last window closes, so the window hook covers the red
+        // dot and the app hook covers Cmd+Q and `cx.quit()`. Each rerun is a
+        // no-op once the probes are gone, and the quit proceeds when the wait
+        // expires.
+        handle.update(cx, |_, window, cx| {
+            window.on_window_should_close(cx, |_, _| {
+                crate::tier::kill_live_probes();
+                crate::tier::wait_for_probes_gone(Duration::from_secs(3));
+                true
+            });
+        }).ok();
+        cx.on_app_quit(|_| async {
+            crate::tier::kill_live_probes();
+            crate::tier::wait_for_probes_gone(Duration::from_secs(3));
+        })
+        .detach();
         match screenshot {
             Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, cx),
             None => cx.activate(true),

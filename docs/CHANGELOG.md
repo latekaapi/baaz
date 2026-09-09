@@ -1,5 +1,19 @@
 # Harness changelog
 
+## 2026-09-09 — window-close probe kill (task B)
+
+The tier-probe-leak fix below closed the `--screenshot` and `--print-tier`
+exits but left the interactive ones: closing the window or quitting mid-probe
+ran no hook, so the `muse` TUI child — its own session leader — was orphaned
+(the leak entry names this as its residual). `main.rs` now registers both
+hooks after opening the window: `on_window_should_close` for the red dot
+(macOS does not quit when the last window closes) and `cx.on_app_quit` for
+Cmd+Q, Dock quit and `cx.quit()`, each calling the same `kill_live_probes`
+plus bounded 3 s `wait_for_probes_gone` pair as the screenshot path. Both are
+idempotent and the quit proceeds when the wait expires. Verified by reading
+the hook path against the gpui-pre 0.3.3 sources; no live probe was run, per
+the spend rule.
+
 ## 2026-09-09 — effort picker offers max (task A)
 
 Muse 1.1.1 added `max` to the closed MSP `ReasoningEffort` vocabulary between

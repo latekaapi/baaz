@@ -75,7 +75,7 @@ The probe's child is SIGKILLed on every exit — the TUI ignores SIGTERM, which
 once left two orphans alive for six hours. Its pid is written to
 `tier-probe/probe.pid` so the next probe can sweep a child orphaned by a
 force-quit (the sweep checks the command line still names the probe workspace,
-never the pid alone).
+never the pid alone). Closing the window or quitting mid-probe runs the same kill plus a bounded 3 s wait, so the interactive exit no longer orphans the child either. The next-probe sweep stays as the backstop for force-quits, which run no exit hook at all.
 
 ### Two things the card does that a reasonable person would not expect
 
