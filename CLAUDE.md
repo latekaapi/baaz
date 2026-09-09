@@ -1,6 +1,6 @@
 # Harness — project instructions
 
-A macOS gpui chat interface to Meta's Muse Code agent (`muse` CLI 1.0.3; `muse serve` =
+A macOS gpui chat interface to Meta's Muse Code agent (`muse` CLI 1.1.1; `muse serve` =
 "MSP", JSON-RPC 2.0 as NDJSON over stdio), built on the `aui` component library at
 `/Users/latekaapi/Projects/agentic-ui` by **path dependency** (gpui-pre 0.3.3 + gpui-kit 0.6).
 The first slice — a feature-complete chat app — is finished (five phases, 2026-09-08/09).

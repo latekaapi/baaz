@@ -294,7 +294,12 @@ fn open_enums_tolerate_unknown_server_values() {
 #[test]
 fn closed_enums_reject_unknown_values() {
     assert!(serde_json::from_value::<ApprovalMode>(Value::from("yolo")).is_err());
-    assert!(serde_json::from_value::<ReasoningEffort>(Value::from("max")).is_err());
+    assert!(serde_json::from_value::<ReasoningEffort>(Value::from("turbo")).is_err());
+    // `max` joined the closed tier vocabulary in muse 1.1.1, between `xhigh` and `ultra`.
+    assert_eq!(
+        serde_json::from_value::<ReasoningEffort>(Value::from("max")).unwrap(),
+        ReasoningEffort::Max
+    );
     assert!(serde_json::from_value::<IfBusy>(Value::from("later")).is_err());
     assert!(serde_json::from_value::<UserInputSelectionMode>(Value::from("many")).is_err());
     assert!(serde_json::from_value::<ViewPageDirection>(Value::from("sideways")).is_err());
@@ -364,9 +369,9 @@ fn constructors_produce_the_documented_shapes() {
 
 #[test]
 fn index_constants_match_the_published_schema() {
-    assert_eq!(MSP_METHODS.len(), 31);
-    assert_eq!(MSP_NOTIFICATIONS.len(), 23);
-    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 36);
+    assert_eq!(MSP_METHODS.len(), 33);
+    assert_eq!(MSP_NOTIFICATIONS.len(), 24);
+    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 37);
     assert!(SCHEMA_FINGERPRINT.starts_with("sha256:"));
     // `session/started` is emitted by the binary but absent from the published index.
     assert!(!MSP_NOTIFICATIONS.contains(&"session/started"));

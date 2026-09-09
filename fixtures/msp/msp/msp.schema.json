@@ -706,6 +706,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "userInputDialogs": {
+          "description": "Whether this client can render a `userInput/request` dialog and answer\nit (SS5.10). **Absent means capable** (D-047): a client that predates\nthe member keeps today's contract, so no existing client changes its\nhandshake. `false` makes the host withhold `userInput/request` toward\nthis client — the D-027 additive-optional-field + withheld-method\nconvention.\n\nDeliberately NOT a `requestedCapabilities` name: that registry records\noperations a host GRANTS (SS1.4.4), and whether a client can draw a\ndialog is a fact about the client, never a privilege the host hands\nout.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -922,6 +926,10 @@
           "description": "Approval identity on SS5 errors.",
           "type": "string"
         },
+        "availability": {
+          "description": "The stored output's availability on `outputUnavailable` — the durable\n`ToolOutputAvailability` value, read-time-derived when the durable\nrecord still says `available` (SS4.5.5; spec 208 FM-008).",
+          "type": "string"
+        },
         "capability": {
           "$ref": "#/$defs/CapabilityName",
           "description": "The missing capability, on `capabilityRequired` errors. Typed on the\ngrantable registry, so `rawLog` is outside the v1 domain and joins it\nas an additive open-enum extension when SS6 un-defers (TEST-009)."
@@ -958,6 +966,10 @@
             "null"
           ]
         },
+        "itemId": {
+          "description": "The item whose stored output was requested, on the `item/readOutput`\narms (`notFound`, `outputUnavailable`, and the misaligned-offset\n`invalidParams`).",
+          "type": "string"
+        },
         "kind": {
           "$ref": "#/$defs/ErrorKind",
           "description": "The stable camelCase category clients branch on."
@@ -976,6 +988,10 @@
         "limitBytes": {
           "description": "The exceeded byte limit, on `inputTooLarge` errors.",
           "type": "integer"
+        },
+        "outputRef": {
+          "description": "The requested `outputRef.id`, on the same `item/readOutput` arms.",
+          "type": "string"
         },
         "paths": {
           "description": "Candidate retained paths on `sessionAmbiguous`.",
@@ -1046,6 +1062,7 @@
         "commandRejected",
         "backpressured",
         "viewTruncated",
+        "outputUnavailable",
         "boundaryPruned",
         "boundaryUnusable",
         "noBoundary",
@@ -1534,7 +1551,10 @@
         },
         "turnId": {
           "description": "The owning turn (== the submitting `commandId` for fresh turns, tdd\nSS3.1.4). `null` only for `userShell` — the one kind outside a turn\n(tdd SS4.5.6).",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "usage": {
           "$ref": "#/$defs/TokenUsage",
@@ -1632,6 +1652,84 @@
       ],
       "type": "string",
       "x-msp-openness": "open"
+    },
+    "ItemReadOutputEncoding": {
+      "description": "The `item/readOutput` content encoding (tdd SS4.7.4). Closed: text media\nis ALWAYS `utf8` and binary media `base64`; a third value would change\nthe client's decode contract.",
+      "enum": [
+        "utf8",
+        "base64"
+      ],
+      "type": "string",
+      "x-msp-openness": "closed"
+    },
+    "ItemReadOutputParams": {
+      "description": "`item/readOutput` params (tdd SS4.7.4): byte-ranged fetch of stored full\noutput that the view truncated — the `outputRef` fetch path SS3.9 and\nSS4.5.5 owe. Read-only; works on loaded and unloaded sessions; no lease.",
+      "properties": {
+        "itemId": {
+          "description": "The item whose stored output is fetched.",
+          "type": "string"
+        },
+        "lengthBytes": {
+          "description": "STORED bytes requested; default and max 6 MiB (tdd SS4.7.4). A value\nabove the max is served at the max.",
+          "type": "integer"
+        },
+        "offsetBytes": {
+          "description": "STORED-byte offset to start from; 0 when omitted. STORED bytes are a\nproperty of the output, not of a transport (tdd SS4.7.4).",
+          "type": "integer"
+        },
+        "outputRef": {
+          "description": "The `outputRef.id` from the item (never the `uri`; the uri is\ndisplay/provenance).",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "The session the item belongs to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "outputRef",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "ItemReadOutputResult": {
+      "description": "`item/readOutput` result (tdd SS4.7.4): one stored-byte page.",
+      "properties": {
+        "byteLen": {
+          "description": "STORED bytes served in THIS response (not the output's total; that is\n`outputRef.byteLen` on the item). The next page's `offsetBytes` is\n`offsetBytes + byteLen` — short-serving and advancing are separate,\nso paging never skips or double-reads a byte (tdd SS4.7.4).",
+          "type": "integer"
+        },
+        "content": {
+          "description": "The served range, decoded per `encoding`.",
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/ItemReadOutputEncoding",
+          "description": "How `content` encodes the stored bytes."
+        },
+        "eof": {
+          "description": "`true` when this range reached the end of the stored output.",
+          "type": "boolean"
+        },
+        "mediaType": {
+          "description": "The stored output's media type (e.g. `text/plain`).",
+          "type": "string"
+        },
+        "offsetBytes": {
+          "description": "The STORED-byte offset this response actually served from.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "byteLen",
+        "content",
+        "encoding",
+        "eof",
+        "mediaType",
+        "offsetBytes"
+      ],
+      "type": "object"
     },
     "ItemStartedParams": {
       "description": "`item/started` params (tdd SS4.3): a new item opened on the transcript.\n`sourceRange` is absent when the item opens on an ephemeral record (the\ndelta-streamed kinds); the item's authoritative open is re-stated by its\ndurable-sourced `item/completed` (tdd SS4.2).",
@@ -2171,6 +2269,7 @@
         "medium",
         "high",
         "xhigh",
+        "max",
         "ultra"
       ],
       "type": "string",
@@ -2480,7 +2579,7 @@
       "type": "object"
     },
     "SessionConfig": {
-      "description": "`session/start`'s reserved `config` object (tdd SS2.5.1): no members in\nv1.\n\nSS2.5.1 also ratifies \"unknown keys are rejected, not ignored\". That is\n#22785 E6b, ruled and NOT exported: spec 206 INV-015 forbids it\ncategorically and TEST-024 enforces that. The model carries the opt-in\nmechanism; this type does not opt in, so the published surface is\nunchanged. See [#23456](https://github.com/mslsrc/tbh/issues/23456).",
+      "description": "`session/start`'s reserved `config` object (tdd SS2.5.1): no members in\nv1.\n\nUnknown keys are ignored on the wire, never rejected (tdd SS1.5.4, spec\n206 INV-015; D-052 resolving\n[#23456](https://github.com/mslsrc/tbh/issues/23456)): the live decoder\nis D-042's tolerant path, and TEST-024 keeps every exported bundle free\nof `additionalProperties: false`. The Rust typed model's\n`deny_unknown_fields` is internal and never exported — the #22785 E6b\nclosedness export applies nowhere, and the `x-msp-closed` opt-in\nmechanism stays inert. Typo detection belongs to the #210 conformance\nharness as a test posture, not the protocol.",
       "properties": {},
       "type": "object"
     },
@@ -2745,6 +2844,48 @@
       ],
       "type": "object"
     },
+    "SessionModelRouteUnservedParams": {
+      "description": "`session/modelRouteUnserved` params (#25603, ADR 25603 D1, spec 5469\nAmendment 16): an accepted `login.credential_update` installed a provider\nthat cannot serve the session's STANDING model route. Disclosure only —\nthe standing selection is unchanged (no `session/modelChanged` fires) and\nthe repair path is a routable `session/setModel`. Folded from the durable\n`runtime.provider_reconfigure.standing_route_unserved` record; additive —\nclients that predate it skip the unknown method.",
+      "properties": {
+        "commandId": {
+          "description": "The command whose accepted swap installed the provider.",
+          "type": "string"
+        },
+        "installedProviderId": {
+          "description": "The provider id the swap installed.",
+          "type": "string"
+        },
+        "modelId": {
+          "description": "The standing (still bound, now unroutable) model.",
+          "type": "string"
+        },
+        "providerId": {
+          "description": "The standing model's provider; `null` when the selection names none.",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "The owning session.",
+          "type": "string"
+        },
+        "sourceRange": {
+          "$ref": "#/$defs/SourceRange",
+          "description": "The durable records this event folded from."
+        },
+        "viewCursor": {
+          "description": "Opaque, strictly monotonic view cursor (tdd SS4.1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commandId",
+        "installedProviderId",
+        "modelId",
+        "sessionId",
+        "sourceRange",
+        "viewCursor"
+      ],
+      "type": "object"
+    },
     "SessionReadParams": {
       "description": "`session/read` params (tdd SS2.5.5): read one stored session **without\nattaching** — no writer lease, no load, no subscription, no\n`SessionResumed` record.",
       "properties": {
@@ -2845,7 +2986,7 @@
           "description": "The loaded session."
         },
         "viewCursor": {
-          "description": "The session view head; the connection is subscribed after it.",
+          "description": "The session view head; the connection is subscribed after it —\nexcept on a still-loaded session a prior `view/unsubscribe` detached,\nwhere resume never re-attaches (spec 208 FR-002a) and live re-attach\nis `view/subscribe` (SS4.7.1).",
           "type": "string"
         }
       },
@@ -3743,7 +3884,8 @@
         "workflowLaunchError",
         "environmentError",
         "modelError",
-        "launchError"
+        "launchError",
+        "authRequired"
       ],
       "type": "string",
       "x-msp-openness": "open"
@@ -4822,6 +4964,36 @@
       ],
       "type": "object"
     },
+    "ViewSubscribeParams": {
+      "description": "`view/subscribe` params (tdd SS4.7.1): attach this connection's live view\nsubscription for a session at an explicit cursor — the fine-grained\ncounterpart of the SS2 auto-subscribe, and the gap-free re-attachment\npath after `view/unsubscribe`. It never loads a session, takes no lease,\nwrites nothing.",
+      "properties": {
+        "after": {
+          "description": "Resume cursor. When present, the server replays `(after, head]` as\nordinary view notifications before any live event — one gapless\ncursor sequence. Omitted means \"from now\": no historical replay\n(tdd SS4.7.1).",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "The session to follow.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "ViewSubscribeResult": {
+      "description": "`view/subscribe` result (tdd SS4.7.1).",
+      "properties": {
+        "viewCursor": {
+          "description": "The view head at subscribe time; the client knows it is live once\ncursors pass it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "viewCursor"
+      ],
+      "type": "object"
+    },
     "ViewUnsubscribeParams": {
       "description": "`view/unsubscribe` params (tdd SS4.7.2): remove this connection from the\nsession's view subscription set — the protocol's single unsubscribe\noperation, at the altitude that owns subscriptions (tdd SS2.5.6 points\nhere). It does not unload the session; unloading is the idle policy\n(tdd SS2.8).",
       "properties": {
@@ -5015,6 +5187,11 @@
       "retryable": false
     },
     {
+      "code": -32041,
+      "kind": "outputUnavailable",
+      "retryable": false
+    },
+    {
       "code": -32042,
       "kind": "boundaryPruned",
       "overrideKinds": [
@@ -5090,6 +5267,15 @@
       },
       "result": {
         "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "item/readOutput": {
+      "description": "Byte-ranged read of stored full output the view truncated; works on loaded and unloaded sessions and takes no lease (SS4.7.4).",
+      "params": {
+        "$ref": "#/$defs/ItemReadOutputParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ItemReadOutputResult"
       }
     },
     "model/list": {
@@ -5335,6 +5521,15 @@
         "$ref": "#/$defs/ViewPageResult"
       }
     },
+    "view/subscribe": {
+      "description": "Attaches this connection's live view subscription for a session at an explicit cursor, replaying `(after, head]` before any live event; the re-attach path after `view/unsubscribe` (SS4.7.1).",
+      "params": {
+        "$ref": "#/$defs/ViewSubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ViewSubscribeResult"
+      }
+    },
     "view/unsubscribe": {
       "description": "Removes this connection from the session's view subscription set; does not unload the session (SS4.7.2).",
       "params": {
@@ -5419,6 +5614,12 @@
       "description": "A durable model selection took effect (SS4.6.1).",
       "params": {
         "$ref": "#/$defs/SessionModelChangedParams"
+      }
+    },
+    "session/modelRouteUnserved": {
+      "description": "An accepted login credential update installed a provider that cannot serve the session's standing model route; the standing selection is unchanged and a routable session/setModel repairs it (#25603, spec 5469 Amendment 16).",
+      "params": {
+        "$ref": "#/$defs/SessionModelRouteUnservedParams"
       }
     },
     "session/todoListChanged": {
