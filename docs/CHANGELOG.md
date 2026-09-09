@@ -1,5 +1,41 @@
 # Harness changelog
 
+## 2026-09-09 — Task C — "Show full output" for truncated tool output
+
+muse 1.1.1 keeps the full bytes of a truncated tool/user-shell output under an
+`outputRef`, fetchable with `item/readOutput` (`docs/10-msp-1.1.1-diff.md`).
+The fold now records that handle: a `toolCall`/`userShell` item completing
+with `truncated: true` and an `outputRef` is kept in a per-session
+`itemId → OutputRef` map on the fold (`MuseFold::stored_output`), keyed by the
+id its `ToolCall` block renders as. The map is not part of the replay
+snapshot, so no existing snapshot changed.
+
+The affordance lives in the existing card's own action slot — no library
+change. The tool card's fold row already emits `ToolCardIntent::Unfold`, so on
+a card whose item truncated with an `outputRef`, that intent is "Show full
+output": the app pages `item/readOutput` on a background task (02-app §3),
+concatenates `utf8` pages (decoding `base64` binary pages first) up to a 2 MiB
+cap, and replaces the card's body on the server's result (D4 — nothing is
+optimistic). Past the cap the body ends with "…truncated at 2 MiB". A second
+press mid-fetch is ignored; a failed fetch reports its banner and keeps the
+truncated body; a replayed capture refuses the fetch read-only like every
+other command. The row's label stays the library's ("N more lines") — the
+library owns the card's text.
+
+No capture carried an `outputRef`, so `fixtures/msp/synthetic-readoutput.jsonl`
+is new: every `<-- ` line is hand-written to `msp.d.ts` (a completed `bash`
+tool call with ten visible lines, `truncated: true` and an available
+`outputRef`); only the item envelope mirrors the real bash item in
+`transcript-real.jsonl`. It folds to a checked-in replay snapshot, and
+`docs/images/improve-full-output-dark.png` replays it. Covered by a fold
+integration test (`stored_output` keeps `out-syn-1`) and unit tests for page
+concat, base64 decode, and the empty case in `full_output.rs`.
+
+Compile note: the shared `agentic-ui` checkout already carries sibling Task A's
+`effort-max` branch (`ReasoningEffort::Max`), so two exhaustive matches gained
+one-line `Max` arms (`effort_wire`, `effort_detail`) to keep this branch
+building. The picker tiers themselves are Task A's change, not this one's.
+
 ## 2026-09-09 — tier probe leak
 
 The billing probe orphaned its `muse` TUI. The probe runs on a background

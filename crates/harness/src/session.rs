@@ -71,8 +71,8 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
-use crate::transcript::{self, Cards, Folds, PlanAction};
-use crate::{files, history, images, plan, skills};
+use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
+use crate::{files, full_output, history, images, plan, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock.
 const TICK: Duration = Duration::from_millis(250);
@@ -298,6 +298,11 @@ pub struct SessionView {
     unqueueing: HashMap<String, Unqueue>,
     /// Pins the context meter's breakdown open, for a scripted capture.
     meter_open: bool,
+    /// "Show full output" fetches by tool block id: what the server's stored
+    /// bytes came back as. The fold keeps the fetch handle (`outputRef`); this
+    /// keeps the result, so the card renders fetched lines without the fold
+    /// ever changing.
+    full_outputs: HashMap<String, full_output::Fetch>,
     /// A synthetic `session/contextUsage`, for a scripted capture of a pressure
     /// state the echo provider cannot reach.
     fake_context: Option<ContextUsage>,
@@ -380,6 +385,7 @@ impl SessionView {
             workspace_key,
             unqueueing: HashMap::new(),
             meter_open: false,
+            full_outputs: HashMap::new(),
             fake_context: None,
             focus: cx.focus_handle(),
             tasks: Vec::new(),
@@ -1776,6 +1782,30 @@ impl SessionView {
         if session.turns.is_empty() {
             return empty(self, window, cx);
         }
+        // Which tool cards the server truncated with an `outputRef` to show
+        // for it, and what a fetch already returned. The fold owns the fetch
+        // handle; this view owns the result.
+        let mut full_output = HashMap::new();
+        if let Some(session) = self.fold.session(&self.session_id) {
+            for turn in &session.turns {
+                for block in turn.blocks() {
+                    if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } =
+                        block
+                    {
+                        if self.fold.stored_output(&self.session_id, id).is_some() {
+                            let state = match self.full_outputs.get(id) {
+                                Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
+                                Some(full_output::Fetch::Ready { lines, capped }) => {
+                                    FullOutputState::Ready { lines: lines.clone(), capped: *capped }
+                                }
+                                None => FullOutputState::Idle,
+                            };
+                            full_output.insert(id.clone(), FullOutput { fetchable: true, state });
+                        }
+                    }
+                }
+            }
+        }
         let folds = Folds {
             toggled: self.toggled.clone(),
             toggle: {
@@ -1801,6 +1831,15 @@ impl SessionView {
             cards: Some(self.card_intents(window, cx)),
             titles: self.titles.clone(),
             at_rest: self.at_rest,
+            full_output,
+            show_full_output: {
+                let show = cx.listener(|this: &mut Self, id: &String, _, cx| {
+                    this.show_full_output(id.clone(), cx);
+                });
+                Some(Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                    show(&id, window, cx)
+                }))
+            },
         };
         let last = session.turns.len().saturating_sub(1);
         let mut list = div()
@@ -2716,6 +2755,50 @@ impl SessionView {
             .map(str::to_owned)
     }
 
+    // ---------------------------------------------------------- full output
+
+    /// "Show full output" on a truncated tool card: page `item/readOutput` on
+    /// a background task (02-app §3 — a page can block) and replace the card's
+    /// body on the server's result (D4). A second press while pages are still
+    /// arriving does nothing; a failed fetch reports its banner and leaves the
+    /// truncated body alone.
+    pub fn show_full_output(&mut self, block_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.wire_client(cx) else { return };
+        let Some(output_ref) = self.fold.stored_output(&self.session_id, &block_id).cloned()
+        else {
+            return;
+        };
+        if matches!(self.full_outputs.get(&block_id), Some(full_output::Fetch::Fetching)) {
+            return;
+        }
+        self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
+        cx.notify();
+        let session_id = self.session_id.clone();
+        let output_ref = output_ref.id.clone();
+        let fetch_id = block_id.clone();
+        // Every MSP request can block, so the pages run here and the card is
+        // replaced below, on the server's result.
+        let call = cx.background_spawn(async move {
+            full_output::fetch_full_output(&client, &session_id, &fetch_id, &output_ref)
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(fetched) => {
+                    this.full_outputs.insert(
+                        block_id,
+                        full_output::Fetch::Ready { lines: fetched.lines, capped: fetched.capped },
+                    );
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.full_outputs.remove(&block_id);
+                    this.report(&error, cx);
+                }
+            });
+        }));
+    }
+
     // ----------------------------------------------------------------- retry
 
     /// "Retry" on an error card: resend the failed turn's own input.
@@ -3043,6 +3126,7 @@ fn effort_wire(effort: ReasoningEffort) -> muse_client::schema::ReasoningEffort 
         ReasoningEffort::Medium => Wire::Medium,
         ReasoningEffort::High => Wire::High,
         ReasoningEffort::Xhigh => Wire::Xhigh,
+        ReasoningEffort::Max => Wire::Max,
         ReasoningEffort::Ultra => Wire::Ultra,
     }
 }

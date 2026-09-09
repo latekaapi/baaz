@@ -457,3 +457,27 @@ fn a_tool_card_that_raised_an_approval_stays_above_it_in_both_folds() {
     assert_eq!(live, vec!["tool", "approval"], "the live fold lost the log's order");
     assert_eq!(backfill, live, "the backfilled fold ordered the turn differently");
 }
+
+/// A truncated tool item keeps its `outputRef` for an `item/readOutput` fetch.
+///
+/// `synthetic-readoutput.jsonl` is the only capture that truncates: its `bash`
+/// item completes with `truncated: true` and an `outputRef`, and the fold must
+/// record that handle under the item's id — the id its `ToolCall` block
+/// renders as — while an untruncated item records nothing.
+#[test]
+fn a_truncated_tool_item_keeps_its_output_ref() {
+    let fold = replay(&fixtures_dir().join("synthetic-readoutput.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let stored = fold.stored_output(&id, "i-syn-bash-1").expect("truncated item keeps its outputRef");
+    assert_eq!(stored.id, "out-syn-1");
+    // The visible output is truncated, but the card still rendered: the fold
+    // records the handle without changing the transcript.
+    let session = fold.session(&id).expect("session exists");
+    let tools = session
+        .turns
+        .iter()
+        .flat_map(|turn| turn.blocks())
+        .filter(|block| matches!(block, aui_protocol::Block::ToolCall { .. }))
+        .count();
+    assert_eq!(tools, 1, "the truncated tool item folded to no tool card");
+}
