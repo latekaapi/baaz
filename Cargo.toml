@@ -21,6 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 image = "0.25"
 base64 = "0.22"
 ignore = "0.4"
+libc = "0.2"
 
 # gpui, pinned to the exact version agentic-ui resolves, so `cargo tree -d` shows
 # one gpui-pre and one gpui-kit here and the two repositories build the same

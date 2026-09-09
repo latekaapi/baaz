@@ -48,6 +48,8 @@ mod session;
 mod shot;
 mod sidebar;
 mod skills;
+mod store;
+mod tier;
 mod transcript;
 
 use std::path::PathBuf;
@@ -134,6 +136,18 @@ pub struct Args {
     /// | `retry` | retry the newest failed turn |
     /// | `wait:<ms>` | let the wire catch up before the next step |
     pub steps: Vec<String>,
+    /// `--tier subscription|payg|unknown`: skip the billing probe and pretend
+    /// it said this.
+    ///
+    /// The probe drives the `muse` TUI in a pseudo-terminal, which takes
+    /// seconds and depends on which login the machine is holding — neither of
+    /// which a reproducible capture of the pay-as-you-go banner can live with.
+    /// It fakes nothing else: the footer row, the banner and `/status` all read
+    /// the same [`tier::Tier`] the real probe returns.
+    pub tier: Option<tier::Tier>,
+    /// `--print-tier`: run the billing probe, print what it found and exit,
+    /// without opening a window. Costs nothing.
+    pub print_tier: bool,
 }
 
 fn parse_args() -> Args {
@@ -155,6 +169,8 @@ fn parse_args() -> Args {
         offline: false,
         replay: None,
         steps: Vec::new(),
+        tier: None,
+        print_tier: false,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -190,6 +206,21 @@ fn parse_args() -> Args {
                 let value = args.next().unwrap_or_else(|| usage("--steps needs `;`-separated steps"));
                 out.steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
             }
+            "--tier" => {
+                let value = args.next().unwrap_or_default();
+                out.tier = Some(match value.as_str() {
+                    "subscription" => tier::Tier::Subscription {
+                        plan: "Muse Code High Usage".into(),
+                        current_pct: Some(2),
+                        weekly_pct: Some(2),
+                        resets: vec!["Resets at 3:00 PM".into(), "Resets Monday".into()],
+                    },
+                    "payg" => tier::Tier::PayAsYouGo,
+                    "unknown" => tier::Tier::Unavailable("scripted".into()),
+                    other => usage(&format!("--tier takes subscription|payg|unknown, not `{other}`")),
+                });
+            }
+            "--print-tier" => out.print_tier = true,
             "--no-connect" => out.offline = true,
             "--replay" => {
                 let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
@@ -225,7 +256,8 @@ fn usage(err: &str) -> ! {
         "usage: harness [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
          \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
          \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\
-         \x20              [--replay <capture.jsonl>]\n\n\
+         \x20              [--replay <capture.jsonl>] [--tier subscription|payg|unknown]\n\
+         \x20              [--print-tier]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing."
@@ -243,6 +275,11 @@ fn shellexpand(path: &str) -> String {
 
 fn main() {
     let args = parse_args();
+    // The billing probe with no window: it drives the `muse` TUI in a pty,
+    // prints the plan and leaves. Nothing here needs gpui.
+    if args.print_tier {
+        tier::print_and_exit(&args.program);
+    }
     let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
     // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
     gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {

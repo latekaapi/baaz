@@ -49,7 +49,8 @@ use crate::auth::{self, Identity, LoginEvent};
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays};
-use crate::session::{SessionEvent, SessionView};
+use crate::session::{SessionEvent, SessionView, TierBanner};
+use crate::tier::{self, Tier};
 use crate::sidebar::{self, SessionEntry};
 use crate::{files, skills, Args};
 
@@ -200,6 +201,15 @@ pub struct Harness {
     focus_dialog: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
     focus_composer: bool,
+    /// What the billing probe said, or `None` while it has not said it yet
+    /// (spec §3.2, Phase 5 A1). A probe that failed is
+    /// [`Tier::Unavailable`], never `None`.
+    tier: Option<Tier>,
+    /// A probe is in flight; a second one is not started on top of it.
+    tier_probing: bool,
+    /// "Send anyway" was pressed. Once per app run, deliberately: a person who
+    /// accepted the bill this morning should be asked again tomorrow.
+    send_anyway: bool,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -223,9 +233,16 @@ impl Harness {
             focus_root: cx.focus_handle(),
             focus_dialog: cx.focus_handle(),
             focus_composer: true,
+            tier: None,
+            tier_probing: false,
+            send_anyway: false,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
+        // `--tier` is a scripted answer to a probe that has not been run, and
+        // it applies to every mode — including `--replay`, which is how the
+        // banner is captured for nothing.
+        this.tier = this.args.tier.clone();
         if this.args.replay.is_some() {
             // `--replay`: a capture, folded, with no child and no credential.
             // The shell is the point — the transcript is what is being looked
@@ -411,6 +428,9 @@ impl Harness {
                 };
                 if matches!(this.auth, Auth::SignedIn(_)) {
                     this.load_sessions(cx);
+                    // A fresh login has a fresh `auth.json`, so the cache
+                    // misses and this is also the re-probe a login asks for.
+                    this.probe_tier(false, cx);
                 }
                 cx.notify();
             });
@@ -520,6 +540,78 @@ impl Harness {
                 cx.notify();
             });
         }));
+    }
+
+    // ---------------------------------------------------------- billing tier
+
+    /// Find out what this login is entitled to (Phase 5 A1,
+    /// `docs/06-billing.md`).
+    ///
+    /// The cache answers the ordinary boot; a probe only runs when `auth.json`
+    /// has changed since the cached answer was taken, or when `force` says the
+    /// person asked. **A probe that fails never stops the app**: it becomes
+    /// [`Tier::Unavailable`], which draws a quiet banner and blocks nothing.
+    fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
+        // `--tier` fakes the probe for a screenshot, and nothing else.
+        if let Some(faked) = self.args.tier.clone() {
+            self.tier = Some(faked);
+            self.push_tier(cx);
+            return;
+        }
+        if !force {
+            if let Some(cached) = tier::cached() {
+                self.tier = Some(cached);
+                self.push_tier(cx);
+                return;
+            }
+        }
+        if self.tier_probing {
+            return;
+        }
+        self.tier_probing = true;
+        let program = self.args.program.clone();
+        let call = cx.background_spawn(async move { tier::probe(&program) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| {
+                this.tier_probing = false;
+                // The reason is the module's own words, never the terminal's.
+                let tier = result.unwrap_or_else(Tier::Unavailable);
+                tier::remember(&tier);
+                this.tier = Some(tier);
+                this.push_tier(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The banner the open session should be drawing, given the tier and
+    /// whether "Send anyway" has been pressed.
+    fn tier_banner(&self) -> Option<TierBanner> {
+        match self.tier.as_ref()? {
+            Tier::Subscription { .. } => None,
+            Tier::PayAsYouGo => Some(TierBanner {
+                text: "This login is on pay-as-you-go: every turn bills API usage. \
+                       Sign out and back in after subscribing, or send anyway."
+                    .to_owned(),
+                blocking: !self.send_anyway,
+            }),
+            Tier::Unavailable(_) => Some(TierBanner {
+                text: "Muse did not say which plan this login is on, so the harness cannot tell \
+                       whether turns bill API usage."
+                    .to_owned(),
+                blocking: false,
+            }),
+        }
+    }
+
+    /// Hand the current banner to whatever session is open.
+    fn push_tier(&mut self, cx: &mut Context<Self>) {
+        let banner = self.tier_banner();
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.set_tier_banner(banner, cx));
+        }
+        cx.notify();
     }
 
     // -------------------------------------------------------------- sessions
@@ -707,9 +799,11 @@ impl Harness {
         }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-        view.update(cx, |view, _| {
+        let tier_banner = self.tier_banner();
+        view.update(cx, |view, cx| {
             view.set_context(titles, self.user_shell);
             view.set_at_rest(self.args.screenshot.is_some());
+            view.set_tier_banner(tier_banner, cx);
         });
         self.active = Some(view);
         self.focus_composer = true;
@@ -760,14 +854,26 @@ impl Harness {
             }
             SessionEvent::Logout => self.logout(cx),
             SessionEvent::Status { detail } => {
+                // What the login is entitled to belongs at the top of
+                // `/status` and `/usage`: it is the first thing that decides
+                // what the next turn costs.
+                let plan = self.tier.as_ref().map(Tier::status_lines).unwrap_or_else(|| "Plan: probing\u{2026}".to_owned());
                 self.set_dialog(cx, Dialog {
                     title: "Session status".into(),
-                    detail: detail.clone(),
+                    detail: format!("{plan}\n\n{detail}"),
                     kind: DialogKind::Info,
                     primary: "Done",
                     action: DialogAction::Dismiss,
                 });
+                // `/usage` is a person asking; take the reading again behind
+                // the dialog rather than serving a cache they just doubted.
+                self.probe_tier(true, cx);
             }
+            SessionEvent::TierOverride => {
+                self.send_anyway = true;
+                self.push_tier(cx);
+            }
+            SessionEvent::TierRecheck => self.probe_tier(true, cx),
         }
         cx.notify();
     }
@@ -882,6 +988,12 @@ impl Harness {
         if !identity.email.is_empty() {
             footer = footer.detail(identity.email.clone());
         }
+        // The third row: what this login is entitled to. Warning-tinted for
+        // anything that is not a plan in force, because that is the case where
+        // the next turn costs money nobody expected.
+        if let Some(tier) = &self.tier {
+            footer = footer.plan(tier.footer_label(), tier.is_warning());
+        }
         footer.into_any_element()
     }
 
@@ -922,6 +1034,8 @@ impl Harness {
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
         self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
+        let tier_banner = self.tier_banner();
+        view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
         self.active = Some(view);
         self.run_steps(window, cx);
         cx.notify();
