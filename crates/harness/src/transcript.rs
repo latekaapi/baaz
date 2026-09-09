@@ -205,19 +205,50 @@ pub fn silent_reasoning(turn: &Turn) -> Option<u64> {
     Some(meta.reasoning_tokens)
 }
 
-/// The "thought silently" line for a turn [`silent_reasoning`] fired on.
+/// The footer's reasoning cell for a turn [`silent_reasoning`] fired on.
 ///
-/// The wording names the library footer's own cell (`"419 reasoning"`), so the
-/// two read as one fact; the style is the footer's (mono, `FS_11`, `ink_4`).
+/// The library footer draws `"419 reasoning"`; on a silent turn the same cell
+/// reads `"419 reasoning, thought silently"`, on the same line in the same
+/// style. Turns with a visible thinking card keep the library's cell
+/// unchanged.
 pub fn silent_reasoning_text(count: u64) -> String {
-    format!("Thought silently · {count} reasoning")
+    format!("{count} reasoning, thought silently")
 }
 
-/// The [`silent_reasoning_text`] line as a footer-styled row under the turn.
-fn silent_reasoning_row(count: u64, cx: &mut App) -> AnyElement {
+/// The library footer's cells for a silent turn: a mirror of the library's
+/// private `footer_items` (`aui/src/transcript/turns.rs`) with the reasoning
+/// cell replaced by [`silent_reasoning_text`].
+///
+/// The library draws the footer from `TurnMeta` with no per-cell hook, so a
+/// silent turn carries no `assistant_turn(..).meta(..)` and gets this row
+/// instead — same cells, same order, same separators, same style. Keep in
+/// sync with the library.
+fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
+    let tokens = meta.tokens_in + meta.tokens_out;
+    let tokens = if tokens >= 1000 {
+        format!("{:.1}k tokens", tokens as f64 / 1000.0)
+    } else {
+        format!("{tokens} tokens")
+    };
+    let mut items = vec![
+        meta.model.clone(),
+        format!("{:.1} s", meta.duration_ms as f64 / 1000.0),
+        tokens,
+    ];
+    items.retain(|item| !item.is_empty());
+    items.push(silent_reasoning_text(count));
+    if meta.cost_usd > 0.0 {
+        items.push(format!("${:.2}", meta.cost_usd));
+    }
+    items
+}
+
+/// The single footer line for a silent turn: the library footer's own row
+/// (mono, `FS_11`, `ink_4`, `·` separators) with the silent reasoning cell.
+fn silent_footer_row(meta: &TurnMeta, count: u64, cx: &mut App) -> AnyElement {
     use aui_tokens::{ActiveAui, AuiStyled};
     let p = cx.aui().colors;
-    h_flex()
+    let mut footer = h_flex()
         .w_full()
         .mt(px(10.0))
         .gap(px(10.0))
@@ -225,9 +256,14 @@ fn silent_reasoning_row(count: u64, cx: &mut App) -> AnyElement {
         .text_px(scale::FS_11)
         .line_height(relative(1.0))
         .medium()
-        .text_color(p.ink_4)
-        .child(silent_reasoning_text(count))
-        .into_any_element()
+        .text_color(p.ink_4);
+    for (i, item) in silent_footer_items(meta, count).into_iter().enumerate() {
+        if i > 0 {
+            footer = footer.child("·");
+        }
+        footer = footer.child(item);
+    }
+    footer.into_any_element()
 }
 
 /// Render one turn: the person's bubble, or every block of an assistant reply.
@@ -235,6 +271,12 @@ fn silent_reasoning_row(count: u64, cx: &mut App) -> AnyElement {
 /// `settled` is false only for the newest turn, so history does not replay the
 /// reveal animation when the window opens or a session is resumed.
 pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    // A turn can bill reasoning tokens and emit no reasoning item at all
+    // (improvement candidate 3 in docs/09-handoff-improvements.md §8). On a
+    // silent turn this row *is* the footer — the library's cells with the
+    // reasoning cell saying what the count meant — so the library must not
+    // draw its own underneath.
+    let silent = silent_reasoning(turn);
     match turn {
         Turn::User { id, text, .. } => vec![div()
             .w_full()
@@ -244,22 +286,21 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
             .into_any_element()],
         Turn::Assistant { id, blocks, meta } => {
             let last = blocks.len().saturating_sub(1);
+            // A silent turn gets the harness's own footer row, so its blocks
+            // carry no library footer.
+            let library_meta = if silent.is_some() { None } else { Some(meta) };
             let mut rows: Vec<AnyElement> = blocks
                 .iter()
                 .enumerate()
                 .map(|(index, b)| {
                     let key = block_key(id, index);
                     let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), index, settled, window, cx);
-                    let body = block(&key, id, b, index == last, meta, folds, cx);
+                    let body = block(&key, id, b, index == last, library_meta, folds, cx);
                     div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
                 })
                 .collect();
-            // A turn can bill reasoning tokens and emit no reasoning item at
-            // all (improvement candidate 3 in docs/09-handoff-improvements.md
-            // §8). The library footer already carries the count; this row says
-            // what the count meant, in the footer's own style.
-            if let Some(count) = silent_reasoning(turn) {
-                rows.push(silent_reasoning_row(count, cx));
+            if let Some(count) = silent {
+                rows.push(silent_footer_row(meta, count, cx));
             }
             rows
         }
@@ -270,13 +311,15 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
 ///
 /// `last` and `meta` exist for one reason: the per-turn token footer belongs
 /// under the reply, and [`assistant_turn`] is the component that draws it, so
-/// the turn's closing text block is the one that carries the meta.
+/// the turn's closing text block is the one that carries the meta. `meta` is
+/// `None` on a silent turn, which gets the harness's own footer row instead
+/// (see [`silent_footer_row`]): the library must not draw its own underneath.
 fn block(
     key: &str,
     turn_id: &str,
     block: &Block,
     last: bool,
-    meta: &TurnMeta,
+    meta: Option<&TurnMeta>,
     folds: &Folds,
     cx: &mut App,
 ) -> AnyElement {
@@ -291,9 +334,12 @@ fn block(
             let mut turn = assistant_turn(id, text.clone()).streaming(*streaming);
             // A finished turn signs off with its footer; a running one has no
             // final numbers to show yet, and neither has a turn the server
-            // measured nothing for.
-            if last && !*streaming && meta != &TurnMeta::default() {
-                turn = turn.meta(meta.clone());
+            // measured nothing for. A silent turn carries no library footer —
+            // `meta` is `None` there — because the harness draws its own row.
+            if let Some(meta) = meta {
+                if last && !*streaming && meta != &TurnMeta::default() {
+                    turn = turn.meta(meta.clone());
+                }
             }
             turn.into_any_element()
         }
@@ -695,7 +741,23 @@ mod tests {
     }
 
     #[test]
-    fn the_silent_line_names_the_footer_count() {
-        assert_eq!(silent_reasoning_text(419), "Thought silently · 419 reasoning");
+    fn the_silent_cell_names_the_footer_count() {
+        assert_eq!(silent_reasoning_text(419), "419 reasoning, thought silently");
+    }
+
+    #[test]
+    fn the_silent_footer_keeps_the_library_cells() {
+        let Turn::Assistant { meta, .. } = assistant(vec![text_block()], 419) else {
+            unreachable!("test helper builds an assistant turn")
+        };
+        assert_eq!(
+            silent_footer_items(&meta, 419),
+            vec![
+                "muse-spark-1.3-contributor".to_owned(),
+                "17.3 s".to_owned(),
+                "59.2k tokens".to_owned(),
+                "419 reasoning, thought silently".to_owned(),
+            ]
+        );
     }
 }
