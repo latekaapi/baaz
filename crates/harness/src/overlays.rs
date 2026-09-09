@@ -92,6 +92,9 @@ pub enum PaletteKind {
     Commands,
     /// `/resume`: the workspace's sessions, under the titles the sidebar shows.
     Resume,
+    /// `/fork` with nothing named: the session's completed assistant turns,
+    /// newest first, under the user prompt that started each one.
+    Fork,
 }
 
 /// The open command palette: which list, and where the keyboard is in it.
@@ -297,7 +300,7 @@ impl Command {
             Command::Mode => "Set the approval mode",
             Command::Plan => "Plan first, then approve",
             Command::Compact => "Summarize the conversation to free up context",
-            Command::Fork => "Branch this session from the latest message",
+            Command::Fork => "Branch this session from an earlier turn",
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
             Command::Hide => "Hide this session from the sidebar",
@@ -350,7 +353,7 @@ impl Command {
 
 /// The effort tiers the picker offers: MSP's whole closed enum, and never the
 /// catalog's `max`, which MSP rejects.
-pub const EFFORTS: [Option<ReasoningEffort>; 8] = [
+pub const EFFORTS: [Option<ReasoningEffort>; 9] = [
     None,
     Some(ReasoningEffort::None),
     Some(ReasoningEffort::Minimal),
@@ -358,6 +361,7 @@ pub const EFFORTS: [Option<ReasoningEffort>; 8] = [
     Some(ReasoningEffort::Medium),
     Some(ReasoningEffort::High),
     Some(ReasoningEffort::Xhigh),
+    Some(ReasoningEffort::Max),
     Some(ReasoningEffort::Ultra),
 ];
 
@@ -379,6 +383,7 @@ pub fn effort_detail(effort: Option<ReasoningEffort>) -> &'static str {
         Some(ReasoningEffort::Medium) => "The middle budget, and the usual default.",
         Some(ReasoningEffort::High) => "A long budget.",
         Some(ReasoningEffort::Xhigh) => "Longer than high.",
+        Some(ReasoningEffort::Max) => "Between extra-high and ultra.",
         Some(ReasoningEffort::Ultra) => "The largest budget MSP accepts.",
     }
 }
