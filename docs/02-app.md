@@ -209,6 +209,14 @@ newest turn animates.
 
 The per-turn token footer is the turn's closing text block: `assistant_turn`
 carries the `TurnMeta`, so the footer sits under the reply where it belongs.
+A finished turn that billed reasoning tokens (`TurnMeta::reasoning_tokens > 0`)
+but shows no thinking card gets one more row under the footer —
+`Thought silently · 419 reasoning` — in the footer's own style (mono, `FS_11`,
+`ink_4`). The count alone never said the thinking happened off-screen; the
+decision is the pure `transcript::silent_reasoning` (assistant turn, count
+above zero, no `Block::Thinking`), and `fixtures/msp/transcript-real.jsonl`
+is the real capture that exercises it (419 billed reasoning tokens, no
+`reasoning` item).
 
 Auto-scroll is tail-follow, the same rule the block terminal uses: anything new
 scrolls the list to the bottom, but only for a reader who was already within a
