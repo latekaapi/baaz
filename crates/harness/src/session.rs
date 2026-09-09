@@ -135,6 +135,25 @@ pub enum SessionEvent {
         /// The lines of the dialog body, already formatted.
         detail: String,
     },
+    /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
+    /// for the rest of this app run.
+    TierOverride,
+    /// "Check again" on the unknown-plan banner: re-probe the billing tier.
+    TierRecheck,
+}
+
+/// The billing guard's banner over the composer (Phase 5 A1), as the
+/// application decided it.
+///
+/// The session view draws it and refuses to submit while `blocking` is set;
+/// what the two buttons mean is the application's business, so both come back
+/// as [`SessionEvent`]s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TierBanner {
+    /// The line the person reads.
+    pub text: String,
+    /// Whether a turn is refused until the person presses "Send anyway".
+    pub blocking: bool,
 }
 
 /// A turn the server says is running.
@@ -190,6 +209,8 @@ pub struct SessionView {
     /// The banner's action, when the error is one the person can do something
     /// about: the label and what pressing it does.
     banner_action: Option<BannerAction>,
+    /// The billing guard's banner, and whether it is refusing turns.
+    tier_banner: Option<TierBanner>,
     /// Which approval's feedback field is open, as `(approvalId, choiceId)`.
     feedback_open: Option<(String, String)>,
     /// The feedback field itself. The card never owns text; this does.
@@ -314,6 +335,7 @@ impl SessionView {
             loading_history: false,
             banner: None,
             banner_action: None,
+            tier_banner: None,
             feedback_open: None,
             feedback,
             clarify_open: None,
@@ -447,6 +469,17 @@ impl SessionView {
     pub fn set_context(&mut self, titles: HashMap<String, String>, user_shell: bool) {
         self.titles = titles;
         self.user_shell = user_shell;
+    }
+
+    /// The billing guard's banner, or `None` when the login's tier is fine.
+    ///
+    /// Pushed by the application, which owns the probe: the session view knows
+    /// only what to draw and what to refuse.
+    pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
+        if self.tier_banner != banner {
+            self.tier_banner = banner;
+            cx.notify();
+        }
     }
 
     /// Draw the cards settled, for a `--screenshot` run.
@@ -715,6 +748,14 @@ impl SessionView {
         // Nothing leaves a replayed capture, and nothing about the person's
         // draft or their history is touched on the way to finding that out.
         if self.wire_client(cx).is_none() {
+            self.restore_prompt(text, cx);
+            return;
+        }
+        // The billing guard. A pay-as-you-go login bills every turn as API
+        // usage, so the turn does not leave until the person has said once,
+        // out loud, that they meant it. The draft goes back in the composer:
+        // the banner explaining why is already above it.
+        if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
             self.restore_prompt(text, cx);
             return;
         }
@@ -1601,6 +1642,7 @@ impl SessionView {
         let status = self.render_status();
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
+        let tier_banner = self.render_tier_banner(cx);
         let queue = self.render_queue(cx);
         let caret_menu = self.render_caret_menu(cx);
         let composer = self.render_composer(cx);
@@ -1612,6 +1654,7 @@ impl SessionView {
             .children(status)
             .children(needs_you)
             .children(banner)
+            .children(tier_banner)
             .children(queue)
             .child(div().w_full().relative().px(px(TRANSCRIPT_PAD_X)).children(caret_menu))
             .child(composer)
@@ -1815,6 +1858,32 @@ impl SessionView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The billing guard's banner (Phase 5 A1), directly over the composer
+    /// because it is about the thing the composer is for.
+    ///
+    /// Pay-as-you-go is `Waiting`-tinted and carries both the way out and the
+    /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
+    fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let guard = self.tier_banner.clone()?;
+        let sign_out = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::Logout));
+        let through = cx.listener(move |_: &mut Self, _: &(), _, cx| {
+            cx.emit(SessionEvent::TierOverride);
+        });
+        let recheck = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::TierRecheck));
+        let kind = if guard.blocking { BannerKind::Waiting } else { BannerKind::Info };
+        let mut row = banner("tier-banner", kind, vec![BannerRun::Text(guard.text.clone().into())]);
+        row = if guard.blocking {
+            row.secondary_action("Sign out", BannerActionStyle::Ghost)
+                .on_secondary(move |window, cx| sign_out(&(), window, cx))
+                .action("Send anyway", BannerActionStyle::Secondary)
+                .on_action(move |window, cx| through(&(), window, cx))
+        } else {
+            row.action("Check again", BannerActionStyle::Ghost)
+                .on_action(move |window, cx| recheck(&(), window, cx))
+        };
+        Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(row).into_any_element())
     }
 
     /// The needs-you banner: something is waiting on the person and they are

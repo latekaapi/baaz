@@ -29,3 +29,6 @@ chrono.workspace = true
 image.workspace = true
 base64.workspace = true
 ignore.workspace = true
+# The billing-tier probe drives the muse TUI under a pseudo-terminal
+# (`crates/harness/src/tier.rs`); `openpty` and `TIOCSCTTY` are the whole use.
+libc.workspace = true
