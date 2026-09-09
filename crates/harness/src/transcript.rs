@@ -20,9 +20,9 @@ use std::rc::Rc;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
     goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
-    tool_card, user_turn, QuestionOutcome,
+    tool_card, user_turn, QuestionOutcome, ToolCardIntent,
 };
-use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, Turn, TurnMeta};
+use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, Turn, TurnMeta};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
@@ -54,6 +54,14 @@ pub struct Folds {
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name the session it came from rather than its uuid.
     pub titles: HashMap<String, String>,
+    /// Tool block id → what its truncated server-side output offers. Only
+    /// blocks whose item carried `truncated: true` with an `outputRef` appear
+    /// here; every other tool card keeps the plain fold toggle.
+    pub full_output: HashMap<String, FullOutput>,
+    /// "Show full output" on a truncated tool card: the block's id, out. The
+    /// card never fetches itself — the app pages `item/readOutput` on a
+    /// background task and replaces the body on the server's result.
+    pub show_full_output: Option<CardHandler>,
     /// Draw the cards settled rather than entering, for a `--screenshot` run
     /// that renders a few frames and quits.
     pub at_rest: bool,
@@ -87,6 +95,28 @@ pub type CardHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 ///
 /// An option was clicked; an option's preview was toggled.
 pub type RowHandler = Rc<dyn Fn(String, usize, &mut Window, &mut App)>;
+
+/// What a tool card offers when the server truncated its visible output but
+/// kept the full bytes under an `outputRef`.
+pub struct FullOutput {
+    /// The fold holds the item's `outputRef`, so a fetch would serve bytes.
+    pub fetchable: bool,
+    /// The fetch the app runs, and what it returned.
+    pub state: FullOutputState,
+}
+
+/// Where a truncated tool card's full-output fetch stands.
+pub enum FullOutputState {
+    /// Nothing fetched yet; the fold row fetches.
+    Idle,
+    /// Pages are arriving on the app's background task.
+    Fetching,
+    /// The server's bytes, as lines, with whether the 2 MiB cap cut them.
+    Ready {
+        lines: Vec<String>,
+        capped: bool,
+    },
+}
 
 /// A server-minted approval choice was pressed:
 /// `(approvalId, choiceId, feedback)`.
@@ -233,14 +263,47 @@ fn block(
                 .on_toggle(toggle)
                 .into_any_element()
         }
-        Block::ToolCall { kind: _, verb, target, status, duration_ms, body, .. } => {
-            tool_card(id, verb.clone(), target.clone(), *status, body.clone())
+        Block::ToolCall { id: block_id, kind: _, verb, target, status, duration_ms, body, .. } => {
+            let full = folds.full_output.get(block_id);
+            let mut body = body.clone();
+            // A fetched full output replaces the truncated visible text on the
+            // server's result only (D4): the fold never changes, the card just
+            // renders what the fetch returned.
+            if let (ToolBody::Shell { output_lines, .. }, Some(full)) = (&mut body, full) {
+                if let FullOutputState::Ready { lines, capped } = &full.state {
+                    *output_lines = lines.clone();
+                    if *capped {
+                        output_lines.push(crate::full_output::CAPPED_MARKER.to_owned());
+                    }
+                }
+            }
+            // The card's own action slot: its fold row already emits Unfold,
+            // so on a truncated card that intent is "Show full output" and
+            // fetches; everywhere else every intent still just toggles, as
+            // before. The row's label stays the library's ("N more lines") —
+            // the library owns the card's text and this app does not change
+            // it.
+            let (fetchable, idle) = full
+                .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
+                .unwrap_or((false, false));
+            let show = folds.show_full_output.clone();
+            let block_id = block_id.clone();
+            tool_card(id, verb.clone(), target.clone(), *status, body)
                 .duration_ms(*duration_ms)
                 .open(folds.open(key, true))
                 .on_intent({
                     let toggle = folds.toggle.clone();
                     let key = key.to_owned();
-                    move |_, window, cx| toggle(key.clone(), window, cx)
+                    move |intent, window, cx| match intent {
+                        ToolCardIntent::Unfold if fetchable && idle => {
+                            if let Some(show) = &show {
+                                show(block_id.clone(), window, cx);
+                            } else {
+                                toggle(key.clone(), window, cx);
+                            }
+                        }
+                        _ => toggle(key.clone(), window, cx),
+                    }
                 })
                 .into_any_element()
         }
