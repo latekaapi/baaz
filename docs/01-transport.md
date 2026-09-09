@@ -153,8 +153,8 @@ the schema and a capture disagree, the capture wins and it is written down.
 
 3. **`onRequest` is not "ask for everything".** `transcript-real.jsonl` runs a
    model-issued `ls` under `onRequest` and **no `approval/*` fires at all**. The
-   free approval captures come from `session/userShell` under `promptUnmatched`
-   and `denyUnmatched`.
+   approval captures come from `session/userShell` under `promptUnmatched`
+   and `denyUnmatched`, which makes no model call and so spends nothing.
 
 4. **A billed reasoning budget does not imply a `reasoning` item.**
    `transcript-real.jsonl` reports `reasoningTokens: 171` and emits no `reasoning`
@@ -299,5 +299,33 @@ RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps
 
 ### Spend
 
-The `echo` provider is free and is what everything automated uses. `meta` costs
-real turns and the spec caps them at five per phase; phase 1 spent none.
+**Correction (phase 4). `echo` is not a free provider.** Phase 1 recorded that
+it was, and research §2.4 says the same; both are wrong on a machine that is
+signed in. Read the truth out of the session log:
+
+* `~/.local/share/muse/sessions/<y>/<m>/<d>/<id>/session.jsonl` opens with a
+  `command_intake` record carrying `provider_id: echo` — the route that was
+  asked for.
+* A later **metadata** record in the same file names what actually served the
+  turn: `provider_id: meta`, `model_id: muse-spark-1.3-contributor`.
+* `~/.local/share/muse/session-index.db` follows the *metadata* record, not the
+  intake, so the index reports `meta` for a session started as `echo`.
+
+Turns routed through `echo` bill reasoning tokens (`fixtures/msp/transcript-echo.jsonl`
+carries a `session/tokenUsage` with `reasoningTokens: 94`), carry provider
+response ids, and answer with varied real text rather than one canned line.
+`--provider` picks a route, not a bill: **every turn on every provider is a real
+subscription turn**, and the cap of five per phase covers all of them.
+
+What actually costs nothing:
+
+| free | why |
+|---|---|
+| `--replay <capture.jsonl>` | folds a checked-in capture; no server, no session, no turn |
+| `--no-connect` | draws the chrome without spawning `muse serve` |
+| `session/start` | opens a session; no model call |
+| `session/userShell` (the `!` path) and the whole approval flow it raises | no model call |
+| `session/fork`, `approval/*`, `session/list`, `view/page` | no model call |
+
+Anything that reaches `turn/start` — including `--send` and a `--steps` list
+containing `send:` or `steer:` — spends a turn.

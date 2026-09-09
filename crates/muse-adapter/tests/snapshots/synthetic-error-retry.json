@@ -1,0 +1,94 @@
+[
+  {
+    "sessionId": "synthetic-error-retry",
+    "session": {
+      "id": "synthetic-error-retry",
+      "agent": "muse",
+      "model": "muse-spark-1.3",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn3-1",
+          "text": "Summarise what changed on this branch.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn3-1",
+          "blocks": [
+            {
+              "kind": "error",
+              "title": "Model error",
+              "detail": "the provider closed the stream before the reply finished\nThe turn was orphaned when the session's process was lost.\nresume_reconcile:orphaned_by_process_loss",
+              "retryable": true
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 4200,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "i-syn3-2",
+          "text": "Try that again.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": {
+        "attempt": 2,
+        "maxAttempts": 5,
+        "nextAttempt": 3,
+        "reason": "rate limited by the provider",
+        "retryDelayMs": 8000,
+        "sessionId": "synthetic-error-retry",
+        "sourceRange": {
+          "first": {
+            "id": "rec-7",
+            "sequence": 7
+          },
+          "last": {
+            "id": "rec-7",
+            "sequence": 7
+          },
+          "stream": {
+            "id": "synthetic-error-retry",
+            "kind": "session"
+          }
+        },
+        "turnId": "t-syn3-2",
+        "viewCursor": "v:syn3:7"
+      },
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn3:7",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

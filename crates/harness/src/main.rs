@@ -5,8 +5,27 @@
 //!
 //! ```bash
 //! cargo run -p harness -- --workspace ~/code/thing
-//! HARNESS_PROVIDER=echo cargo run -p harness      # free provider, for demos
+//! cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl
 //! ```
+//!
+//! ## `echo` is not a free provider
+//!
+//! On a machine that is signed in, `--provider echo` picks a *route*, not a
+//! free ride. The session log proves it: `~/.local/share/muse/sessions/…/
+//! session.jsonl` records `provider_id: echo` on the `command_intake` record
+//! and then a metadata record naming `provider_id: meta` with a real
+//! `model_id` (`muse-spark-1.3-contributor`); the session index's
+//! `provider_id` follows that model record, not the intake. Turns on `echo`
+//! bill reasoning tokens, carry provider response ids, and come back with
+//! varied real replies. **Every turn on every provider is a real subscription
+//! turn.**
+//!
+//! The two things that genuinely cost nothing are `--replay <capture.jsonl>`,
+//! which folds a checked-in capture with no server at all, and `--no-connect`,
+//! which draws the chrome without one. Starting a session and `session/
+//! userShell` (the `!` path) also make no model call, which is why the whole
+//! approval flow can be exercised without spending a turn — but the turn that
+//! *follows* an approval does spend one.
 //!
 //! The window boots exactly the way `aui/examples/minimal.rs` does — the asset
 //! source, then `aui::init`, then the text scale, then the window — because
@@ -71,6 +90,15 @@ pub struct Args {
     /// `--no-connect`: render the chrome without spawning `muse serve`, which
     /// is what a screenshot of the login screen wants.
     pub offline: bool,
+    /// `--replay <capture.jsonl>`: fold a wire capture and render it, with no
+    /// child at all (implies `--no-connect`).
+    ///
+    /// Most of the phase-4 screenshots are taken this way. It costs nothing —
+    /// no provider, no turn, no session — and it is reproducible to the byte,
+    /// because the input is a file that is checked in. Commands issued against
+    /// a replayed session are refused with a banner rather than silently
+    /// dropped.
+    pub replay: Option<PathBuf>,
     /// `--steps <a;b;c>`: what to do to the open session before the capture.
     ///
     /// One step per item, `;`-separated because a step's payload may contain a
@@ -92,6 +120,19 @@ pub struct Args {
     /// | `plan` | turn plan mode on |
     /// | `image:<path>` | attach an image |
     /// | `plus` / `drop` | open the `+` menu; raise the drop overlay |
+    /// | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
+    /// | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
+    /// | `choose:<n>` | the n-th choice of the newest pending approval |
+    /// | `feedback:<text>` | type into an open feedback or clarify field |
+    /// | `answer:<label>` / `answers:<a\|b>` | pick options on the newest question |
+    /// | `confirm-answer` | send the answer |
+    /// | `preview:<n>` | open the n-th option's preview (0-based) |
+    /// | `select:<label>` | pick an option without sending |
+    /// | `clarify:<text>` | "Explain instead"; with no text, only opens the field |
+    /// | `skip` | decline the newest question |
+    /// | `fork` | `session/fork` at the newest completed turn |
+    /// | `retry` | retry the newest failed turn |
+    /// | `wait:<ms>` | let the wire catch up before the next step |
     pub steps: Vec<String>,
 }
 
@@ -99,8 +140,11 @@ fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut out = Args {
         workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        // The spec caps real-provider turns; `echo` is free and is what demos
-        // and tests run on.
+        // The spec caps real turns. `echo` does not dodge that cap — it is
+        // routed to the real model on a signed-in machine (see the module
+        // header) — but it is the cheapest route and the one scripted runs
+        // take, so a run that forgot to name a provider lands here rather than
+        // on `meta` with its longer, costlier answers.
         provider: std::env::var("HARNESS_PROVIDER").unwrap_or_else(|_| "meta".into()),
         program: std::env::var("HARNESS_MUSE").unwrap_or_else(|_| "muse".into()),
         theme: ThemeKind::Dark,
@@ -109,6 +153,7 @@ fn parse_args() -> Args {
         session: None,
         send: None,
         offline: false,
+        replay: None,
         steps: Vec::new(),
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
@@ -146,6 +191,11 @@ fn parse_args() -> Args {
                 out.steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
             }
             "--no-connect" => out.offline = true,
+            "--replay" => {
+                let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
+                out.replay = Some(PathBuf::from(shellexpand(&value)));
+                out.offline = true;
+            }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument `{other}`")),
         }
@@ -156,9 +206,12 @@ fn parse_args() -> Args {
     // real turns by accident: Phase 3 spent 25 against a cap of five because the
     // screenshot commands omitted `HARNESS_PROVIDER=echo`. A scripted run is
     // therefore `echo` unless the provider was named explicitly.
-    let scripted = out.screenshot.is_some() || !out.steps.is_empty() || out.send.is_some();
+    let scripted = out.screenshot.is_some() || !out.steps.is_empty() || out.send.is_some() || out.replay.is_some();
     if scripted && !provider_explicit && out.provider != "echo" {
-        eprintln!("harness: scripted run, using the free `echo` provider (pass --provider meta to spend real turns)");
+        eprintln!(
+            "harness: scripted run, routing through `echo` (still a real turn if it sends one; \
+             use --replay for a free run, or --provider meta to pick the model)"
+        );
         out.provider = "echo".into();
     }
     out
@@ -171,8 +224,11 @@ fn usage(err: &str) -> ! {
     eprintln!(
         "usage: harness [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
          \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
-         \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\n\
-         environment: HARNESS_PROVIDER=echo picks the free provider; HARNESS_MUSE names the binary."
+         \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\
+         \x20              [--replay <capture.jsonl>]\n\n\
+         environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
+         \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
+         \x20              --replay and --no-connect are the only runs that cost nothing."
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }

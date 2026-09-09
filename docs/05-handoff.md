@@ -11,7 +11,8 @@ the `aui` library at /Users/latekaapi/Projects/agentic-ui (path dependencies; gp
 
 Read first, in order: docs/00-spec.md (frozen spec: crates, decisions, keymap, five phases
 with gates), docs/CHANGELOG.md, docs/01-transport.md (Phase 1 findings), docs/02-app.md
-(Phase 2), docs/03-composer.md (Phase 3), agentic-ui/docs/10-muse-research.md §1, §3, §4, §7 (wire contract, auth,
+(Phase 2), docs/03-composer.md (Phase 3), docs/04-approvals.md (Phase 4 — read §0 first),
+agentic-ui/docs/10-muse-research.md §1, §3, §4, §7 (wire contract, auth,
 what is not on the wire, adapter mapping), agentic-ui/docs/00-agent-brief.md, and your memory
 file project-harness-muse-slice-2026-09-08.
 
@@ -48,6 +49,43 @@ State on 2026-09-09:
   (`--screenshot`/`--steps`/`--send`) now default to `echo`; verify spend from
   `~/.local/share/muse/session-index.db` (`provider_id`, `workspace_root`), never
   from a lead's report.
+- Phase 4 DONE on 2026-09-09: harness `main` (approval card v2 round-trip over
+  `approval/decide` with server-minted choices / stages / feedback / badges /
+  policy and judge resolutions, questions over `userInput/answer|cancel|clarify`
+  with previews and a timeout countdown, F2 humanized failures with retry and
+  `turn/retryScheduled`, every marker kind, `session/fork`, todo and goal, the
+  generic-item fallback, `--replay <capture.jsonl>` and the phase-4 `--steps`
+  verbs); agentic-ui `muse-support` (approval_card v2, question_card
+  header/previews/timeout/clarify/limits, `retry_row`, `generic_item_card`,
+  `goal_card`, `PlanSection` + `plan_card.sections`, `keys::ChooseNth`, the
+  un-truncating picker menu, three extended gallery cards). Gates green in both
+  repos; screenshots in `docs/images/phase4-*.png`; `docs/04-approvals.md`
+  describes it all. F2, F3, F6, F7 and F8 closed. Spend by this lead: **zero**.
+- **THE NO-FREE-PROVIDER RULE — read this before briefing Phase 5.**
+  `echo` is **not** a free provider, and Phase 1's changelog, research §2.4 and
+  three doc sections said it was until Phase 4 corrected them. On a signed-in
+  machine `session.jsonl` records `provider_id: echo` on its `command_intake`
+  record and then a **metadata** record naming
+  `provider_id: meta, model_id: muse-spark-1.3-contributor`; `session-index.db`
+  follows the metadata record, which is why the index reports `meta` for a
+  session started as `echo`. Turns on `echo` bill reasoning tokens, carry
+  provider response ids and return varied real text. `--provider` picks a
+  **route, not a bill**: every turn on every provider is a real subscription
+  turn and the cap of five per phase covers all of them.
+  * Free: `--replay <capture.jsonl>`, `--no-connect`; and on a live server
+    `session/start`, `session/userShell` (the `!` path) and the whole approval
+    flow it raises, `approval/*`, `userInput/*`, `session/fork`,
+    `session/list`, `view/page` — none of them make a model call.
+  * Not free: anything reaching `turn/start` — `--send`, and a `--steps` list
+    containing `send:` or `steer:`.
+  * `muse-client/tests/live.rs` (`live_echo`, `live_backfill_parity`) spends a
+    turn **per run**. Both are `#[ignore]`d and documented as such; do not put
+    either in a loop or in CI. The offline gate that replaces
+    `live_backfill_parity` is
+    `muse-adapter/tests/fixtures.rs::a_live_fold_and_a_backfilled_fold_agree`.
+  * Phase 4's brief still said "everything approval-shaped is free on echo" and
+    budgeted two `meta` turns for questions. Six real turns were spent by two
+    earlier leads under that belief. Brief Phase 5 with this rule instead.
 - Phase 3 findings: `/plan <text>` **does** fire the bundled plan skill
   server-side (evidence in `fixtures/msp/transcript-plan-probe.jsonl`);
   `reasoningEffort` is on `turn/start` and `turn/steer` only and is never
@@ -64,18 +102,19 @@ State on 2026-09-09:
 - The Phase 3 brief that worked is kept at docs/briefs/phase3-brief.md; write the Phase 4
   brief in the same shape (read list, scope, numbered decisions, wire facts, deliverables)
   and save it as docs/briefs/phase4-brief.md.
-- Phases 4 (approval card v2 multi-stage + feedback + policy and judge
-  resolutions, question previews/timeout/clarify, error banners/dialogs, retry
-  and retry-scheduled, markers, fork, todo, goal — plus findings F2 and F3) and
-  5 (polish, motion, focus, docs, CI, and the `/name` `/resume` commands that
-  currently only toast) are not started. Each is one Opus lead session briefed
+- Phase 5 (polish, motion, focus, docs, CI, and the `/name` `/resume` commands
+  that currently only toast) is not started. Its screenshots should come from
+  `--replay` wherever they can; the captures under `fixtures/msp/` now cover
+  approvals, a policy denial, a question and its answer, a clarification, an
+  error with a scheduled retry, and todo + goal. Each is one Opus lead session briefed
   with the spec sections named in docs/00-spec.md §5; the owner reviews at each
   gate on screenshots and the diff.
 
 Facts that cost time to learn (details in docs/01-transport.md and the research doc):
 - `muse serve --no-session-log` accepts turns but emits NO view events; always run durable.
-- Provider is chosen per session (`session/start { providerId: "echo" | "meta" }`); echo is
-  free — use it for everything except at most 5 real turns per phase.
+- Provider is chosen per session (`session/start { providerId: "echo" | "meta" }`). **echo is
+  NOT free** — see the no-free-provider rule above; it is a route, not a bill, and its turns
+  count against the cap of 5 real turns per phase. Free runs are `--replay` and `--no-connect`.
 - `commandId` must be UUIDv7; both directions send requests (approval/request and
   userInput/request arrive with the server's ids — never answer them with a JSON-RPC result,
   use approval/decide and userInput/*); view events can precede a command's ack.
@@ -90,8 +129,9 @@ design decisions and reviews only; ONE Opus (or Sonnet) lead per phase does the 
 briefed with a self-contained prompt, and Fable spot-checks the diff, reruns one gate and
 reads the screenshots. SendMessage is not available to the main session: if a lead dies
 mid-phase (rate limit), launch a fresh lead told to inventory the uncommitted trees first.
-Spend rule after Phase 3: the brief must tell the lead to prefix EVERY app invocation with
-`HARNESS_PROVIDER=echo` and to name each real turn before spending it; at the gate, count
+Spend rule after Phase 4: the brief must tell the lead that there is NO free provider, that
+`--replay` and `--no-connect` are the only free runs, and that each real turn must be named
+before it is spent; at the gate, count
 real turns yourself with
 `sqlite3 ~/.local/share/muse/session-index.db "select workspace_root, first_user_prompt from sessions where session_dir like '%/<date>/%' and provider_id='meta'"`
 and `grep -c runtime.user_intent.accepted <session_dir>/session.jsonl` per session. Prefix shell commands with

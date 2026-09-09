@@ -39,6 +39,49 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 /// `view/page.limit` at 1000.
 const GAP_PAGE_LIMIT: u64 = 1000;
 
+/// The environment variable that turns on a wire capture.
+///
+/// Set it to a path and every line, both directions, is appended there in the
+/// `--> ` / `<-- ` format the fixtures under `fixtures/msp/` use — which is the
+/// format the fold's own tests and the app's `--replay` read. That is the whole
+/// point: a session driven by hand once becomes a fixture the tests replay
+/// forever, and a bug that needed a real provider to reach needs it only once.
+///
+/// ```text
+/// MUSE_CAPTURE=fixtures/msp/transcript-userinput-answer.jsonl \
+///   cargo run -p harness -- --provider meta --workspace /tmp/ws
+/// ```
+///
+/// Nothing is redacted. A capture holds the prompts, the replies and the
+/// workspace paths of whoever made it, so a capture that is going to be checked
+/// in wants reading first.
+pub const CAPTURE_ENV: &str = "MUSE_CAPTURE";
+
+/// The sink a capture is written to: one file, one mutex, both threads.
+struct Capture {
+    file: Mutex<std::fs::File>,
+}
+
+impl Capture {
+    /// Open the capture named by [`CAPTURE_ENV`], if it is set.
+    fn from_env() -> Option<Arc<Capture>> {
+        let path = std::env::var_os(CAPTURE_ENV)?;
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => Some(Arc::new(Capture { file: Mutex::new(file) })),
+            Err(error) => {
+                eprintln!("muse-client: cannot open {}: {error}", path.to_string_lossy());
+                None
+            }
+        }
+    }
+
+    /// One line, with the arrow that says which way it went.
+    fn write(&self, arrow: &str, line: &str) {
+        let Ok(mut file) = self.file.lock() else { return };
+        let _ = writeln!(file, "{arrow} {}", line.trim_end());
+    }
+}
+
 /// Mint a fresh `commandId`.
 ///
 /// Every MSP command carries a **client-minted UUIDv7** and the server enforces
@@ -164,6 +207,8 @@ struct GapState {
 
 struct Inner {
     next_id: AtomicI64,
+    /// The wire capture, when `MUSE_CAPTURE` named a file.
+    capture: Option<Arc<Capture>>,
     pending: Mutex<HashMap<i64, Pending>>,
     /// The writer thread's inbox. It is an `Option` so [`MuseClient::shutdown`]
     /// can *drop* it: the writer parks in `recv()`, and dropping the last sender
@@ -178,6 +223,9 @@ struct Inner {
 impl Inner {
     /// Hand one framed line to the writer thread.
     fn write_line(&self, line: String) -> Result<()> {
+        if let Some(capture) = &self.capture {
+            capture.write("-->", &line);
+        }
         let writes = self.writes.lock().expect("writes mutex");
         let Some(writes) = writes.as_ref() else { return Err(MuseError::Closed) };
         writes.send(line).map_err(|_| MuseError::Closed)
@@ -263,6 +311,7 @@ impl MuseClient {
         let (events_tx, events_rx) = unbounded::<MuseEvent>();
         let inner = Arc::new(Inner {
             next_id: AtomicI64::new(1),
+            capture: Capture::from_env(),
             pending: Mutex::new(HashMap::new()),
             writes: Mutex::new(Some(writes_tx)),
             events: events_tx,
@@ -535,6 +584,9 @@ fn read_loop(inner: Arc<Inner>, child: Arc<Mutex<Child>>, stdout: ChildStdout) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let Ok(line) = line else { break };
+        if let Some(capture) = &inner.capture {
+            capture.write("<--", &line);
+        }
         match parse_line(&line) {
             Ok(None) => {}
             Ok(Some(frame)) => handle_frame(&inner, frame),

@@ -1,0 +1,142 @@
+[
+  {
+    "sessionId": "synthetic-question-error",
+    "session": {
+      "id": "synthetic-question-error",
+      "agent": "muse",
+      "model": "muse-spark-1.3",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn2-1",
+          "text": "Describe one of the two files, and ask me which.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn2-1",
+          "blocks": [
+            {
+              "kind": "question",
+              "id": "ui-syn2-1:file_choice",
+              "header": "File",
+              "prompt": "Which of the listed files do you want described?",
+              "subtitle": "",
+              "options": [
+                {
+                  "label": "README.md",
+                  "description": "The project's own introduction",
+                  "key": "1",
+                  "preview": {
+                    "content": "# checkout-flow-v2\n\nAddress validation for the `acme` checkout, with `country`-aware rules.",
+                    "format": "markdown"
+                  }
+                },
+                {
+                  "label": "notes.txt",
+                  "description": "Scratch notes from the last session",
+                  "key": "2",
+                  "preview": {
+                    "content": "- GB outward codes still fail on the space\n- ask about CA before touching the regex",
+                    "format": "text"
+                  }
+                }
+              ],
+              "multi": false,
+              "allow_other": false,
+              "answer": null,
+              "timeout_ms": 120000
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {
+        "ui-syn2-1": {
+          "autoResolutionMs": 120000,
+          "itemId": "ui-syn2-1",
+          "questions": [
+            {
+              "header": "File",
+              "id": "file_choice",
+              "options": [
+                {
+                  "description": "The project's own introduction",
+                  "label": "README.md",
+                  "preview": {
+                    "content": "# checkout-flow-v2\n\nAddress validation for the `acme` checkout, with `country`-aware rules.",
+                    "format": "markdown"
+                  }
+                },
+                {
+                  "description": "Scratch notes from the last session",
+                  "label": "notes.txt",
+                  "preview": {
+                    "content": "- GB outward codes still fail on the space\n- ask about CA before touching the regex",
+                    "format": "text"
+                  }
+                }
+              ],
+              "question": "Which of the listed files do you want described?",
+              "selection": {
+                "mode": "single"
+              }
+            }
+          ],
+          "sessionId": "synthetic-question-error",
+          "sourceRange": {
+            "first": {
+              "id": "rec-4",
+              "sequence": 4
+            },
+            "last": {
+              "id": "rec-4",
+              "sequence": 4
+            },
+            "stream": {
+              "id": "synthetic-question-error",
+              "kind": "session"
+            }
+          },
+          "toolCallId": "call-syn2-1",
+          "toolName": "request_user_input",
+          "turnId": "t-syn2-1",
+          "userInputId": "ui-syn2-1",
+          "viewCursor": "v:syn2:4"
+        }
+      },
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn2:4",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

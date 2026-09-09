@@ -1,0 +1,111 @@
+[
+  {
+    "sessionId": "01a08501-5f37-7982-b84f-910e72c3db20",
+    "session": {
+      "id": "01a08501-5f37-7982-b84f-910e72c3db20",
+      "agent": "muse",
+      "model": "muse-spark-1.3-contributor",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/private/tmp/h4meta",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "31f43df4-4d4f-4cc5-93a4-23e554a563f9",
+          "text": "Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a08501-5fb4-7860-a4bc-406e96c03a7f",
+          "blocks": [
+            {
+              "kind": "question",
+              "id": "0c4aea9b-59de-4aee-b119-f1bd1e7ac904:file_choice",
+              "header": "File",
+              "prompt": "Which file should I describe?",
+              "subtitle": "",
+              "options": [
+                {
+                  "label": "README.md",
+                  "description": "",
+                  "key": "1"
+                },
+                {
+                  "label": "notes.txt",
+                  "description": "",
+                  "key": "2"
+                }
+              ],
+              "multi": false,
+              "allow_other": false,
+              "answer": {
+                "selected": [
+                  0
+                ],
+                "other": null
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "ac7bec02-087e-4df7-9072-71ca6ee131f9",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "README.md",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 4
+              }
+            },
+            {
+              "kind": "text",
+              "text": "You asked me to describe `README.md`.\n\n[README.md](/private/tmp/h4meta/README.md:1):\n- Title: `checkout-flow-v2`\n- Content: Short description — address validation for the acme checkout.\n- Size: 3 lines, minimal placeholder README with no usage, setup, or API details.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3-contributor",
+            "duration_ms": 120269,
+            "tokens_in": 62556,
+            "tokens_out": 539,
+            "reasoning_tokens": 278,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": {
+        "pressure": "normal",
+        "usedTokens": 21177,
+        "windowTokens": 1007997
+      },
+      "cumulative": {
+        "outputTokens": 539,
+        "promptTokens": 62556,
+        "totalTokens": 63095
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:01a08501-5f37-7982-b84f-910e72c3db20:34",
+      "command_text": {
+        "01a08501-5fb4-7860-a4bc-406e96c03a7f": "Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it."
+      },
+      "restored_prompt": null
+    }
+  }
+]

@@ -84,6 +84,8 @@ actions!(
         HistoryNext,
         /// ⌘V, which is an image attachment when the clipboard holds one.
         PasteMaybeImage,
+        /// Send what is in an open approval-feedback or question-clarify field.
+        ConfirmField,
     ]
 );
 
@@ -115,8 +117,11 @@ const TOAST_STACK_H: f32 = 260.0;
 /// triad; these are the ones only this app knows about.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("enter", SendTurn, Some("HarnessComposer && !menu")),
+        KeyBinding::new("enter", SendTurn, Some("HarnessComposer && !menu && !field")),
         KeyBinding::new("enter", MenuConfirm, Some("HarnessComposer && menu")),
+        // A card's own field owns Enter while it is open: the person is writing
+        // a refusal, not a prompt.
+        KeyBinding::new("enter", ConfirmField, Some("HarnessComposer && field")),
         KeyBinding::new("cmd-enter", SteerTurn, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("up", MenuUp, Some("HarnessComposer && menu")),
         KeyBinding::new("down", MenuDown, Some("HarnessComposer && menu")),
@@ -187,6 +192,10 @@ pub struct Harness {
     sidebar_open: bool,
     /// The right pane's slot exists; nothing opens it in this phase.
     right_open: bool,
+    /// Whether `initialize` granted `userShell`. Requested in `conn::connect`;
+    /// a server that did not grant it disables the `!` path with a banner
+    /// rather than letting the command fail on the wire.
+    user_shell: bool,
     focus_root: FocusHandle,
     focus_dialog: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
@@ -210,12 +219,25 @@ impl Harness {
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             right_open: false,
+            user_shell: true,
             focus_root: cx.focus_handle(),
             focus_dialog: cx.focus_handle(),
             focus_composer: true,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
+        if this.args.replay.is_some() {
+            // `--replay`: a capture, folded, with no child and no credential.
+            // The shell is the point — the transcript is what is being looked
+            // at — so the auth probe is skipped rather than faked into a login.
+            this.auth = Auth::SignedIn(Identity {
+                name: "Replay".into(),
+                email: String::new(),
+                api_key: false,
+            });
+            this.wire = Wire::Ready;
+            return this;
+        }
         if this.args.offline {
             // `--no-connect`: the chrome without a child, for a screenshot of
             // the login screen with sample data.
@@ -260,6 +282,11 @@ impl Harness {
                         // failure: say so on stderr and carry on.
                         eprintln!("harness: {warning:?}");
                     }
+                    this.user_shell = connection
+                        .server
+                        .granted_capabilities
+                        .iter()
+                        .any(|c| c.as_wire() == Some("userShell"));
                     this.client = Some(connection.client);
                     this.wire = Wire::Ready;
                     this.pump(events, cx);
@@ -578,12 +605,26 @@ impl Harness {
         if steps.is_empty() {
             return;
         }
-        let Some(view) = self.active.clone() else { return };
-        view.update(cx, |view, cx| {
-            for step in &steps {
-                view.step(step, window, cx);
+        let _ = window;
+        // The steps run on a task rather than in a loop, because `wait:<ms>` is
+        // the only way a scripted approval round-trip can exist: a decision has
+        // to reach the wire and its `approval/updated` has to come back before
+        // the next `choose:` means anything.
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            for step in steps {
+                if let Some(ms) = step.strip_prefix("wait:") {
+                    let ms: u64 = ms.parse().unwrap_or(0);
+                    cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
+                    continue;
+                }
+                let ran = this.update_in(cx, |this, window, cx| {
+                    this.with_session(cx, |view, cx| view.step(&step, window, cx));
+                });
+                if ran.is_err() {
+                    return;
+                }
             }
-        });
+        }));
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,
@@ -658,12 +699,18 @@ impl Harness {
         let Some(client) = self.client.clone() else { return };
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
-        let view = cx.new(|cx| SessionView::new(session_id, client, provider, workspace, overlays, window, cx));
+        let view = cx.new(|cx| SessionView::new(session_id, Some(client), provider, workspace, overlays, window, cx));
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
         if backfill {
             view.update(cx, |view, cx| view.backfill(cx));
         }
+        let titles: HashMap<String, String> =
+            self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
+        view.update(cx, |view, _| {
+            view.set_context(titles, self.user_shell);
+            view.set_at_rest(self.args.screenshot.is_some());
+        });
         self.active = Some(view);
         self.focus_composer = true;
         self.send_scripted(window, cx);
@@ -695,6 +742,22 @@ impl Harness {
             // The child's exit already reached `route`, which owns the reconnect.
             SessionEvent::Closed => {}
             SessionEvent::NewSession => self.new_session(cx),
+            // The fork result is a resume envelope for the **new** session, so
+            // it is already attached: opening it and paging it in is all that
+            // is left, and the sidebar re-reads itself because there is now one
+            // more session in this workspace.
+            SessionEvent::Forked { session_id, session } => {
+                let (session_id, envelope) = (session_id.clone(), session.clone());
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.open(session_id, true, window, cx);
+                        if let Some(view) = this.active.clone() {
+                            view.update(cx, |view, cx| view.seed_session(envelope, cx));
+                        }
+                        this.load_sessions(cx);
+                    });
+                }));
+            }
             SessionEvent::Logout => self.logout(cx),
             SessionEvent::Status { detail } => {
                 self.set_dialog(cx, Dialog {
@@ -841,7 +904,31 @@ impl Harness {
         )
     }
 
+    /// `--replay`: open one session out of a capture file, once, on the first
+    /// frame that has a `Window` to build a composer with.
+    fn open_replay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.args.replay.take() else { return };
+        let at_rest = self.args.screenshot.is_some();
+        let (provider, workspace) = (self.args.provider.clone(), self.workspace());
+        let overlays = self.overlays.clone();
+        // The capture names its own session; this id is a placeholder the view
+        // replaces the moment the first line is folded.
+        let view = cx.new(|cx| {
+            let mut view = SessionView::new("replay".to_owned(), None, provider, workspace, overlays, window, cx);
+            view.set_at_rest(at_rest);
+            view.load_replay(&path, cx);
+            view
+        });
+        self.subscriptions.clear();
+        self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
+        self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
+        self.active = Some(view);
+        self.run_steps(window, cx);
+        cx.notify();
+    }
+
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
         let body = match self.active.clone() {
             Some(view) => {
@@ -879,6 +966,17 @@ impl Harness {
                 });
             }))
             .on_action(cx.listener(|this, _: &PasteMaybeImage, window, cx| this.paste(window, cx)))
+            .on_action(cx.listener(|this, _: &ConfirmField, window, cx| {
+                this.with_session(cx, |view, cx| {
+                    view.confirm_field(window, cx);
+                });
+            }))
+            // 1–9 on a pending approval: the n-th server-minted choice, in the
+            // order the server sent them.
+            .on_action(cx.listener(|this, nth: &aui::keys::ChooseNth, window, cx| {
+                let index = nth.index;
+                this.with_session(cx, |view, cx| view.choose_nth(index, window, cx));
+            }))
             .children(banner)
             .child(body)
             .into_any_element()
@@ -892,6 +990,18 @@ impl Harness {
         let mut context = String::from(COMPOSER_CONTEXT);
         if self.overlays.read(cx).menu.is_some() {
             context.push_str(" menu");
+        }
+        if let Some(view) = &self.active {
+            if view.read(cx).card_field_open() {
+                context.push_str(" field");
+            }
+            // The library binds 1–9 in its own approval context; naming that
+            // context here is what hands the digits to the pending card, and
+            // only while the composer is empty.
+            if view.read(cx).card_has_keys(cx) {
+                context.push(' ');
+                context.push_str(aui::keys::APPROVAL_CONTEXT);
+            }
         }
         if let Some(view) = &self.active {
             let (first, last) = view.read(cx).caret_edges(cx);
@@ -1127,6 +1237,18 @@ impl Harness {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
+            cx.notify();
+            return;
+        }
+        // A card's open field is the next thing Escape takes back, before it
+        // reaches for the running turn.
+        let field = self
+            .active
+            .clone()
+            .map(|view| view.update(cx, |view, cx| view.close_card_field(cx)))
+            .unwrap_or(false);
+        if field {
+            self.focus_composer = true;
             cx.notify();
             return;
         }

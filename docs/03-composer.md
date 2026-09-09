@@ -65,7 +65,7 @@ HARNESS_PROVIDER=echo cargo run -p harness -- --workspace /tmp/ws --theme dark \
 `context:` is the one step that invents a fact, and it exists for one reason:
 the meter's `warning` and `blocked` states are the server's to declare, the
 thresholds are the server's, and no prompt anyone would want to send fills a
-one-million-token window on the free provider. `docs/images/phase3-blocked-*.png`
+one-million-token window in a turn anyone would want to spend. `docs/images/phase3-blocked-*.png`
 is therefore a synthetic pressure level over a real session's real cumulative
 counters. Everything else in every capture came off the wire.
 
