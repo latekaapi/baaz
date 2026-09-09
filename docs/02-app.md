@@ -145,6 +145,20 @@ be used. Then the probe runs again and the app enters.
 
 The sidebar footer shows `user_full_name` over `user_email` and carries a
 "Sign out" button, which runs `muse logout` and returns to the login screen.
+The plan row carries the list toggles: "Show hidden (n)" once something is
+hidden, and "Show empty (n)" once a session with no turns exists — both
+`ghost().xs()` buttons that appear only when their count is above zero. The
+buttons stack in short right-aligned rows — hidden row, empty-toggle row,
+"Clear empty" row — because the plan label keeps a fixed width and
+truncates first. While the empty rows are on screen the toggle reads "Hide
+empty" with no count, and "Clear empty" on its own row hides them all
+through the same `hidden = true` override as `/hide`, with the same
+eight-second Undo.
+
+The on-state screenshots live in a scratch workspace
+(`/private/tmp/harness-ws`): freshly started turn-less sessions are pruned
+by `muse serve` 1.1.1 before any later run can list them, so only a
+workspace with older stable empties can show the toggle on.
 
 A `turn/completed` failure whose message reads like a credential problem
 (`not authenticated`, `no credential`, …) on a `modelError` / `configError` /

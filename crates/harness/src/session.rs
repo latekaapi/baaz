@@ -145,6 +145,9 @@ pub enum SessionEvent {
     RenameStart,
     /// `/hide`: take this session out of the list.
     Hide,
+    /// `/empty`: show sessions with no turns in the sidebar, or hide them
+    /// again. A window-level filter, so the application owns the state.
+    ToggleEmpty,
     /// `/resume`: open the session picker.
     Resume,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
@@ -1366,6 +1369,7 @@ impl SessionView {
                 }
             }
             Command::Hide => cx.emit(SessionEvent::Hide),
+            Command::Empty => cx.emit(SessionEvent::ToggleEmpty),
             Command::Resume => cx.emit(SessionEvent::Resume),
         }
     }

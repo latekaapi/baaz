@@ -234,6 +234,8 @@ pub enum Command {
     Resume,
     /// Hide this session from the sidebar.
     Hide,
+    /// Show sessions with no turns in the sidebar again.
+    Empty,
     /// The session status dialog.
     Status,
     /// The session usage dialog (the same dialog as `/status`).
@@ -248,7 +250,7 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Command; 14] = [
+    pub const ALL: [Command; 15] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -261,6 +263,7 @@ impl Command {
         Command::Name,
         Command::Resume,
         Command::Hide,
+        Command::Empty,
         Command::Logout,
         Command::Help,
     ];
@@ -277,6 +280,7 @@ impl Command {
             Command::Name => "/name",
             Command::Resume => "/resume",
             Command::Hide => "/hide",
+            Command::Empty => "/empty",
             Command::Status => "/status",
             Command::Usage => "/usage",
             Command::Clear => "/clear",
@@ -297,6 +301,7 @@ impl Command {
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
             Command::Hide => "Hide this session from the sidebar",
+            Command::Empty => "Show sessions with no turns in the sidebar",
             Command::Status => "Show current session status",
             Command::Usage => "Show session usage",
             Command::Clear => "Start a new session in this workspace",

@@ -1,5 +1,39 @@
 # Harness changelog
 
+## 2026-09-09 — Improvements — sidebar noise
+
+Screenshot and test runs leave dozens of sessions that never had a turn, so
+the sidebar was mostly noise. Sessions with no turns are now hidden by
+default. A session counts as *empty* when it has no turns, is not the open
+session, is not running, and has no user-given name (`SessionMeta.name`) —
+the rule lives in one pure function, `SessionEntry::is_empty`, and the open
+session is never filtered, so a session just created stays visible.
+
+- **"Show empty (n)"** in the sidebar footer, next to "Show hidden (n)",
+  same style, shown only when n > 0. `/empty` (in the `/` menu, and typed in
+  full) toggles the same filter.
+- **"Clear empty"** on its own row below the toggle, shown only while the
+  empty rows are on screen: it hides every currently-empty session through
+  the existing `hidden = true` override, so it persists, with a toast whose
+  one Undo restores the whole batch. Rows already hidden stay out of the
+  batch. The footer buttons stack in short right-aligned rows (hidden row,
+  empty-toggle row, clear row) because the plan label keeps a fixed width
+  and truncates first: one shared row squeezed it into an ellipsis.
+- While the toggle is on it reads **"Hide empty"** with no count — the rows
+  are on screen, so the count is redundant, and the width is needed for the
+  plan label. Off it stays "Show empty (n)".
+- The sidebar's empty state names its own toggle when only empty sessions
+  were filtered out: "Only empty sessions here" / "Turn on “Show empty”
+  below to see them."
+- Screenshots: `docs/images/improve-sidebar-empty-{dark,light}.png` show the
+  footer with the toggle off; `docs/images/improve-sidebar-empty-on-{dark,light}.png`
+  show it on, with "Hide empty" and "Clear empty" on their own rows next to
+  the fully readable plan label. The on-state shots are taken in the
+  `/private/tmp/harness-ws` scratch workspace: it holds stable empty
+  sessions, while `muse serve` 1.1.1 prunes freshly started turn-less
+  sessions before any later run can photograph them (see the footer note in
+  `docs/02-app.md`).
+
 ## 2026-09-08
 - Spec frozen: docs/00-spec.md. Wire captures and schema exports from muse 1.0.3 added under fixtures/msp.
 
