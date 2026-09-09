@@ -29,12 +29,16 @@ Improvement candidate 3 in `docs/09-handoff-improvements.md` §8: a turn can
 bill reasoning tokens and emit no `reasoning` item, and the footer showed the
 count with nothing saying the thinking happened off-screen. A finished
 assistant turn with `reasoning_tokens > 0` and no `Block::Thinking` now gets
-one more row under the footer — `Thought silently · 419 reasoning` — in the
-footer's own style (mono, `FS_11`, `ink_4`).
+the same footer line with the reasoning cell reading
+`419 reasoning, thought silently` — one line, in the footer's own style
+(mono, `FS_11`, `ink_4`). A first cut drew it as a second row under the
+footer, repeating the count and doubling the height; the fix folds the note
+into the footer's own cell. Turns with a visible thinking card keep the
+plain `419 reasoning` cell.
 
 The decision is the pure `transcript::silent_reasoning` in
 `crates/harness/src/transcript.rs` (assistant turn, count above zero, no
-thinking card), covered by five unit tests; the fold already accumulated the
+thinking card), covered by six unit tests; the fold already accumulated the
 count (`TurnUsage::reasoning` → `TurnMeta::reasoning_tokens`), so no snapshot
 changed. `fixtures/msp/transcript-real.jsonl` is the real capture that
 exercises it: 419 billed reasoning tokens, no `reasoning` item. Screenshots

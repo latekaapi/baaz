@@ -210,13 +210,17 @@ newest turn animates.
 The per-turn token footer is the turn's closing text block: `assistant_turn`
 carries the `TurnMeta`, so the footer sits under the reply where it belongs.
 A finished turn that billed reasoning tokens (`TurnMeta::reasoning_tokens > 0`)
-but shows no thinking card gets one more row under the footer —
-`Thought silently · 419 reasoning` — in the footer's own style (mono, `FS_11`,
-`ink_4`). The count alone never said the thinking happened off-screen; the
-decision is the pure `transcript::silent_reasoning` (assistant turn, count
-above zero, no `Block::Thinking`), and `fixtures/msp/transcript-real.jsonl`
-is the real capture that exercises it (419 billed reasoning tokens, no
-`reasoning` item).
+but shows no thinking card gets the same footer line with the reasoning cell
+reading `419 reasoning, thought silently` — one line, in the footer's own
+style (mono, `FS_11`, `ink_4`). The count alone never said the thinking
+happened off-screen; the decision is the pure
+`transcript::silent_reasoning` (assistant turn, count above zero, no
+`Block::Thinking`), and `fixtures/msp/transcript-real.jsonl` is the real
+capture that exercises it (419 billed reasoning tokens, no `reasoning`
+item). The library draws the footer from `TurnMeta` with no per-cell hook,
+so a silent turn carries no library footer and the harness draws the row
+itself, mirroring the library's cells. A turn with a visible thinking card
+keeps the library's plain `419 reasoning` cell.
 
 Auto-scroll is tail-follow, the same rule the block terminal uses: anything new
 scrolls the list to the bottom, but only for a reader who was already within a
