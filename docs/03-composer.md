@@ -85,7 +85,8 @@ Escape closes; `/model`, `/effort` and `/mode` open the same three.
   client must not assume exactly one row wears either, so both are badges rather
   than states.
 - **Effort** rows are the MSP enum plus a leading "Default" that omits the
-  field. The catalog's `max` tier is never offered: MSP rejects it.
+  field, including the `max` tier muse 1.1.1 added between `xhigh` and
+  `ultra`.
 - **Mode** rows are the four MSP modes with the labels from spec §3.6.
 
 None of the three is given an `on_hover` handler. The component already lets the

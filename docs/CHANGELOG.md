@@ -1,5 +1,20 @@
 # Harness changelog
 
+## 2026-09-09 — effort picker offers max (task A)
+
+Muse 1.1.1 added `max` to the closed MSP `ReasoningEffort` vocabulary between
+`xhigh` and `ultra`, and the wire client already accepted it — but the effort
+picker still omitted it because its tiers are the library's
+`aui_protocol::ReasoningEffort`. The library (agentic-ui branch `effort-max`)
+gained `ReasoningEffort::Max` with the `Max` picker label, the gallery sample
+rows list it, and the protocol test pins the `"max"` wire string. The harness
+maps it end to end: `EFFORTS` lists `Max` between `Xhigh` and `Ultra`
+(8 → 9 slots with the leading Default), `effort_detail` describes it, and the
+wire map sends `Wire::Max`. This retires the picker-omits-max tail of
+`docs/01-transport.md` §4 item 6 and the out-of-scope note in
+`docs/10-msp-1.1.1-diff.md`; `docs/03-composer.md` now lists `max` among the
+effort rows. No live turn was spent: replay/unit gates only.
+
 ## 2026-09-09 — tier probe leak
 
 The billing probe orphaned its `muse` TUI. The probe runs on a background
