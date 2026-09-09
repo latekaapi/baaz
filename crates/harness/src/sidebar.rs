@@ -39,6 +39,9 @@ pub struct SessionEntry {
     pub turns: u64,
     /// Hidden from this window's list (`/hide`).
     pub hidden: bool,
+    /// Named with `/name` or the row's pencil. A named session with no turns
+    /// is somebody's draft, not noise, so the empty filter leaves it alone.
+    pub named: bool,
     /// Everything the search field matches against: the label, the index's
     /// title and first prompt, and whatever Muse made searchable.
     pub haystack: String,
@@ -78,6 +81,7 @@ impl SessionEntry {
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             turns: session.turn_count,
             hidden: meta.is_some_and(|m| m.hidden),
+            named: name.is_some(),
             haystack: haystack(label, index),
             needs_title: label.is_none(),
         }
@@ -103,8 +107,16 @@ impl SessionEntry {
             running: false,
             turns: 0,
             hidden: false,
+            named: false,
             needs_title: false,
         }
+    }
+
+    /// Whether this row is noise: no turns yet, not running, and nobody named
+    /// it. The open session is never noise — a session just created has no
+    /// turns yet and must stay visible — so the caller passes its id.
+    pub fn is_empty(&self, active: Option<&str>) -> bool {
+        self.turns == 0 && !self.running && !self.named && !active.is_some_and(|id| id == self.id)
     }
 
     /// The row's state dot: running sessions pulse, everything else is idle.
@@ -241,5 +253,51 @@ mod tests {
     #[test]
     fn an_unparseable_timestamp_sorts_last_rather_than_first() {
         assert!(parse_time("not a date") < Local::now() - chrono::Duration::days(365));
+    }
+
+    fn entry(id: &str) -> SessionEntry {
+        SessionEntry {
+            id: id.to_owned(),
+            label: "x".into(),
+            updated: Local::now(),
+            running: false,
+            turns: 0,
+            hidden: false,
+            named: false,
+            haystack: "x".into(),
+            needs_title: false,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_turns_is_empty() {
+        assert!(entry("a").is_empty(None));
+    }
+
+    #[test]
+    fn the_open_session_is_never_empty() {
+        assert!(!entry("a").is_empty(Some("a")));
+        assert!(entry("a").is_empty(Some("b")));
+    }
+
+    #[test]
+    fn a_running_session_is_never_empty() {
+        let mut running = entry("a");
+        running.running = true;
+        assert!(!running.is_empty(None));
+    }
+
+    #[test]
+    fn a_named_session_is_never_empty() {
+        let mut named = entry("a");
+        named.named = true;
+        assert!(!named.is_empty(None));
+    }
+
+    #[test]
+    fn a_session_with_turns_is_never_empty() {
+        let mut turned = entry("a");
+        turned.turns = 1;
+        assert!(!turned.is_empty(None));
     }
 }

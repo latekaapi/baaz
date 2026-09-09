@@ -42,7 +42,7 @@ use gpui::{
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::component::input::Textarea;
-use gpui_kit::base::v_flex;
+use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::{
     ModelCatalogSource, ModelListParams, SessionListParams, SessionResumeParams, SessionStartParams,
 };
@@ -241,6 +241,8 @@ pub struct Harness {
     overrides: sessions::Overrides,
     /// Whether hidden sessions are listed anyway (the footer's toggle).
     show_hidden: bool,
+    /// Whether sessions with no turns are listed anyway (the footer's toggle).
+    show_empty: bool,
     /// The sidebar's search field, and whether it is on screen. The field is a
     /// slot the library frames and this owns.
     search: Entity<TextareaState>,
@@ -251,8 +253,10 @@ pub struct Harness {
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
-    /// Sessions hidden in the last few seconds, newest last: the toast's Undo.
-    hidden_undo: Vec<String>,
+    /// Batches hidden in the last few seconds, newest last: the toast's Undo.
+    /// One `/hide` is a batch of one; one "Clear empty" is a batch of
+    /// everything it hid, so one Undo restores the whole batch.
+    hidden_undo: Vec<Vec<String>>,
     /// The title last given to the window, so it is only set when it changed.
     window_title: Option<String>,
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
@@ -288,6 +292,7 @@ impl Harness {
             tier_probing: false,
             overrides: sessions::Overrides::new(),
             show_hidden: false,
+            show_empty: false,
             search: search.clone(),
             search_open: false,
             renaming: None,
@@ -839,6 +844,10 @@ impl Harness {
                 self.show_hidden = !self.show_hidden;
                 cx.notify();
             }
+            "empty" => {
+                self.show_empty = !self.show_empty;
+                cx.notify();
+            }
             _ => return false,
         }
         cx.notify();
@@ -859,6 +868,7 @@ impl Harness {
             entry.needs_title = label.is_none();
             entry.label = label.unwrap_or(crate::sidebar::UNNAMED).to_owned();
             entry.hidden = meta.is_some_and(|m| m.hidden);
+            entry.named = name.is_some();
         }
     }
 
@@ -1049,6 +1059,9 @@ impl Harness {
                     self.hide_session(session_id, cx);
                 }
             }
+            SessionEvent::ToggleEmpty => {
+                self.show_empty = !self.show_empty;
+            }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
         }
         cx.notify();
@@ -1158,42 +1171,90 @@ impl Harness {
     /// A hidden session is never loaded — the row is gone and so is the
     /// transcript — so the active one is closed when it is the one hidden.
     fn hide_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.set_override(&session_id, |meta| meta.hidden = true, cx);
         if self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id) {
             self.active = None;
         }
-        let toast = self.overlays.update(cx, |overlays, _| {
-            overlays.toast_with_action("Session hidden", "It is still on disk; Muse keeps its own list.", "Undo")
-        });
+        self.hide_batch(
+            vec![session_id],
+            "Session hidden".to_owned(),
+            "It is still on disk; Muse keeps its own list.",
+            cx,
+        );
+    }
+
+    /// Hide a batch of sessions with a way back for eight seconds: one
+    /// toast, one Undo that restores the whole batch. One `/hide` is a
+    /// batch of one; one "Clear empty" is a batch of everything it hid.
+    fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
+        for session_id in &ids {
+            self.set_override(session_id, |meta| meta.hidden = true, cx);
+        }
+        let toast =
+            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, detail, "Undo"));
         // The toast's own timer takes it away; this one takes the undo away
         // with it, so a press after it has gone does nothing.
-        let undo = session_id.clone();
+        let undo = ids.clone();
         self.tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(UNDO_WINDOW).await;
             let _ = this.update(cx, |this, cx| {
                 this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
-                this.hidden_undo.retain(|id| id != &undo);
+                this.hidden_undo.retain(|batch| *batch != undo);
                 cx.notify();
             });
         }));
-        self.hidden_undo.push(session_id);
+        self.hidden_undo.push(ids);
         cx.notify();
     }
 
-    /// The toast's Undo: put the newest hidden session back.
+    /// The toast's Undo: put the newest hidden batch back — one row, or one
+    /// "Clear empty" whole.
     fn unhide_newest(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.hidden_undo.pop() else { return };
-        self.set_override(&session_id, |meta| meta.hidden = false, cx);
+        let Some(batch) = self.hidden_undo.pop() else { return };
+        for session_id in batch {
+            self.set_override(&session_id, |meta| meta.hidden = false, cx);
+        }
     }
 
-    /// The rows the sidebar should draw: hidden ones out unless asked for, and
-    /// the search field's text applied.
+    /// "Clear empty": hide every session with no turns, with a way back for
+    /// eight seconds. Rows already hidden stay out of the batch, so Undo
+    /// restores exactly what this hid and nothing it did not.
+    fn clear_empty(&mut self, cx: &mut Context<Self>) {
+        let active = self.active_id(cx);
+        let cleared: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| !entry.hidden && entry.is_empty(active.as_deref()))
+            .map(|entry| entry.id.clone())
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        let n = cleared.len();
+        self.hide_batch(
+            cleared,
+            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
+            "They are still on disk; Muse keeps its own list.",
+            cx,
+        );
+    }
+
+    /// The open session's id, which the empty filter never applies to: a
+    /// session just created has no turns yet and must stay visible.
+    fn active_id(&self, cx: &gpui::App) -> Option<String> {
+        self.active.as_ref().map(|a| a.read(cx).session_id.clone())
+    }
+
+    /// The rows the sidebar should draw: hidden ones out unless asked for,
+    /// sessions with no turns out unless asked for, and the search field's
+    /// text applied. The open session is always drawn.
     fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
         let needle = self.search_text(cx);
+        let active = self.active_id(cx);
         let mut rows: Vec<SessionEntry> = self
             .sessions
             .iter()
             .filter(|entry| self.show_hidden || !entry.hidden)
+            .filter(|entry| self.show_empty || !entry.is_empty(active.as_deref()))
             .filter(|entry| entry.matches(&needle))
             .cloned()
             .collect();
@@ -1453,12 +1514,27 @@ impl Harness {
             return None;
         }
         let p = cx.aui().colors;
-        let searching = !self.search_text(cx).is_empty();
-        let hidden_only = !self.sessions.is_empty() && !self.show_hidden;
-        let (title, detail) = match (searching, hidden_only) {
-            (true, _) => ("No sessions match", "Try fewer letters, or Esc to clear."),
-            (false, true) => ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} below to bring them back."),
-            (false, false) => ("No sessions yet", "\u{2318}N starts one."),
+        let needle = self.search_text(cx);
+        let searching = !needle.is_empty();
+        let active = self.active_id(cx);
+        // What each filter alone is keeping out, past the other two: the
+        // empty text names its own toggle rather than borrowing hidden's.
+        let hidden_only =
+            !self.show_hidden && self.sessions.iter().any(|e| e.hidden && e.matches(&needle));
+        let empty_only = !self.show_empty
+            && self
+                .sessions
+                .iter()
+                .any(|e| (self.show_hidden || !e.hidden) && e.matches(&needle) && e.is_empty(active.as_deref()));
+        let (title, detail) = match (searching, hidden_only, empty_only) {
+            (true, _, _) => ("No sessions match", "Try fewer letters, or Esc to clear."),
+            (false, true, _) => {
+                ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} below to bring them back.")
+            }
+            (false, false, true) => {
+                ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} below to see them.")
+            }
+            (false, false, false) => ("No sessions yet", "\u{2318}N starts one."),
         };
         Some(
             v_flex()
@@ -1482,7 +1558,16 @@ impl Harness {
             this.show_hidden = !this.show_hidden;
             cx.notify();
         });
+        let toggle_empty = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.show_empty = !this.show_empty;
+            cx.notify();
+        });
+        let clear_empty = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.clear_empty(cx);
+        });
         let hidden = self.sessions.iter().filter(|e| e.hidden).count();
+        let active = self.active_id(cx);
+        let empty = self.sessions.iter().filter(|e| e.is_empty(active.as_deref())).count();
         let mut footer = sidebar_footer("account", identity.initial(), identity.name.clone())
             .trailing(button("sign-out", "Sign out").ghost().xs().on_click(sign_out));
         if !identity.email.is_empty() {
@@ -1498,12 +1583,38 @@ impl Harness {
             // a line to live on, so the row exists with nothing in it.
             footer = footer.plan("", false);
         }
-        // The hidden toggle only appears once something is hidden: an
-        // affordance for an empty set is a question nobody asked.
+        // Either toggle only appears once it has something to show: an
+        // affordance for an empty set is a question nobody asked. Clearing
+        // only appears once the empty rows are on screen to be cleared. The
+        // rows stack vertically and right-aligned: the plan label keeps its
+        // fixed width and truncates first, so the buttons must stay short
+        // rather than squeeze the label into an ellipsis.
+        let mut plan_rows: Vec<AnyElement> = Vec::new();
         if hidden > 0 {
             let label =
                 if self.show_hidden { format!("Hide hidden ({hidden})") } else { format!("Show hidden ({hidden})") };
-            footer = footer.plan_trailing(button("show-hidden", label).ghost().xs().on_click(toggle_hidden));
+            plan_rows.push(button("show-hidden", label).ghost().xs().on_click(toggle_hidden).into_any_element());
+        }
+        if empty > 0 {
+            // While the toggle is on, the rows it shows make the count
+            // redundant, and the width is needed for the plan label.
+            let label = if self.show_empty { "Hide empty".to_owned() } else { format!("Show empty ({empty})") };
+            plan_rows.push(
+                h_flex()
+                    .gap(px(scale::SP_2))
+                    .child(button("show-empty", label).ghost().xs().on_click(toggle_empty))
+                    .into_any_element(),
+            );
+            // "Clear empty" gets its own row: beside the toggle it still
+            // squeezed the plan label into an ellipsis.
+            if self.show_empty {
+                plan_rows.push(
+                    button("clear-empty", "Clear empty").ghost().xs().on_click(clear_empty).into_any_element(),
+                );
+            }
+        }
+        if !plan_rows.is_empty() {
+            footer = footer.plan_trailing(v_flex().items_end().gap(px(scale::SP_1)).children(plan_rows));
         }
         footer.into_any_element()
     }
@@ -1945,7 +2056,8 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismissed));
             cx.notify();
         });
-        // One action exists, and it is Undo on a hidden session.
+        // One action exists, and it is Undo on hidden sessions — one row, or
+        // one "Clear empty" batch.
         let act = cx.listener(move |this: &mut Self, _: &(), _, cx| {
             this.unhide_newest(cx);
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));

@@ -157,7 +157,9 @@ one dialog built out of `SideState` (model, mode, effort, plan, context,
 cumulative tokens, queue depth, session id, workspace, branch) under the
 billing tier and its two percentages; `/help` reopens the menu unfiltered.
 `/fork` landed in Phase 4; `/name`, `/hide` and `/resume` landed in Phase 5 —
-nothing in the list says "not in this build yet" any more.
+nothing in the list says "not in this build yet" any more. `/empty` toggles
+the sidebar's empty-session filter: sessions with no turns are hidden by
+default, and the command shows them again (or hides them once shown).
 
 A command can also be **typed in full and sent**. `send()` parses the whole
 line, so `/name Fix the parser` renames the session rather than asking Muse
