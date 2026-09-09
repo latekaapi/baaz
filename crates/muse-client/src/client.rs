@@ -20,16 +20,17 @@ use crate::frame::{notification_line, parse_line, request_line, Frame};
 use crate::schema::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalListPendingParams,
     ApprovalListPendingResult, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult,
-    ModelListParams, ModelListResult, SessionCompactParams, SessionCompactResult, SessionForkParams,
-    SessionForkResult, SessionListParams, SessionListResult, SessionReadParams, SessionReadResult,
-    SessionResumeParams, SessionResumeResult, SessionSetApprovalModeParams,
-    SessionSetApprovalModeResult, SessionSetModelParams, SessionSetModelResult, SessionStartParams,
-    SessionStartResult, SessionUserShellParams, SessionUserShellResult, TurnCancelParams,
-    TurnCancelResult, TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult,
-    TurnSteerParams, TurnSteerResult, TurnUnqueueParams, TurnUnqueueResult, UserInputAnswerParams,
+    ItemReadOutputParams, ItemReadOutputResult, ModelListParams, ModelListResult,
+    SessionCompactParams, SessionCompactResult, SessionForkParams, SessionForkResult,
+    SessionListParams, SessionListResult, SessionReadParams, SessionReadResult, SessionResumeParams,
+    SessionResumeResult, SessionSetApprovalModeParams, SessionSetApprovalModeResult,
+    SessionSetModelParams, SessionSetModelResult, SessionStartParams, SessionStartResult,
+    SessionUserShellParams, SessionUserShellResult, TurnCancelParams, TurnCancelResult,
+    TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams,
+    TurnSteerResult, TurnUnqueueParams, TurnUnqueueResult, UserInputAnswerParams,
     UserInputAnswerResult, UserInputCancelParams, UserInputCancelResult, UserInputClarifyParams,
-    UserInputClarifyResult, ViewPageParams, ViewPageResult, ViewUnsubscribeParams,
-    ViewUnsubscribeResult, SCHEMA_FINGERPRINT,
+    UserInputClarifyResult, ViewPageParams, ViewPageResult, ViewSubscribeParams, ViewSubscribeResult,
+    ViewUnsubscribeParams, ViewUnsubscribeResult, SCHEMA_FINGERPRINT,
 };
 
 /// How long a request waits before giving up on a silent server.
@@ -515,6 +516,12 @@ impl MuseClient {
         self.call("view/page", params)
     }
 
+    /// `view/subscribe` — attach this connection's live view subscription at an
+    /// explicit cursor. The re-attach path after `view/unsubscribe`.
+    pub fn view_subscribe(&self, params: &ViewSubscribeParams) -> Result<ViewSubscribeResult> {
+        self.call("view/subscribe", params)
+    }
+
     /// `view/unsubscribe` — stop following a session. Idempotent; does not
     /// unload the session.
     pub fn view_unsubscribe(
@@ -522,6 +529,17 @@ impl MuseClient {
         params: &ViewUnsubscribeParams,
     ) -> Result<ViewUnsubscribeResult> {
         self.call("view/unsubscribe", params)
+    }
+
+    // ------------------------------------------------------------------------ item
+
+    /// `item/readOutput` — byte-ranged fetch of stored full output the view
+    /// truncated. Read-only; works on loaded and unloaded sessions.
+    pub fn item_read_output(
+        &self,
+        params: &ItemReadOutputParams,
+    ) -> Result<ItemReadOutputResult> {
+        self.call("item/readOutput", params)
     }
 
     // ----------------------------------------------------------------- approvals

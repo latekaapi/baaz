@@ -48,6 +48,7 @@ pub fn title(kind: &str) -> String {
         TurnErrorKind::ProjectionError => "Projection error".to_owned(),
         TurnErrorKind::LogError => "Log error".to_owned(),
         TurnErrorKind::WorkflowLaunchError => "Workflow launch error".to_owned(),
+        TurnErrorKind::AuthRequired => "Authentication required".to_owned(),
         // The open enum drops the string it could not name, so the raw one is
         // what the card shows: a class this build has never heard of is still
         // more informative as its own wire name than as "Error".

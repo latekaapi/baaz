@@ -1,5 +1,22 @@
 # Harness changelog
 
+## 2026-09-09 — muse 1.1.1 schema
+
+The `muse` CLI self-updated 1.0.3 → 1.1.1, so the MSP schema exports were
+regenerated in place (`fixtures/msp/msp-ts/msp.d.ts`,
+`fixtures/msp/msp/{manifest.json,msp.schema.json}`) and `schema.rs` absorbs the
+whole diff. Fingerprint `sha256:0331…758b7` → `sha256:c669…03e6a4f` (manifest,
+corroborated by a free `initialize`). The diff is purely additive: 2 new
+methods (`item/readOutput`, `view/subscribe`), 1 new notification
+(`session/modelRouteUnserved`), 6 new types, 3 new enum variants, 4 new fields —
+including `ReasoningEffort.max`, which retires the §4 item 6 discrepancy in
+`docs/01-transport.md`. Both new methods have typed params/results and
+`MuseClient` wrappers; the new notification is indexed but deliberately has no
+fold arm (the fold ignores unknown methods). No behaviour fix was needed:
+framing, ids, `session/list`, approval/userInput shapes and error kinds are
+unchanged. The 1.0.3 captures replay untouched, with no snapshot regeneration.
+Full write-up: `docs/10-msp-1.1.1-diff.md`.
+
 ## 2026-09-09 — Improvements — sidebar noise
 
 Screenshot and test runs leave dozens of sessions that never had a turn, so
