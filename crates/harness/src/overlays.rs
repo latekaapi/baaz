@@ -15,7 +15,7 @@
 //! Keeping the state here rather than in the two views is what makes "Escape
 //! closes whatever is open, in order" one function instead of a negotiation.
 
-use aui::feedback::{ToastData, ToastKind};
+use aui::feedback::{ToastAction, ToastData, ToastKind};
 use aui::overlay::DialogKind;
 use aui_protocol::{PermissionMode, ReasoningEffort};
 
@@ -85,6 +85,23 @@ impl Menu {
     }
 }
 
+/// Which list the command palette is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaletteKind {
+    /// ⌘K: every `/` command and every session operation.
+    Commands,
+    /// `/resume`: the workspace's sessions, under the titles the sidebar shows.
+    Resume,
+}
+
+/// The open command palette: which list, and where the keyboard is in it.
+pub struct Palette {
+    /// Which list.
+    pub kind: PaletteKind,
+    /// The highlighted row, across all sections in order.
+    pub selected: usize,
+}
+
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
@@ -92,6 +109,8 @@ pub struct Overlays {
     pub dialog: Option<Dialog>,
     /// The open popover, if any.
     pub menu: Option<Menu>,
+    /// The open command palette, if any.
+    pub palette: Option<Palette>,
     /// Toasts, oldest first.
     pub toasts: Vec<ToastData>,
     /// The `/` menu's **Skills** section, from `muse skills list --json`.
@@ -110,7 +129,21 @@ impl Overlays {
         if self.menu.take().is_some() {
             return true;
         }
+        if self.palette.take().is_some() {
+            return true;
+        }
         self.dialog.take().is_some()
+    }
+
+    /// Move the palette's selection by `delta` within `count`, wrapping.
+    pub fn move_palette(&mut self, delta: isize, count: usize) {
+        let Some(palette) = self.palette.as_mut() else { return };
+        if count == 0 {
+            palette.selected = 0;
+            return;
+        }
+        let count = count as isize;
+        palette.selected = (((palette.selected as isize + delta) % count + count) % count) as usize;
     }
 
     /// Open a menu, replacing whatever was open.
@@ -140,6 +173,28 @@ impl Overlays {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);
         self.toasts.push(ToastData::new(id, title.into(), body.into()).kind(ToastKind::Neutral));
+    }
+
+    /// Show a note carrying one action, and return the toast's id.
+    ///
+    /// The one action that exists is Undo, and it exists because hiding a
+    /// session is the only thing in this window that takes something away from
+    /// the list without asking first.
+    pub fn toast_with_action(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        action: impl Into<String>,
+    ) -> String {
+        self.next_toast += 1;
+        let id = format!("toast-{}", self.next_toast);
+        let label = action.into();
+        self.toasts.push(
+            ToastData::new(id.clone(), title.into(), body.into())
+                .kind(ToastKind::Neutral)
+                .action(ToastAction::new(label.to_lowercase(), label).primary()),
+        );
+        id
     }
 
     /// Drop the toast with this id.
@@ -173,10 +228,12 @@ pub enum Command {
     Compact,
     /// Fork the session — Phase 4.
     Fork,
-    /// Rename the session — Phase 5.
+    /// Rename the session (`sessions.json`, not the wire).
     Name,
-    /// Resume another session — Phase 5.
+    /// Resume another session — the command palette over `session/list`.
     Resume,
+    /// Hide this session from the sidebar.
+    Hide,
     /// The session status dialog.
     Status,
     /// The session usage dialog (the same dialog as `/status`).
@@ -191,7 +248,7 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Command; 13] = [
+    pub const ALL: [Command; 14] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -203,6 +260,7 @@ impl Command {
         Command::Fork,
         Command::Name,
         Command::Resume,
+        Command::Hide,
         Command::Logout,
         Command::Help,
     ];
@@ -218,6 +276,7 @@ impl Command {
             Command::Fork => "/fork",
             Command::Name => "/name",
             Command::Resume => "/resume",
+            Command::Hide => "/hide",
             Command::Status => "/status",
             Command::Usage => "/usage",
             Command::Clear => "/clear",
@@ -237,6 +296,7 @@ impl Command {
             Command::Fork => "Branch this session from the latest message",
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
+            Command::Hide => "Hide this session from the sidebar",
             Command::Status => "Show current session status",
             Command::Usage => "Show session usage",
             Command::Clear => "Start a new session in this workspace",
@@ -247,21 +307,39 @@ impl Command {
 
     /// Whether this build actually does it. The three that do not still appear.
     pub fn available(&self) -> bool {
-        !matches!(self, Command::Fork | Command::Name | Command::Resume)
+        true
     }
 
-    /// The phase that will bring it, for the "not yet" toast.
+    /// The phase that would bring a command this build does not have.
+    ///
+    /// Nothing is unavailable any more — `/fork` landed in Phase 4, `/name`
+    /// and `/resume` in Phase 5 — so this is the empty sentence the toast
+    /// would have carried. The pair is kept because a build that grows a
+    /// command before it grows the code should say so rather than do nothing.
     pub fn coming_in(&self) -> &'static str {
-        match self {
-            Command::Fork => "Forking arrives with the approvals phase.",
-            Command::Name | Command::Resume => "Renaming and resuming arrive with the polish phase.",
-            _ => "",
-        }
+        ""
     }
 
     /// Parse a typed slash command.
     pub fn parse(text: &str) -> Option<Command> {
         Command::ALL.into_iter().find(|c| c.slash() == text)
+    }
+
+    /// Parse a whole typed line into a command and whatever followed it.
+    ///
+    /// `"/name Fix the parser"` is `(Name, "Fix the parser")`, `"/status"` is
+    /// `(Status, "")`, and anything that is not a command is `None` — which is
+    /// what keeps a prompt beginning with a slash a prompt.
+    pub fn parse_line(text: &str) -> Option<(Command, &str)> {
+        let line = text.trim_end();
+        if !line.starts_with('/') || line.lines().count() > 1 {
+            return None;
+        }
+        let (head, rest) = match line.split_once(' ') {
+            Some((head, rest)) => (head, rest.trim_start()),
+            None => (line, ""),
+        };
+        Command::parse(head).map(|command| (command, rest))
     }
 }
 

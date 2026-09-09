@@ -5,15 +5,89 @@
 //! harness PNG and a gallery PNG are the same kind of image: 1×, no window
 //! chrome, no pointer.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{path::PathBuf, time::Duration};
 
 use gpui::{App, WindowHandle};
 use gpui_kit::component::Root;
 
+/// Whether the open session is showing a pending approval right now.
+///
+/// A flag rather than a callback because the capture runs outside the entity
+/// tree: [`capture_and_quit`] holds a `WindowHandle`, not the session. The
+/// session sets it on every frame it renders.
+static PENDING_APPROVAL: AtomicBool = AtomicBool::new(false);
+
+/// Whether a `--steps` list is still running.
+///
+/// A scripted capture used to race its own script: the delay is measured from
+/// the first frame, and a step list containing a `wait:` outlives it, so the
+/// PNG showed the window before the steps that were the point of taking it.
+static STEPS_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// How long a capture that is waiting for an approval will wait.
+const APPROVAL_CEILING: Duration = Duration::from_secs(15);
+/// How often it looks.
+const POLL: Duration = Duration::from_millis(100);
+
+/// Called by the session view each frame: is a card waiting on the person?
+pub fn set_pending_approval(pending: bool) {
+    PENDING_APPROVAL.store(pending, Ordering::Relaxed);
+}
+
+/// Called by the application around its `--steps` loop.
+pub fn set_steps_running(running: bool) {
+    STEPS_RUNNING.store(running, Ordering::Relaxed);
+}
+
 /// Waits for the first frames, captures the window and exits the process.
-pub fn capture_and_quit(handle: WindowHandle<Root>, path: PathBuf, delay: Duration, cx: &mut App) {
+///
+/// `await_steps` is set whenever `--steps` were given, and `await_approval`
+/// when one of them is a `shell:`, which raises a real, server-minted approval
+/// over a live wire. The fixed delay is the right wait for a fold that is
+/// already in memory and the wrong one for a script or a round-trip to a child
+/// process: `docs/images/phase4-approval-stage1-*.png` were captured before the
+/// card arrived and showed the shell card alone (finding F9). So the capture
+/// waits for the condition, and then for the same settling delay it would have
+/// used anyway.
+pub fn capture_and_quit(
+    handle: WindowHandle<Root>,
+    path: PathBuf,
+    delay: Duration,
+    await_steps: bool,
+    await_approval: bool,
+    cx: &mut App,
+) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(delay).await;
+        let mut waited = false;
+        if await_steps {
+            let deadline = std::time::Instant::now() + APPROVAL_CEILING;
+            // The flag is only raised once the session is open, so the wait is
+            // for "the steps have run", not "the steps are not running yet".
+            while !STEPS_RUNNING.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                cx.background_executor().timer(POLL).await;
+            }
+            while STEPS_RUNNING.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                cx.background_executor().timer(POLL).await;
+            }
+            waited = true;
+        }
+        if await_approval {
+            let deadline = std::time::Instant::now() + APPROVAL_CEILING;
+            while !PENDING_APPROVAL.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                cx.background_executor().timer(POLL).await;
+            }
+            if !PENDING_APPROVAL.load(Ordering::Relaxed) {
+                eprintln!("harness: no approval arrived in {APPROVAL_CEILING:?}; capturing anyway");
+            }
+            waited = true;
+        }
+        if waited {
+            // Whatever arrived animates in; give it the same settling time the
+            // first frames got.
+            cx.background_executor().timer(delay).await;
+        }
         let result = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();

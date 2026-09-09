@@ -469,15 +469,51 @@ pub fn elapsed(ms: u64) -> SharedString {
 }
 
 /// The empty transcript: what a brand-new session shows before the first turn.
-pub fn empty_state(workspace: &str, cx: &mut App) -> AnyElement {
+pub fn empty_state(
+    workspace: &str,
+    on_pick: Option<PickSuggestion>,
+    cx: &mut App,
+) -> AnyElement {
     use aui_tokens::{ActiveAui, AuiStyled};
     let p = cx.aui().colors;
-    v_flex()
+    let name = std::path::Path::new(workspace)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| workspace.to_owned());
+    let mut column = v_flex()
         .size_full()
         .items_center()
         .justify_center()
         .gap(px(scale::SP_3))
         .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("New session"))
-        .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("Muse runs in {workspace}.")))
-        .into_any_element()
+        .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("Muse runs in {name}.")));
+    // Three ways in, for a person looking at a blank page. They are prompts
+    // about the workspace itself, so none of them assumes a project this is
+    // not — and picking one only fills the composer, it never sends.
+    if let Some(on_pick) = on_pick {
+        column = column.child(
+            aui::composer::suggestion_chips("empty-suggestions", SUGGESTIONS.iter().map(|s| (*s).into()).collect())
+                .on_pick(move |index, window, cx| on_pick(index, window, cx)),
+        );
+    }
+    column.into_any_element()
 }
+
+/// A suggestion chip was picked: the caller puts its text in the composer.
+pub type PickSuggestion = std::rc::Rc<dyn Fn(usize, &mut gpui::Window, &mut App)>;
+
+/// The text of the chip at `index`, for the caller that has to put it in the
+/// composer.
+pub fn suggestion(index: usize) -> Option<&'static str> {
+    SUGGESTIONS.get(index).copied()
+}
+
+/// The three chips a fresh session offers.
+///
+/// Short, about the workspace rather than about a project the harness has not
+/// looked at, and each one is a thing a person genuinely opens a session for.
+const SUGGESTIONS: [&str; 3] = [
+    "What is in this workspace?",
+    "Explain how this project is laid out",
+    "Find the entry point and walk me through it",
+];

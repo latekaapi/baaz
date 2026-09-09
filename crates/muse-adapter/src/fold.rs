@@ -69,6 +69,37 @@ struct Folded {
     /// Parallel to the turn's `blocks`, and the reason a backfilled transcript
     /// reads the same as a live one (finding F3).
     block_order: HashMap<String, Vec<u64>>,
+    /// Policy-resolved approvals still waiting to be told **why**, keyed by the
+    /// `commandId` of the item they gated (finding F11).
+    ///
+    /// Live, the server resolves the approval before it completes the item, and
+    /// the reason — "deny_unmatched: no policy rule allows this action" — only
+    /// ever arrives on the item. So the card is drawn with the approval mode's
+    /// name and corrected the moment the item lands.
+    awaiting_reason: HashMap<String, AwaitingReason>,
+    /// The other order, which a backfill produces: the item's refusal reason,
+    /// keyed by its `commandId`, waiting for the approval that gated it.
+    ///
+    /// Both halves exist because F3 is the standing rule — a session read a
+    /// second time must say what it said the first time — and the two streams
+    /// deliver these two facts in opposite orders.
+    item_reasons: HashMap<String, String>,
+}
+
+/// One policy-resolved approval whose card is still naming the mode rather than
+/// the reason.
+///
+/// It holds the **approval id**, not the slot it was in. A block's slot moves:
+/// an item that arrives out of order is inserted by its log sequence and every
+/// slot past it shifts (finding F3), which is exactly what a backfill does to
+/// the tool card that sits above an approval. The slot is looked up again when
+/// the reason lands.
+#[derive(Clone, Debug)]
+struct AwaitingReason {
+    approval_id: String,
+    request: msp::ApprovalRequestParams,
+    by: Option<ResolvedBy>,
+    allowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -304,6 +335,8 @@ impl Folded {
             user_turns: HashMap::new(),
             usage: HashMap::new(),
             seen_requests: HashMap::new(),
+            awaiting_reason: HashMap::new(),
+            item_reasons: HashMap::new(),
             marker_seq: 0,
             mode_seen: false,
             current_seq: None,
@@ -680,10 +713,16 @@ impl Folded {
         }
         self.revisions.insert(item.item_id.clone(), item.revision);
 
-        match item.kind {
+        // F11: record the refusal before the item is drawn, so an approval this
+        // stream resolves *later* can read it, and correct the card afterwards
+        // for the stream that resolved it earlier.
+        self.note_denial_reason(&item);
+        let mut deltas = match item.kind {
             msp::ItemKind::UserMessage => self.user_message(&item, previous.is_some()),
             _ => self.assistant_item(&item, terminal),
-        }
+        };
+        deltas.extend(self.fill_policy_reason(&item));
+        deltas
     }
 
     fn user_message(&mut self, item: &msp::Item, seen: bool) -> Vec<Delta> {
@@ -905,12 +944,24 @@ impl Folded {
         let Some(slot) = self.approvals.get(&resolved.approval_id).copied() else {
             return Vec::new();
         };
-        let rule = request
-            .as_ref()
-            .and_then(|r| r.subject.command.clone())
-            .unwrap_or_else(|| resolved.decision.as_wire().unwrap_or("policy").to_owned());
         let allowed = matches!(resolved.policy_result, msp::ApprovalPolicyResult::Allow);
         let by = resolved_by(&resolved.resolved_by);
+        // F11. The subject's command is what was *asked about*, never the rule
+        // that decided it: a card reading "Rule echo hi && ls" said the policy
+        // contained a rule that it did not. What decided it is, best first:
+        // the amendment this decision installed, then the reason the gated item
+        // will carry, then the approval mode that was in force.
+        let amendment = resolved.amendment.as_ref().map(|a| a.rule_preview.clone());
+        // `toolCallId` is `<tool>_<commandId>`, which is the only join there is
+        // between an approval and the item it gated.
+        let command_id = request
+            .as_ref()
+            .and_then(|r| r.tool_call_id.rsplit_once('_').map(|(_, id)| id.to_owned()));
+        let known = command_id.as_ref().and_then(|id| self.item_reasons.get(id).cloned());
+        let rule = amendment
+            .clone()
+            .or_else(|| known.clone())
+            .unwrap_or_else(|| approval_mode_name(&self.side.approval_mode).to_owned());
         let state = match (by, allowed) {
             // A policy or judge resolution can arrive with no user interaction
             // at all — the card opened and closed in the same breath and was
@@ -921,7 +972,50 @@ impl Folded {
             (_, false) => ApprovalState::AutoDenied { rule },
         };
         let Some(request) = request else { return Vec::new() };
+        // Nothing better than the mode's name yet: the reason is still in
+        // flight on the gated item, so remember where to put it. Only for a
+        // resolution nobody was asked for — a person who pressed Allow decided
+        // it themselves, and a failure the command hit afterwards is not the
+        // reason their approval was granted.
+        let unattended = !matches!(by, Some(ResolvedBy::User));
+        if amendment.is_none() && known.is_none() && unattended {
+            if let Some(command_id) = command_id {
+                self.awaiting_reason.insert(
+                    command_id,
+                    AwaitingReason {
+                        approval_id: resolved.approval_id.clone(),
+                        request: request.clone(),
+                        by,
+                        allowed,
+                    },
+                );
+            }
+        }
         let block = approval_block(&request, state, by, None);
+        self.update_block(slot, block)
+    }
+
+    /// F11. Remember why a gated item was refused, for an approval that has not
+    /// been resolved yet in this stream.
+    fn note_denial_reason(&mut self, item: &msp::Item) {
+        let Some(reason) = refusal(item) else { return };
+        let Some(command_id) = item.command_id.clone() else { return };
+        self.item_reasons.insert(command_id, reason);
+    }
+
+    /// F11. A gated item finally said why it was refused: correct the card that
+    /// is still naming the approval mode.
+    fn fill_policy_reason(&mut self, item: &msp::Item) -> Vec<Delta> {
+        let Some(command_id) = item.command_id.as_deref() else { return Vec::new() };
+        let Some(reason) = refusal(item) else { return Vec::new() };
+        let Some(waiting) = self.awaiting_reason.remove(command_id) else { return Vec::new() };
+        let Some(slot) = self.approvals.get(&waiting.approval_id).copied() else { return Vec::new() };
+        let state = if waiting.allowed {
+            ApprovalState::AutoAllowed { rule: reason }
+        } else {
+            ApprovalState::AutoDenied { rule: reason }
+        };
+        let block = approval_block(&waiting.request, state, waiting.by, None);
         self.update_block(slot, block)
     }
 
@@ -1200,6 +1294,51 @@ fn permission_mode(mode: &ApprovalMode) -> PermissionMode {
         ApprovalMode::OnRequest => PermissionMode::OnRequest,
         ApprovalMode::DenyUnmatched => PermissionMode::DenyUnmatched,
     }
+}
+
+/// The approval mode in words, for a policy resolution with nothing better to
+/// name (finding F11).
+fn approval_mode_name(mode: &ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::AllowAll => "the allow-all approval mode",
+        ApprovalMode::PromptUnmatched => "the prompt-unmatched approval mode",
+        ApprovalMode::OnRequest => "the on-request approval mode",
+        ApprovalMode::DenyUnmatched => "the deny-unmatched approval mode",
+    }
+}
+
+/// The sentence inside an item's refusal, or `None` for an item that was not
+/// refused.
+fn refusal(item: &msp::Item) -> Option<String> {
+    if !matches!(item.status, msp::ItemStatus::Rejected | msp::ItemStatus::Failed) {
+        return None;
+    }
+    item.failure_reason
+        .as_deref()
+        .or(item.visible_output.as_deref())
+        .and_then(denial_reason)
+}
+
+/// The sentence inside a refusal.
+///
+/// `"tool denied: deny_unmatched: no policy rule allows this action"` is three
+/// things wearing one coat: the tool's own preamble, the policy's code, and the
+/// sentence a person can read. Only the last belongs on a card; the code is a
+/// grep key, and the preamble says nothing the card's title does not.
+fn denial_reason(text: &str) -> Option<String> {
+    let mut rest = text.lines().next()?.trim();
+    for prefix in ["tool denied:", "tool failed:", "denied:", "error:"] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped.trim();
+        }
+    }
+    // `<code>: <sentence>` — a code carries no spaces.
+    if let Some((code, sentence)) = rest.split_once(": ") {
+        if !code.is_empty() && !code.contains(' ') {
+            rest = sentence.trim();
+        }
+    }
+    (!rest.is_empty()).then(|| rest.to_owned())
 }
 
 fn todo_state(status: &msp::TodoStatus) -> TodoState {

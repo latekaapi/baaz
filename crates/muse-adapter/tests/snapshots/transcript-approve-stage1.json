@@ -1,0 +1,238 @@
+[
+  {
+    "sessionId": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+    "session": {
+      "id": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+      "agent": "muse",
+      "model": "",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "caec247d-152b-46b9-a8d3-ec2788c4b70a",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "running",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": true
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+              "tool": "shell",
+              "command": "echo hi && ls",
+              "reason": "",
+              "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "state": {
+                "kind": "pending"
+              },
+              "rule": "Always allow in this workspace: echo ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: echo ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: echo ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 2,
+                  "argv": [
+                    "echo",
+                    "hi"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: echo ..."
+                },
+                {
+                  "position": 2,
+                  "total": 2,
+                  "argv": [
+                    "ls"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: ls ..."
+                }
+              ],
+              "current_stage": 0,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {
+        "66de002c-bd48-4071-9bdb-c6c28252ea8f": {
+          "approvalId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+          "availableChoices": [
+            {
+              "choiceId": "allow_once",
+              "decision": "approved",
+              "label": "Allow once",
+              "scope": "once"
+            },
+            {
+              "choiceId": "allow_local_prefix",
+              "decision": "approvedPolicyAmendment",
+              "label": "Always allow in this workspace: echo ...",
+              "rulePreview": "Always allow in this workspace: echo ...",
+              "scope": "localPersistent"
+            },
+            {
+              "acceptsFeedback": true,
+              "choiceId": "abort",
+              "decision": "abort",
+              "label": "Reject",
+              "scope": "once"
+            }
+          ],
+          "currentRequirementId": {
+            "approvalId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+            "sourceIndex": 0
+          },
+          "itemId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+          "judgeEscalated": false,
+          "protectedWrite": false,
+          "rawArgs": "{\"command\":\"echo hi && ls\"}",
+          "sessionId": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+          "sourceRange": {
+            "first": {
+              "id": "8c83e0ff-1501-4f33-9b05-8abc666aa440",
+              "sequence": 9
+            },
+            "last": {
+              "id": "8c83e0ff-1501-4f33-9b05-8abc666aa440",
+              "sequence": 9
+            },
+            "stream": {
+              "id": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+              "kind": "session"
+            }
+          },
+          "subject": {
+            "command": "echo hi && ls",
+            "kind": "shell",
+            "stages": [
+              {
+                "argv": [
+                  "echo",
+                  "hi"
+                ],
+                "argvComplete": true,
+                "position": 1,
+                "requirementId": {
+                  "approvalId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+                  "sourceIndex": 0
+                },
+                "resolution": {
+                  "kind": "unresolved"
+                },
+                "suggestedPrefix": {
+                  "argvPrefix": [
+                    "echo"
+                  ],
+                  "label": "Always allow in this workspace: echo ..."
+                },
+                "totalStages": 2
+              },
+              {
+                "argv": [
+                  "ls"
+                ],
+                "argvComplete": true,
+                "position": 2,
+                "requirementId": {
+                  "approvalId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+                  "sourceIndex": 1
+                },
+                "resolution": {
+                  "kind": "unresolved"
+                },
+                "suggestedPrefix": {
+                  "argvPrefix": [
+                    "ls"
+                  ],
+                  "label": "Always allow in this workspace: ls ..."
+                },
+                "totalStages": 2
+              }
+            ],
+            "workspaceRoot": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws"
+          },
+          "taskId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+          "toolCallId": "user_shell_01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "toolName": "shell",
+          "turnId": "01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "viewCursor": "v:01a081ef-2588-78b3-8dd9-9c5c14f4b118:2"
+        }
+      },
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:01a081ef-2588-78b3-8dd9-9c5c14f4b118:2",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

@@ -37,13 +37,20 @@ pub struct IndexEntry {
 
 impl IndexEntry {
     /// The label the sidebar should show, best first.
+    ///
+    /// Muse writes the literal string `"New session"` into `title` for a
+    /// session it could not name — which is a placeholder wearing a title's
+    /// clothes, and the reason fourteen rows read the same thing in Phase 4's
+    /// screenshots (finding F10). It is treated as no title at all, so the
+    /// caller goes on to the next fact it has.
     pub fn label(&self) -> Option<&str> {
         fn pick(value: &Option<String>) -> Option<&str> {
             value.as_deref().map(str::trim).filter(|s| !s.is_empty())
         }
-        pick(&self.session_name)
-            .or_else(|| Some(self.title.trim()).filter(|s| !s.is_empty()))
-            .or_else(|| pick(&self.first_user_prompt))
+        let title = Some(self.title.trim())
+            .filter(|s| !s.is_empty())
+            .filter(|s| !s.eq_ignore_ascii_case(crate::sidebar::UNNAMED));
+        pick(&self.session_name).or(title).or_else(|| pick(&self.first_user_prompt))
     }
 }
 
@@ -115,5 +122,8 @@ mod tests {
         let bare = IndexEntry { first_user_prompt: Some("hello".into()), ..IndexEntry::default() };
         assert_eq!(bare.label(), Some("hello"));
         assert_eq!(IndexEntry::default().label(), None);
+        // Muse's own placeholder is not a title (finding F10).
+        let placeholder = IndexEntry { title: "New session".into(), ..IndexEntry::default() };
+        assert_eq!(placeholder.label(), None);
     }
 }
