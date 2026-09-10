@@ -1,5 +1,39 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (E) — full-text search palette and local store
+
+The sidebar's search icon was inert and Cmd+Shift+F opened a label filter;
+full-text search of sessions and created files did not exist (header item 4,
+overall item 2). New `crates/harness/src/search.rs` owns a harness-side
+`search.db` (sqlite via the existing `rusqlite` bundled build — FTS5 verified
+with a `USING fts5` smoke query at open, no new dependency): `sessions_fts`
+over label/title/first-prompt plus Muse's `search_text` transcript column,
+rebuilt off the UI thread at boot and after each index refresh, and
+`files_fts` over created files, recorded off the UI thread when a turn
+completes. "Files we created" means write/edit tool targets, relativized
+against the session workspace with escapes rejected; reads, searches,
+shells and unknown tools are never recorded.
+
+`PaletteKind::Search` lists both halves — Sessions (label plus a one-line
+`snippet()` around the match) and Files (path plus the owning session's
+label). Enter on a session resumes it; on a file reveals it in Finder (a
+toast when it is gone). Opened from the sidebar search icon (`.on_search`),
+Cmd+Shift+F (retargeted; the empty query lists recent sessions plus recent
+files, which is what the old filter did) and `/search`. Queries run
+off-thread with a query epoch, latest wins; punctuation can never error the
+query. Scripted as `--steps search:<query>`.
+
+Findings P3/P4 in the same pass: `history::write_all` goes through
+`store::write_atomic`, and `history::read`/`append` run off the UI thread;
+`files::walk` lowercases once at walk time and the `@` menu ranks on a
+background task with epoch/latest-wins instead of scanning 5 000 paths on
+the UI thread per keystroke. Covered by unit tests over ranking, snippets
+and the recorder's verb detection; full detail in `docs/12-search.md`.
+
+- Screenshots: `docs/images/improve-search-{dark,light}.png` replay
+  `fixtures/msp/transcript-real.jsonl` with `--steps search:harness`, a
+  query hitting both sections (Files seeded from a scratch workspace).
+
 ## 2026-09-10 — Task D — composer files, thumbnails, plus menu
 
 The composer attaches more than images now. The `+` menu holds three rows —
@@ -139,6 +173,7 @@ touched.
 - Screenshots: `docs/images/improve-fold-toolgroup-dark.png` and
   `docs/images/improve-fold-toolgroup-light.png` replay the tool-group
   capture in both themes, taken with `--replay` so they cost nothing.
+
 
 
 ## 2026-09-09 — Improvements (E) — fork picker

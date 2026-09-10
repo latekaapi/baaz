@@ -64,7 +64,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘B | Sidebar ↔ collapsed rail |
 | ⌘N | New session in this workspace |
 | ⌘K | The command palette: every `/` command and every session operation |
-| ⌘⇧F | The sidebar's search field |
+| ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
 | ⌘\\ | The right pane (wired, and the pane is empty) |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
@@ -82,5 +82,5 @@ disarmed and every control would wear a ring after the first key press.
 - **No ⌘1–⌘9 for sessions.** The digits belong to the approval card, and a key
   that means two things depending on where you are looking is a key that means
   neither.
-- **No ⌘F.** The search is the sidebar's, not the transcript's, and ⌘⇧F says so.
+- **No ⌘F.** Search is the palette's (⌘⇧F), not the transcript's.
 - **No ⌘W / ⌘Q overrides.** They are the platform's.
