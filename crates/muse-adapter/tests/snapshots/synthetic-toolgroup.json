@@ -1,0 +1,228 @@
+[
+  {
+    "sessionId": "synthetic-toolgroup",
+    "session": {
+      "id": "synthetic-toolgroup",
+      "agent": "muse",
+      "model": "muse-spark-test",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Build it and check the configs.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] compiling harness",
+                      "[build] linking harness"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "ok"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "done"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "thinking",
+              "text": "Checking the plan",
+              "elapsed_ms": 0,
+              "summary": "Checking the plan",
+              "state": "done"
+            },
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg-4",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/notes.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 2
+                  }
+                },
+                {
+                  "id": "i-tg-5",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/todo.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 1
+                  }
+                }
+              ],
+              "summary": "Read 2 files",
+              "state": "done"
+            },
+            {
+              "kind": "approval",
+              "id": "ap-tg-1",
+              "tool": "bash",
+              "command": "cargo run -- --no-connect",
+              "reason": "",
+              "cwd": "/tmp/synthetic",
+              "capabilities": [],
+              "scope": "this_command",
+              "state": {
+                "kind": "approving"
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "user"
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-tg-6",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --deny warnings",
+              "status": "error",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "error: warnings denied"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-tg-7",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --allow warnings",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "recovered"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn:18",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

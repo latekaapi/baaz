@@ -1,0 +1,77 @@
+[
+  {
+    "sessionId": "synthetic-reasoning-text",
+    "session": {
+      "id": "synthetic-reasoning-text",
+      "agent": "muse",
+      "model": "muse-spark-test",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Why this plan?",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "thinking",
+              "text": "Consider the workspace layout first, then list files.",
+              "elapsed_ms": 0,
+              "summary": null,
+              "state": "done"
+            },
+            {
+              "kind": "thinking",
+              "text": "Plan the sweep",
+              "elapsed_ms": 0,
+              "summary": "Plan the sweep",
+              "state": "done"
+            },
+            {
+              "kind": "text",
+              "text": "Done.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn:7",
+      "command_text": {},
+      "restored_prompt": null
+    }
+  }
+]

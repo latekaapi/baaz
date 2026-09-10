@@ -1,5 +1,42 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (B) — adapter fold: structured tool results, tool groups, reminderChild, reasoning
+
+Shell tool cards showed the raw JSON envelope (`{"chunk_id": …, "command": …,
+"description": …, "exit_code": …, …}`) and the todo tool showed
+`{"todos":[…]}` / `{"ok":true,…}` as code. The fold now presents both, and
+groups consecutive tool calls the way the owner asked (transcript report
+§C7–§C9). Shapes were learned read-only from the newest session logs under
+`~/.local/share/muse/sessions/2026/09/` and rebuilt as sanitised synthetic
+fixtures; the library branch already carries `Block::ToolGroup` and is not
+touched.
+
+- A shell result serialised as a JSON envelope folds into the shell body:
+  the command is the title (one line, elided past 120 characters), the
+  output text is the body, the status comes from the exit code, and the
+  "N more lines" fold still applies. The envelope's `description` has no
+  home in the library card and is dropped (documented workaround in
+  `docs/01-transport.md`); an empty command falls back to it as the title.
+- A todo tool call (`args` with a `todos` array) folds into the session's
+  todo card; its `{"ok":…}` result is never shown. File reads keep the
+  line-count body. Any other JSON object/array result folds pretty-printed
+  with its args as parameter pairs. D6 log-sequence ordering is unchanged.
+- Consecutive `ToolCall`s in one assistant turn fold into one
+  `Block::ToolGroup` ("Ran 3 commands", "Read 4 files", else "N tool
+  calls"), incrementally while streaming, with stable group/turn keys.
+  Approvals, questions, errors, plans, todos, thinking and approval-gated
+  calls each break the run.
+- `reminderChild` renders as nothing (`workflow` stays generic); `reasoning`
+  falls back to its raw `text` when `summary` is empty. Incidental fix: a
+  tool call's own `exitCode` now reaches the shell body (it used to fold to
+  `null`).
+- Covered by four new synthetic fixtures and eight fold tests; snapshots
+  regenerated and read (`transcript-phase3` groups its three consecutive
+  calls, `synthetic-readoutput` gains the exit code).
+- Screenshots: `docs/images/improve-fold-toolgroup-dark.png` and
+  `docs/images/improve-fold-toolgroup-light.png` replay the tool-group
+  capture in both themes, taken with `--replay` so they cost nothing.
+
 ## 2026-09-09 — Improvements (E) — fork picker
 
 `/fork` used to fork the newest completed turn with no say in the matter; the
