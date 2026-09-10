@@ -72,7 +72,7 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
-use crate::{files, full_output, history, images, plan, skills};
+use crate::{attachments, files, full_output, history, images, plan, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock.
 const TICK: Duration = Duration::from_millis(250);
@@ -289,6 +289,10 @@ pub struct SessionView {
     images: Vec<images::Image>,
     /// Monotonic id source for image chips.
     image_seq: u64,
+    /// Files waiting to go out with the next turn, as extracted text.
+    files: Vec<attachments::AttachedFile>,
+    /// Monotonic id source for file chips.
+    file_seq: u64,
     /// A drag is over the window, so the drop overlay is up.
     dragging: bool,
     /// The `+` menu.
@@ -382,6 +386,8 @@ impl SessionView {
             plan_seq: 0,
             images: Vec::new(),
             image_seq: 0,
+            files: Vec::new(),
+            file_seq: 0,
             dragging: false,
             plus_open: false,
             history: history::Cursor::new(history::read(&workspace_key)),
@@ -749,7 +755,7 @@ impl SessionView {
     /// prefixes the model-visible input.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
-        if text.trim().is_empty() && self.images.is_empty() {
+        if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
             return;
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
@@ -811,6 +817,7 @@ impl SessionView {
             ..Default::default()
         };
         self.images.clear();
+        self.files.clear();
         let Some(client) = self.wire_client(cx) else { return };
         let planning = self.plan;
         let call = cx.background_spawn(async move { client.turn_start(&params) });
@@ -821,9 +828,11 @@ impl SessionView {
         cx.notify();
     }
 
-    /// The turn's content parts: the text, then every attached image.
+    /// The turn's content parts: one text part per attached file, then the
+    /// prompt text, then every attached image.
     fn parts(&self, text: String) -> Vec<TurnInputPart> {
         let mut parts = Vec::new();
+        parts.extend(self.files.iter().map(attachments::AttachedFile::part));
         if !text.trim().is_empty() {
             parts.push(TurnInputPart::text(text));
         }
@@ -896,6 +905,7 @@ impl SessionView {
             reasoning_effort: self.effort.map(effort_wire),
         };
         self.images.clear();
+        self.files.clear();
         let Some(client) = self.wire_client(cx) else { return };
         let call = cx.background_spawn(async move { client.turn_steer(&params) });
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -1494,12 +1504,31 @@ impl SessionView {
         pasted
     }
 
-    /// The `+` menu's "Attach image", and the drop of a file from Finder.
+    /// The `+` menu's "Attach file or photo", and the drop of files from
+    /// Finder. Image extensions attach as images; everything else is extracted
+    /// to text by `attachments` (MSP has no file part to carry the bytes).
     pub fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
-            self.image_seq += 1;
-            match images::from_path(format!("img-{}", self.image_seq), &path) {
-                Ok(image) => self.images.push(image),
+            let ext =
+                path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+                self.image_seq += 1;
+                match images::from_path(format!("img-{}", self.image_seq), &path) {
+                    Ok(image) => self.images.push(image),
+                    Err(reason) => self.banner = Some(reason),
+                }
+                continue;
+            }
+            if self.files.len() >= attachments::MAX_FILES {
+                self.banner = Some(format!(
+                    "at most {} files per turn; the rest were not attached",
+                    attachments::MAX_FILES
+                ));
+                continue;
+            }
+            self.file_seq += 1;
+            match attachments::from_path(format!("file-{}", self.file_seq), &path) {
+                Ok(file) => self.files.push(file),
                 Err(reason) => self.banner = Some(reason),
             }
         }
@@ -1515,7 +1544,8 @@ impl SessionView {
         cx.notify();
     }
 
-    /// Open the system picker for an image.
+    /// Open the system picker for a file. Image extensions attach as images;
+    /// everything else is extracted to text, so the prompt accepts any file.
     pub fn prompt_for_image(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -1527,6 +1557,22 @@ impl SessionView {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let _ = this.update(cx, |this, cx| this.attach_paths(paths, cx));
         }));
+    }
+
+    /// Type a menu sigil (`@` or `/`) into the draft so its caret menu opens:
+    /// what the `+` menu's Mention and commands rows do. The text goes through
+    /// `set_draft`, so the caret lands at the end and the popover opens exactly
+    /// as if the person had typed it.
+    fn insert_sigil(&mut self, sigil: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (draft, _) = self.draft_and_caret(cx);
+        let mut next = draft;
+        if !next.is_empty() && !next.ends_with(char::is_whitespace) {
+            next.push(' ');
+        }
+        next.push_str(sigil);
+        self.set_draft(next, window, cx);
+        self.on_draft_changed(cx);
+        self.focus_composer(window, cx);
     }
 
     // -------------------------------------------------------------- scripting
@@ -1563,6 +1609,7 @@ impl SessionView {
             }
             "plan" => self.set_plan(true, cx),
             "image" => self.attach_paths(vec![PathBuf::from(rest)], cx),
+            "file" => self.attach_paths(vec![PathBuf::from(rest)], cx),
             "plus" => {
                 self.plus_open = !self.plus_open;
                 cx.notify();
@@ -2229,13 +2276,17 @@ impl SessionView {
             }
             ComposerIntent::RemoveChip(id) => {
                 this.images.retain(|image| image.id != id.as_ref());
+                this.files.retain(|file| file.id != id.as_ref());
                 cx.notify();
             }
         });
-        let plus = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+        let plus = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             this.plus_open = false;
-            if id.as_ref() == "attach-image" {
-                this.prompt_for_image(cx);
+            match id.as_ref() {
+                "attach" => this.prompt_for_image(cx),
+                "mention" => this.insert_sigil("@", window, cx),
+                "commands" => this.insert_sigil("/", window, cx),
+                _ => {}
             }
             cx.notify();
         });
@@ -2254,21 +2305,34 @@ impl SessionView {
                         kind: ComposerChipKind::Image,
                         label: image.name.clone().into(),
                         removable: true,
-                        thumbnail: None,
+                        thumbnail: image.thumb.clone(),
                         detail: None,
                     })
+                    .chain(self.files.iter().map(|file| ComposerChip {
+                        id: file.id.clone().into(),
+                        kind: ComposerChipKind::File,
+                        label: file.name.clone().into(),
+                        removable: true,
+                        thumbnail: None,
+                        detail: Some(file.detail().into()),
+                    }))
                     .collect(),
             )
             .streaming(self.busy())
             // Blocked context is the server refusing to take more, so the
             // composer refuses too and the meter offers the way out.
-            .can_send(!blocked && (!draft.trim().is_empty() || !self.images.is_empty()))
+            .can_send(!blocked && (!draft.trim().is_empty() || !self.images.is_empty() || !self.files.is_empty()))
             .plus_menu(
                 self.plus_open,
                 Some(
                     plus_menu(
                         "plus",
-                        vec![PlusMenuItem::new("attach-image", IconName::Image, "Attach image")],
+                        vec![
+                            PlusMenuItem::new("attach", IconName::Paperclip, "Attach file or photo")
+                                .key("⌘U"),
+                            PlusMenuItem::new("mention", IconName::At, "@ Mention file"),
+                            PlusMenuItem::new("commands", IconName::Slash, "/ Slash commands"),
+                        ],
                         self.plus_open,
                     )
                     .on_activate(move |id, window, cx| plus(id, window, cx)),
