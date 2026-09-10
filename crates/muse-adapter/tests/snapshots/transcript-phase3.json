@@ -25,53 +25,57 @@
           "id": "01a08284-e45b-7c90-8c73-245f5e76b670",
           "blocks": [
             {
-              "kind": "tool_call",
-              "id": "d4c7871d-ca1e-47f9-9ebb-1ff169548448",
-              "tool_kind": {
-                "kind": "read"
-              },
-              "verb": "Read skill",
-              "target": "bundled:manage-settings",
-              "status": "success",
-              "duration_ms": null,
-              "body": {
-                "kind": "read",
-                "lines": 244
-              }
-            },
-            {
-              "kind": "tool_call",
-              "id": "6eec4f57-f48e-4a89-808b-1fae39f4e2d1",
-              "tool_kind": {
-                "kind": "shell"
-              },
-              "verb": "Ran",
-              "target": "python3 -c 'import os; print(os.path.join(os.environ.get(\"XDG_CONFIG_HOME\") or os.path.join(os.environ[\"HOME\"], \".config\"), \"muse\", \"settings.json\"))'",
-              "status": "success",
-              "duration_ms": null,
-              "body": {
-                "kind": "shell",
-                "output_lines": [
-                  "/Users/latekaapi/.config/muse/settings.json"
-                ],
-                "exit_code": null,
-                "live": false
-              }
-            },
-            {
-              "kind": "tool_call",
-              "id": "ba8a0e63-eea9-4baa-a36c-ffd294038b29",
-              "tool_kind": {
-                "kind": "read"
-              },
-              "verb": "Read",
-              "target": "/Users/latekaapi/.config/muse/settings.json",
-              "status": "success",
-              "duration_ms": null,
-              "body": {
-                "kind": "read",
-                "lines": 7
-              }
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "d4c7871d-ca1e-47f9-9ebb-1ff169548448",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read skill",
+                  "target": "bundled:manage-settings",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 244
+                  }
+                },
+                {
+                  "id": "6eec4f57-f48e-4a89-808b-1fae39f4e2d1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "python3 -c 'import os; print(os.path.join(os.environ.get(\"XDG_CONFIG_HOME\") or os.path.join(os.environ[\"HOME\"], \".config\"), \"muse\", \"settings.json\"))'",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "/Users/latekaapi/.config/muse/settings.json"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "ba8a0e63-eea9-4baa-a36c-ffd294038b29",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/Users/latekaapi/.config/muse/settings.json",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 7
+                  }
+                }
+              ],
+              "summary": "3 tool calls",
+              "state": "done"
             }
           ],
           "meta": {

@@ -96,8 +96,8 @@ fn every_capture_folds_to_its_snapshot() {
 #[test]
 fn no_capture_needs_a_generic_fallback() {
     // The phase-1 gate: every item kind in every capture folds to a real card.
-    // `workflow` and `reminderChild` are the two kinds allowed to fall back, and
-    // no capture contains one.
+    // `workflow` is the only kind allowed to fall back (`reminderChild` is
+    // dropped by the fold before it could), and no capture contains one.
     for path in captures() {
         let fold = replay(&path);
         for id in fold.session_ids() {
@@ -480,4 +480,267 @@ fn a_truncated_tool_item_keeps_its_output_ref() {
         .filter(|block| matches!(block, aui_protocol::Block::ToolCall { .. }))
         .count();
     assert_eq!(tools, 1, "the truncated tool item folded to no tool card");
+}
+
+// ------------------------------------------- Task B: structured presentation
+
+/// The assistant turn with an id, or a panic naming the turns present.
+fn assistant_turn<'a>(
+    fold: &'a MuseFold,
+    session_id: &str,
+    turn_id: &str,
+) -> &'a aui_protocol::Turn {
+    let session = fold.session(session_id).expect("session exists");
+    session.turns.iter().find(|turn| turn.id() == turn_id).unwrap_or_else(|| {
+        panic!(
+            "no turn {turn_id}; have {:?}",
+            session.turns.iter().map(|turn| turn.id().to_owned()).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// The structured shell envelope folds into the shell body: the command is
+/// the title, the output text is the body, the status comes from the exit
+/// code — never a raw JSON card.
+#[test]
+fn a_shell_json_envelope_folds_to_a_shell_card() {
+    use aui_protocol::{ToolBody, ToolKind, ToolStatus};
+    let fold = replay(&fixtures_dir().join("synthetic-toolshapes.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let turn = assistant_turn(&fold, &id, "t-syn-1");
+    let call = turn
+        .blocks()
+        .iter()
+        .filter_map(|block| block.as_tool_call())
+        .find(|call| call.id == "i-syn-bash-1")
+        .expect("the enveloped shell call folded to a tool card");
+    assert_eq!(call.kind, ToolKind::Shell);
+    assert_eq!(call.verb, "Ran");
+    assert_eq!(call.target, "ls -la");
+    assert_eq!(call.status, ToolStatus::Success);
+    match call.body {
+        ToolBody::Shell { output_lines, exit_code, live } => {
+            assert_eq!(output_lines, vec!["README.md".to_owned(), "notes.txt".to_owned()]);
+            assert_eq!(exit_code, Some(0));
+            assert!(!live);
+        }
+        body => panic!("enveloped shell output folded to {body:?}"),
+    }
+}
+
+/// A todo tool call folds its args into the session's todo card: no tool
+/// card for the call itself, and its `{"ok": …}` result is shown nowhere.
+#[test]
+fn a_todo_tool_call_folds_to_the_todo_card() {
+    use aui_protocol::{Block, TodoState};
+    let fold = replay(&fixtures_dir().join("synthetic-toolshapes.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let session = fold.session(&id).expect("session exists");
+    let mut todos = Vec::new();
+    for turn in &session.turns {
+        for block in turn.blocks() {
+            if let Block::Todo { items } = block {
+                todos.extend(items.iter().cloned());
+            }
+        }
+    }
+    let labels: Vec<(&str, TodoState)> =
+        todos.iter().map(|item| (item.label.as_str(), item.state)).collect();
+    assert_eq!(
+        labels,
+        vec![
+            ("Sweep the workspace", TodoState::Running),
+            ("Update the changelog", TodoState::Pending),
+            ("File the notes", TodoState::Done),
+        ]
+    );
+    let rendered = serde_json::to_string(session).expect("session serializes");
+    assert!(!rendered.contains("i-syn-todo-1"), "the todo call drew a tool card");
+    assert!(!rendered.contains(r#""items":3"#), "the todo result count leaked");
+    assert!(!rendered.contains(r#""ok""#), "the todo result was shown");
+}
+
+/// Any other JSON object result folds pretty-printed with its args as
+/// parameters, while a file read keeps its line-count body.
+#[test]
+fn other_json_results_fold_pretty_and_reads_keep_their_line_count() {
+    use aui_protocol::ToolBody;
+    let fold = replay(&fixtures_dir().join("synthetic-toolshapes.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let turn = assistant_turn(&fold, &id, "t-syn-1");
+    let calls: Vec<aui_protocol::ToolCall> =
+        turn.blocks().iter().filter_map(|block| block.as_tool_call()).collect();
+    let estimate =
+        calls.iter().find(|call| call.id == "i-syn-est-1").expect("the JSON call folded");
+    match &estimate.body {
+        ToolBody::Mcp { params, result_json } => {
+            assert_eq!(
+                *params,
+                vec![
+                    ("task".to_owned(), "tidy".to_owned()),
+                    ("depth".to_owned(), "2".to_owned()),
+                ]
+            );
+            let parsed: serde_json::Value =
+                serde_json::from_str(result_json).expect("pretty result parses");
+            assert_eq!(parsed["estimate_minutes"], 12);
+            assert_eq!(*result_json, serde_json::to_string_pretty(&parsed).expect("pretty"));
+        }
+        body => panic!("a JSON object result folded to {body:?}"),
+    }
+    let read = calls.iter().find(|call| call.id == "i-syn-read-1").expect("the read folded");
+    match &read.body {
+        ToolBody::Read { lines } => assert_eq!(*lines, 3),
+        body => panic!("a file read folded to {body:?}"),
+    }
+}
+
+/// `reminderChild` items render as nothing at all: no generic card, no
+/// block, no trace in the serialised transcript.
+#[test]
+fn reminder_children_render_as_nothing() {
+    use aui_protocol::Block;
+    let fold = replay(&fixtures_dir().join("synthetic-reminderchild.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let session = fold.session(&id).expect("session exists");
+    for turn in &session.turns {
+        for block in turn.blocks() {
+            assert!(
+                !matches!(block, Block::Generic { .. }),
+                "a reminder child drew a generic card"
+            );
+        }
+    }
+    let turn = assistant_turn(&fold, &id, "t-syn-1");
+    assert_eq!(turn.blocks().len(), 1, "reminder children left blocks behind");
+    assert!(
+        matches!(turn.blocks()[0], Block::Text { .. }),
+        "the surviving block is not the reply text"
+    );
+    let rendered = serde_json::to_string(session).expect("session serializes");
+    assert!(!rendered.contains("reminderChild"), "a reminder kind leaked");
+    assert!(!rendered.contains("i-syn-rem-"), "a reminder item leaked");
+}
+
+/// A `reasoning` item with no `summary` falls back to its raw text so exposed
+/// reasoning is never dropped; the collapsed line stays the first summary
+/// part, and a summarised item is untouched by the fallback.
+#[test]
+fn reasoning_falls_back_to_raw_text_when_the_summary_is_empty() {
+    use aui_protocol::Block;
+    let fold = replay(&fixtures_dir().join("synthetic-reasoning-text.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let turn = assistant_turn(&fold, &id, "t-syn-1");
+    let thinking: Vec<(&str, Option<&str>)> = turn
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            Block::Thinking { text, summary, .. } => {
+                Some((text.as_str(), summary.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking,
+        vec![
+            ("Consider the workspace layout first, then list files.", None),
+            ("Plan the sweep", Some("Plan the sweep")),
+        ]
+    );
+}
+
+/// Consecutive tool calls fold into one `ToolGroup` per run with a
+/// verb-derived summary; thinking, approvals and errors each break the run,
+/// and the failed and recovered calls stand alone.
+#[test]
+fn consecutive_tool_calls_fold_into_verb_summarised_groups() {
+    use aui_protocol::{ActivityState, Block, ToolKind, ToolStatus};
+    let fold = replay(&fixtures_dir().join("synthetic-toolgroup.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let turn = assistant_turn(&fold, &id, "t-syn-1");
+    let blocks = turn.blocks();
+    assert_eq!(blocks.len(), 6, "unexpected blocks: {blocks:?}");
+    match &blocks[0] {
+        Block::ToolGroup { calls, summary, state } => {
+            assert_eq!(summary, "Ran 3 commands");
+            assert_eq!(*state, ActivityState::Done);
+            assert_eq!(calls.len(), 3);
+            assert!(calls.iter().all(|call| call.kind == ToolKind::Shell));
+            assert!(calls.iter().all(|call| call.status == ToolStatus::Success));
+        }
+        other => panic!("the shell run did not group: {other:?}"),
+    }
+    assert!(matches!(blocks[1], Block::Thinking { .. }), "no thinking break: {:?}", blocks[1]);
+    match &blocks[2] {
+        Block::ToolGroup { calls, summary, state } => {
+            assert_eq!(summary, "Read 2 files");
+            assert_eq!(*state, ActivityState::Done);
+            assert_eq!(calls.len(), 2);
+            assert!(calls.iter().all(|call| call.kind == ToolKind::Read));
+        }
+        other => panic!("the read run did not group: {other:?}"),
+    }
+    match &blocks[3] {
+        Block::Approval { tool, command, state, .. } => {
+            assert_eq!(tool, "bash");
+            assert_eq!(command, "cargo run -- --no-connect");
+            assert!(matches!(state, aui_protocol::ApprovalState::Approving));
+        }
+        other => panic!("the approval did not break the run: {other:?}"),
+    }
+    let failed = blocks[4].as_tool_call().expect("the failed call folded");
+    assert_eq!(failed.status, ToolStatus::Error);
+    assert!(failed.target.contains("deny warnings"), "wrong card: {:?}", failed.target);
+    let lone = blocks[5].as_tool_call().expect("the last call folded");
+    assert_eq!(lone.status, ToolStatus::Success);
+}
+
+/// The group forms while streaming: the second started call joins the first
+/// into a working group, and the next output chunk lands in the right member.
+#[test]
+fn a_group_forms_incrementally_while_streaming() {
+    use aui_protocol::{ActivityState, Block};
+    let path = fixtures_dir().join("synthetic-toolgroup.jsonl");
+    let text = std::fs::read_to_string(&path).expect("capture is readable");
+    let mut fold = MuseFold::new();
+    let mut staged = 0;
+    for line in text.lines() {
+        let Some(body) = line.strip_prefix("<-- ") else { continue };
+        let Some(frame) = frame::parse_line(body).expect("frame parses") else { continue };
+        let Some(event) = MuseEvent::from_frame(frame) else { continue };
+        fold.apply(event);
+        if body.contains("\"item/started\"") && body.contains("i-tg-2") {
+            let turn = assistant_turn(&fold, "synthetic-toolgroup", "t-syn-1");
+            assert_eq!(turn.blocks().len(), 1, "the run split while streaming");
+            match &turn.blocks()[0] {
+                Block::ToolGroup { calls, summary, state } => {
+                    assert_eq!(calls.len(), 2);
+                    assert_eq!(summary, "Ran 2 commands");
+                    assert_eq!(*state, ActivityState::Working);
+                }
+                other => panic!("the second started call did not join: {other:?}"),
+            }
+            staged += 1;
+        }
+        if body.contains("\"item/delta\"") && body.contains("i-tg-1") {
+            let turn = assistant_turn(&fold, "synthetic-toolgroup", "t-syn-1");
+            match &turn.blocks()[0] {
+                Block::ToolGroup { calls, .. } => {
+                    let first =
+                        calls.iter().find(|call| call.id == "i-tg-1").expect("member kept");
+                    let output = match &first.body {
+                        aui_protocol::ToolBody::Shell { output_lines, .. } => {
+                            output_lines.join("\n")
+                        }
+                        body => panic!("streamed output left the shell body: {body:?}"),
+                    };
+                    assert!(output.contains("linking harness"), "delta lost: {output:?}");
+                }
+                other => panic!("the group broke on a delta: {other:?}"),
+            }
+            staged += 1;
+        }
+    }
+    assert_eq!(staged, 2, "the streaming stages never ran");
 }

@@ -48,7 +48,7 @@
                   "[done] finished in 12.4 s",
                   "[done] 0 warnings"
                 ],
-                "exit_code": null,
+                "exit_code": 0,
                 "live": false
               }
             }

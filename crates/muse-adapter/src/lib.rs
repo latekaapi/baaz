@@ -29,7 +29,9 @@
 //!
 //! Unknown item kinds take the rendering MSP mandates for them: a
 //! [`aui_protocol::Block::Generic`] card carrying kind, status and
-//! `fallbackText`. In 1.0.3 only `workflow` and `reminderChild` reach it.
+//! `fallbackText`. In 1.0.3 only `workflow` reaches it: `reminderChild` is
+//! dropped by the fold, and `reasoning` falls back to its raw text when it
+//! carries no summary (presentation policy, `docs/01-transport.md`).
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

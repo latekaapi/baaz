@@ -1,0 +1,20 @@
+# synthetic-reminderchild.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# No capture contains a `reminderChild` item, which is why the live card
+# survived while the fixtures stayed green: this file pins the policy
+# that reminder children render as nothing at all.
+#
+# Shapes follow `fixtures/msp/msp-ts/msp.d.ts` and the real bash toolCall item
+# in `transcript-real.jsonl`; every `<-- ` line below is synthetic. Paths and
+# ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing here names a
+# real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-reminderchild", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-reminderchild/session.jsonl", "activeTurnId": null}}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:2", "sessionId": "synthetic-reminderchild", "turnId": "t-syn-1"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:3", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-user-1", "kind": "userMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "What did the reminder say?"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-rem-1", "kind": "reminderChild", "turnId": "t-syn-1", "revision": 1, "status": "completed", "childSessionId": "synthetic-child-1", "childSessionLogPath": "/tmp/synthetic/synthetic-reminderchild/child-1.jsonl", "generationId": 2, "reminderAgentId": "reminder-agent-1", "taskId": "task-1", "fallbackText": "Reminder from the child session."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-rem-2", "kind": "reminderChild", "turnId": "t-syn-1", "revision": 1, "status": "completed", "childSessionId": "synthetic-child-2", "childSessionLogPath": "/tmp/synthetic/synthetic-reminderchild/child-2.jsonl", "generationId": 3, "reminderAgentId": "reminder-agent-1", "taskId": "task-1", "fallbackText": "Reminder from the child session."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-reminderchild", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Nothing to show."}}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-reminderchild", "turnId": "t-syn-1", "terminal": "completed"}}

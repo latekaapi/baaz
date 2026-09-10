@@ -258,6 +258,49 @@ question is the better rendering of the same fact.
 Unknown item kinds get `Block::Generic { kind, status, text }` — the rendering MSP
 mandates. Across all five captures nothing reaches it.
 
+### Presentation policy (2026-09-10)
+
+What the transcript shows is the wire's facts, but not always one card per
+fact. The fold drops or regroups in exactly these cases, and nothing else:
+
+- `reminderChild` renders as **nothing**. It is a Muse-internal
+  child-session record (child session id, log path, generation), re-emitted
+  once per reminder generation; the owner asked for it to go. `workflow`
+  stays generic — nobody complained about it, and the mandate says to render
+  what is not modelled.
+- A shell result serialised as one JSON object (`command`, `description`,
+  `exit_code`/`terminal_status`, an output field) becomes the shell body it
+  always should have been: the command is the title (one line, elided past
+  120 characters), the output text is the body, the status comes from the
+  exit code. The envelope's `description` has **no home** in the library card
+  (`ToolCall` carries verb/target/status/body, `ToolBody::Shell` carries
+  lines/exit-code/liveness) and is dropped; when the command is empty the
+  description stands in as the title instead. This is the documented
+  workaround until the library gains a subtitle.
+- A todo tool call (`args` carrying a `todos` array) becomes the session's
+  todo card — the same card `session/todoListChanged` owns — and its
+  `{"ok": …}` result is never shown. A file read keeps the read body with
+  the line count. Any other JSON object/array result becomes a generic body
+  with the args as parameter pairs and the result pretty-printed: still a
+  folded code body, never a raw one-liner.
+- Consecutive `ToolCall` blocks inside one assistant turn fold into one
+  `Block::ToolGroup` with a verb-derived summary ("Ran 3 commands",
+  "Read 4 files", otherwise "N tool calls") and the aggregate state (failed
+  if any member failed, working while any member runs, done otherwise). The
+  group is incremental — a streaming call joins the open run — and group and
+  turn keys stay stable, so the transcript never re-keys mid-stream.
+  Approvals, questions, errors, plans, todos, thinking, and any call awaiting
+  approval each **break** the run (D10/D11 liveness): a run never spans a
+  decision.
+- A `reasoning` item with no `summary` falls back to its raw `text`, so
+  exposed reasoning is never silently dropped. The collapsed line stays the
+  first summary part.
+
+None of this touches the D6 log-sequence ordering: grouping converts and
+joins in place, and an out-of-order arrival still lands where its sequence
+says rather than at the tail. Live and backfilled folds agree because every
+rule above is a function of the terminal item, not of the streaming halves.
+
 ---
 
 ## 6. Running things
