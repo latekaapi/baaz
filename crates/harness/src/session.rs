@@ -2254,6 +2254,8 @@ impl SessionView {
                         kind: ComposerChipKind::Image,
                         label: image.name.clone().into(),
                         removable: true,
+                        thumbnail: None,
+                        detail: None,
                     })
                     .collect(),
             )
