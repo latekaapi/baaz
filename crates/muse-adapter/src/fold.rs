@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalChoice, ApprovalScope, ApprovalStage, ApprovalState, Answer, Block,
-    Delta, MarkerKind, PermissionMode, Provider, QuestionOption, QuestionPreview, ResolvedBy,
-    SearchHit, Session, ThinkingState, ToolBody, ToolKind, ToolStatus, TodoItem, TodoState, Turn,
-    TurnMeta,
+    ActivityState, ApprovalBadges, ApprovalChoice, ApprovalScope, ApprovalStage, ApprovalState,
+    Answer, Block, Delta, MarkerKind, PermissionMode, Provider, QuestionOption, QuestionPreview,
+    ResolvedBy, SearchHit, Session, ThinkingState, ToolBody, ToolCall, ToolKind, ToolStatus,
+    TodoItem, TodoState, Turn, TurnMeta,
 };
 use muse_client::schema::{self as msp, ApprovalMode};
 use muse_client::MuseEvent;
@@ -91,6 +91,21 @@ struct Folded {
     /// second time must say what it said the first time — and the two streams
     /// deliver these two facts in opposite orders.
     item_reasons: HashMap<String, String>,
+    /// Generation counter for tool grouping: every decision-point event bumps
+    /// it, so a run of consecutive tool calls only ever groups within one
+    /// generation (presentation policy, `docs/01-transport.md`).
+    group_gen: u64,
+    /// Assistant turn id → the open end of its consecutive-tool-call run: a
+    /// lone groupable `ToolCall` or a `ToolGroup`. Valid only while its `gen`
+    /// matches `group_gen` and it is still the turn's last block.
+    open_groups: HashMap<String, OpenGroup>,
+}
+
+/// The open end of one assistant turn's consecutive-tool-call run.
+#[derive(Clone, Copy, Debug)]
+struct OpenGroup {
+    block: usize,
+    gen: u64,
 }
 
 /// One policy-resolved approval whose card is still naming the mode rather than
@@ -245,6 +260,7 @@ impl MuseFold {
     /// later [`MuseFold::replace_client_block`] can find it again.
     pub fn append_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
         let folded = self.folded(session_id);
+        folded.break_groups();
         let mut deltas = Vec::new();
         let turn = folded.standalone_turn(id, &mut deltas);
         let (added, _) = folded.push_block(turn, block);
@@ -255,6 +271,7 @@ impl MuseFold {
     /// Replace the first block of a client-authored turn.
     pub fn replace_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
         let folded = self.folded(session_id);
+        folded.break_groups();
         let Some(turn) = folded.session.turns.iter().position(|t| t.id() == id) else {
             return Vec::new();
         };
@@ -357,6 +374,8 @@ impl Folded {
             awaiting_reason: HashMap::new(),
             stored_outputs: HashMap::new(),
             item_reasons: HashMap::new(),
+            group_gen: 0,
+            open_groups: HashMap::new(),
             marker_seq: 0,
             mode_seen: false,
             current_seq: None,
@@ -504,20 +523,13 @@ impl Folded {
     fn todo_changed(&mut self, params: &Value) -> Vec<Delta> {
         // Replace the whole list every event; an empty `items` is a cleared
         // list, not a no-op.
+        self.break_groups();
         let items: Vec<msp::TodoItem> = params
             .get("items")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        // An empty list is the agent saying it has no tasks any more, so the
-        // card goes: a todo card with nothing in it is not a todo card.
-        if items.is_empty() {
-            return match self.todo.take() {
-                Some(slot) => self.remove_block(slot),
-                None => Vec::new(),
-            };
-        }
-        let block = Block::Todo {
-            items: items
+        self.set_todo(
+            items
                 .iter()
                 .map(|item| TodoItem {
                     label: item.text.clone(),
@@ -525,22 +537,11 @@ impl Folded {
                     elapsed_ms: None,
                 })
                 .collect(),
-        };
-        match self.todo {
-            Some(slot) => self.update_block(slot, block),
-            None => {
-                let mut deltas = Vec::new();
-                let id = format!("todo:{}", self.session.id);
-                let turn = self.standalone_turn(&id, &mut deltas);
-                let (added, slot) = self.push_block(turn, block);
-                deltas.extend(added);
-                self.todo = Some(slot);
-                deltas
-            }
-        }
+        )
     }
 
     fn goal_changed(&mut self, params: &Value) -> Vec<Delta> {
+        self.break_groups();
         let goal: Option<msp::Goal> =
             params.get("goal").and_then(|v| serde_json::from_value(v.clone()).ok());
         self.side.goal = goal.clone();
@@ -811,18 +812,314 @@ impl Folded {
                 }
             }
         }
+        // A todo tool call renders as the session's todo card, never as a
+        // tool card; its `{"ok": …}` result is not shown.
+        if matches!(item.kind, msp::ItemKind::ToolCall)
+            && todo_entries(item.args.as_deref()).is_some()
+        {
+            self.break_groups();
+            return self.tool_todo(item);
+        }
         let Some(block) = self.block_for(item, terminal) else { return Vec::new() };
+        // Decision points and failures end the open run: they never join a
+        // group, and nothing after them joins the run from before (D10/D11).
+        let groupable = is_groupable(&block) && item.approval_id.is_none();
+        if !groupable {
+            self.break_groups();
+        }
         match self.items.get(&item.item_id).copied() {
-            Some(slot) => self.update_block(slot, block),
+            Some(slot) => self.update_call(slot, item, block, groupable),
             None => {
                 let mut deltas = Vec::new();
                 let turn = self.item_host_turn(item, &mut deltas);
+                if groupable {
+                    if let Some(joined) = self.try_join(turn, item, &block) {
+                        deltas.extend(joined);
+                        return deltas;
+                    }
+                }
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
+                if groupable {
+                    self.note_open(turn, slot);
+                }
                 self.items.insert(item.item_id.clone(), slot);
                 deltas
             }
         }
+    }
+
+    /// Close every open tool run: the next groupable call starts a new run.
+    ///
+    /// Decision-point events call this even when they land in another turn,
+    /// because a run must never span a decision (D10/D11 liveness).
+    fn break_groups(&mut self) {
+        self.group_gen += 1;
+    }
+
+    /// Record a freshly pushed groupable call as its turn's open run.
+    fn note_open(&mut self, turn: usize, slot: Slot) {
+        if slot.turn != turn {
+            return;
+        }
+        let turn_id = self.session.turns[turn].id().to_owned();
+        self.open_groups.insert(turn_id, OpenGroup { block: slot.block, gen: self.group_gen });
+    }
+
+    /// Fold a new groupable call into its turn's open run, if there is one.
+    ///
+    /// Returns `None` when the call stands alone: no open run, the run is no
+    /// longer the turn's last block, or the call arrived out of log order
+    /// (D6) and belongs where its sequence says rather than at the tail.
+    fn try_join(&mut self, turn: usize, item: &msp::Item, block: &Block) -> Option<Vec<Delta>> {
+        let turn_id = self.session.turns.get(turn)?.id().to_owned();
+        let cursor =
+            self.open_groups.get(&turn_id).copied().filter(|cursor| cursor.gen == self.group_gen)?;
+        let blocks = self.session.turns[turn].blocks();
+        if cursor.block + 1 != blocks.len() {
+            self.open_groups.remove(&turn_id);
+            return None;
+        }
+        if !self.seq_allows_join(&turn_id) {
+            return None;
+        }
+        let call = block.as_tool_call()?;
+        let slot = Slot { turn, block: cursor.block };
+        match blocks[cursor.block].clone() {
+            Block::ToolGroup { mut calls, .. } => {
+                calls.push(call);
+                let summary = group_summary(&calls);
+                let state = group_state(&calls);
+                let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
+                self.items.insert(item.item_id.clone(), slot);
+                Some(deltas)
+            }
+            previous if is_groupable(&previous) => {
+                let previous = previous.as_tool_call()?;
+                let calls = vec![previous, call];
+                let summary = group_summary(&calls);
+                let state = group_state(&calls);
+                let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
+                self.items.insert(item.item_id.clone(), slot);
+                Some(deltas)
+            }
+            _ => {
+                self.open_groups.remove(&turn_id);
+                None
+            }
+        }
+    }
+
+    /// Whether a call carried by the event being folded now may join its
+    /// turn's open run: only in log order (D6), never ahead of what the log
+    /// already filed there.
+    fn seq_allows_join(&self, turn_id: &str) -> bool {
+        let Some(seq) = self.current_seq else { return true };
+        self.block_order
+            .get(turn_id)
+            .and_then(|keys| keys.last())
+            .map(|&last| seq >= last)
+            .unwrap_or(true)
+    }
+
+    /// Re-fold an item the fold has already drawn, usually at its terminal
+    /// revision. A grouped member is re-folded inside its group; a member
+    /// that stopped being groupable (it failed, or it is now known to await
+    /// approval) leaves the group for a card of its own — errors and gated
+    /// calls break the run, and a backfill, which only ever sees the terminal
+    /// revision, must fold the same (F3).
+    fn update_call(
+        &mut self,
+        slot: Slot,
+        item: &msp::Item,
+        block: Block,
+        groupable: bool,
+    ) -> Vec<Delta> {
+        let current = self
+            .session
+            .turns
+            .get(slot.turn)
+            .and_then(|turn| turn.blocks().get(slot.block))
+            .cloned();
+        match current {
+            Some(Block::ToolCall { id, .. }) if id == item.item_id => self.update_block(slot, block),
+            Some(Block::ToolGroup { .. }) if !matches!(block, Block::ToolCall { .. }) => {
+                self.update_block(slot, block)
+            }
+            Some(Block::ToolGroup { mut calls, .. }) => {
+                let Some(index) = calls.iter().position(|call| call.id == item.item_id) else {
+                    return self.relocate_call(item, block, groupable);
+                };
+                let Some(call) = block.as_tool_call() else {
+                    return self.update_block(slot, block);
+                };
+                if groupable {
+                    calls[index] = call;
+                    let summary = group_summary(&calls);
+                    let state = group_state(&calls);
+                    self.update_block(slot, Block::ToolGroup { calls, summary, state })
+                } else {
+                    calls.remove(index);
+                    let mut deltas = Vec::new();
+                    if calls.len() == 1 {
+                        let lone = calls.pop().expect("one call left");
+                        deltas.extend(self.update_block(slot, Block::tool_call(lone)));
+                    } else {
+                        let summary = group_summary(&calls);
+                        let state = group_state(&calls);
+                        deltas.extend(
+                            self.update_block(slot, Block::ToolGroup { calls, summary, state })
+                        );
+                    }
+                    let mut fresh = Vec::new();
+                    let turn = self.item_host_turn(item, &mut fresh);
+                    deltas.extend(fresh);
+                    let (added, fresh_slot) = self.push_block(turn, block);
+                    deltas.extend(added);
+                    self.items.insert(item.item_id.clone(), fresh_slot);
+                    deltas
+                }
+            }
+            // Text, thinking and every other non-tool block re-folds in
+            // place; only a tool card ever moves between slots.
+            Some(_) => self.update_block(slot, block),
+            None => {
+                if matches!(block, Block::ToolCall { .. }) {
+                    self.relocate_call(item, block, groupable)
+                } else {
+                    self.update_block(slot, block)
+                }
+            }
+        }
+    }
+
+    /// The cached slot no longer names this call's card: find the card again
+    /// by id, or file the call as new. Slots are maintained on every
+    /// mutation, so this path should stay cold.
+    fn relocate_call(&mut self, item: &msp::Item, block: Block, groupable: bool) -> Vec<Delta> {
+        enum Site {
+            Lone,
+            Grouped,
+        }
+        let mut hit: Option<(usize, usize, Site)> = None;
+        for (turn, _) in self.session.turns.iter().enumerate() {
+            for (index, existing) in self.session.turns[turn].blocks().iter().enumerate() {
+                match existing {
+                    Block::ToolCall { id, .. } if id == &item.item_id => {
+                        hit = Some((turn, index, Site::Lone));
+                    }
+                    Block::ToolGroup { calls, .. }
+                        if calls.iter().any(|call| call.id == item.item_id) =>
+                    {
+                        hit = Some((turn, index, Site::Grouped));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match hit {
+            Some((turn, index, Site::Lone)) => {
+                let slot = Slot { turn, block: index };
+                self.items.insert(item.item_id.clone(), slot);
+                self.update_block(slot, block)
+            }
+            Some((turn, index, Site::Grouped)) => {
+                let slot = Slot { turn, block: index };
+                self.items.insert(item.item_id.clone(), slot);
+                if !groupable {
+                    self.break_groups();
+                }
+                match (self.session.turns[turn].blocks()[index].clone(), block.as_tool_call()) {
+                    (Block::ToolGroup { mut calls, .. }, Some(call)) => {
+                        if let Some(member) = calls.iter_mut().find(|call| call.id == item.item_id)
+                        {
+                            *member = call;
+                        }
+                        let summary = group_summary(&calls);
+                        let state = group_state(&calls);
+                        self.update_block(slot, Block::ToolGroup { calls, summary, state })
+                    }
+                    _ => self.update_block(slot, block),
+                }
+            }
+            None => {
+                let mut deltas = Vec::new();
+                let turn = self.item_host_turn(item, &mut deltas);
+                if groupable {
+                    if let Some(joined) = self.try_join(turn, item, &block) {
+                        deltas.extend(joined);
+                        return deltas;
+                    }
+                }
+                let (added, slot) = self.push_block(turn, block);
+                deltas.extend(added);
+                if groupable {
+                    self.note_open(turn, slot);
+                }
+                self.items.insert(item.item_id.clone(), slot);
+                deltas
+            }
+        }
+    }
+
+    /// A todo tool call's list becomes the session's todo card (or clears it).
+    fn tool_todo(&mut self, item: &msp::Item) -> Vec<Delta> {
+        let entries = todo_entries(item.args.as_deref()).unwrap_or_default();
+        self.set_todo(
+            entries
+                .into_iter()
+                .map(|entry| TodoItem { label: entry.label, state: entry.state, elapsed_ms: None })
+                .collect(),
+        )
+    }
+
+    /// Replace the session's todo card, creating it the first time and
+    /// removing it when the list empties: a todo card with nothing in it is
+    /// not a todo card.
+    fn set_todo(&mut self, items: Vec<TodoItem>) -> Vec<Delta> {
+        if items.is_empty() {
+            return match self.todo.take() {
+                Some(slot) => self.remove_block(slot),
+                None => Vec::new(),
+            };
+        }
+        let block = Block::Todo { items };
+        match self.todo {
+            Some(slot) => self.update_block(slot, block),
+            None => {
+                let mut deltas = Vec::new();
+                let id = format!("todo:{}", self.session.id);
+                let turn = self.standalone_turn(&id, &mut deltas);
+                let (added, slot) = self.push_block(turn, block);
+                deltas.extend(added);
+                self.todo = Some(slot);
+                deltas
+            }
+        }
+    }
+
+    /// Append streamed output to a grouped call: the library's
+    /// `ToolOutputDelta` only addresses a lone `ToolCall`, so a grouped call
+    /// re-folds its whole group card. Returns the `BlockUpdated`, or nothing
+    /// when the member has no shell body to append to.
+    fn append_group_output(&mut self, slot: Slot, item_id: &str, text: &str) -> Vec<Delta> {
+        let Some(Block::ToolGroup { mut calls, summary, state }) = self
+            .session
+            .turns
+            .get(slot.turn)
+            .and_then(|turn| turn.blocks().get(slot.block))
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(call) = calls.iter_mut().find(|call| call.id == item_id) else {
+            return Vec::new();
+        };
+        let ToolBody::Shell { output_lines, .. } = &mut call.body else { return Vec::new() };
+        if !append_output_lines(output_lines, text) {
+            return Vec::new();
+        }
+        self.update_block(slot, Block::ToolGroup { calls, summary, state })
     }
 
     fn block_for(&self, item: &msp::Item, terminal: bool) -> Option<Block> {
@@ -831,18 +1128,29 @@ impl Folded {
                 text: item.text.clone().unwrap_or_default(),
                 streaming: !terminal,
             },
-            msp::ItemKind::Reasoning => Block::Thinking {
-                // One entry per summary part; part boundaries are blank lines.
-                text: item.summary.clone().unwrap_or_default().join("\n\n"),
-                elapsed_ms: 0,
-                summary: item.summary.as_ref().and_then(|parts| parts.first().cloned()),
-                state: if terminal { ThinkingState::Done } else { ThinkingState::Thinking },
-            },
+            msp::ItemKind::Reasoning => {
+                // The provider only sometimes writes summaries; the raw text
+                // is the fallback so exposed reasoning is never dropped. The
+                // collapsed line stays the first summary part.
+                let parts = item.summary.clone().unwrap_or_default();
+                let text = if parts.is_empty() {
+                    item.text.clone().unwrap_or_default()
+                } else {
+                    parts.join("\n\n")
+                };
+                Block::Thinking {
+                    text,
+                    elapsed_ms: 0,
+                    summary: item.summary.as_ref().and_then(|parts| parts.first().cloned()),
+                    state: if terminal { ThinkingState::Done } else { ThinkingState::Thinking },
+                }
+            }
             msp::ItemKind::ToolCall => {
                 let tool = item.tool.clone().unwrap_or_default();
                 let (kind, verb, target) = tool_shape(&tool, item.args.as_deref());
-                let body = tool_body(&kind, item.visible_output.as_deref().unwrap_or(""), None, !terminal);
-                Block::ToolCall { id: item.item_id.clone(), kind, verb, target, status: tool_status(&item.status), duration_ms: item.duration_ms, body }
+                let (verb, target, status, body) =
+                    tool_presentation(&kind, verb, target, item, terminal);
+                Block::ToolCall { id: item.item_id.clone(), kind, verb, target, status, duration_ms: item.duration_ms, body }
             }
             msp::ItemKind::UserShell => Block::ToolCall {
                 id: item.item_id.clone(),
@@ -874,9 +1182,12 @@ impl Folded {
                 kind: MarkerKind::ContextCompacted,
                 text: compaction_text(item),
             },
-            // `workflow` and `reminderChild` have no home in the library yet, so
-            // they take the mandated generic rendering: kind + status +
-            // `fallbackText`.
+            // `reminderChild` renders as nothing at all: it is a
+            // Muse-internal child-session record the owner asked to drop
+            // (presentation policy, `docs/01-transport.md`).
+            msp::ItemKind::ReminderChild => return None,
+            // `workflow` has no home in the library yet, so it takes the
+            // mandated generic rendering: kind + status + `fallbackText`.
             _ => Block::Generic {
                 kind: item.kind.as_wire().unwrap_or("unknown").to_owned(),
                 status: item.status.as_wire().unwrap_or("unknown").to_owned(),
@@ -898,6 +1209,17 @@ impl Folded {
         let turn_id = turn.id().to_owned();
         // `field` is a dotted path and **absent means `"text"`**.
         let field = params.get("field").and_then(Value::as_str).unwrap_or("text");
+        // A grouped call's output re-folds its group card: the library's
+        // `ToolOutputDelta` only addresses a lone `ToolCall`.
+        let grouped = self
+            .session
+            .turns
+            .get(slot.turn)
+            .and_then(|turn| turn.blocks().get(slot.block))
+            .is_some_and(|block| matches!(block, Block::ToolGroup { .. }));
+        if field == "output" && grouped {
+            return self.append_group_output(slot, item_id, &text);
+        }
         let delta = match (field, turn.blocks().get(slot.block)) {
             ("output", _) => Delta::ToolOutputDelta { turn_id, block_index: slot.block, text },
             (_, Some(Block::Thinking { .. })) => {
@@ -925,6 +1247,7 @@ impl Folded {
         if self.seen_requests.insert(request.approval_id.clone(), ()).is_some() {
             return Vec::new();
         }
+        self.break_groups();
         self.side.pending_approvals.insert(request.approval_id.clone(), request.clone());
         let block = approval_block(&request, ApprovalState::Pending, None, None);
         let mut deltas = Vec::new();
@@ -939,6 +1262,7 @@ impl Folded {
     }
 
     fn approval_updated(&mut self, params: &Value) -> Vec<Delta> {
+        self.break_groups();
         let Some(approval_id) = params.get("approvalId").and_then(Value::as_str) else {
             return Vec::new();
         };
@@ -973,6 +1297,7 @@ impl Folded {
         else {
             return Vec::new();
         };
+        self.break_groups();
         let request = self.side.pending_approvals.remove(&resolved.approval_id);
         let Some(slot) = self.approvals.get(&resolved.approval_id).copied() else {
             return Vec::new();
@@ -1062,6 +1387,7 @@ impl Folded {
         if self.seen_requests.insert(request.user_input_id.clone(), ()).is_some() {
             return Vec::new();
         }
+        self.break_groups();
         self.side.pending_inputs.insert(request.user_input_id.clone(), request.clone());
         let mut deltas = Vec::new();
         let turn = self.ensure_assistant_turn(&request.turn_id, &mut deltas);
@@ -1083,6 +1409,7 @@ impl Folded {
         else {
             return Vec::new();
         };
+        self.break_groups();
         let Some(request) = self.side.pending_inputs.remove(&settled.user_input_id) else {
             return Vec::new();
         };
@@ -1231,6 +1558,13 @@ impl Folded {
         self.inputs.values_mut().flatten().for_each(bump);
         self.todo.iter_mut().for_each(bump);
         self.goal.iter_mut().for_each(bump);
+        if let Some(turn_id) = self.session.turns.get(turn).map(|turn| turn.id().to_owned()) {
+            if let Some(cursor) = self.open_groups.get_mut(&turn_id) {
+                if cursor.block >= at {
+                    cursor.block += 1;
+                }
+            }
+        }
     }
 
     fn update_block(&mut self, slot: Slot, block: Block) -> Vec<Delta> {
@@ -1271,6 +1605,17 @@ impl Folded {
         self.inputs.values_mut().flatten().for_each(unshift);
         self.todo.iter_mut().for_each(unshift);
         self.goal.iter_mut().for_each(unshift);
+        if self
+            .open_groups
+            .get(&turn_id)
+            .is_some_and(|cursor| cursor.block == slot.block)
+        {
+            self.open_groups.remove(&turn_id);
+        } else if let Some(cursor) = self.open_groups.get_mut(&turn_id) {
+            if cursor.block > slot.block {
+                cursor.block -= 1;
+            }
+        }
         vec![delta]
     }
 
@@ -1293,6 +1638,7 @@ impl Folded {
             .enumerate()
             .map(|(index, turn)| (turn.id().to_owned(), index))
             .collect();
+        self.open_groups.retain(|id, _| self.assistant_turns.contains_key(id));
         self.assistant_turns.retain(|id, index| match positions.get(id) {
             Some(&position) => {
                 *index = position;
@@ -1404,6 +1750,116 @@ fn resolved_by(by: &msp::ApprovalResolvedBy) -> Option<ResolvedBy> {
     }
 }
 
+/// Whether a freshly folded block may join (or open) a consecutive-call
+/// run: only a tool card that finished clean — or is still running — groups.
+/// Errors break the run, so a failed call never joins one.
+fn is_groupable(block: &Block) -> bool {
+    matches!(block, Block::ToolCall { status, .. } if *status != ToolStatus::Error)
+}
+
+/// The collapsed header for a run of consecutive calls: what ran, when the
+/// run is all one tool, or just how many when it mixes tools.
+fn group_summary(calls: &[ToolCall]) -> String {
+    let count = calls.len();
+    if calls.iter().all(|call| call.kind == ToolKind::Shell) {
+        if count == 1 {
+            "Ran 1 command".to_owned()
+        } else {
+            format!("Ran {count} commands")
+        }
+    } else if calls.iter().all(|call| call.kind == ToolKind::Read) {
+        if count == 1 {
+            "Read 1 file".to_owned()
+        } else {
+            format!("Read {count} files")
+        }
+    } else if count == 1 {
+        "1 tool call".to_owned()
+    } else {
+        format!("{count} tool calls")
+    }
+}
+
+/// A run is failed when any member failed, working while any member still is,
+/// done otherwise.
+fn group_state(calls: &[ToolCall]) -> ActivityState {
+    if calls.iter().any(|call| call.status == ToolStatus::Error) {
+        ActivityState::Failed
+    } else if calls
+        .iter()
+        .any(|call| matches!(call.status, ToolStatus::Running | ToolStatus::Pending))
+    {
+        ActivityState::Working
+    } else {
+        ActivityState::Done
+    }
+}
+
+/// Append a chunk of terminal output to `output_lines`, keeping partial lines
+/// whole: the first segment continues the last line, the rest start new ones.
+/// Mirrors the library's own `ToolOutputDelta` application, which cannot
+/// address a call inside a group.
+fn append_output_lines(output_lines: &mut Vec<String>, text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let mut parts = text.split('\n');
+    let first = parts.next().unwrap_or_default();
+    if !first.is_empty() {
+        match output_lines.last_mut() {
+            Some(last) => last.push_str(first),
+            None => output_lines.push(first.to_string()),
+        }
+    }
+    for part in parts {
+        output_lines.push(part.to_string());
+    }
+    true
+}
+
+/// One todo row out of a todo tool call's `args`.
+struct TodoEntry {
+    label: String,
+    state: TodoState,
+}
+
+/// The rows of a todo tool call's `args` (`{"todos": […]}`), or `None` when
+/// the args are not a todo list at all — the call then folds as a normal
+/// tool card.
+fn todo_entries(args: Option<&str>) -> Option<Vec<TodoEntry>> {
+    let value: Value = serde_json::from_str(args?).ok()?;
+    let todos = value.get("todos")?.as_array()?;
+    todos
+        .iter()
+        .map(|entry| {
+            let label = entry
+                .get("content")
+                .or_else(|| entry.get("title"))
+                .or_else(|| entry.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let state = entry
+                .get("status")
+                .or_else(|| entry.get("state"))
+                .and_then(Value::as_str)
+                .map(todo_entry_state)
+                .unwrap_or(TodoState::Pending);
+            Some(TodoEntry { label, state })
+        })
+        .collect()
+}
+
+/// A todo tool's status words, which are looser than MSP's own enum.
+fn todo_entry_state(status: &str) -> TodoState {
+    match status.to_lowercase().replace(['_', '-'], "").as_str() {
+        "inprogress" | "running" | "active" | "started" => TodoState::Running,
+        "completed" | "complete" | "done" => TodoState::Done,
+        "cancelled" | "canceled" => TodoState::Done,
+        _ => TodoState::Pending,
+    }
+}
+
 /// `args` is model-authored JSON **as a verbatim string**, so it is parsed
 /// per-tool and falls back to raw display when it is not valid JSON.
 ///
@@ -1454,28 +1910,180 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     }
 }
 
-/// The body that goes with a tool's kind.
+/// What a tool call's card shows: the structured shapes a raw
+/// `visibleOutput` can carry, folded into the existing bodies.
 ///
-/// The rule is "never draw a body the wire did not send". MSP carries one
-/// rendering surface per tool call — `visibleOutput`, a plain string — and no
-/// diffs, no structured hits and no result lists, so:
+/// The rule is still "never draw a body the wire did not send". MSP carries
+/// one rendering surface per tool call — `visibleOutput`, a plain string —
+/// and no diffs, no structured hits and no result lists, so:
 ///
+/// * a shell result serialised as a JSON envelope (`command`, `description`,
+///   `exit_code`/`terminal_status`, an output field) becomes the shell body:
+///   the command is the title (one line, elided), the output text is the
+///   body, the status comes from the exit code;
+/// * any other JSON object/array result becomes a generic body with the args
+///   as parameter pairs and the result pretty-printed — still a folded code
+///   body, never a raw one-liner;
 /// * a **read** renders as its header plus the line count, which is the
 ///   library's own rendering for a read and what the Phase 2 review asked for;
 /// * a **search** promotes `path:line:text` output to real hits when every
 ///   line parses, and otherwise keeps the raw output;
 /// * everything else keeps the raw output, because a card with no body would
 ///   hide what the tool actually said.
-fn tool_body(kind: &ToolKind, visible_output: &str, exit_code: Option<i32>, live: bool) -> ToolBody {
-    let lines = split_lines(visible_output);
-    match kind {
+fn tool_presentation(
+    kind: &ToolKind,
+    verb: String,
+    target: String,
+    item: &msp::Item,
+    terminal: bool,
+) -> (String, String, ToolStatus, ToolBody) {
+    let visible = item.visible_output.as_deref().unwrap_or("");
+    if matches!(kind, ToolKind::Shell) {
+        if let Some(envelope) = shell_envelope(visible) {
+            let target = elide_command(&envelope.command)
+                .filter(|command| !command.is_empty())
+                .or_else(|| elide_command(&envelope.description))
+                .unwrap_or(target);
+            let exit_code = envelope.exit_code.or(item.exit_code);
+            let status = envelope_status(terminal, exit_code, envelope.terminal_status.as_deref());
+            let body = ToolBody::Shell {
+                output_lines: split_lines(&envelope.output),
+                exit_code,
+                live: !terminal,
+            };
+            return (verb, target, status, body);
+        }
+    }
+    let status = tool_status(&item.status);
+    let lines = split_lines(visible);
+    let body = match kind {
         ToolKind::Read => ToolBody::Read { lines: lines.len() },
         ToolKind::Search => match search_hits(&lines) {
             Some(hits) => ToolBody::Search { hits },
-            None => ToolBody::Shell { output_lines: lines, exit_code, live },
+            None => ToolBody::Shell { output_lines: lines, exit_code: item.exit_code, live: !terminal },
         },
-        _ => ToolBody::Shell { output_lines: lines, exit_code, live },
+        _ => match pretty_json_object(visible) {
+            Some(result_json) => {
+                ToolBody::Mcp { params: mcp_params(item.args.as_deref()), result_json }
+            }
+            None => ToolBody::Shell {
+                output_lines: lines,
+                exit_code: item.exit_code,
+                live: !terminal,
+            },
+        },
+    };
+    (verb, target, status, body)
+}
+
+/// A shell result carried as one JSON object rather than as plain text: the
+/// shape the owner saw painted raw (`command`, `description`, `exit_code`,
+/// `terminal_status`, an output field).
+struct ShellEnvelope {
+    command: String,
+    description: String,
+    output: String,
+    exit_code: Option<i32>,
+    terminal_status: Option<String>,
+}
+
+/// Parse a shell JSON envelope, or `None` for anything else — in particular
+/// for plain-text output and for JSON without a `command` and an output
+/// field, which take the generic pretty-printed path instead.
+fn shell_envelope(visible: &str) -> Option<ShellEnvelope> {
+    let object = serde_json::from_str::<Value>(visible.trim()).ok()?;
+    let object = object.as_object()?;
+    let command = object.get("command")?.as_str()?;
+    let output = match (
+        object.get("output").and_then(Value::as_str),
+        object.get("stdout").and_then(Value::as_str),
+        object.get("stderr").and_then(Value::as_str),
+    ) {
+        (Some(output), _, _) => output.to_owned(),
+        (None, Some(stdout), Some(stderr)) if !stderr.is_empty() => {
+            format!("{stdout}\n{stderr}")
+        }
+        (None, Some(stdout), _) => stdout.to_owned(),
+        (None, None, Some(stderr)) => stderr.to_owned(),
+        _ => return None,
+    };
+    Some(ShellEnvelope {
+        command: command.to_owned(),
+        description: object
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        output,
+        exit_code: object
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        terminal_status: object.get("terminal_status").and_then(Value::as_str).map(str::to_owned),
+    })
+}
+
+/// A shell card's status from the envelope's own exit code, falling back to
+/// the terminal status. A finished call with no code said nothing went wrong.
+fn envelope_status(
+    terminal: bool,
+    exit_code: Option<i32>,
+    terminal_status: Option<&str>,
+) -> ToolStatus {
+    if !terminal {
+        return ToolStatus::Running;
     }
+    match exit_code {
+        Some(0) => ToolStatus::Success,
+        Some(_) => ToolStatus::Error,
+        None => match terminal_status {
+            Some("cancelled") => ToolStatus::Cancelled,
+            Some("failed") | Some("error") | Some("timedOut") => ToolStatus::Error,
+            _ => ToolStatus::Success,
+        },
+    }
+}
+
+/// A command as a one-line card title: first line, overlong commands cut with
+/// an ellipsis. `None` when there is no command at all.
+fn elide_command(command: &str) -> Option<String> {
+    let first = command.lines().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    const MAX: usize = 120;
+    if first.chars().count() <= MAX {
+        return Some(first.to_owned());
+    }
+    let cut: String = first.chars().take(MAX - 1).collect();
+    Some(format!("{cut}…"))
+}
+
+/// Pretty-print a JSON object/array result, or `None` when the text is not
+/// one. Bare strings and numbers are not results worth a code body.
+fn pretty_json_object(visible: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(visible.trim()).ok()?;
+    if !matches!(value, Value::Object(_) | Value::Array(_)) {
+        return None;
+    }
+    serde_json::to_string_pretty(&value).ok()
+}
+
+/// A tool's verbatim args as name/value pairs for a generic body. Values are
+/// shortened to one line: the body shows the shape of the call, the result
+/// carries the detail.
+fn mcp_params(args: Option<&str>) -> Vec<(String, String)> {
+    let Some(args) = args else { return Vec::new() };
+    let Ok(Value::Object(map)) = serde_json::from_str(args) else { return Vec::new() };
+    map.into_iter()
+        .map(|(key, value)| {
+            let text = match &value {
+                Value::String(text) => text.clone(),
+                _ => value.to_string(),
+            };
+            (key, elide_command(&text).unwrap_or_default())
+        })
+        .collect()
 }
 
 /// `path:line:text` on every non-empty line, or nothing.
