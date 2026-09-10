@@ -1,5 +1,47 @@
 # Harness changelog
 
+## 2026-09-10 — Task D — composer files, thumbnails, plus menu
+
+The composer attaches more than images now. The `+` menu holds three rows —
+**Attach file or photo** (⌘U, also bound in the composer's context),
+**@ Mention file** and **/ Slash commands** — where it used to hold one
+"Attach image" row. Mention and commands type their sigil into the draft
+through `set_draft`, so the caret and its popover open exactly as if the
+person had typed them; attach opens the same system picker as before, which
+already accepted any file.
+
+Which chip a picked or dropped path becomes is decided by its extension.
+Image extensions still become image chips and `TurnInputPart::Image` parts,
+and each one now draws a 64 px thumbnail (`images::THUMB_LONG_EDGE`),
+decoded and downscaled once at attach time while the full-resolution bytes
+still go on the wire. Everything else goes through the new
+`crates/harness/src/attachments.rs`: text-like types are read as text, PDF
+arrives through its text layer (`pdf-extract`), xlsx/xls sheet by sheet as
+CSV-ish text under `## <sheet>` headers (`calamine`), docx from
+`word/document.xml` with its tags stripped (`zip`) — all pure Rust, so
+`cargo tree -d` still shows one `gpui-pre` and one `gpui-kit`. Anything else
+is refused with the banner reason, because MSP's `TurnInputPart` is a closed
+enum and a file's bytes have nowhere else to go. Each file is capped at
+64 KB of text with a `[file truncated to 64 KB]` note, eight files per turn;
+`parts()` emits one `--- file: <name> ---` text part per file ahead of the
+prompt text, and each file chip wears a muted `KIND · size` detail.
+`--steps file:<path>` attaches from a command line, beside `image:<path>`.
+
+Enter sends through the library's `submit_on_enter` (`composer_state_rows`
+sets it; verified present, no harness binding change needed): plain Enter
+submits with no newline while Shift+Enter still inserts one. Documented in
+`docs/03-composer.md` §8 and `docs/08-keymap.md` (the ⌘U row).
+
+- Screenshots: `docs/images/improve-composer-files-dark.png` shows an image
+  thumbnail chip beside md, pdf and xlsx file chips;
+  `docs/images/improve-composer-plus-dark.png` shows the three-row `+` menu.
+  Both are `--replay` of `fixtures/msp/transcript-echo.jsonl`, so they cost
+  nothing.
+- Covered by eight offline unit tests in `attachments.rs` (md text, the
+  64 KB truncation note, refused extensions, extensionless sniffing,
+  spreadsheet/pdf/docx garbage, an in-memory docx and xlsx, empty files);
+  no test opens a real session.
+
 ## 2026-09-10 — Improvements (C) — transcript rendering
 
 The transcript list is virtualized: `render_transcript` renders a gpui `list()`
@@ -97,6 +139,7 @@ touched.
 - Screenshots: `docs/images/improve-fold-toolgroup-dark.png` and
   `docs/images/improve-fold-toolgroup-light.png` replay the tool-group
   capture in both themes, taken with `--replay` so they cost nothing.
+
 
 ## 2026-09-09 — Improvements (E) — fork picker
 

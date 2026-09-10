@@ -24,6 +24,7 @@ only while a pending card is focused and the draft is empty.
 | ⌘Enter | Steer the running turn | `HarnessComposer` |
 | ⇧Tab | Plan mode on / off | `HarnessComposer` |
 | ⌘V | Paste; an image on the clipboard becomes an attachment | `HarnessComposer` |
+| ⌘U | Attach a file or photo (the `+` menu's first row) | `HarnessComposer` |
 | ↑ / ↓ | Prompt history, only on the draft's first / last line | `histup` / `histdown` |
 | ↑ / ↓ | Move the open menu's highlight | `HarnessComposer && menu` |
 | `/` | The command menu, at a line start only | — |

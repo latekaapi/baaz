@@ -20,8 +20,12 @@ use base64::Engine as _;
 /// The per-image cap. Ten megabytes of base64 is already a 13 MB JSON line.
 pub const MAX_BYTES: usize = 10 * 1024 * 1024;
 
+/// The thumbnail's long edge: a 64 px preview for the chip, decoded once at
+/// attach time, while the full-resolution bytes still go on the wire.
+pub const THUMB_LONG_EDGE: u32 = 64;
+
 /// One image ready to be sent, and to be drawn as a composer chip.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Image {
     /// Stable id for the chip and its remove button.
     pub id: String,
@@ -35,6 +39,37 @@ pub struct Image {
     pub width: u32,
     /// Pixel height.
     pub height: u32,
+    /// The downscaled preview the chip draws; dropped on remove/send.
+    pub thumb: Option<std::sync::Arc<gpui::RenderImage>>,
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        // The thumbnail is a render cache, not content: two decodes of the
+        // same bytes compare equal.
+        self.id == other.id
+            && self.name == other.name
+            && self.media_type == other.media_type
+            && self.base64_data == other.base64_data
+            && self.width == other.width
+            && self.height == other.height
+    }
+}
+
+impl Eq for Image {}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `RenderImage` has no `Debug`, so the thumbnail reports presence only.
+        f.debug_struct("Image")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("media_type", &self.media_type)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("thumbnail", &self.thumb.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The four formats MSP's image part is worth sending.
@@ -62,9 +97,12 @@ pub fn from_bytes(id: impl Into<String>, name: impl Into<String>, bytes: &[u8]) 
     }
     let format = image::guess_format(bytes).map_err(|_| "that is not an image".to_owned())?;
     let media_type = media_type(format).ok_or_else(|| format!("{format:?} images are not supported"))?;
-    let dimensions = image::load_from_memory_with_format(bytes, format)
-        .map(|image| (image.width(), image.height()))
+    let decoded = image::load_from_memory_with_format(bytes, format)
         .map_err(|error| format!("the image could not be read: {error}"))?;
+    let (width, height) = (decoded.width(), decoded.height());
+    // The chip's preview, downscaled once here so no frame ever decodes.
+    let preview = decoded.thumbnail(THUMB_LONG_EDGE, THUMB_LONG_EDGE).into_rgba8();
+    let thumb = std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(preview)]));
     let mut name: String = name.into();
     if name.is_empty() {
         name = format!("pasted.{}", format.extensions_str().first().copied().unwrap_or("png"));
@@ -74,8 +112,9 @@ pub fn from_bytes(id: impl Into<String>, name: impl Into<String>, bytes: &[u8]) 
         name,
         media_type: media_type.to_owned(),
         base64_data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        width: dimensions.0,
-        height: dimensions.1,
+        width,
+        height,
+        thumb: Some(thumb),
     })
 }
 
