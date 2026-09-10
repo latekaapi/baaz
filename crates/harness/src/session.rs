@@ -72,7 +72,7 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
-use crate::{files, full_output, history, images, plan, skills};
+use crate::{files, full_output, history, images, plan, search, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock.
 const TICK: Duration = Duration::from_millis(250);
@@ -150,6 +150,8 @@ pub enum SessionEvent {
     ToggleEmpty,
     /// `/resume`: open the session picker.
     Resume,
+    /// `/search`: open the full-text search palette.
+    Search,
     /// `/fork` with nothing named: open the turn picker over the session's
     /// completed assistant turns.
     ForkPicker,
@@ -295,6 +297,19 @@ pub struct SessionView {
     plus_open: bool,
     /// Where the composer is in this workspace's prompt history.
     history: history::Cursor,
+    /// The `@` picker's last completed rank and what it was ranked for. The
+    /// rank runs on the background executor (a 5 000-path subsequence scan per
+    /// keystroke does not belong on the UI thread); the render path reads this
+    /// cache and never ranks.
+    mention_cache: Vec<String>,
+    /// The filter `mention_cache` was ranked for.
+    mention_cache_for: String,
+    /// How many files the rank above ran over: a re-walk invalidates it.
+    mention_files_len: usize,
+    /// The filter a background rank is computing, if any.
+    mention_pending: Option<String>,
+    /// Monotonic id for mention ranks; only the latest result is kept.
+    mention_epoch: u64,
     /// The canonical workspace key the history file is written under.
     workspace_key: String,
     /// Queued turns whose unqueue is in flight, and why.
@@ -384,8 +399,13 @@ impl SessionView {
             image_seq: 0,
             dragging: false,
             plus_open: false,
-            history: history::Cursor::new(history::read(&workspace_key)),
+            history: history::Cursor::new(Vec::new()),
             workspace_key,
+            mention_cache: Vec::new(),
+            mention_cache_for: String::new(),
+            mention_files_len: 0,
+            mention_pending: None,
+            mention_epoch: 0,
             unqueueing: HashMap::new(),
             meter_open: false,
             full_outputs: HashMap::new(),
@@ -668,7 +688,11 @@ impl SessionView {
                 _ => {}
             }
         }
+        let completed_ours = matches!(&event, MuseEvent::Notification { method, .. } if method == "turn/completed");
         let changed = !self.fold.apply(event).is_empty();
+        if completed_ours {
+            self.record_created_files(cx);
+        }
         // Restore a retracted prompt the moment the fold hands it back — unless
         // the unqueue was a Remove (the text is meant to be gone) or a Steer
         // (the text is going straight back out on the wire).
@@ -689,6 +713,70 @@ impl SessionView {
             self.refresh_pending_now(cx);
         }
         cx.notify();
+    }
+
+    /// A completed turn's created files, into the search index's `files_fts`.
+    ///
+    /// "Files we created" is what the search palette means by it: the
+    /// workspace-relative targets of this session's write/edit tool calls.
+    /// The scan over the in-memory fold is cheap; the sqlite insert runs on
+    /// the background executor.
+    fn record_created_files(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.fold.session(&self.session_id) else { return };
+        let mut records = Vec::new();
+        for block in session.turns.iter().flat_map(|turn| turn.blocks()) {
+            let aui_protocol::Block::ToolCall { kind, target, .. } = block else { continue };
+            let Some(verb) = search::created_target(kind, target) else { continue };
+            let Some(path) = search::relativize(&self.workspace, target) else { continue };
+            records.push(search::FileRecord {
+                path,
+                session_id: self.session_id.clone(),
+                kind: verb.to_owned(),
+            });
+        }
+        if records.is_empty() {
+            return;
+        }
+        let call = cx.background_spawn(async move {
+            if let Ok(connection) = search::open() {
+                let _ = search::record_files(&connection, &records);
+            }
+        });
+        self.tasks.push(cx.spawn(async move |_this, _cx| {
+            call.await;
+        }));
+    }
+
+    /// This workspace's prompt history, read off the UI thread (finding P4).
+    ///
+    /// Called once when the view opens; the whole-file JSON round-trip never
+    /// runs on the UI thread any more.
+    pub fn load_history(&mut self, cx: &mut Context<Self>) {
+        let key = self.workspace_key.clone();
+        let call = cx.background_spawn(async move { history::read(&key) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let entries = call.await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.history.set(entries);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Append a sent prompt to the history off the UI thread (finding P4).
+    ///
+    /// The cursor updates when the write lands; a prompt sent before that
+    /// still reached the wire first — history is a convenience, not a record.
+    fn append_history(&mut self, text: String, cx: &mut Context<Self>) {
+        let key = self.workspace_key.clone();
+        let call = cx.background_spawn(async move { history::append(&key, &text) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let entries = call.await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.history.set(entries);
+                cx.notify();
+            });
+        }));
     }
 
     /// A `turn/completed` with `terminal: "failed"`: the fold already drew the
@@ -793,7 +881,7 @@ impl SessionView {
         }
         self.banner = None;
         self.submitting = true;
-        self.history.set(history::append(&self.workspace_key, &text));
+        self.append_history(text.clone(), cx);
         let command_id = new_command_id();
         // The wire never gives the prompt back, so the fold has to remember it
         // before the command leaves: a retraction identifies the submission by
@@ -887,7 +975,7 @@ impl SessionView {
         };
         let command_id = new_command_id();
         self.fold.record_command(&self.session_id, &command_id, &text);
-        self.history.set(history::append(&self.workspace_key, &text));
+        self.append_history(text.clone(), cx);
         let params = TurnSteerParams {
             command_id,
             session_id: self.session_id.clone(),
@@ -1199,6 +1287,16 @@ impl SessionView {
                 None => {}
             }
         });
+        if let Some(filter) = self
+            .overlays
+            .read(cx)
+            .menu
+            .as_ref()
+            .filter(|menu| menu.kind == MenuKind::Mention)
+            .map(|menu| menu.filter.clone())
+        {
+            self.refresh_mentions(filter, cx);
+        }
         cx.notify();
     }
 
@@ -1392,6 +1490,7 @@ impl SessionView {
             Command::Hide => cx.emit(SessionEvent::Hide),
             Command::Empty => cx.emit(SessionEvent::ToggleEmpty),
             Command::Resume => cx.emit(SessionEvent::Resume),
+            Command::Search => cx.emit(SessionEvent::Search),
         }
     }
 
@@ -2204,10 +2303,67 @@ impl SessionView {
         (commands, skill_rows)
     }
 
-    /// The `@` picker's candidates.
+    /// The `@` picker's candidates, from the last background rank.
+    ///
+    /// The rank itself runs in [`SessionView::refresh_mentions`] off the UI
+    /// thread; this only reads the cache, so render-adjacent code never scans
+    /// 5 000 paths per keystroke. An empty query is the head of the walk
+    /// order, which is a slice, not a rank.
     fn mention_rows(&self, filter: &str, cx: &gpui::App) -> Vec<String> {
         let overlays = self.overlays.read(cx);
-        files::filter(&overlays.files, filter).into_iter().cloned().collect()
+        if filter.is_empty() {
+            return overlays.files.iter().take(files::VISIBLE).map(|entry| entry.path.clone()).collect();
+        }
+        if self.mention_cache_for == filter && self.mention_files_len == overlays.files.len() {
+            return self.mention_cache.clone();
+        }
+        // A rank is in flight (or not yet started): show the previous rank
+        // while it narrows this filter, rather than an empty menu for a frame.
+        if !self.mention_cache_for.is_empty() && filter.starts_with(&self.mention_cache_for) {
+            return self.mention_cache.clone();
+        }
+        Vec::new()
+    }
+
+    /// Rank the `@` picker off the UI thread, latest keystroke wins.
+    ///
+    /// One filter in flight at a time; a rank that finishes after a newer
+    /// keystroke started is dropped, so a fast typist never sees a stale list.
+    fn refresh_mentions(&mut self, filter: String, cx: &mut Context<Self>) {
+        if filter.is_empty() {
+            return;
+        }
+        let files_len = self.overlays.read(cx).files.len();
+        if self.mention_cache_for == filter && self.mention_files_len == files_len {
+            return;
+        }
+        if self.mention_pending.as_deref() == Some(filter.as_str()) && self.mention_files_len == files_len {
+            return;
+        }
+        self.mention_epoch += 1;
+        let epoch = self.mention_epoch;
+        self.mention_pending = Some(filter.clone());
+        self.mention_files_len = files_len;
+        let files = self.overlays.read(cx).files.clone();
+        // The cache says what it was ranked for, exactly: a newer keystroke
+        // always starts a newer rank (bumping the epoch), so whatever lands
+        // here is either current or dropped above.
+        let wanted = filter.clone();
+        let call = cx.background_spawn(async move {
+            files::filter(&files, &filter).into_iter().map(|entry| entry.path.clone()).collect::<Vec<_>>()
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let rows = call.await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                if this.mention_epoch != epoch {
+                    return;
+                }
+                this.mention_pending = None;
+                this.mention_cache_for = wanted;
+                this.mention_cache = rows;
+                cx.notify();
+            });
+        }));
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -54,11 +54,10 @@ pub fn append(workspace: &str, text: &str) -> Vec<String> {
 
 fn write_all(all: &BTreeMap<String, Vec<String>>) {
     let Some(path) = path() else { return };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Atomic like every other store write: a crash mid-send leaves the
+    // previous history rather than half of the next one.
     if let Ok(text) = serde_json::to_string_pretty(all) {
-        let _ = std::fs::write(path, text);
+        let _ = crate::store::write_atomic(&path, text.as_bytes());
     }
 }
 
