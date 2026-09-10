@@ -1292,6 +1292,23 @@ impl SessionView {
         cx.notify();
     }
 
+    /// The sidebar's description line for this session: the first line of
+    /// the newest assistant text block, capped at 120 characters. Free — the
+    /// fold is already in memory — so a completed turn writes it with no
+    /// model call.
+    pub fn last_summary_text(&self) -> Option<String> {
+        let text = self.last_assistant_text()?;
+        let first = text.lines().next().unwrap_or("").trim();
+        if first.is_empty() {
+            return None;
+        }
+        let flat: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() <= 120 {
+            return Some(flat);
+        }
+        Some(flat.chars().take(119).collect::<String>() + "\u{2026}")
+    }
+
     /// The text of the newest assistant text block, which is the plan reply.
     fn last_assistant_text(&self) -> Option<String> {
         let session = self.session()?;
@@ -1432,6 +1449,9 @@ impl SessionView {
                 let filter = overlays.menu.as_ref().map(|m| m.filter.clone()).unwrap_or_default();
                 self.mention_rows(&filter, cx).len()
             }
+            // The shell's own menus are rendered and driven by the window,
+            // not by the composer: no rows here, no Enter here.
+            Some(MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account) => 0,
             None => 0,
         }
     }
@@ -1478,6 +1498,8 @@ impl SessionView {
                     self.replace_token(&format!("@{path} "), window, cx);
                 }
             }
+            // Click-driven by the window; Enter stays with the composer.
+            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account => {}
         }
     }
 
@@ -2767,8 +2789,10 @@ impl SessionView {
                     .on_select(move |id, window, cx| pick(id, window, cx))
                     .into_any_element()
             }
-            // The chip pickers are anchored to their chips, not to the caret.
+            // The chip pickers are anchored to their chips, and the shell's
+            // menus to their own buttons — none of them hangs off the caret.
             MenuKind::Model | MenuKind::Effort | MenuKind::Mode => return None,
+            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account => return None,
         };
         Some(
             popover_layer(
@@ -3056,7 +3080,11 @@ impl SessionView {
                         .into_any_element(),
                 )]
             }
-            MenuKind::Command | MenuKind::Mention => Vec::new(),
+            MenuKind::Command
+            | MenuKind::Mention
+            | MenuKind::Overflow
+            | MenuKind::ViewOptions
+            | MenuKind::Account => Vec::new(),
         }
     }
 }
