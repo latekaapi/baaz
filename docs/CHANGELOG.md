@@ -1,5 +1,37 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (G) — platform: menu bar, ⌘W/⌘Q, app bundle and icon
+
+The app finally has a native menu bar (`crate::app::set_menus`, called from
+`main.rs` after `bind_keys` because macOS reads each item's shortcut from the
+keymap): Harness (About with the version, Services, Quit ⌘Q), File (New
+Session ⌘N, Close Window ⌘W), Edit (Undo/Redo/Cut/Copy/Paste/Select All, each
+carrying its `OsAction` for OS recognition and deliberately *without* global
+bindings — the focused field owns those keys), View (sidebar, palette ⌘K,
+search ⌘⇧F, theme), Window (Minimize ⌘M, Zoom), Help (Harness Documentation,
+which reveals `docs/` in Finder). Close and Quit are global listeners (not
+window handlers, which validate dimmed on the login screen) that run the same
+`tier::cleanup_probes` as the window should-close and app-quit hooks, so every
+exit path is one function; the deferred `remove_window` works around menu
+dispatch holding the window out of `App.windows` mid-dispatch. Verified live
+on `--no-connect`: the app log shows `CloseWindow` then `QuitApp (global)`,
+the window closed while the process stayed up after ⌘W, and the process was
+gone with no `muse` child left after ⌘Q.
+
+`scripts/bundle.sh` assembles `target/bundle/Harness.app` from the release
+binary, a generated `Info.plist` (`dev.harness.app`, `LSMinimumSystemVersion`
+14.0) and `Harness.icns` converted from the checked-in placeholder
+`assets/icon-1024.png` — a flat dark rounded tile with a white H, drawn by the
+checked-in stdlib-only `assets/make-icon.py` — ad-hoc signed and launched once
+with `open`. Signing/notarisation are out of scope.
+
+- Screenshots: `docs/images/improve-platform-menubar.png` (live menu bar),
+  `docs/images/improve-platform-app-dark.png` /
+  `docs/images/improve-platform-app-light.png` (replay in both themes),
+  `docs/images/improve-platform-dock.png` (the H tile running in the Dock).
+- Covered by one offline unit test (`find_docs_dir`: cwd wins, then the
+  executable's ancestors, then `None`); no test opens a real session.
+
 ## 2026-09-10 — Improvements (F) — resizable sidebar
 
 The sidebar divider is now a drag target. A 6 px transparent strip
@@ -202,9 +234,6 @@ touched.
 - Screenshots: `docs/images/improve-fold-toolgroup-dark.png` and
   `docs/images/improve-fold-toolgroup-light.png` replay the tool-group
   capture in both themes, taken with `--replay` so they cost nothing.
-
-
-
 
 ## 2026-09-09 — Improvements (E) — fork picker
 

@@ -67,6 +67,9 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
 | ⌘\\ | The right pane (wired, and the pane is empty) |
+| ⌘W | Close the window (File → Close Window; probe cleanup first) |
+| ⌘Q | Quit (Harness → Quit Harness; probe cleanup first) |
+| ⌘M | Minimize the window |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
 
 ## Focus rings
@@ -77,10 +80,28 @@ ring only while it is armed. The harness has its own root element, so it calls
 `aui::keys::track_pointer` on it — without that call the flag would never be
 disarmed and every control would wear a ring after the first key press.
 
+## Native menus
+
+The menu bar is real (`crate::app::set_menus`, called after `bind_keys` in
+`main.rs`): Harness (About, Services, Quit ⌘Q), File (New ⌘N, Close ⌘W),
+Edit (the standard six, each carrying its `OsAction` for OS recognition),
+View (sidebar, palette ⌘K, search ⌘⇧F, theme), Window (Minimize ⌘M, Zoom),
+Help (Harness Documentation reveals `docs/` in Finder). A menu item's shortcut displays
+from the keymap, so an item without a binding shows none — which is why the
+Edit items show none: ⌘X/⌘C/⌘V/⌘A/⌘Z belong to the focused field and are not
+rebound globally. ⌘W closes through `remove_window` and ⌘Q quits through
+`cx.quit()`, each after the same tier-probe cleanup as the window-close and
+app-quit hooks (`tier::cleanup_probes`).
+
 ## Deliberately not bound
 
 - **No ⌘1–⌘9 for sessions.** The digits belong to the approval card, and a key
   that means two things depending on where you are looking is a key that means
   neither.
 - **No ⌘F.** Search is the palette's (⌘⇧F), not the transcript's.
-- **No ⌘W / ⌘Q overrides.** They are the platform's.
+- **No global ⌘X/⌘C/⌘V/⌘A/⌘Z.** The Edit menu names them for the OS, but their
+  keys stay with the focused field; binding them globally would steal them
+  from the composer.
+- **⌘W / ⌘Q are bound, once.** They used to be left to the platform; now
+  File → Close Window and Harness → Quit Harness own them, because closing or
+  quitting mid-probe must run the probe cleanup.
