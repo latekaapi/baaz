@@ -1,9 +1,14 @@
 # synthetic-toolgroup.jsonl — HAND-WRITTEN, not a wire capture.
 #
-# No capture holds three consecutive tool calls around decision points:
-# this file pins grouping — incremental joins while streaming, the
-# verb-derived summaries, and the breaks on thinking, approvals and
+# Turn 1 (Task B): no capture holds three consecutive tool calls around
+# decision points — this pins grouping: incremental joins while streaming,
+# the verb-derived summaries, and the breaks on thinking, approvals and
 # errors — with sequences a backfill replays identically (F3).
+#
+# Turn 2 (Task C, merged in on `wf-improvements` when both branches added
+# this same path): one turn with three consecutive `bash` toolCalls followed
+# by prose, for the tool-group card screenshots. With Task B's fold the same
+# frames fold into one `Block::ToolGroup`.
 #
 # Shapes follow `fixtures/msp/msp-ts/msp.d.ts` and the real bash toolCall item
 # in `transcript-real.jsonl`; every `<-- ` line below is synthetic. Paths and
@@ -30,3 +35,10 @@
 <-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:16", "sessionId": "synthetic-toolgroup", "item": {"itemId": "i-tg-6", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "failed", "tool": "bash", "callId": "call_i-tg-6", "args": "{\"command\": \"cargo clippy -- --deny warnings\", \"description\": \"Strict lint\"}", "visibleOutput": "error: warnings denied\n", "failureReason": "tool failed: exit code 2: warnings denied"}, "sourceRange": {"stream": {"kind": "session", "id": "synthetic-toolgroup"}, "first": {"id": "syn-range-9", "sequence": 9}, "last": {"id": "syn-range-9", "sequence": 9}}}}
 <-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:17", "sessionId": "synthetic-toolgroup", "item": {"itemId": "i-tg-7", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "bash", "callId": "call_i-tg-7", "args": "{\"command\": \"cargo clippy -- --allow warnings\", \"description\": \"Lenient lint\"}", "visibleOutput": "recovered\n"}, "sourceRange": {"stream": {"kind": "session", "id": "synthetic-toolgroup"}, "first": {"id": "syn-range-10", "sequence": 10}, "last": {"id": "syn-range-10", "sequence": 10}}}}
 <-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:18", "sessionId": "synthetic-toolgroup", "turnId": "t-syn-1", "terminal": "completed"}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:19", "sessionId": "synthetic-toolgroup", "turnId": "t-syn-2"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:20", "sessionId": "synthetic-toolgroup", "item": {"itemId": "i-tg2-user-1", "kind": "userMessage", "turnId": "t-syn-2", "revision": 1, "status": "completed", "text": "Run the checks."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:21", "sessionId": "synthetic-toolgroup", "sourceRange": {"stream": {"kind": "session", "id": "synthetic-toolgroup"}, "first": {"id": "syn-range-11", "sequence": 11}, "last": {"id": "syn-range-11", "sequence": 11}}, "item": {"itemId": "i-tg2-bash-1", "kind": "toolCall", "turnId": "t-syn-2", "revision": 2, "status": "completed", "tool": "bash", "callId": "call_tg2_1", "args": "{\"command\": \"cargo test --workspace\", \"description\": \"Full workspace test run\"}", "visibleOutput": "[test] running 42 tests\n[test] .... ok\n", "exitCode": 0, "durationMs": 8100}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:22", "sessionId": "synthetic-toolgroup", "sourceRange": {"stream": {"kind": "session", "id": "synthetic-toolgroup"}, "first": {"id": "syn-range-12", "sequence": 12}, "last": {"id": "syn-range-12", "sequence": 12}}, "item": {"itemId": "i-tg2-bash-2", "kind": "toolCall", "turnId": "t-syn-2", "revision": 2, "status": "completed", "tool": "bash", "callId": "call_tg2_2", "args": "{\"command\": \"cargo clippy --workspace --all-targets\", \"description\": \"Lint the workspace\"}", "visibleOutput": "[lint] clippy clean\n", "exitCode": 0, "durationMs": 3200}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:23", "sessionId": "synthetic-toolgroup", "sourceRange": {"stream": {"kind": "session", "id": "synthetic-toolgroup"}, "first": {"id": "syn-range-13", "sequence": 13}, "last": {"id": "syn-range-13", "sequence": 13}}, "item": {"itemId": "i-tg2-bash-3", "kind": "toolCall", "turnId": "t-syn-2", "revision": 2, "status": "completed", "tool": "bash", "callId": "call_tg2_3", "args": "{\"command\": \"cargo build --workspace\", \"description\": \"Full workspace build\"}", "visibleOutput": "[build] linking harness\n[build] finished in 12.4 s\n", "exitCode": 0, "durationMs": 12400}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:24", "sessionId": "synthetic-toolgroup", "item": {"itemId": "i-tg2-agent-1", "kind": "agentMessage", "turnId": "t-syn-2", "revision": 1, "status": "completed", "text": "All three checks pass: tests, lint and build."}}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:25", "sessionId": "synthetic-toolgroup", "turnId": "t-syn-2", "terminal": "completed", "durationMs": 24000}}
