@@ -183,8 +183,10 @@ whenever a session is pinned (the library partitions `pinned` rows out of the
 date buckets itself).
 
 Every row carries one muted second line: `last_summary` when a turn completed
-in this app, else the index's first prompt, else the derived title — through
-the row's own one-line cap, with the "N turns" meta after it. `last_summary`
+in this app, else the index's first prompt — but only when the row's label is
+not that same prompt (a user-given name or a Muse title); otherwise the row
+shows the "N turns" meta alone, never a repeated first line. Whatever shows
+goes through the row's own one-line cap. `last_summary`
 is written on `turn/completed` from the first line (≤ 120 chars) of the last
 assistant text block: the fold is already in memory, so it costs no model
 call, and it persists through `sessions.json` beside the name, the hidden and
@@ -204,7 +206,8 @@ they carry a muted Archived tag and their Archive tray action puts them back.
 Row actions are Pin, Rename and Archive. Pin regroups the list around the
 Pinned group. Rename opens the dense inline field — the library's
 `dense_field` in its 22 px bordered wrapper, so the editing row keeps the 30
-px row height and siblings never move — committing through the existing
+px row height and siblings never move — always single-line (no wrap,
+horizontal overflow hidden, caret visible), committing through the existing
 `/name` path and cancelling on Escape. Archive opens a danger dialog
 ("Archive \"<label>\"? — archived sessions stay on disk and return through
 the Sessions menu"); on confirm the session leaves the list, the newest
@@ -214,7 +217,8 @@ for eight seconds.
 Collapsed (⌘B), the sidebar column is the library `rail` (`flat(true)`):
 New and Search cells, a separator, one dot per running session mirroring the
 rows' selection and pulse, and the account avatar. The Search cell opens the
-same quick filter ⌘⇧F does until the search palette lands. The window-level
+full-text search palette, exactly as ⌘⇧F does — there is no sidebar
+quick-filter, so the two can never be open together. The window-level
 `--steps` verbs for all of this are `sidebar` (toggle), `overflow`,
 `view-menu`, `account`, `pin`, `archive`, `archive-confirm`, and
 `show-archived`, beside the older `search`,
@@ -247,8 +251,12 @@ scripts a settled width for screenshots.
 The shell paints no traffic lights of its own — the window's native ones are
 the only set. The centre header shows the active session's label ("Harness"
 with nothing open) with the provider mark and the overflow "…" menu (Rename,
-Fork, Archive); there is no right-pane toggle and no right-header close
-button — the right pane's slot stays empty and `right_open` stays false. The
+Fork, Archive); the title flexes inside the header cell and elides to one
+line, so a whole first prompt as the label can never push the overflow button
+out. Renaming the open session swaps the title for the same dense single-line
+field the sidebar row uses, through the same confirm/Escape path. There is no
+right-pane toggle and no right-header close button — the right pane's slot
+stays empty and `right_open` stays false. The
 shell wraps the header row in its drag region, so press-drag moves the window
 and double-click zooms while the buttons and the rename field keep their
 clicks. Collapsed, the rail column is 48 px and the centre title stands 14 px
@@ -287,8 +295,13 @@ scrolls the list to the bottom, but only for a reader who was already within a
 few dozen pixels of it.
 
 The transcript list is virtualized (2026-09-10): `render_transcript` renders a
-gpui `list()` with a persistent bottom-aligned `ListState`, one item per turn,
-instead of building every cell every frame. Fold changes `splice` the affected
+gpui `list()` with a persistent top-aligned `ListState`, one item per turn,
+instead of building every cell every frame. Top, so a short transcript starts
+at the top instead of leaving a void above it; tail-follow is the `follow`
+flag (`scroll_to_end` when the reader was at the tail), never the alignment.
+The list wrapper carries the pre-virtualised container's own gutters
+(`TRANSCRIPT_PAD_TOP`/`TRANSCRIPT_PAD_X`, `SP_4` below), so the turns line up
+with the status and banner rows. Fold changes `splice` the affected
 range only, and only visible rows are laid out per frame, so per-frame cost
 stays bounded as the transcript grows. `apply` notifies only when the fold
 changed or view state changed (unchanged streaming deltas earn no frame), the
@@ -313,9 +326,15 @@ Markdown links click through: URLs open in the browser, workspace paths reveal
 in Finder (escapes above the workspace are rejected with a toast, missing
 paths toast). `Block::ToolGroup` renders through the library `tool_group`,
 its open state in `Folds` keyed by the group's fold key. The transcript holds
-one `TextSelection`: ⌘C in the transcript context copies it and Escape clears
-it (turn-level highlight waits on the library forwarding selection through the
-turn components). `--steps top`, `end` and `expand-groups` drive screenshots.
+one `TextSelection` per turn (keyed by turn id with its markdown source):
+dragging or word/paragraph-picking in a turn highlights it through the turn's
+`selection(..)`/`on_selection_change(..)`, a plain click elsewhere clears that
+turn, ⌘C in the transcript context copies `turn_selected_text` of the held
+turn (never from the composer or a card field), and Escape clears it. Per
+turn because the library scopes cell keys (`p0`, …) to the markdown view that
+rendered them — one shared cell would light up every turn at once. `--steps
+top`, `end`, `expand-groups` and `select-text:<turn>:<from>-<to>` (a scripted
+hold over the turn's first paragraph) drive screenshots.
 
 `aui::composer::composer(...).docked(true)` is the composer. **Enter** sends,
 **Shift+Enter** makes a newline, **Escape on an empty composer** and **⌃C**

@@ -30,8 +30,16 @@ recent order, files from the most recently recorded rows.
 
 ## The palette (`PaletteKind::Search`)
 
-Two sections: **Sessions** (label plus a one-line `snippet()` around the
-first match) and **Files** (path plus the owning session's label). Enter or
+Two sections: **Sessions** (the sidebar label plus a one-line `snippet()`
+around the first match) and **Files** (path plus the owning session's label).
+The snippet is cut from `clean_search_text`, not from Muse's raw
+`search_text`: the `\x1f`-separated index envelope (session id, short id,
+`valid`, the workspace path, `meta`, the model id) is stripped, whitespace
+collapses, and the window holds ~90 chars around the first match. Matching
+still runs on the raw body in FTS; only the shown row is cleaned. The query's
+first hit in each label is emphasised through the row's own `matched` ranges;
+the snippet itself stays the library's muted mono context (the row offers no
+proportional-font or snippet-highlight shape). Enter or
 click on a session resumes it through the same path as `/resume`; on a file
 reveals it in Finder (`cx.reveal_path`), or toasts when it no longer exists.
 

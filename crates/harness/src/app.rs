@@ -417,12 +417,10 @@ pub struct Harness {
     show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
     show_archived: bool,
-    /// The sidebar's search field, and whether it is on screen. The field is a
-    /// slot the library frames and this owns.
-    search: Entity<TextareaState>,
-    search_open: bool,
     /// The search palette's query field. The card's own query row shows the
     /// result count; typing here re-queries `search.db` off the UI thread.
+    /// There is no sidebar quick-filter: ⌘⇧F and the sidebar search icon open
+    /// only this palette, so the two can never be open together.
     search_query: Entity<TextareaState>,
     /// Full-text session hits for the open search palette, latest query only.
     search_sessions: Vec<SessionHit>,
@@ -453,7 +451,6 @@ pub struct Harness {
 impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| composer_state_rows("Search sessions", 1, 1, window, cx));
         let rename = cx.new(|cx| composer_state_rows("Name this session", 1, 1, window, cx));
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         // The divider's last settled x, or the default for a fresh store.
@@ -489,8 +486,6 @@ impl Harness {
             show_hidden: false,
             show_empty: false,
             show_archived: false,
-            search: search.clone(),
-            search_open: false,
             search_query: search_query.clone(),
             search_sessions: Vec::new(),
             search_files: Vec::new(),
@@ -504,15 +499,12 @@ impl Harness {
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
-        // Typing in either field is what re-filters the list and what redraws
-        // the row being renamed.
-        for field in [&search, &rename] {
-            this.subscriptions.push(cx.subscribe(field, |_: &mut Self, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }));
-        }
+        // Typing in the rename field redraws the row being renamed.
+        this.subscriptions.push(cx.subscribe(&rename, |_: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
         // Typing in the search palette's query re-queries off the UI thread.
         this.subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1107,6 +1099,10 @@ impl Harness {
             let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let label = name.or_else(|| index.and_then(IndexEntry::label)).or(derived);
+            // Same rule as [`SessionEntry::join`]: the description must not
+            // repeat a label that already is the first prompt.
+            let label_from_prompt =
+                name.is_none() && index.is_some_and(IndexEntry::label_from_prompt);
             entry.needs_title = label.is_none();
             // A replayed capture names its own row by file, and no source
             // speaks for it: keep that label rather than blanking it to the
@@ -1119,7 +1115,7 @@ impl Harness {
             entry.hidden = meta.is_some_and(|m| m.hidden);
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
-            entry.description = sidebar::describe(meta, index);
+            entry.description = sidebar::describe(meta, index, label_from_prompt);
             entry.named = name.is_some();
         }
     }
@@ -1677,10 +1673,10 @@ impl Harness {
 
     /// The rows the sidebar should draw: hidden ones out unless asked for,
     /// archived ones out unless asked for, sessions with no turns out unless
-    /// asked for, and the search field's text applied. The open session is
-    /// always drawn.
+    /// asked for. Text search lives in the search palette (⌘⇧F), never in a
+    /// sidebar field, so no needle applies here. The open session is always
+    /// drawn.
     fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
-        let needle = self.search_text(cx);
         let active = self.active_id(cx);
         let mut rows: Vec<SessionEntry> = self
             .sessions
@@ -1694,34 +1690,12 @@ impl Harness {
                     || self.show_empty
                     || !entry.is_empty(active.as_deref())
             })
-            .filter(|entry| entry.matches(&needle))
             .cloned()
             .collect();
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
         rows
-    }
-
-    /// What is in the search field, or nothing when it is closed.
-    fn search_text(&self, cx: &gpui::App) -> String {
-        if !self.search_open {
-            return String::new();
-        }
-        self.search.read(cx).value().to_string()
-    }
-
-    /// Escape in the search field: empty it, close it, and give the keyboard
-    /// back to the composer.
-    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.search_open {
-            return false;
-        }
-        self.search.update(cx, |state, cx| state.set_value("", window, cx));
-        self.search_open = false;
-        self.focus_composer = true;
-        cx.notify();
-        true
     }
 
     /// F10. A session with no title anywhere: read its head and take the first
@@ -2101,11 +2075,12 @@ impl Harness {
         if let Some(selected) = selected {
             view = view.selected(selected);
         }
-        let mut column = v_flex().size_full().child(self.render_nav_block(cx));
-        if self.search_open {
-            column = column.child(self.render_search(window, cx));
-        }
-        column
+        // No quick-filter field: ⌘⇧F and the sidebar search icon open the
+        // full-text search palette instead, so the two can never share the
+        // sidebar.
+        v_flex()
+            .size_full()
+            .child(self.render_nav_block(cx))
             .child(
                 div()
                     .id("sessions-scroll")
@@ -2119,24 +2094,14 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The sidebar's search row: the library's frame around this window's own
-    /// field.
-    fn render_search(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let text = self.search_text(cx);
-        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.clear_search(window, cx);
-        });
-        sidebar_search("sessions-search", Textarea::new(&self.search).text_size(aui_tokens::scaled(scale::FS_12)))
-            .clearable(!text.is_empty())
-            .on_clear(clear)
-            .into_any_element()
-    }
-
     /// The field the row being renamed holds: the library's dense recipe —
     /// a borderless, chromeless single line at the row-title size, with the
     /// 1 px focus border on the 22 px wrapper instead of the component. 22 px
     /// of wrapper in 4 px of row padding is exactly the 30 px row, so siblings
-    /// never move while a rename is open. The commit path is unchanged.
+    /// never move while a rename is open. The commit path is unchanged. One
+    /// line, always: no wrap, horizontal overflow hidden so a long name
+    /// scrolls under the caret instead of spilling a clipped second line.
+    /// The same element serves the sidebar row and the header title.
     fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let focused = self.rename.focus_handle(cx).is_focused(window);
@@ -2148,12 +2113,13 @@ impl Harness {
                 div()
                     .w_full()
                     .h(px(aui::nav::DENSE_FIELD_H + 2.0))
+                    .overflow_hidden()
                     .px(px(6.0))
                     .rounded(px(scale::R_SM))
                     .border_1()
                     .border_color(if focused { p.accent } else { p.line })
                     .bg(p.surface_1)
-                    .child(dense_field(&self.rename)),
+                    .child(dense_field(&self.rename).whitespace_nowrap().overflow_x_hidden()),
             )
             .into_any_element()
     }
@@ -2164,27 +2130,25 @@ impl Harness {
             return None;
         }
         let p = cx.aui().colors;
-        let needle = self.search_text(cx);
-        let searching = !needle.is_empty();
         let active = self.active_id(cx);
-        // What each filter alone is keeping out, past the other two: the
+        // What each filter alone is keeping out, past the other one: the
         // empty text names its own toggle rather than borrowing hidden's.
-        let hidden_only =
-            !self.show_hidden && self.sessions.iter().any(|e| e.hidden && e.matches(&needle));
+        // (There is no sidebar text filter — search lives in the palette —
+        // so no "no match" state exists here.)
+        let hidden_only = !self.show_hidden && self.sessions.iter().any(|e| e.hidden);
         let empty_only = !self.show_empty
             && self
                 .sessions
                 .iter()
-                .any(|e| (self.show_hidden || !e.hidden) && e.matches(&needle) && e.is_empty(active.as_deref()));
-        let (title, detail) = match (searching, hidden_only, empty_only) {
-            (true, _, _) => ("No sessions match", "Try fewer letters, or Esc to clear."),
-            (false, true, _) => {
+                .any(|e| (self.show_hidden || !e.hidden) && e.is_empty(active.as_deref()));
+        let (title, detail) = match (hidden_only, empty_only) {
+            (true, _) => {
                 ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.")
             }
-            (false, false, true) => {
+            (false, true) => {
                 ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} in the Sessions menu above.")
             }
-            (false, false, false) => ("No sessions yet", "\u{2318}N starts one."),
+            (false, false) => ("No sessions yet", "\u{2318}N starts one."),
         };
         Some(
             v_flex()
@@ -2256,14 +2220,42 @@ impl Harness {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         let expand = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
+        // The title flexes inside the header cell and clips to one line, so
+        // a whole first prompt as the derived title can never push the
+        // overflow button out; the provider mark is flex-none so it stays
+        // painted. There is no width token in aui-tokens, so the flex
+        // leftover — not a fixed max — is the constraint, which also holds
+        // on narrow windows.
         let title = h_flex()
+            .flex_1()
             .min_w(px(0.0))
+            .overflow_hidden()
             .gap(px(7.0))
             .text_color(p.ink)
             .ui(scale::FS_13)
             .semibold()
-            .child(provider_mark(Provider::Muse))
-            .child(div().min_w(px(0.0)).truncate().child(label));
+            .child(div().flex_none().child(provider_mark(Provider::Muse)))
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+        // Renaming the open session swaps the header title for the same
+        // dense field the sidebar row uses (Task A); the commit path is the
+        // same `ConfirmRename`, Escape the same `cancel`.
+        let renaming_here = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx).session_id.clone())
+            .is_some_and(|id| self.renaming.as_deref() == Some(id.as_str()));
+        let title: AnyElement = if renaming_here {
+            // The field's own root is `w_full`, so the flex item clips: the
+            // overflow button keeps its slot instead of being pushed out.
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .child(self.rename_field(window, cx))
+                .into_any_element()
+        } else {
+            title.into_any_element()
+        };
         let _ = window;
         let mut cell = header_cell("hd-centre");
         if !self.sidebar_open {
@@ -2281,7 +2273,6 @@ impl Harness {
         }
         cell
             .child(title)
-            .child(div().flex_1())
             .child(
                 icon_button("hd-centre-overflow", IconName::Dots)
                     .ghost()
@@ -2782,17 +2773,22 @@ impl Harness {
             PaletteKind::Search => {
                 let (sessions, files): (Vec<_>, Vec<_>) =
                     rows.iter().partition(|(id, _, _)| id.starts_with("s:"));
+                // The row's own match emphasis covers the label only — the
+                // library paints `matched` ranges on the label and the
+                // context (the snippet) stays muted mono. Primary text is
+                // the sidebar label either way; the snippet is display-only.
+                let query = self.search_query.read(cx).value().to_string();
                 let mut sections = Vec::new();
                 if !sessions.is_empty() {
                     sections.push(PaletteSection::new(
                         "Sessions",
-                        palette_items_ref(&sessions, PaletteIcon::Glyph(IconName::Clock)),
+                        palette_items_ref_matching(&sessions, PaletteIcon::Glyph(IconName::Clock), &query),
                     ));
                 }
                 if !files.is_empty() {
                     sections.push(PaletteSection::new(
                         "Files",
-                        palette_items_ref(&files, PaletteIcon::Glyph(IconName::File)),
+                        palette_items_ref_matching(&files, PaletteIcon::Glyph(IconName::File), &query),
                     ));
                 }
                 (SharedString::from(""), self.search_status(cx).into(), sections)
@@ -2938,6 +2934,19 @@ fn palette_items_ref(
     icon: PaletteIcon,
 ) -> Vec<PaletteItem> {
     rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon, (*label).clone()).context((*detail).clone())).collect()
+}
+
+/// [`palette_items_ref`] with the query's first hit in each label emphasised
+/// through the row's own `matched` ranges. An empty query emphasises nothing.
+fn palette_items_ref_matching(
+    rows: &[&(SharedString, SharedString, SharedString)],
+    icon: PaletteIcon,
+    needle: &str,
+) -> Vec<PaletteItem> {
+    palette_items_ref(rows, icon)
+        .into_iter()
+        .map(|item| if needle.trim().is_empty() { item } else { item.matching(needle) })
+        .collect()
 }
 
 /// F10. The first `userShell` command in a session's history, as a row title.
@@ -3283,19 +3292,18 @@ impl Harness {
 
     /// Escape: close whatever is open, and otherwise stop the running turn if
     /// the composer is empty (spec §3.9).
-    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
             cx.notify();
             return;
         }
-        // An open rename is the next thing Escape takes back, then the search.
+        // An open rename is the next thing Escape takes back. (There is no
+        // sidebar search field left to clear: ⌘⇧F owns search now, and its
+        // palette closes through the overlay stack above.)
         if self.renaming.take().is_some() {
             self.focus_composer = true;
             cx.notify();
-            return;
-        }
-        if self.clear_search(window, cx) {
             return;
         }
         // A transcript text selection is the next thing Escape takes back.

@@ -154,7 +154,11 @@ pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec
     let Ok(rows) = rows else { return Vec::new() };
     rows.filter_map(Result::ok)
         .map(|(session_id, label, body)| {
-            let snippet = snippet_for(&body, query);
+            // The indexed body is Muse's raw `search_text`: unit-separated
+            // header segments (ids, status, paths) ahead of the transcript.
+            // The row shows words, so the snippet is cut from the cleaned
+            // text, never from the raw envelope.
+            let snippet = snippet_for(&clean_search_text(&body), query);
             SessionHit { session_id, label, snippet }
         })
         .collect()
@@ -228,18 +232,69 @@ fn ceil_boundary(text: &str, bound: usize) -> usize {
     bound
 }
 
+/// Muse's raw `search_text` with its index envelope stripped: the
+/// `\x1f`-separated header segments (session id, short id, `valid`, the
+/// workspace path, `meta`, the model id) are metadata about the session, not
+/// its words. What remains is the title, the first prompt and the transcript
+/// text, joined and whitespace-collapsed for display. Matching still runs on
+/// the raw body in FTS; only the shown snippet is cleaned.
+pub fn clean_search_text(body: &str) -> String {
+    body.split(['\u{1f}', '\u{1e}'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| !is_index_metadata(segment))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a `\x1f`-separated `search_text` segment is envelope rather than
+/// words: a session uuid, a short hex id, the `valid`/`meta` markers, a bare
+/// absolute path (the workspace the session ran in), or a model id. A title
+/// or a first prompt never matches any of these shapes, so they survive.
+fn is_index_metadata(segment: &str) -> bool {
+    if segment.eq_ignore_ascii_case("valid") || segment.eq_ignore_ascii_case("meta") {
+        return true;
+    }
+    // A session uuid (`8-4-4-4-12` hex) or a short hex id (`01a07c66`).
+    // The long form is exactly 36 chars with four hyphens; the short form
+    // is 8–12 bare hex digits. Plain numbers and short hex words in prose
+    // are shorter than that, so they survive.
+    if segment.len() == 36
+        && segment.chars().filter(|c| *c == '-').count() == 4
+        && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        return true;
+    }
+    if (8..=12).contains(&segment.len()) && segment.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // The workspace path: absolute, and one token (transcript prose with a
+    // path in it keeps its spaces, so it keeps the segment).
+    if segment.starts_with('/') && !segment.contains(char::is_whitespace) {
+        return true;
+    }
+    // A model id (`muse-spark-1.3-contributor`): one token naming a model.
+    if !segment.contains(char::is_whitespace)
+        && (segment.starts_with("muse-") || segment.ends_with("-contributor"))
+    {
+        return true;
+    }
+    false
+}
+
 /// One line of `body` around the query's first match, for the palette row.
 ///
-/// Case-insensitive; newlines become spaces; overlong bodies are cut where
-/// the row would truncate them anyway. No match (or an empty query) is the
-/// body's own first line: the row still says something honest.
+/// `body` is already [`clean_search_text`] output: plain words, no envelope.
+/// Case-insensitive; whitespace collapses; the window holds ~90 chars around
+/// the first match. No match is the body's own first line: the row still says
+/// something honest.
 pub fn snippet_for(body: &str, query: &str) -> String {
     let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.is_empty() {
         return String::new();
     }
-    const RADIUS: usize = 48;
-    const CAP: usize = 140;
+    const RADIUS: usize = 45;
+    const CAP: usize = 92;
     // Searched on the lowercase copy, windowed on the original: byte indices
     // can disagree past ASCII, so both ends go through a char-boundary floor
     // and ceiling rather than slicing raw.
@@ -377,6 +432,32 @@ mod tests {
         let snippet = snippet_for(&body, "needle-here");
         assert!(snippet.contains("needle-here"));
         assert!(snippet.len() < body.len());
+    }
+
+    #[test]
+    fn the_cleaned_body_drops_the_index_envelope() {
+        let raw = "01a081e5-3361-7952-94ce-456eda0dd590\x1f01a081e5\x1fhello from the probe\x1fvalid\x1fhello from the probe\x1f/private/tmp/ws\x1fmeta\x1fmuse-spark-1.3-contributor\x1fthe parser panics on nested generics";
+        let clean = clean_search_text(raw);
+        assert!(!clean.contains("01a081e5"));
+        assert!(!clean.contains("valid"));
+        assert!(!clean.contains("/private/tmp/ws"));
+        assert!(!clean.contains("muse-spark"));
+        assert!(!clean.contains('\u{1f}'));
+        assert!(clean.contains("hello from the probe"));
+        assert!(clean.contains("nested generics"));
+    }
+
+    #[test]
+    fn numbers_and_short_hex_words_survive_cleaning() {
+        assert_eq!(clean_search_text("42\x1fdeadbee\x1fstatus ok"), "42 deadbee status ok");
+    }
+
+    #[test]
+    fn the_snippet_window_holds_about_ninety_chars() {
+        let body = "alpha ".repeat(40) + "needle-here " + &"omega ".repeat(40);
+        let snippet = snippet_for(&clean_search_text(&body), "needle-here");
+        assert!(snippet.contains("needle-here"));
+        assert!(snippet.chars().count() <= 94);
     }
 
     #[test]

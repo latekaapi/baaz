@@ -20,7 +20,7 @@ use std::rc::Rc;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
     goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
-    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, QuestionOutcome,
+    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, QuestionOutcome, TextSelection,
     ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, ToolCall, Turn, TurnMeta};
@@ -72,6 +72,13 @@ pub struct Folds {
     pub assistant_action: Option<AssistantActionHandler>,
     /// Bottom-row actions on user turns: turn id plus its text (C6).
     pub user_action: Option<UserActionHandler>,
+    /// What each turn currently holds selected, by turn id (C8b). Per turn
+    /// because the library scopes cell keys to the markdown view that
+    /// rendered them — one shared cell would light up every turn at once.
+    pub text_selections: HashMap<String, TextSelection>,
+    /// Selection intents out of the turns: turn id, that turn's markdown
+    /// source, and the intent (C8b).
+    pub selection_change: Option<TextSelectionChangeHandler>,
     /// Tool-group header and per-call intents, keyed by the group's fold key (C8).
     pub tool_group: Option<ToolGroupActionHandler>,
 }
@@ -84,6 +91,13 @@ pub type AssistantActionHandler = Rc<dyn Fn(String, AssistantTurnAction, &mut Wi
 
 /// A user turn's bottom-row action: the turn's id, its text, and what was pressed.
 pub type UserActionHandler = Rc<dyn Fn(String, String, UserTurnAction, &mut Window, &mut App)>;
+
+/// A turn's selection intent: the turn's id, that turn's markdown source
+/// (so ⌘C slices the exact view the person dragged in), and the intent
+/// itself — `Some` on drags and word/paragraph picks, `None` on a plain
+/// click elsewhere in a cell (C8b).
+pub type TextSelectionChangeHandler =
+    Rc<dyn Fn(String, String, Option<TextSelection>, &mut Window, &mut App)>;
 
 /// A tool group's intent: the group's fold key and what it asked for.
 pub type ToolGroupActionHandler = Rc<dyn Fn(String, ToolGroupIntent, &mut Window, &mut App)>;
@@ -307,6 +321,16 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
                 let on_link = on_link.clone();
                 turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
             }
+            // The turn's own held selection, if any (C8b): every turn gets
+            // only its own, because cell keys repeat across turns.
+            turn = turn.selection(folds.text_selections.get(id).cloned());
+            if let Some(on_change) = &folds.selection_change {
+                let on_change = on_change.clone();
+                let (turn_id, source) = (id.clone(), text.clone());
+                turn = turn.on_selection_change(move |next, window, cx| {
+                    on_change(turn_id.clone(), source.clone(), next, window, cx);
+                });
+            }
             if let Some(act) = &folds.user_action {
                 let act = act.clone();
                 let (turn_id, body) = (id.clone(), text.clone());
@@ -376,6 +400,20 @@ fn block(
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
                 turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
+            }
+            // The turn's own held selection, if any (C8b). Sibling text
+            // blocks share the turn id, so a selection over one block's
+            // `p0` also tints the other's — the library scopes keys to the
+            // markdown view, and a turn holds several. The source that
+            // travels back with an intent is still exactly this block's
+            // text, so ⌘C copies what was dragged.
+            turn = turn.selection(folds.text_selections.get(turn_id).cloned());
+            if let Some(on_change) = &folds.selection_change {
+                let on_change = on_change.clone();
+                let (owner, source) = (turn_id.to_owned(), text.clone());
+                turn = turn.on_selection_change(move |next, window, cx| {
+                    on_change(owner.clone(), source.clone(), next, window, cx);
+                });
             }
             // The row belongs to the message, so only the closing block
             // carries it; Pin stays unwired here (the app toasts instead).
