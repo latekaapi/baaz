@@ -192,8 +192,10 @@ the path that is contiguous, ordered and bounded, and it never replays
 `item/delta`, so a backfilled message arrives whole and the fold takes it that
 way.
 
-⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail. Rename,
-hide and search are Phase 5 and are not built.
+⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail.
+⌘⇧F opens the full-text search palette (`PaletteKind::Search`): sessions by
+transcript text plus the files the workspace's turns created, Enter resumes a
+session and reveals a file in Finder. Full detail in `docs/12-search.md`.
 
 ---
 
