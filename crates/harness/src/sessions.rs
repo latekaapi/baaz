@@ -102,29 +102,6 @@ pub fn shell_title(command: &str) -> Option<String> {
     Some(text.to_owned())
 }
 
-/// Case-insensitive subsequence match: does `needle`'s characters appear in
-/// `haystack`, in order?
-///
-/// The sidebar's filter. A subsequence rather than a substring because a
-/// session called "fix the parser panic" should be found by typing `fxparse`,
-/// which is what a person does when they half-remember a name.
-pub fn matches(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let mut wanted = needle.chars().flat_map(char::to_lowercase).peekable();
-    for c in haystack.chars().flat_map(char::to_lowercase) {
-        match wanted.peek() {
-            Some(next) if *next == c => {
-                wanted.next();
-            }
-            Some(_) => {}
-            None => return true,
-        }
-    }
-    wanted.peek().is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,13 +152,4 @@ mod tests {
         assert_eq!(shell_title("  !  "), None);
     }
 
-    #[test]
-    fn the_filter_is_a_case_insensitive_subsequence() {
-        assert!(matches("fix the parser panic", "fxparse"));
-        assert!(matches("Fix The Parser", "parser"));
-        assert!(matches("anything", ""));
-        assert!(!matches("fix the parser", "zebra"));
-        // Order matters: a subsequence is not a bag of letters.
-        assert!(!matches("abc", "cba"));
-    }
 }

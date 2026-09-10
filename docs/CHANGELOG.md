@@ -1,5 +1,84 @@
 # Harness changelog
 
+## 2026-09-10 — Fix-up pass on `wf-improvements` (owner-side audit)
+
+Seven faults from the owner's screenshots, all `--replay`/`--no-connect`
+proofs, no live turn spent.
+
+- Transcript gutter and alignment (`session.rs`): the virtualised list's
+  rows were full-bleed against the sidebar divider and the right edge, and
+  `ListAlignment::Bottom` left a void above short transcripts. The list
+  wrapper carries the pre-virtualised container's own gutters again
+  (`TRANSCRIPT_PAD_TOP`/`TRANSCRIPT_PAD_X` px, `SP_4` below; per-row `SP_5`
+  is the inter-turn gap), and the list runs `ListAlignment::Top` with the
+  existing follow-the-tail logic untouched (`follow` +
+  `is_scrolled_to_end`/`scroll_to_end`). No content max-width was restored
+  because none existed: neither the old container nor the composer column
+  constrains width in code, so the turns line up with the status/banner rows
+  through the shared `TRANSCRIPT_PAD_X` step.
+- Header title (`app.rs`): the title flexes inside the header cell
+  (`flex_1`, `min_w(0)`, `overflow_hidden`, `truncate`) with a flex-none
+  provider mark, so a whole first prompt as the derived label elides to one
+  line and can never push the overflow button out. No fixed max width: no
+  width token exists in `aui-tokens`, so the flex leftover is the
+  constraint, which also holds on narrow windows.
+- Sidebar description (`sidebar.rs`): the second line repeated the first
+  prompt the label already showed. Now `last_summary` wins when present;
+  otherwise the first prompt shows only when the row's label is not derived
+  from it (user name or Muse title, via `IndexEntry::label_from_prompt`);
+  otherwise the row carries the turns meta alone. The derived title is no
+  longer a description fallback anywhere (`join` and `rejoin` share the
+  rule). Covered by the rewritten `describe` unit test.
+- Rename field (`app.rs`): the dense field wrapped long names onto a
+  clipped second line; it is single-line now (`whitespace_nowrap`,
+  `overflow_x_hidden` on the field, `overflow_hidden` on the 22 px
+  wrapper) and fills its slot to the trailing meta. Renaming the open
+  session also swaps the header title for the same field (Task A's design:
+  "Rename swaps the title for a dense inline field"), through the same
+  `ConfirmRename`/Escape path.
+- Search palette (`search.rs`, `app.rs`): rows showed the raw index
+  envelope (session-id fragments, `^_` separators, `valid`, workspace
+  paths). The snippet is cut from the new `clean_search_text` — uuid/short
+  id, `valid`/`meta`, bare absolute paths and model ids stripped, whitespace
+  collapsed, ~90 chars around the first match — while FTS still matches the
+  raw body. Primary text stays the sidebar label; files keep path plus the
+  owning session label. The query's first hit in each label is emphasised
+  through the row's own `matched` ranges. Caveat: the snippet itself stays
+  the library's muted mono context — the palette row offers no
+  proportional-font or snippet-highlight shape, and the library is untouched.
+  The dead sidebar quick-filter is gone entirely (field, state, matching
+  helpers, empty-state branch): ⌘⇧F and the search icon open only the
+  palette, so the two can never be open together.
+- Turn actions: Pin stays. The library draws it unconditionally in both the
+  hover toolbar and the bottom row (`turns.rs`, no opt-out builder), and the
+  library branch is frozen — hiding it needs a library-side change. The
+  toast ("Pin lives on sidebar sessions") still answers the press.
+- Text selection (Task C item 8b): the library now forwards
+  `selection(..)`/`on_selection_change(..)` through both turns and
+  `turn_selected_text(..)`, and the harness half is fully wired: every turn
+  gets its own held cell, intents carry the turn's markdown source back, ⌘C
+  in the transcript context copies `turn_selected_text` of the held turn
+  (never from the composer or a card field), Escape and plain clicks
+  elsewhere clear it. Per turn, not one shared cell: the library scopes cell
+  keys (`p0`, …) to the markdown view, so a shared selection would light up
+  every turn at once. New `--steps select-text:<turn>:<from>-<to>` verb
+  holds a scripted selection for screenshots. Residual library limit: an
+  assistant turn with several text blocks shares one turn id, so a selection
+  tints each block's same-key cell — ⌘C still copies exactly what was
+  dragged, because the source travels with the intent.
+- Covered by three new offline unit tests in `search.rs` (envelope
+  stripping, survivor shapes, the ~90-char window) plus the rewritten
+  `describe` rule test in `sidebar.rs`; no test opens a real session.
+- Screenshots (all `--replay`, 15 s delay):
+  `docs/images/improve-integrated-{dark,light}.png` (transcript-real: gutter,
+  top start, elided header), `improve-integrated-markdown-dark.png`,
+  `improve-transcript-stress-tail-dark.png` (300-turn tail still sticks),
+  `improve-shell-{open,rename}-{dark,light}.png` (description rule,
+  single-line rename in row and header),
+  `improve-integrated-search-{dark,light}.png` (clean rows),
+  `improve-transcript-selection-{dark,light}.png` (scripted hold over the
+  user bubble).
+
 ## 2026-09-10 — Improvements (A) — shell: header and sidebar
 
 The header shows the active session's label ("Harness" with nothing open) with

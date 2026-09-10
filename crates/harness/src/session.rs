@@ -47,8 +47,8 @@ use aui::data::{ContextMeterState, ContextPressure};
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::overlay::popover_layer;
 use aui::transcript::{
-    AssistantTurnAction, LinkTarget, TextSelection, ToolCardIntent, ToolGroupIntent, UserTurnAction,
-    needs_you_banner, retry_row, status_row, StatusLead,
+    AssistantTurnAction, LinkTarget, SelectionKey, TextSelection, ToolCardIntent, ToolGroupIntent,
+    UserTurnAction, needs_you_banner, retry_row, status_row, StatusLead, turn_selected_text,
 };
 use aui_icons::IconName;
 use aui_protocol::{Block, PermissionMode, PlanState, ReasoningEffort, Session, Turn};
@@ -234,7 +234,7 @@ pub struct SessionView {
     overlays: Entity<Overlays>,
     /// Cards the person folded away from their default.
     toggled: HashSet<String>,
-    /// Virtualized transcript list (gpui `list()`, bottom-aligned, one item
+    /// Virtualized transcript list (gpui `list()`, top-aligned, one item
     /// per turn) and the item count it was last synced to. Only visible rows
     /// are built and laid out per frame; `splice` keeps indices stable across
     /// folds (C1). Tail-follow rides `is_scrolled_to_end`/`scroll_to_end`
@@ -251,11 +251,14 @@ pub struct SessionView {
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
-    /// The transcript's current text selection (library selection model):
-    /// one cell at a time, cleared on Escape; ⌘C copies it (C8b). The turn
-    /// components do not forward selection intents yet, so this holds the
-    /// state and the binding until the library wires the turns through.
-    text_selection: Option<TextSelection>,
+    /// The transcript's text selections (library selection model), keyed by
+    /// turn id: `(markdown source, selection)`. One cell at a time — a new
+    /// drag replaces whatever was held — cleared on Escape or a plain click
+    /// elsewhere; ⌘C copies the held one (C8b). Per turn, not one shared
+    /// cell: the library scopes cell keys (`p0`, `b0-0`, …) to the markdown
+    /// view that rendered them, so a single shared selection would light up
+    /// the same key in every turn at once.
+    text_selections: HashMap<String, (String, TextSelection)>,
     /// Last elapsed second the turn ticker painted, so the 1 Hz clock
     /// notifies only when the displayed number changes (P2).
     last_tick_secs: Option<u64>,
@@ -412,7 +415,11 @@ impl SessionView {
             toggled: HashSet::new(),
             list_state: ListState::new(
                 0,
-                ListAlignment::Bottom,
+                // Top, not Bottom: a short transcript starts at the top
+                // instead of leaving a void above it. Tail-follow is owned
+                // by the `follow` flag below (`scroll_to_end` when the
+                // reader was at the tail), never by the alignment.
+                ListAlignment::Top,
                 // Overdraw covers the tail-slack zone twice over, so rows
                 // entering at the tail are already measured (C1).
                 px(TAIL_SLACK * 2.0),
@@ -421,7 +428,7 @@ impl SessionView {
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: HashMap::new(),
             follow: true,
-            text_selection: None,
+            text_selections: HashMap::new(),
             last_tick_secs: None,
             running: None,
             submitting: false,
@@ -1901,6 +1908,10 @@ impl SessionView {
             }
             // Transcript inspection (Task C): jump without touching the
             // pointer, and open every tool group for its screenshot.
+            // A scripted text selection for the selection screenshot (C8b):
+            // `select-text:<turn>:<from>-<to>` over the turn's first
+            // paragraph.
+            "select-text" => self.select_text_step(rest, cx),
             "top" => {
                 self.follow = false;
                 self.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
@@ -2149,6 +2160,30 @@ impl SessionView {
                           cx: &mut gpui::App| { act(&(id, text, action), window, cx) },
                 ))
             },
+            // Text selection (C8b): every turn gets its own held cell, and
+            // every intent carries its turn's markdown source back.
+            text_selections: self
+                .text_selections
+                .iter()
+                .map(|(id, (_, selection))| (id.clone(), selection.clone()))
+                .collect(),
+            selection_change: {
+                let changed = cx.listener(
+                    |this: &mut Self,
+                     (turn_id, source, next): &(String, String, Option<TextSelection>),
+                     _,
+                     cx| {
+                        this.set_text_selection(turn_id.clone(), source.clone(), next.clone(), cx);
+                    },
+                );
+                Some(Rc::new(
+                    move |turn_id: String,
+                          source: String,
+                          next: Option<TextSelection>,
+                          window: &mut Window,
+                          cx: &mut gpui::App| { changed(&(turn_id, source, next), window, cx) },
+                ))
+            },
             tool_group: {
                 let act = cx.listener(
                     |this: &mut Self, (key, intent): &(String, ToolGroupIntent), window, cx| {
@@ -2189,13 +2224,19 @@ impl SessionView {
         let folds = Rc::new(folds);
         // The wrapper is a flex column so the virtual list's own
         //  resolves to the leftover centre height; without it the
-        // list lays out at zero height and paints nothing.
+        // list lays out at zero height and paints nothing. It carries
+        // the pre-virtualised transcript's own gutters (pt/px/pb) because
+        // the list items themselves are full-bleed rows; the px step is
+        // the same TRANSCRIPT_PAD_X the status and banner rows use, so
+        // the turns line up with them.
         let element = div()
             .w_full()
             .flex_1()
             .min_h(px(0.0))
             .flex()
             .flex_col()
+            .px(px(TRANSCRIPT_PAD_X))
+            .pb(px(scale::SP_4))
             .key_context(TRANSCRIPT_CONTEXT)
             .child(
                 list(self.list_state.clone(), move |ix, window, cx| {
@@ -2464,26 +2505,98 @@ impl SessionView {
         None
     }
 
-    /// ⌘C in the transcript context (C8b): copy the held selection, if
-    /// any. The binding's own predicate already excludes the composer and
-    /// card fields, so this never steals copy from an editor.
-    pub fn copy_selected(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        // The turn components do not forward selection intents yet, so
-        // `text_selection` can only be `None` today; the state, the clear
-        // paths and this binding are the harness half, waiting on the
-        // library's turn wiring.
-        let _ = self.text_selection.as_ref();
+    /// A turn's selection intent (C8b): a drag or a word/paragraph pick
+    /// replaces whatever was held (one cell at a time); a plain click
+    /// elsewhere in a cell arrives as `None` and clears that turn. The
+    /// turn's markdown source travels with the intent so ⌘C slices the
+    /// exact view the person dragged in.
+    fn set_text_selection(
+        &mut self,
+        turn_id: String,
+        source: String,
+        next: Option<TextSelection>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match next {
+            Some(selection) => {
+                let fresh = self
+                    .text_selections
+                    .get(&turn_id)
+                    .map(|(_, held)| held != &selection)
+                    .unwrap_or(true);
+                self.text_selections.clear();
+                self.text_selections.insert(turn_id, (source, selection));
+                // One cell at a time: the clear above leaves exactly this
+                // one, so any fresh intent changed what is held.
+                fresh
+            }
+            None => self.text_selections.remove(&turn_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
-    /// Clear the transcript text selection (C8b). Returns whether one was
+    /// ⌘C in the transcript context (C8b): copy the held selection, if
+    /// any, sliced out of its own turn's markdown source. The binding's own
+    /// predicate already excludes the composer and card fields, so this
+    /// never steals copy from an editor.
+    pub fn copy_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let entry = self.text_selections.values().next().cloned();
+        let Some((source, selection)) = entry else { return };
+        if let Some(text) = turn_selected_text(&source, &selection) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Clear the transcript text selections (C8b). Returns whether one was
     /// held, so Escape prefers it over heavier dismissals.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.text_selection.take().is_some() {
-            cx.notify();
-            true
-        } else {
-            false
+        if self.text_selections.is_empty() {
+            return false;
         }
+        self.text_selections.clear();
+        cx.notify();
+        true
+    }
+
+    /// `--steps select-text:<turn>:<from>-<to>`: hold a scripted selection
+    /// over the turn's first paragraph (`p0`), for the selection screenshot.
+    /// `<turn>` is the turn's index in the live transcript; the range is
+    /// byte offsets, clamped to the paragraph. A turn with no text paragraph
+    /// (or a bad range) holds nothing rather than a lie.
+    fn select_text_step(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let (turn, range) = rest.split_once(':').unwrap_or((rest, ""));
+        let (from, to) = range.split_once('-').unwrap_or((range, ""));
+        let (Ok(index), Ok(mut from), Ok(mut to)) =
+            (turn.parse::<usize>(), from.parse::<usize>(), to.parse::<usize>())
+        else {
+            return;
+        };
+        if from > to {
+            std::mem::swap(&mut from, &mut to);
+        }
+        // The turn's own markdown source: a user turn is one view, an
+        // assistant turn's first text block is the `p0` this step holds.
+        let found = self.fold.session(&self.session_id).and_then(|session| {
+            session.turns.get(index).and_then(|turn| match turn {
+                Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
+                Turn::Assistant { id, blocks, .. } => blocks.iter().find_map(|block| match block {
+                    Block::Text { text, .. } => Some((id.clone(), text.clone())),
+                    _ => None,
+                }),
+            })
+        });
+        let Some((turn_id, source)) = found else { return };
+        // Clamp to the source so the highlight never addresses bytes that
+        // are not there; an emptied range holds nothing rather than a lie.
+        from = from.min(source.len());
+        to = to.min(source.len());
+        if from >= to {
+            return;
+        }
+        let selection = TextSelection { cell: SelectionKey::paragraph("", 0), range: from..to };
+        self.set_text_selection(turn_id, source, Some(selection), cx);
     }
 
     /// Open every tool group for a screenshot: group keys default closed, so
