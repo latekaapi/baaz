@@ -39,6 +39,16 @@ pub struct SessionEntry {
     pub turns: u64,
     /// Hidden from this window's list (`/hide`).
     pub hidden: bool,
+    /// Pinned to the top of the date view, in its own group.
+    pub pinned: bool,
+    /// Archived out of the list (shown only from the Sessions menu).
+    pub archived: bool,
+    /// The muted second line: the last summary, the first prompt, or the
+    /// derived title — whichever says what was done here last.
+    pub description: String,
+    /// A `--replay` capture, labelled by file rather than by the index. No
+    /// store source speaks for its label, so a rejoin keeps it.
+    pub replayed: bool,
     /// Named with `/name` or the row's pencil. A named session with no turns
     /// is somebody's draft, not noise, so the empty filter leaves it alone.
     pub named: bool,
@@ -81,6 +91,10 @@ impl SessionEntry {
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             turns: session.turn_count,
             hidden: meta.is_some_and(|m| m.hidden),
+            pinned: meta.is_some_and(|m| m.pinned),
+            archived: meta.is_some_and(|m| m.archived),
+            description: describe(meta, index),
+            replayed: false,
             named: name.is_some(),
             haystack: haystack(label, index),
             needs_title: label.is_none(),
@@ -107,6 +121,10 @@ impl SessionEntry {
             running: false,
             turns: 0,
             hidden: false,
+            pinned: false,
+            archived: false,
+            description: String::new(),
+            replayed: true,
             named: false,
             needs_title: false,
         }
@@ -132,10 +150,21 @@ impl SessionEntry {
     fn summary(&self) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed(self.updated))
             .provider(Provider::Muse);
+        // The description first, so the second line reads what was done here
+        // last; the turn count stays in the meta after it.
+        if !self.description.is_empty() {
+            row = row.meta(aui::nav::MetaItem::Text(self.description.clone().into()));
+        }
         if self.turns > 0 {
             row = row.meta(aui::nav::MetaItem::Text(
                 format!("{} turn{}", self.turns, if self.turns == 1 { "" } else { "s" }).into(),
             ));
+        }
+        if self.archived {
+            row = row.meta(aui::nav::MetaItem::Tag("Archived".into()));
+        }
+        if self.pinned {
+            row = row.pinned();
         }
         if self.running {
             row = row.pulse();
@@ -181,6 +210,16 @@ fn elapsed(at: DateTime<Local>) -> String {
         s if s < 86_400 => format!("{}h", s / 3_600),
         s => format!("{}d", s / 86_400),
     }
+}
+
+/// What the row's muted second line says: the summary the last completed
+/// turn left behind, else the index's first prompt, else the derived title.
+/// The row's own cap bounds it, and an empty answer means no second line.
+pub fn describe(meta: Option<&SessionMeta>, index: Option<&IndexEntry>) -> String {
+    let summary = meta.and_then(|m| m.last_summary.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    let prompt = index.and_then(|i| i.first_user_prompt.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    summary.or(prompt).or(derived).map(one_line).unwrap_or_default()
 }
 
 /// An RFC3339 instant as a local time; anything unparseable is the epoch, which
@@ -263,6 +302,10 @@ mod tests {
             running: false,
             turns: 0,
             hidden: false,
+            pinned: false,
+            archived: false,
+            description: String::new(),
+            replayed: false,
             named: false,
             haystack: "x".into(),
             needs_title: false,
@@ -299,5 +342,33 @@ mod tests {
         let mut turned = entry("a");
         turned.turns = 1;
         assert!(!turned.is_empty(None));
+    }
+
+    fn meta_with(summary: Option<&str>, derived: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            last_summary: summary.map(str::to_owned),
+            derived_title: derived.map(str::to_owned),
+            ..SessionMeta::default()
+        }
+    }
+
+    fn indexed(prompt: Option<&str>) -> IndexEntry {
+        IndexEntry { first_user_prompt: prompt.map(str::to_owned), ..IndexEntry::default() }
+    }
+
+    #[test]
+    fn the_description_prefers_the_last_summary_then_the_prompt() {
+        let meta = meta_with(Some("Fixed the parser panic"), Some("cargo test"));
+        let index = indexed(Some("why does this panic"));
+        assert_eq!(describe(Some(&meta), Some(&index)), "Fixed the parser panic");
+        assert_eq!(describe(None, Some(&index)), "why does this panic");
+        assert_eq!(describe(Some(&meta_with(None, Some("cargo test"))), None), "cargo test");
+        assert_eq!(describe(None, None), "");
+    }
+
+    #[test]
+    fn a_long_summary_is_cut_where_the_row_would_truncate_it() {
+        let meta = meta_with(Some(&"w".repeat(200)), None);
+        assert_eq!(describe(Some(&meta), None).chars().count(), 80);
     }
 }

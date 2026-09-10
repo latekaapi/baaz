@@ -112,6 +112,16 @@ impl Tier {
         }
     }
 
+    /// The sidebar footer's usage meter: the weekly window's fraction in
+    /// `0..=1`, or `None` when the probe said nothing usable. The label's
+    /// "12% weekly" and the meter's 0.12 are the same number in two clothes.
+    pub fn weekly_fraction(&self) -> Option<f32> {
+        match self {
+            Tier::Subscription { weekly_pct: Some(pct), .. } => Some((*pct as f32 / 100.0).clamp(0.0, 1.0)),
+            _ => None,
+        }
+    }
+
     /// Whether that row is warning-tinted: anything that is not a known
     /// subscription is.
     pub fn is_warning(&self) -> bool {
@@ -719,6 +729,16 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_weekly_fraction_feeds_the_footer_meter() {
+        let sub = |weekly_pct| Tier::Subscription { plan: "High Usage".into(), current_pct: None, weekly_pct, resets: vec![] };
+        let frac = sub(Some(12)).weekly_fraction().unwrap();
+        assert!((frac - 0.12).abs() < 1e-6, "{frac}");
+        assert_eq!(sub(None).weekly_fraction(), None);
+        assert_eq!(Tier::PayAsYouGo.weekly_fraction(), None);
+        assert_eq!(Tier::Unavailable("no".into()).weekly_fraction(), None);
+    }
 
     #[test]
     fn a_subscription_card_yields_the_plan_and_both_percentages() {

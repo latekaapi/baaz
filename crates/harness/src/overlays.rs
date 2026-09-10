@@ -31,6 +31,10 @@ pub struct Dialog {
     pub primary: &'static str,
     /// What the primary button does.
     pub action: DialogAction,
+    /// When the action archives, the session it archives. The target lives on
+    /// the dialog so dismissing it — Escape, the scrim, Cancel — drops the
+    /// target with it and nothing can confirm afterwards.
+    pub archive_target: Option<String>,
 }
 
 /// What a dialog's primary button does.
@@ -42,6 +46,8 @@ pub enum DialogAction {
     Reconnect,
     /// Go to the login screen.
     SignIn,
+    /// Archive the dialog's `archive_target` out of the sidebar.
+    Archive,
 }
 
 /// Which popover is open over the composer.
@@ -57,6 +63,12 @@ pub enum MenuKind {
     Command,
     /// The `@` mention picker, above the composer.
     Mention,
+    /// The header's overflow menu: Rename, Fork, Archive.
+    Overflow,
+    /// The Sessions caption's view menu: empty and archived filters.
+    ViewOptions,
+    /// The footer's account menu: Sign out.
+    Account,
 }
 
 /// An open menu: which one, where the keyboard is, and what has been typed.
@@ -418,6 +430,7 @@ mod tests {
                 kind: DialogKind::Error,
                 primary: "Dismiss",
                 action: DialogAction::Dismiss,
+                archive_target: None,
             }),
             ..Default::default()
         };
