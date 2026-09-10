@@ -280,3 +280,28 @@ The banner stays up until the new child answers.
 - **No rename, hide or search.** Phase 5, and none of them are on the wire.
 - **The `Overlays` entity is one field.** There is one modal and nothing else to
   stack yet.
+
+---
+
+## 9. Native menus and the app bundle
+
+The menu bar is built in `crate::app::set_menus`, called from `main.rs`
+after `bind_keys` — after, because macOS reads each item's shortcut from the
+keymap. Harness (About, Services, Quit), File (New, Close), Edit (the
+standard six with `OsAction`), View (sidebar, palette, search, theme),
+Window (Minimize, Zoom), Help (Harness Documentation, which reveals the
+`docs/` folder in Finder). ⌘W runs the tier-probe cleanup and
+`remove_window`; ⌘Q runs the same cleanup and `cx.quit()` — the same pair
+the window's should-close hook and the app-quit hook run
+(`tier::cleanup_probes`), so every exit path is one function. The docs
+lookup (`find_docs_dir`, unit-tested in `app.rs`) tries the working
+directory's `docs/` first, then three ancestors above the executable, so it
+works from `cargo run` and from a debug target; a bundle moved away from
+the repo logs instead of pretending.
+
+`scripts/bundle.sh` assembles `target/bundle/Harness.app` from the release
+binary, `assets/icon-1024.png` (a flat H tile drawn by the checked-in
+`assets/make-icon.py`, converted to `Harness.icns` with `sips`/`iconutil`)
+and a generated `Info.plist` (`CFBundleIdentifier dev.harness.app`),
+ad-hoc signed so `open target/bundle/Harness.app` launches it on this
+machine. Signing/notarisation are out of scope.

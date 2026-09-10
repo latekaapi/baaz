@@ -258,6 +258,17 @@ pub fn kill_live_probes() {
     }
 }
 
+/// Kill live tier-probe children and wait, bounded, for their drops.
+///
+/// The one cleanup every exit path runs — the screenshot quit, the window's
+/// should-close hook, the app-quit hook, and the ⌘W / ⌘Q menu actions — so a
+/// probe mid-flight never orphans its `muse` TUI child. Bounded either way:
+/// the close or quit proceeds when the wait expires.
+pub fn cleanup_probes() {
+    kill_live_probes();
+    wait_for_probes_gone(Duration::from_secs(3));
+}
+
 /// Wait, bounded, for every live probe to be dropped and reaped after
 /// [`kill_live_probes`]: the probe thread sees the dead child on its next
 /// pump tick and its `Drop` removes the pid file. For exits that want the

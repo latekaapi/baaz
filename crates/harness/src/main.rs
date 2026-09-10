@@ -318,7 +318,10 @@ fn main() {
         aui::init(theme, cx);
         // 3. The product text scale.
         AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
+        // 4. The app's own keys, then the native menu bar: macOS reads each
+        // menu item's shortcut from the keymap, so the menus come second.
         app::bind_keys(cx);
+        app::set_menus(cx);
 
         let bounds = match screenshot {
             // A capture renders at the display's top-left, away from the
@@ -352,14 +355,12 @@ fn main() {
         // expires.
         handle.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, _| {
-                crate::tier::kill_live_probes();
-                crate::tier::wait_for_probes_gone(Duration::from_secs(3));
+                crate::tier::cleanup_probes();
                 true
             });
         }).ok();
         cx.on_app_quit(|_| async {
-            crate::tier::kill_live_probes();
-            crate::tier::wait_for_probes_gone(Duration::from_secs(3));
+            crate::tier::cleanup_probes();
         })
         .detach();
         match screenshot {
