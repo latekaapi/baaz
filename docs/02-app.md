@@ -318,10 +318,11 @@ row stands in, and a failed switch keeps the old view with the error banner.
 
 Turns carry an in-flow action row under the prose (`actions_bottom`) for both
 roles. Assistant: Copy writes the turn's text to the clipboard, Retry resends
-the user input behind the turn, Fork opens the turn picker, and Pin — which
-the row always draws but a turn cannot honour — says it lives on sidebar
-sessions. User: Copy, Edit (text into the composer draft), Resend. Wire
-actions are live-only: in a replayed capture they answer with a toast.
+the user input behind the turn, Fork opens the turn picker; Pin is hidden on
+turns through the library's `AssistantTurn::actions(..)` (it lives on sidebar
+sessions, whose rows keep the Pin action). User: Copy, Edit (text into the
+composer draft), Resend. Wire actions are live-only: in a replayed capture
+they answer with a toast.
 Markdown links click through: URLs open in the browser, workspace paths reveal
 in Finder (escapes above the workspace are rejected with a toast, missing
 paths toast). `Block::ToolGroup` renders through the library `tool_group`,

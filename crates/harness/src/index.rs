@@ -52,20 +52,6 @@ impl IndexEntry {
             .filter(|s| !s.eq_ignore_ascii_case(crate::sidebar::UNNAMED));
         pick(&self.session_name).or(title).or_else(|| pick(&self.first_user_prompt))
     }
-
-    /// Whether [`IndexEntry::label`] falls through to the first user prompt:
-    /// no session name and no real generated title, but a prompt. The
-    /// sidebar's description line needs this so it does not repeat a label
-    /// that already is the prompt.
-    pub fn label_from_prompt(&self) -> bool {
-        let named =
-            self.session_name.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
-        let titled = !self.title.trim().is_empty()
-            && !self.title.trim().eq_ignore_ascii_case(crate::sidebar::UNNAMED);
-        !named
-            && !titled
-            && self.first_user_prompt.as_deref().map(str::trim).is_some_and(|s| !s.is_empty())
-    }
 }
 
 /// `~/.local/share/muse/session-index.db`, honouring `XDG_DATA_HOME`.

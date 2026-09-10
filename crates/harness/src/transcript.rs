@@ -386,8 +386,16 @@ fn block(
     };
     match block {
         Block::Text { text, streaming } => {
-            let mut turn =
-                assistant_turn(id, text.clone()).streaming(*streaming).actions_bottom(last);
+            // Pin has no meaning on a turn — it lives on sidebar sessions —
+            // so the row keeps copy, retry and fork only.
+            let mut turn = assistant_turn(id, text.clone())
+                .actions(&[
+                    AssistantTurnAction::Copy,
+                    AssistantTurnAction::Retry,
+                    AssistantTurnAction::Fork,
+                ])
+                .streaming(*streaming)
+                .actions_bottom(last);
             // A finished turn signs off with its footer; a running one has no
             // final numbers to show yet, and neither has a turn the server
             // measured nothing for. A silent turn carries no library footer —
@@ -416,7 +424,7 @@ fn block(
                 });
             }
             // The row belongs to the message, so only the closing block
-            // carries it; Pin stays unwired here (the app toasts instead).
+            // carries it.
             if last {
                 if let Some(act) = &folds.assistant_action {
                     let act = act.clone();
