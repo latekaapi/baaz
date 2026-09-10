@@ -44,6 +44,7 @@ mod full_output;
 mod history;
 mod images;
 mod index;
+mod layout;
 mod overlays;
 mod plan;
 mod search;
