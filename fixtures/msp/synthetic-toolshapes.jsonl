@@ -1,0 +1,27 @@
+# synthetic-toolshapes.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# No capture carries a shell result serialised as a JSON envelope, a todo
+# tool call, or a JSON object result: this file exercises the structured
+# presentation — envelope to shell card, todo args to the todo card,
+# other JSON pretty-printed, reads keeping their line count.
+#
+# Shapes follow `fixtures/msp/msp-ts/msp.d.ts` and the real bash toolCall item
+# in `transcript-real.jsonl`; every `<-- ` line below is synthetic. Paths and
+# ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing here names a
+# real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-toolshapes", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-toolshapes/session.jsonl", "activeTurnId": null}}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:2", "sessionId": "synthetic-toolshapes", "turnId": "t-syn-1"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:3", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-user-1", "kind": "userMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Check the workspace, tidy the todos, then estimate the tidy."}}}
+<-- {"jsonrpc": "2.0", "method": "item/started", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-bash-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 1, "status": "inProgress", "tool": "bash", "callId": "call_i-syn-bash-1", "args": "{\"command\": \"ls -la\", \"description\": \"List workspace files\"}"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-bash-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "bash", "callId": "call_i-syn-bash-1", "args": "{\"command\": \"ls -la\", \"description\": \"List workspace files\"}", "visibleOutput": "{\"command\": \"ls -la\", \"description\": \"List workspace files\", \"exit_code\": 0, \"terminal_status\": \"completed\", \"output\": \"README.md\\nnotes.txt\\n\"}", "exitCode": 0, "durationMs": 120}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Workspace listed. Tidying now."}}}
+<-- {"jsonrpc": "2.0", "method": "item/started", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-todo-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 1, "status": "inProgress", "tool": "todo", "callId": "call_i-syn-todo-1", "args": "{\"todos\": [{\"content\": \"Sweep the workspace\", \"status\": \"in_progress\"}, {\"content\": \"Update the changelog\", \"status\": \"pending\"}, {\"content\": \"File the notes\", \"status\": \"completed\"}]}"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:8", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-todo-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "todo", "callId": "call_i-syn-todo-1", "args": "{\"todos\": [{\"content\": \"Sweep the workspace\", \"status\": \"in_progress\"}, {\"content\": \"Update the changelog\", \"status\": \"pending\"}, {\"content\": \"File the notes\", \"status\": \"completed\"}]}", "visibleOutput": "{\"ok\":true,\"revision\":1,\"items\":3}"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:9", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-text-2", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Todos captured."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:10", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-read-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 1, "status": "completed", "tool": "read_file", "callId": "call_i-syn-read-1", "args": "{\"path\": \"/tmp/synthetic/notes.txt\"}", "visibleOutput": "line one\nline two\nline three\n"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:11", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-text-3", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Notes read. Estimating."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:12", "sessionId": "synthetic-toolshapes", "item": {"itemId": "i-syn-est-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 1, "status": "completed", "tool": "estimate", "callId": "call_i-syn-est-1", "args": "{\"task\": \"tidy\", \"depth\": 2}", "visibleOutput": "{\"estimate_minutes\": 12, \"steps\": [\"sweep\", \"sort\"]}"}}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:13", "sessionId": "synthetic-toolshapes", "turnId": "t-syn-1", "terminal": "completed"}}

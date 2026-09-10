@@ -1,0 +1,20 @@
+# synthetic-reasoning-text.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# No capture carries a `reasoning` item with raw `text` and no `summary`:
+# this file pins the fallback — exposed reasoning is never dropped —
+# with a summarised item beside it as the control.
+#
+# Shapes follow `fixtures/msp/msp-ts/msp.d.ts` and the real bash toolCall item
+# in `transcript-real.jsonl`; every `<-- ` line below is synthetic. Paths and
+# ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing here names a
+# real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-reasoning-text", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-reasoning-text/session.jsonl", "activeTurnId": null}}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:2", "sessionId": "synthetic-reasoning-text", "turnId": "t-syn-1"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:3", "sessionId": "synthetic-reasoning-text", "item": {"itemId": "i-syn-user-1", "kind": "userMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Why this plan?"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-reasoning-text", "item": {"itemId": "i-syn-reason-1", "kind": "reasoning", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Consider the workspace layout first, then list files."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-reasoning-text", "item": {"itemId": "i-syn-reason-2", "kind": "reasoning", "turnId": "t-syn-1", "revision": 1, "status": "completed", "summary": ["Plan the sweep"], "text": "RAW-INCIDENTAL-UNUSED"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-reasoning-text", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Done."}}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-reasoning-text", "turnId": "t-syn-1", "terminal": "completed"}}
