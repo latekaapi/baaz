@@ -30,7 +30,7 @@ touched.
   falls back to its raw `text` when `summary` is empty. Incidental fix: a
   tool call's own `exitCode` now reaches the shell body (it used to fold to
   `null`).
-- Covered by four new synthetic fixtures and eight fold tests; snapshots
+- Covered by four new synthetic fixtures and seven new fold tests; snapshots
   regenerated and read (`transcript-phase3` groups its three consecutive
   calls, `synthetic-readoutput` gains the exit code).
 - Screenshots: `docs/images/improve-fold-toolgroup-dark.png` and
