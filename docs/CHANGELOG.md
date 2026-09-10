@@ -1,5 +1,67 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (C) — transcript rendering
+
+The transcript list is virtualized: `render_transcript` renders a gpui `list()`
+with a persistent bottom-aligned `ListState`, one item per turn, instead of
+building every cell every frame. Fold changes splice the affected range only
+(pure appends splice just the new tail), and only visible rows are laid out per
+frame, so per-frame cost stays bounded as the transcript grows: with
+`HARNESS_FRAME_STATS=1` driving 240 frames, `synthetic-stress-300.jsonl`
+(~300 turns) reports p50 11µs / p90 16µs and the few-turn `transcript-echo`
+reports p50 13–14µs — flat across turn count. (No before-numbers exist: the old
+code had no stats hook. The hook measures harness element construction; row
+layout/paint inside gpui and the library is not instrumented.)
+
+`apply` notifies only when the fold changed or view state changed (unchanged
+streaming deltas earn no frame), the turn ticker runs at 1 Hz and notifies only
+when the displayed second changes, and unchanged turns are never re-parsed (the
+library memoises markdown via `parsed_markdown`).
+
+A session switch never flashes the empty state: `Harness::open` keeps the old
+view rendered until the new session's first backfill batch applies (marked by
+`SessionEvent::HistoryReady`), then swaps; with no old view a neutral loading
+row stands in, and a failed switch keeps the old view with the error banner. A
+mid-switch frame needs a live session, so the swap itself is verified by code,
+not a screenshot — the switch screenshots show the Resume palette over a live
+transcript. `synthetic-stress-300.jsonl` (~300 turns, built by the checked-in
+`fixtures/msp/make-stress-300.py`) and the hand-written `synthetic-markdown`
+(headings, table, fence, links) and `synthetic-toolgroup` captures are replayed
+by the existing fold snapshot test, which covers every capture in the
+directory.
+
+Turns carry an in-flow action row under the prose (`actions_bottom`) for both
+roles. Assistant: Copy writes the turn's text to the clipboard, Retry resends
+the user input behind the turn, Fork opens the turn picker, and Pin — which the
+row always draws but a turn cannot honour — says it lives on sidebar sessions.
+User: Copy, Edit (text into the composer draft), Resend. Wire actions are
+live-only: in a replayed capture they answer with a toast. Markdown links click
+through: URLs open in the browser, workspace paths reveal in Finder (escapes
+above the workspace are rejected with a toast, missing paths toast).
+`Block::ToolGroup` renders through the library `tool_group` with open state in
+`Folds` keyed stably — but today's fold never emits a group (grouping is Task
+B), so the group card path is wired, not yet live; the toolgroup screenshots
+show the three sibling cards the fold currently produces.
+
+Text selection is half-landed (8b): `SessionView` holds one `TextSelection`,
+⌘C in the transcript context copies it and Escape clears it — but the
+library's `UserTurn`/`AssistantTurn` expose no `.selection()` /
+`.on_selection_change()` (only the lower-level `markdown()` does), so turns
+cannot display or report a selection and no dragged-selection screenshot
+exists. The harness half waits on the library forwarding selection through the
+turn components. Top inset raised to the horizontal-gutter step so the first
+turn clears the header. `--steps top`, `end`, `mid`, `bench` and
+`expand-groups` drive screenshots.
+
+- Screenshots: `docs/images/improve-transcript-stress-mid-{dark,light}.png`
+  (mid-scroll), `improve-transcript-stress-tail-{dark,light}.png` (tail),
+  `improve-transcript-markdown-{dark,light}.png`,
+  `improve-transcript-toolgroup-{dark,light}.png`,
+  `improve-transcript-switch-{dark,light}.png` (Resume palette over a live
+  transcript; the no-flash swap itself is code-verified).
+- Covered by one offline unit test (`tail_slack_stays_put` keeps the 48 px
+  tail-follow slack named); no test opens a real session.
+
 ## 2026-09-09 — Improvements (E) — fork picker
 
 `/fork` used to fork the newest completed turn with no say in the matter; the

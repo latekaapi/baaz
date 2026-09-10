@@ -20,7 +20,8 @@ use std::rc::Rc;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
     goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
-    tool_card, user_turn, QuestionOutcome, ToolCardIntent,
+    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, QuestionOutcome,
+    ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, ToolCall, Turn, TurnMeta};
 use aui_tokens::scale;
@@ -65,7 +66,27 @@ pub struct Folds {
     /// Draw the cards settled rather than entering, for a `--screenshot` run
     /// that renders a few frames and quits.
     pub at_rest: bool,
+    /// Link clicks from markdown bodies (C5): URLs and workspace paths.
+    pub link: Option<TurnLinkHandler>,
+    /// Bottom-row actions on assistant turns, keyed by turn id (C6).
+    pub assistant_action: Option<AssistantActionHandler>,
+    /// Bottom-row actions on user turns: turn id plus its text (C6).
+    pub user_action: Option<UserActionHandler>,
+    /// Tool-group header and per-call intents, keyed by the group's fold key (C8).
+    pub tool_group: Option<ToolGroupActionHandler>,
 }
+
+/// A markdown link click: the target the library parsed out.
+pub type TurnLinkHandler = Rc<dyn Fn(LinkTarget, &mut Window, &mut App)>;
+
+/// An assistant turn's bottom-row action: the turn's id and what was pressed.
+pub type AssistantActionHandler = Rc<dyn Fn(String, AssistantTurnAction, &mut Window, &mut App)>;
+
+/// A user turn's bottom-row action: the turn's id, its text, and what was pressed.
+pub type UserActionHandler = Rc<dyn Fn(String, String, UserTurnAction, &mut Window, &mut App)>;
+
+/// A tool group's intent: the group's fold key and what it asked for.
+pub type ToolGroupActionHandler = Rc<dyn Fn(String, ToolGroupIntent, &mut Window, &mut App)>;
 
 /// What a card header click reports: the key of the card that was clicked.
 pub type ToggleHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
@@ -98,6 +119,7 @@ pub type RowHandler = Rc<dyn Fn(String, usize, &mut Window, &mut App)>;
 
 /// What a tool card offers when the server truncated its visible output but
 /// kept the full bytes under an `outputRef`.
+#[derive(Clone)]
 pub struct FullOutput {
     /// The fold holds the item's `outputRef`, so a fetch would serve bytes.
     pub fetchable: bool,
@@ -106,6 +128,7 @@ pub struct FullOutput {
 }
 
 /// Where a truncated tool card's full-output fetch stands.
+#[derive(Clone)]
 pub enum FullOutputState {
     /// Nothing fetched yet; the fold row fetches.
     Idle,
@@ -278,12 +301,20 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
     // draw its own underneath.
     let silent = silent_reasoning(turn);
     match turn {
-        Turn::User { id, text, .. } => vec![div()
-            .w_full()
-            .flex()
-            .justify_end()
-            .child(user_turn(SharedString::from(id.clone()), text.clone()))
-            .into_any_element()],
+        Turn::User { id, text, .. } => {
+            let mut turn = user_turn(SharedString::from(id.clone()), text.clone()).actions_bottom(true);
+            if let Some(on_link) = &folds.link {
+                let on_link = on_link.clone();
+                turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
+            }
+            if let Some(act) = &folds.user_action {
+                let act = act.clone();
+                let (turn_id, body) = (id.clone(), text.clone());
+                turn = turn
+                    .on_action(move |action, window, cx| act(turn_id.clone(), body.clone(), action, window, cx));
+            }
+            vec![div().w_full().flex().justify_end().child(turn).into_any_element()]
+        }
         Turn::Assistant { id, blocks, meta } => {
             let last = blocks.len().saturating_sub(1);
             // A silent turn gets the harness's own footer row, so its blocks
@@ -331,7 +362,8 @@ fn block(
     };
     match block {
         Block::Text { text, streaming } => {
-            let mut turn = assistant_turn(id, text.clone()).streaming(*streaming);
+            let mut turn =
+                assistant_turn(id, text.clone()).streaming(*streaming).actions_bottom(last);
             // A finished turn signs off with its footer; a running one has no
             // final numbers to show yet, and neither has a turn the server
             // measured nothing for. A silent turn carries no library footer —
@@ -339,6 +371,20 @@ fn block(
             if let Some(meta) = meta {
                 if last && !*streaming && meta != &TurnMeta::default() {
                     turn = turn.meta(meta.clone());
+                }
+            }
+            if let Some(on_link) = &folds.link {
+                let on_link = on_link.clone();
+                turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
+            }
+            // The row belongs to the message, so only the closing block
+            // carries it; Pin stays unwired here (the app toasts instead).
+            if last {
+                if let Some(act) = &folds.assistant_action {
+                    let act = act.clone();
+                    let turn_id = turn_id.to_owned();
+                    turn = turn
+                        .on_action(move |action, window, cx| act(turn_id.clone(), action, window, cx));
                 }
             }
             turn.into_any_element()
@@ -367,19 +413,25 @@ fn block(
             };
             tool_call_card(key, id, &call, folds)
         }
-        // A grouped run renders as its individual cards until the fold learns
-        // the group's own open state: same card, same toggles, one per call.
-        Block::ToolGroup { calls, .. } => {
-            let cards = calls
-                .iter()
-                .enumerate()
-                .map(|(index, call)| {
-                    let sub_key = format!("{key}:{index}");
-                    let sub_id = ElementId::from(SharedString::from(sub_key.clone()));
-                    tool_call_card(&sub_key, sub_id, call, folds)
-                })
-                .collect::<Vec<_>>();
-            v_flex().w_full().gap(px(8.0)).children(cards).into_any_element()
+        // A grouped run renders through the library's group card (C8): the
+        // header toggles the group, and the open group renders every call as
+        // the full card the lone `Block::ToolCall` would have shown — same
+        // toggles, same full-output fetches, keyed stably per call.
+        Block::ToolGroup { .. } => {
+            let Some(data) = ToolGroupData::from_block(block) else {
+                return generic_item_card(id, "tool", "done", String::new()).into_any_element();
+            };
+            let mut group = tool_group(id, data.clone(), folds.open(key, false));
+            for (index, _) in data.calls.iter().enumerate() {
+                group = group.call_open(index, folds.open(&format!("{key}:{index}"), true));
+            }
+            if let Some(handler) = &folds.tool_group {
+                let handler = handler.clone();
+                let key = key.to_owned();
+                group = group
+                    .on_intent(move |intent, window, cx| handler(key.clone(), intent, window, cx));
+            }
+            group.into_any_element()
         }
         Block::Approval { id: approval_id, tool, command, reason, cwd, capabilities, scope, state, rule, choices, stages, current_stage, badges, feedback, resolved_by } => {
             let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())

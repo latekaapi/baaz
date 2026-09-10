@@ -95,6 +95,8 @@ actions!(
         FocusSearch,
         /// Commit the sidebar row's inline rename (Enter).
         ConfirmRename,
+        /// Copy the transcript's held text selection (⌘C).
+        CopySelection,
     ]
 );
 
@@ -163,6 +165,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-p", OpenModeMenu, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-f", FocusSearch, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("enter", ConfirmRename, Some(RENAME_CONTEXT)),
+        // The transcript list wears `TRANSCRIPT_CONTEXT`; the predicate keeps
+        // this off the composer and every field, so copy there stays native.
+        KeyBinding::new("cmd-c", CopySelection, Some(crate::session::TRANSCRIPT_COPY_KEYS)),
     ]);
 }
 
@@ -214,6 +219,11 @@ pub struct Harness {
     sessions: Vec<SessionEntry>,
     index: HashMap<String, IndexEntry>,
     active: Option<Entity<SessionView>>,
+    /// A session switch paging history in: the view kept off-stage until its
+    /// first backfill batch applies, so no frame flashes empty (C2).
+    pending_active: Option<Entity<SessionView>>,
+    /// The pending view's backfill landed; the next centre frame swaps it in.
+    pending_ready: bool,
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
@@ -280,6 +290,8 @@ impl Harness {
             sessions: Vec::new(),
             index: HashMap::new(),
             active: None,
+            pending_active: None,
+            pending_ready: false,
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             right_open: false,
@@ -943,7 +955,13 @@ impl Harness {
             let result = call.await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = result {
-                    this.active = None;
+                    // A failed switch keeps the old view (C2): only a boot
+                    // open with nothing behind it clears the centre pane.
+                    if this.pending_active.take().is_some() {
+                        this.pending_ready = false;
+                    } else {
+                        this.active = None;
+                    }
                     this.report(&error, cx);
                 }
                 cx.notify();
@@ -958,8 +976,28 @@ impl Harness {
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
         let view = cx.new(|cx| SessionView::new(session_id, Some(client), provider, workspace, overlays, window, cx));
+        // A switch that pages history in does not swap synchronously: the
+        // old view keeps rendering until the new view's first backfill batch
+        // applies (C2), so no frame flashes the "New session" screen.
+        // Backfill failure keeps the old view and reports (see `resume`).
+        if backfill && self.active.is_some() {
+            view.update(cx, |view, cx| view.backfill(cx));
+            let titles: HashMap<String, String> =
+                self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
+            let tier_banner = self.tier_banner();
+            view.update(cx, |view, cx| {
+                view.set_context(titles, self.user_shell);
+                view.set_at_rest(self.args.screenshot.is_some());
+                view.set_tier_banner(tier_banner, cx);
+            });
+            self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+            self.pending_active = Some(view);
+            self.pending_ready = false;
+            cx.notify();
+            return;
+        }
         self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
+        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         if backfill {
             view.update(cx, |view, cx| view.backfill(cx));
         }
@@ -978,8 +1016,29 @@ impl Harness {
         cx.notify();
     }
 
+    /// Swap the deferred session view in once its backfill landed (C2).
+    fn swap_pending_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.pending_active.take() else {
+            self.pending_ready = false;
+            return;
+        };
+        self.pending_ready = false;
+        self.subscriptions.clear();
+        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        self.active = Some(view);
+        self.focus_composer = true;
+        self.send_scripted(window, cx);
+        self.run_steps(window, cx);
+        cx.notify();
+    }
+
     /// What a session cannot decide for itself.
-    fn on_session_event(&mut self, event: &SessionEvent, cx: &mut Context<Self>) {
+    fn on_session_event(
+        &mut self,
+        view: Entity<SessionView>,
+        event: &SessionEvent,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             SessionEvent::Dialog { title, detail } => {
                 self.set_dialog(cx, Dialog {
@@ -1001,6 +1060,14 @@ impl Harness {
             }
             // The child's exit already reached `route`, which owns the reconnect.
             SessionEvent::Closed => {}
+            // The deferred switch's first backfill batch applied: mark it and
+            // let the next centre frame (which owns a `Window`) swap it in.
+            SessionEvent::HistoryReady => {
+                if self.pending_active.as_ref().is_some_and(|pending| *pending == view) {
+                    self.pending_ready = true;
+                    cx.notify();
+                }
+            }
             SessionEvent::NewSession => self.new_session(cx),
             // The fork result is a resume envelope for the **new** session, so
             // it is already attached: opening it and paging it in is all that
@@ -1011,7 +1078,8 @@ impl Harness {
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.open(session_id, true, window, cx);
-                        if let Some(view) = this.active.clone() {
+                        let target = this.pending_active.clone().or_else(|| this.active.clone());
+                        if let Some(view) = target {
                             view.update(cx, |view, cx| view.seed_session(envelope, cx));
                         }
                         this.load_sessions(cx);
@@ -1670,7 +1738,7 @@ impl Harness {
             view
         });
         self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, _, event, cx| this.on_session_event(event, cx)));
+        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
@@ -1681,6 +1749,11 @@ impl Harness {
 
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.open_replay(window, cx);
+        // Deferred session switch (C2): the new view swaps in on its first
+        // backfill batch, so no frame ever shows the empty state mid-switch.
+        if self.pending_ready {
+            self.swap_pending_in(window, cx);
+        }
         let banner = self.render_wire_banner(cx);
         let body = match self.active.clone() {
             Some(view) => {
@@ -1722,6 +1795,9 @@ impl Harness {
                 this.with_session(cx, |view, cx| {
                     view.confirm_field(window, cx);
                 });
+            }))
+            .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
+                this.with_session(cx, |view, cx| view.copy_selected(window, cx));
             }))
             // 1–9 on a pending approval: the n-th server-minted choice, in the
             // order the server sent them.
@@ -2123,6 +2199,12 @@ impl Harness {
         }
         if self.clear_search(window, cx) {
             return;
+        }
+        // A transcript text selection is the next thing Escape takes back.
+        if let Some(view) = self.active.clone() {
+            if view.update(cx, |view, cx| view.clear_selection(cx)) {
+                return;
+            }
         }
         // A card's open field is the next thing Escape takes back, before it
         // reaches for the running turn.

@@ -1,0 +1,13 @@
+# synthetic-markdown.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# A markdown-rich turn for the transcript markdown screenshot (Task C item 9):
+# headings, bullets, a fenced code block, a table, and both link shapes (a URL
+# and a workspace path). The envelope mirrors `synthetic-todo-goal.jsonl`.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc":"2.0","method":"session/started","params":{"viewCursor":"v:md:1","session":{"sessionId":"synthetic-markdown","workspaceRoot":"/tmp/synthetic","modelId":"muse-spark-1.3","status":"idle","createdAt":"2026-09-10T00:00:00Z","updatedAt":"2026-09-10T00:00:00Z","turnCount":0,"approvalMode":{"mode":"onRequest","source":"session"},"path":"/tmp/synthetic/session.jsonl","activeTurnId":null}}}
+<-- {"jsonrpc":"2.0","method":"turn/started","params":{"viewCursor":"v:md:2","sessionId":"synthetic-markdown","turnId":"t-md-1"}}
+<-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:md:3","sessionId":"synthetic-markdown","item":{"itemId":"i-md-user-1","kind":"userMessage","turnId":"t-md-1","revision":1,"status":"completed","text":"Show me the validation summary with code and links."}}}
+<-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:md:4","sessionId":"synthetic-markdown","item":{"itemId":"i-md-agent-1","kind":"agentMessage","turnId":"t-md-1","revision":1,"status":"completed","text":"## Validation summary\n\nCA and GB now branch per country, with focused tests over both.\n\n- CA outward codes accept the space form\n- GB outward codes still fail on the space (next)\n- Full suite stays green: `cargo test --workspace`\n\n```rust\nfn validate(code: &str, country: Country) -> bool {\n    match country {\n        Country::Ca => CA_RE.is_match(code),\n        Country::Gb => GB_RE.is_match(code),\n    }\n}\n```\n\n| country | cases | result |\n| --- | --- | --- |\n| CA | 14 | pass |\n| GB | 11 | 1 failing |\n\nNotes live in [the plan](https://example.com/plan) and the harness doc at docs/02-app.md.\n"}}}
+<-- {"jsonrpc":"2.0","method":"turn/completed","params":{"viewCursor":"v:md:5","sessionId":"synthetic-markdown","turnId":"t-md-1","terminal":"completed","durationMs":2300,"sourceRange":{"stream":{"kind":"session","id":"synthetic-markdown"},"first":{"id":"rec-5","sequence":5},"last":{"id":"rec-5","sequence":5}}}}
