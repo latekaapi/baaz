@@ -82,7 +82,11 @@ Two directions cross the boundary, and each has exactly one shape.
 - **Events in.** `conn::connect` returns a `futures` receiver fed by one
   bridging thread. A single foreground task drains it and calls
   `SessionView::apply`, so folding happens **on the UI thread in wire order**
-  and every frame renders a consistent transcript.
+  and every frame renders a consistent transcript. `apply` notifies only when
+  the fold changed or view state changed (2026-09-10): unchanged streaming
+  deltas used to rebuild the whole transcript per chunk, and the turn ticker
+  with them at 250 ms. The ticker is 1 Hz now and notifies only when the
+  displayed second changes.
 - **Commands out.** Every `muse-client` request blocks, so every one of them
   runs on `background_spawn` and comes back through `update`. The UI thread
   issues intents and never waits.

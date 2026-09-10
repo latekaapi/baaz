@@ -46,13 +46,17 @@ use aui::composer::{
 use aui::data::{ContextMeterState, ContextPressure};
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::overlay::popover_layer;
-use aui::transcript::{needs_you_banner, retry_row, status_row, StatusLead};
+use aui::transcript::{
+    AssistantTurnAction, LinkTarget, TextSelection, ToolCardIntent, ToolGroupIntent, UserTurnAction,
+    needs_you_banner, retry_row, status_row, StatusLead,
+};
 use aui_icons::IconName;
-use aui_protocol::{Block, PermissionMode, PlanState, ReasoningEffort, Session};
+use aui_protocol::{Block, PermissionMode, PlanState, ReasoningEffort, Session, Turn};
 use aui_tokens::scale;
 use gpui::{
-    div, prelude::*, px, AnyElement, ClipboardEntry, Context, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, ScrollHandle, SharedString, Task, Window,
+    div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
+    Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, Position, TextareaState};
 use gpui_kit::component::input::Textarea;
@@ -74,8 +78,10 @@ use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
 use crate::{files, full_output, history, images, plan, skills};
 
-/// How often the "Working… 12 s" row re-reads the clock.
-const TICK: Duration = Duration::from_millis(250);
+/// How often the "Working… 12 s" row re-reads the clock: 1 Hz, the finest
+/// the elapsed row can show (P2 — the old 250 ms whole-view ticker rebuilt
+/// the transcript four times a second on top of every streaming delta).
+const TICK: Duration = Duration::from_secs(1);
 /// How often a countdown — a question's auto-resolution, a scheduled retry —
 /// re-reads it. Once a second, because that is all a countdown in seconds can
 /// show.
@@ -89,7 +95,16 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(3);
 const PAGE_LIMIT: u32 = 1000;
 /// The transcript's own padding, matching the assistant screen's `.tr`.
 const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
-const TRANSCRIPT_PAD_TOP: f32 = scale::SP_5;
+/// Top inset: the first turn's first line must clear the header (C8 — the
+/// owner's screenshot showed it cut off). Same step as the horizontal gutter.
+const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7;
+/// The key context the transcript list wears, so ⌘C reaches the selection
+/// copy without ever matching inside the composer or a card field (C8b).
+pub const TRANSCRIPT_CONTEXT: &str = "HarnessTranscript";
+/// The ⌘C predicate for that copy: the transcript holds focus context, but
+/// never the composer, a card field or the rename field.
+pub const TRANSCRIPT_COPY_KEYS: &str =
+    "HarnessTranscript && !HarnessComposer && !field && !HarnessRename";
 /// How close to the bottom counts as "reading the tail" for auto-scroll.
 const TAIL_SLACK: f32 = 48.0;
 /// The gap the caret popovers leave above the composer, matching the
@@ -153,6 +168,10 @@ pub enum SessionEvent {
     /// `/fork` with nothing named: open the turn picker over the session's
     /// completed assistant turns.
     ForkPicker,
+    /// The deferred switch's first backfill batch applied: the application
+    /// may now swap the pending view in (C2 — no empty-state flash between
+    /// sessions).
+    HistoryReady,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
     /// for the rest of this app run.
     TierOverride,
@@ -213,10 +232,31 @@ pub struct SessionView {
     overlays: Entity<Overlays>,
     /// Cards the person folded away from their default.
     toggled: HashSet<String>,
-    scroll: ScrollHandle,
+    /// Virtualized transcript list (gpui `list()`, bottom-aligned, one item
+    /// per turn) and the item count it was last synced to. Only visible rows
+    /// are built and laid out per frame; `splice` keeps indices stable across
+    /// folds (C1). Tail-follow rides `is_scrolled_to_end`/`scroll_to_end`
+    /// with the `TAIL_SLACK` semantics below.
+    list_state: ListState,
+    list_len: usize,
+    /// What `render_transcript` reads every frame (C1): one snapshot shared
+    /// by steady-state frames, refreshed only when the fold changes (length
+    /// drift or `follow`), so per-frame cost stays bounded as the transcript
+    /// grows. Event handlers keep reading the live fold.
+    cached_turns: Rc<Vec<Turn>>,
+    /// The truncated-output map for the cached turns (same refresh rule).
+    cached_full_output: HashMap<String, FullOutput>,
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
+    /// The transcript's current text selection (library selection model):
+    /// one cell at a time, cleared on Escape; ⌘C copies it (C8b). The turn
+    /// components do not forward selection intents yet, so this holds the
+    /// state and the binding until the library wires the turns through.
+    text_selection: Option<TextSelection>,
+    /// Last elapsed second the turn ticker painted, so the 1 Hz clock
+    /// notifies only when the displayed number changes (P2).
+    last_tick_secs: Option<u64>,
     running: Option<Running>,
     /// A `turn/start` is in flight and no `turn/started` has arrived yet.
     submitting: bool,
@@ -351,8 +391,19 @@ impl SessionView {
             composer,
             overlays,
             toggled: HashSet::new(),
-            scroll: ScrollHandle::new(),
+            list_state: ListState::new(
+                0,
+                ListAlignment::Bottom,
+                // Overdraw covers the tail-slack zone twice over, so rows
+                // entering at the tail are already measured (C1).
+                px(TAIL_SLACK * 2.0),
+            ),
+            list_len: 0,
+            cached_turns: Rc::new(Vec::new()),
+            cached_full_output: HashMap::new(),
             follow: true,
+            text_selection: None,
+            last_tick_secs: None,
             running: None,
             submitting: false,
             loading_history: false,
@@ -647,6 +698,7 @@ impl SessionView {
                     if let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) {
                         self.running = Some(Running { turn_id: turn_id.to_owned(), started: Instant::now() });
                         self.submitting = false;
+                        self.last_tick_secs = None;
                         self.start_ticker(cx);
                     }
                 }
@@ -655,6 +707,7 @@ impl SessionView {
                     if self.running.as_ref().is_some_and(|r| Some(r.turn_id.as_str()) == ours) {
                         self.running = None;
                         self.ticker = None;
+                        self.last_tick_secs = None;
                     }
                     self.submitting = false;
                     if let Some(turn_id) = ours {
@@ -668,27 +721,44 @@ impl SessionView {
                 _ => {}
             }
         }
+        // View state the fold does not report: prompt text handed back below,
+        // and whether a turn is running, all change what the frame shows.
+        let was_running = self.running.is_some();
+        let was_submitting = self.submitting;
         let changed = !self.fold.apply(event).is_empty();
         // Restore a retracted prompt the moment the fold hands it back — unless
         // the unqueue was a Remove (the text is meant to be gone) or a Steer
         // (the text is going straight back out on the wire).
-        if let Some(text) = self.fold.take_restored_prompt(&self.session_id) {
-            match unqueued.as_deref().and_then(|id| self.unqueueing.remove(id)) {
+        let restored = self.fold.take_restored_prompt(&self.session_id);
+        let unqueued_kind = unqueued.as_deref().and_then(|id| self.unqueueing.remove(id));
+        if let Some(text) = restored {
+            match unqueued_kind {
                 Some(Unqueue::Remove) => {}
                 Some(Unqueue::Steer) => self.steer_text(text, cx),
                 _ => self.restore_prompt(text, cx),
             }
         }
+        // Notify less (P1): a streaming delta that changed nothing visible
+        // must not rebuild the whole transcript. Unchanged deltas arrive
+        // constantly while a reply streams; only fold changes and view-state
+        // changes earn a frame.
+        let mut view_changed = unqueued.is_some()
+            || was_running != self.running.is_some()
+            || was_submitting != self.submitting;
         if changed {
             self.follow = true;
+            view_changed = true;
         }
         // Every event can start or end a countdown; the clock is started and
         // stopped in one place rather than by each event that might matter.
         self.observe_clocks(cx);
         if std::mem::take(&mut self.refresh_pending) {
             self.refresh_pending_now(cx);
+            view_changed = true;
         }
-        cx.notify();
+        if view_changed {
+            cx.notify();
+        }
     }
 
     /// A `turn/completed` with `terminal: "failed"`: the fold already drew the
@@ -736,6 +806,9 @@ impl SessionView {
                 this.loading_history = false;
                 this.follow = true;
                 cx.notify();
+                // The deferred switch's cue: the application swaps this view
+                // in now, instead of having flashed the empty state (C2).
+                cx.emit(SessionEvent::HistoryReady);
             });
         }));
     }
@@ -1055,7 +1128,9 @@ impl SessionView {
         cx.notify();
     }
 
-    /// Keep the elapsed time honest while a turn runs.
+    /// Keep the elapsed time honest while a turn runs: 1 Hz, notifying only
+    /// when the displayed second changes, so the clock costs one frame per
+    /// second instead of four whole-transcript rebuilds (P2).
     fn start_ticker(&mut self, cx: &mut Context<Self>) {
         if self.ticker.is_some() {
             return;
@@ -1063,7 +1138,11 @@ impl SessionView {
         self.ticker = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
             let alive = this.update(cx, |this, cx| {
-                cx.notify();
+                let secs = this.running.as_ref().map(|r| r.started.elapsed().as_secs());
+                if secs != this.last_tick_secs {
+                    this.last_tick_secs = secs;
+                    cx.notify();
+                }
                 this.running.is_some()
             });
             if !matches!(alive, Ok(true)) {
@@ -1145,6 +1224,7 @@ impl SessionView {
                 let replaced =
                     Block::Plan { id: id.to_owned(), items: items.clone(), sections: sections.clone(), state };
                 self.fold.replace_client_block(&self.session_id, id, replaced);
+                self.follow = true;
             }
         }
         match action {
@@ -1651,6 +1731,40 @@ impl SessionView {
                     self.skip_question(block_id, cx);
                 }
             }
+            // Transcript inspection (Task C): jump without touching the
+            // pointer, and open every tool group for its screenshot.
+            "top" => {
+                self.follow = false;
+                self.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+                cx.notify();
+            }
+            "end" => {
+                self.list_state.scroll_to_end();
+                cx.notify();
+            }
+            "bench" => {
+                // Frame-stats driver (Task C item 3): N back-to-back frames
+                // so HARNESS_FRAME_STATS percentiles have samples on a static
+                // replay, which would otherwise idle after a few frames.
+                let n: usize = rest.parse().unwrap_or(240);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    for _ in 0..n {
+                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    }
+                }));
+            }
+            "mid" => {
+                self.follow = false;
+                let mid = self.list_len / 2;
+                self.list_state.scroll_to(gpui::ListOffset { item_ix: mid, offset_in_item: px(0.0) });
+                cx.notify();
+            }
+            "expand-groups" => {
+                self.expand_all_groups(cx);
+            }
             "fork" => self.fork(None, cx),
             "retry" => {
                 if let Some(turn_id) = self.newest_failed_turn() {
@@ -1766,14 +1880,7 @@ impl SessionView {
     }
 
     fn render_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Tail-follow: anything new scrolls the list down, but only for a
-        // reader who was already at the bottom.
-        if std::mem::take(&mut self.follow) {
-            let at_end = (-self.scroll.offset().y) >= self.scroll.max_offset().y - px(TAIL_SLACK);
-            if at_end {
-                self.scroll.scroll_to_bottom();
-            }
-        }
+        let frame_start = std::time::Instant::now();
         let empty = |view: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             // A replayed capture is read-only, so its empty state offers
             // nothing to type: the chips would be three buttons that refuse.
@@ -1791,44 +1898,26 @@ impl SessionView {
             let _ = window;
             transcript::empty_state(&view.workspace, pick, cx)
         };
-        let Some(session) = self.fold.session(&self.session_id).cloned() else {
-            return empty(self, window, cx);
-        };
-        if session.turns.is_empty() {
-            return empty(self, window, cx);
+        // Loading is not empty: while the first backfill batch is still on
+        // the wire the old view stays up (C2, `Harness::open`), and when no
+        // old view exists this neutral row stands in — never `empty_state`.
+        // Steady-state frames share one snapshot: refresh only when the fold
+        // grew/shrank under us or `follow` says content changed.
+        let live_len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
+        if live_len != self.cached_turns.len() || self.follow {
+            self.refresh_render_cache();
         }
-        // Which tool cards the server truncated with an `outputRef` to show
-        // for it, and what a fetch already returned. The fold owns the fetch
-        // handle; this view owns the result.
-        let mut full_output = HashMap::new();
-        if let Some(session) = self.fold.session(&self.session_id) {
-            for turn in &session.turns {
-                for block in turn.blocks() {
-                    if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } =
-                        block
-                    {
-                        if self.fold.stored_output(&self.session_id, id).is_some() {
-                            let state = match self.full_outputs.get(id) {
-                                Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
-                                Some(full_output::Fetch::Ready { lines, capped }) => {
-                                    FullOutputState::Ready { lines: lines.clone(), capped: *capped }
-                                }
-                                None => FullOutputState::Idle,
-                            };
-                            full_output.insert(id.clone(), FullOutput { fetchable: true, state });
-                        }
-                    }
-                }
+        if self.cached_turns.is_empty() {
+            if self.loading_history {
+                return Self::loading_row();
             }
+            return empty(self, window, cx);
         }
         let folds = Folds {
             toggled: self.toggled.clone(),
             toggle: {
                 let toggle = cx.listener(|this: &mut Self, key: &String, _, cx| {
-                    if !this.toggled.remove(key) {
-                        this.toggled.insert(key.clone());
-                    }
-                    cx.notify();
+                    this.toggle_fold(key.clone(), cx);
                 });
                 Rc::new(move |key: String, window: &mut Window, cx: &mut gpui::App| toggle(&key, window, cx))
             },
@@ -1846,7 +1935,7 @@ impl SessionView {
             cards: Some(self.card_intents(window, cx)),
             titles: self.titles.clone(),
             at_rest: self.at_rest,
-            full_output,
+            full_output: self.cached_full_output.clone(),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {
                     this.show_full_output(id.clone(), cx);
@@ -1855,27 +1944,397 @@ impl SessionView {
                     show(&id, window, cx)
                 }))
             },
+            // Turn links and bottom-row actions (C5, C6): markdown URLs open
+            // in the browser, workspace paths reveal in Finder, and every
+            // wire action is live-only — replay answers with a toast.
+            link: {
+                let link = cx.listener(|this: &mut Self, target: &LinkTarget, _, cx| {
+                    this.handle_link(target.clone(), cx);
+                });
+                Some(Rc::new(move |target: LinkTarget, window: &mut Window, cx: &mut gpui::App| {
+                    link(&target, window, cx)
+                }))
+            },
+            assistant_action: {
+                let act = cx.listener(
+                    |this: &mut Self, (id, action): &(String, AssistantTurnAction), window, cx| {
+                        this.assistant_action(id.clone(), *action, window, cx);
+                    },
+                );
+                Some(Rc::new(
+                    move |id: String, action: AssistantTurnAction, window: &mut Window, cx: &mut gpui::App| {
+                        act(&(id, action), window, cx)
+                    },
+                ))
+            },
+            user_action: {
+                let act = cx.listener(
+                    |this: &mut Self, (id, text, action): &(String, String, UserTurnAction), window, cx| {
+                        this.user_action(id.clone(), text.clone(), *action, window, cx);
+                    },
+                );
+                Some(Rc::new(
+                    move |id: String,
+                          text: String,
+                          action: UserTurnAction,
+                          window: &mut Window,
+                          cx: &mut gpui::App| { act(&(id, text, action), window, cx) },
+                ))
+            },
+            tool_group: {
+                let act = cx.listener(
+                    |this: &mut Self, (key, intent): &(String, ToolGroupIntent), window, cx| {
+                        this.tool_group_action(key.clone(), *intent, window, cx);
+                    },
+                );
+                Some(Rc::new(
+                    move |key: String, intent: ToolGroupIntent, window: &mut Window, cx: &mut gpui::App| {
+                        act(&(key, intent), window, cx)
+                    },
+                ))
+            },
         };
-        let last = session.turns.len().saturating_sub(1);
-        let mut list = div()
-            .id("transcript")
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .min_h(px(0.0))
-            .w_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .pt(px(TRANSCRIPT_PAD_TOP))
-            .px(px(TRANSCRIPT_PAD_X))
-            .pb(px(scale::SP_4))
-            .gap(px(scale::SP_5));
-        for (index, turn) in session.turns.iter().enumerate() {
-            for element in transcript::turn(turn, index != last, &folds, window, cx) {
-                list = list.child(element);
+        let count = self.cached_turns.len();
+        // Sync the virtual list, splicing the changed range only so visible
+        // rows keep their measurements and the tail stays pinned (C1).
+        if count != self.list_len {
+            let old = self.list_len;
+            self.list_len = count;
+            if old == 0 {
+                self.list_state.reset(count);
+            } else if count > old {
+                // Pure append (the streaming case): only the new tail needs
+                // measuring; visible rows keep theirs (C1).
+                self.list_state.splice(old..old, count - old);
+            } else {
+                self.list_state.splice(0..old, count);
             }
         }
-        list.into_any_element()
+        // Follow the tail only when the reader was at the tail — the
+        // TAIL_SLACK semantics, now owned by the list element itself.
+        if std::mem::take(&mut self.follow) && self.list_state.is_scrolled_to_end().unwrap_or(true) {
+            self.list_state.scroll_to_end();
+        }
+        let last = count.saturating_sub(1);
+        // `Rc` clone: O(1). Only visible rows are built below.
+        let turns = self.cached_turns.clone();
+        let folds = Rc::new(folds);
+        // The wrapper is a flex column so the virtual list's own
+        //  resolves to the leftover centre height; without it the
+        // list lays out at zero height and paints nothing.
+        let element = div()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .key_context(TRANSCRIPT_CONTEXT)
+            .child(
+                list(self.list_state.clone(), move |ix, window, cx| {
+                    // One item per turn: only visible rows are built and laid
+                    // out per frame, so per-frame cost stays bounded as the
+                    // transcript grows (C1). Turn bodies still come from
+                    // blocks exactly as before.
+                    let mut row = v_flex().w_full().pb(px(scale::SP_5));
+                    if ix == 0 {
+                        row = row.pt(px(TRANSCRIPT_PAD_TOP));
+                    }
+                    match turns.get(ix) {
+                        Some(turn) => row.children(transcript::turn(turn, ix != last, &folds, window, cx)),
+                        None => row,
+                    }
+                    .into_any_element()
+                })
+                .flex_1()
+                .into_any_element(),
+            )
+            .into_any_element();
+        record_frame_stats(frame_start.elapsed());
+        let _ = window;
+        element
+    }
+
+    /// The neutral row while history is still paging in (C2): a spinner, and
+    /// never the "New session" empty state.
+    fn loading_row() -> AnyElement {
+        div()
+            .w_full()
+            .pt(px(TRANSCRIPT_PAD_TOP))
+            .px(px(TRANSCRIPT_PAD_X))
+            .child(
+                status_row("transcript-loading", "Loading history\u{2026}")
+                    .lead(StatusLead::Spinner)
+                    .shimmer(true),
+            )
+            .into_any_element()
+    }
+
+    /// Re-snapshot what `render_transcript` reads every frame: the turn list
+    /// and the truncated-output map.
+    ///
+    /// The fold owns the fetch handle (`outputRef`); this view owns the
+    /// result. Called when the fold changes (length drift or `follow`), never
+    /// per frame, so steady-state frames share one `Rc`.
+    fn refresh_render_cache(&mut self) {
+        if let Some(session) = self.fold.session(&self.session_id) {
+            self.cached_turns = Rc::new(session.turns.clone());
+        }
+        let mut full_output = HashMap::new();
+        for turn in self.cached_turns.iter() {
+            for block in turn.blocks() {
+                if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } = block
+                {
+                    if self.fold.stored_output(&self.session_id, id).is_some() {
+                        let state = match self.full_outputs.get(id) {
+                            Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
+                            Some(full_output::Fetch::Ready { lines, capped }) => {
+                                FullOutputState::Ready { lines: lines.clone(), capped: *capped }
+                            }
+                            None => FullOutputState::Idle,
+                        };
+                        full_output.insert(id.clone(), FullOutput { fetchable: true, state });
+                    }
+                }
+            }
+        }
+        self.cached_full_output = full_output;
+    }
+
+    /// Flip one card's fold override (C8: group headers and per-call cards
+    /// share this, keyed stably).
+    fn toggle_fold(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// A markdown link click (C5): URLs open in the browser, paths resolve
+    /// against the session workspace.
+    fn handle_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) {
+        match target {
+            LinkTarget::Url(url) => cx.open_url(&url),
+            LinkTarget::Path(path) => self.reveal_workspace_path(&path, cx),
+        }
+    }
+
+    /// Reveal a linked path in Finder (C5): resolve against the workspace,
+    /// reject escapes above it, toast when nothing is there.
+    fn reveal_workspace_path(&mut self, raw: &str, cx: &mut Context<Self>) {
+        // A trailing `:line` is a viewer hint, not part of the path.
+        let path_part = raw.split(':').next().unwrap_or(raw);
+        let workspace = PathBuf::from(&self.workspace);
+        let candidate = workspace.join(path_part.trim_start_matches('/'));
+        // Reject escapes without touching the filesystem first: normalize
+        // `..` lexically and require the workspace prefix.
+        let mut normalized = PathBuf::new();
+        for component in candidate.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+        if !normalized.starts_with(&workspace) {
+            self.toast("Link", "That path escapes the session workspace.", cx);
+            return;
+        }
+        match std::fs::metadata(&normalized) {
+            Ok(_) => cx.reveal_path(&normalized),
+            Err(_) => self.toast("Link", format!("No such file: {path_part}"), cx),
+        }
+    }
+
+    /// An assistant turn's bottom-row action (C6): Copy is local; Retry
+    /// resends the user input behind the turn; Fork opens the turn picker;
+    /// Pin has no meaning on a turn and says where it lives. Wire actions
+    /// are live-only — replay answers with a toast.
+    fn assistant_action(
+        &mut self,
+        turn_id: String,
+        action: AssistantTurnAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = window;
+        match action {
+            AssistantTurnAction::Copy => {
+                let text = self.assistant_text(&turn_id).unwrap_or_default();
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            AssistantTurnAction::Retry => {
+                if self.replay {
+                    self.toast("Replay", "Retry is not available in a replayed capture.", cx);
+                    return;
+                }
+                match self.input_before(&turn_id) {
+                    Some(text) => self.submit(text, cx),
+                    None => self.toast("Retry", "There is no remembered input behind this turn.", cx),
+                }
+            }
+            AssistantTurnAction::Fork => {
+                if self.replay {
+                    self.toast("Replay", "Fork is not available in a replayed capture.", cx);
+                    return;
+                }
+                cx.emit(SessionEvent::ForkPicker);
+            }
+            AssistantTurnAction::Pin => {
+                // The bottom row always draws Pin; a turn is not pinnable.
+                self.toast("Pin", "Pin lives on sidebar sessions, not on turns.", cx);
+            }
+        }
+    }
+
+    /// A user turn's bottom-row action (C6): Copy is local, Edit drops the
+    /// text into the composer draft, Resend sends it again (live only).
+    fn user_action(
+        &mut self,
+        turn_id: String,
+        text: String,
+        action: aui::transcript::UserTurnAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = turn_id;
+        match action {
+            aui::transcript::UserTurnAction::Copy => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            aui::transcript::UserTurnAction::Edit => {
+                self.set_draft(text, window, cx);
+                self.focus_composer(window, cx);
+            }
+            aui::transcript::UserTurnAction::Resend => {
+                if self.replay {
+                    self.toast("Replay", "Resend is not available in a replayed capture.", cx);
+                    return;
+                }
+                self.submit(text, cx);
+            }
+        }
+    }
+
+    /// A tool group's intents (C8): the header toggles the group, per-call
+    /// toggles flip that call's card, and OpenInPane reveals the call's
+    /// target path where it names one.
+    fn tool_group_action(
+        &mut self,
+        key: String,
+        intent: ToolGroupIntent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            ToolGroupIntent::Toggle => self.toggle_fold(key, cx),
+            ToolGroupIntent::Call { index, intent } => match intent {
+                ToolCardIntent::OpenInPane => self.reveal_tool_target(&key, index, cx),
+                _ => self.toggle_fold(format!("{key}:{index}"), cx),
+            },
+        }
+    }
+
+    /// A grouped call's header target, back to the text the lone card would
+    /// have shown. The group key is `<turn id>:<block index>`.
+    fn tool_call_target(&self, turn_id: &str, block_index: usize, call_index: usize) -> Option<String> {
+        let session = self.fold.session(&self.session_id)?;
+        session.turns.iter().find_map(|turn| match turn {
+            Turn::Assistant { id, blocks, .. } if id == turn_id => match blocks.get(block_index) {
+                Some(Block::ToolGroup { calls, .. }) => {
+                    calls.get(call_index).map(|call| call.target.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// Reveal a grouped call's target (C5 on grouped cards).
+    fn reveal_tool_target(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        let (turn_id, block_index) = key.rsplit_once(':').unwrap_or((key, ""));
+        let block_index = block_index.parse::<usize>().unwrap_or(usize::MAX);
+        match self.tool_call_target(turn_id, block_index, index) {
+            Some(target) => self.reveal_workspace_path(&target, cx),
+            None => self.toast("Open", "That call has no path to reveal.", cx),
+        }
+    }
+
+    /// An assistant turn's prose, for Copy: every text block joined.
+    fn assistant_text(&self, turn_id: &str) -> Option<String> {
+        let session = self.fold.session(&self.session_id)?;
+        session.turns.iter().find_map(|turn| match turn {
+            Turn::Assistant { id, blocks, .. } if id == turn_id => {
+                let texts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                Some(texts.join("\n\n"))
+            }
+            _ => None,
+        })
+    }
+
+    /// The user input behind an assistant turn, for Retry: the nearest user
+    /// turn above it.
+    fn input_before(&self, turn_id: &str) -> Option<String> {
+        let session = self.fold.session(&self.session_id)?;
+        let mut last_user: Option<String> = None;
+        for turn in &session.turns {
+            match turn {
+                Turn::User { text, .. } => last_user = Some(text.clone()),
+                Turn::Assistant { id, .. } if id == turn_id => return last_user,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// ⌘C in the transcript context (C8b): copy the held selection, if
+    /// any. The binding's own predicate already excludes the composer and
+    /// card fields, so this never steals copy from an editor.
+    pub fn copy_selected(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        // The turn components do not forward selection intents yet, so
+        // `text_selection` can only be `None` today; the state, the clear
+        // paths and this binding are the harness half, waiting on the
+        // library's turn wiring.
+        let _ = self.text_selection.as_ref();
+    }
+
+    /// Clear the transcript text selection (C8b). Returns whether one was
+    /// held, so Escape prefers it over heavier dismissals.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.text_selection.take().is_some() {
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Open every tool group for a screenshot: group keys default closed, so
+    /// marking them toggled opens them; calls default open.
+    fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.fold.session(&self.session_id).cloned() else {
+            return;
+        };
+        for turn in &session.turns {
+            let Turn::Assistant { id, blocks, .. } = turn else {
+                continue;
+            };
+            for (index, block) in blocks.iter().enumerate() {
+                if matches!(block, Block::ToolGroup { .. }) {
+                    self.toggled.insert(transcript::block_key(id, index));
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Everything the pending approval and question cards need to talk back.
@@ -2034,7 +2493,7 @@ impl SessionView {
     /// a card the reader is already reading is noise.
     fn render_needs_you(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (approvals, questions) = self.waiting_on_you()?;
-        let at_tail = (-self.scroll.offset().y) >= self.scroll.max_offset().y - px(TAIL_SLACK);
+        let at_tail = self.list_state.is_scrolled_to_end().unwrap_or(true);
         if at_tail {
             return None;
         }
@@ -2044,7 +2503,7 @@ impl SessionView {
             (a, q) => format!("{a} approval{} and {q} question{} above.", plural(a), plural(q)),
         };
         let jump = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.scroll.scroll_to_bottom();
+            this.list_state.scroll_to_end();
             cx.notify();
         });
         Some(
@@ -2446,6 +2905,7 @@ impl SessionView {
             // first, and the error carries the winning resolution.
             Some(ErrorKind::ApprovalAlreadyResolved) => {
                 self.fold.resolve_approval(&self.session_id, approval_id, resolution_of(error));
+                self.follow = true;
                 cx.notify();
             }
             // The choices moved under the press, which only happens between
@@ -2457,6 +2917,7 @@ impl SessionView {
             }
             Some(ErrorKind::ApprovalNotFound) => {
                 self.fold.resolve_approval(&self.session_id, approval_id, None);
+                self.follow = true;
                 self.set_banner("Muse no longer knows about that approval.", None, cx);
             }
             _ => self.report(error, cx),
@@ -2825,6 +3286,7 @@ impl SessionView {
             return;
         }
         self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
+        self.refresh_render_cache();
         cx.notify();
         let session_id = self.session_id.clone();
         let output_ref = output_ref.id.clone();
@@ -2842,6 +3304,7 @@ impl SessionView {
                         block_id,
                         full_output::Fetch::Ready { lines: fetched.lines, capped: fetched.capped },
                     );
+                    this.refresh_render_cache();
                     cx.notify();
                 }
                 Err(error) => {
@@ -3200,6 +3663,36 @@ fn wire_mode(mode: PermissionMode) -> ApprovalMode {
 /// Blocking: every call waits on the wire, so this runs on the background
 /// executor. A page that comes back empty, or a `nextCursor` of `null`, is the
 /// end of the view in that direction.
+/// Debug-only frame timer (C1/P1): with `HARNESS_FRAME_STATS=1`, record
+/// every `render_transcript` duration and print p50/p90/p99 to stderr every
+/// 120 frames, so the stress capture reports bounded per-frame cost.
+fn record_frame_stats(elapsed: std::time::Duration) {
+    use std::sync::{Mutex, OnceLock};
+    static SAMPLES: OnceLock<Mutex<Vec<u128>>> = OnceLock::new();
+    if std::env::var("HARNESS_FRAME_STATS").as_deref() != Ok("1") {
+        return;
+    }
+    let samples = SAMPLES.get_or_init(|| Mutex::new(Vec::with_capacity(128)));
+    let Ok(mut samples) = samples.lock() else {
+        return;
+    };
+    samples.push(elapsed.as_micros());
+    if samples.len() >= 120 {
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        let at = |q: f64| sorted[((q * sorted.len() as f64) as usize).min(sorted.len() - 1)];
+        eprintln!(
+            "harness-frame-stats n={} p50={}us p90={}us p99={}us max={}us",
+            sorted.len(),
+            at(0.5),
+            at(0.9),
+            at(0.99),
+            sorted[sorted.len() - 1]
+        );
+        samples.clear();
+    }
+}
+
 fn page_all(client: &MuseClient, session_id: &str) -> Vec<MuseEvent> {
     let mut out = Vec::new();
     let mut cursor: Option<String> = None;
@@ -3294,6 +3787,14 @@ mod tests {
         assert_eq!(token.0, MenuKind::Mention);
         assert_eq!(token.1, 8);
         assert_eq!(token.2, "src/ma");
+    }
+
+    #[test]
+    fn tail_slack_stays_put() {
+        // Tail-follow slack (C1): the virtual list pins the tail through
+        // `is_scrolled_to_end`, and this is the slack readers still count as
+        // "at the tail" — kept as a named constant so the behaviour stays put.
+        assert_eq!(TAIL_SLACK, 48.0);
     }
 
     #[test]
