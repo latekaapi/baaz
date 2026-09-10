@@ -1,5 +1,56 @@
 # Harness changelog
 
+## 2026-09-10 — Fix-up 2 on `wf-improvements` (owner re-read of the retakes)
+
+Four faults, all `--replay` proofs, no live turn spent.
+
+- Sidebar description (`sidebar.rs`, `index.rs`, `app.rs`): the row still
+  read the same words twice ("Run the shell command…" over "Run the shell
+  command `ls` in the"). The old `label_from_prompt` only caught the index
+  fallthrough, but this label is Muse's index `title` — Muse writes whole
+  first prompts into it (seen on a host session whose title and first prompt
+  are the same 150-char prompt). Rule now, on the text: `last_summary` wins;
+  otherwise the first prompt shows only when the label is a user-given name
+  (`/name` or the index `session_name`) or a Muse title that is not a
+  prefix/elision of that prompt (lowercased, whitespace-collapsed, first 40
+  chars, trailing elision trimmed); otherwise no second line. `join` and
+  `rejoin` share it; the superseded `IndexEntry::label_from_prompt` is gone.
+  Covered by the rewritten `describe` test plus a direct `echoes_prompt`
+  predicate test (equal, elided, case/space-folded, foreign, empty).
+- Rename field (`app.rs`): the fixed 22 px wrapper with full
+  `overflow_hidden` cropped the glyphs at the top in the row and the header.
+  The wrapper is a flex row with `items_center` now, its height whatever the
+  editor's own line-height makes it (`h_auto`), clipping horizontal only —
+  and the rename state runs with soft wrap off (`set_soft_wrap(false)` at
+  creation), because `whitespace_nowrap` never reaches the editor's layout
+  and the narrow row wrapped the 80-char label onto two lines. Same element
+  serves both places; rows keep their height.
+- Search palette (`app.rs`): the committed frame sat at ~50 % opacity with
+  the input floating off the panel. Not reproduced on this tree — three
+  consecutive retakes render the card at full opacity (38,41,49 vs the dim
+  frame's 14,15,18), the palette structure is byte-identical before/after
+  except the matched-range highlights (highlight-only, cannot dim), and the
+  library palette file is untouched since 2026-09-09 — so the dim frame was
+  most likely caught mid-enter-animation by a capture that raced the steps.
+  Hardened anyway: scripted screenshots draw the card `.at_rest()` (the
+  library's documented static-composition switch; live opens keep the rise),
+  and the palette column is `items_center` so the search field — the sidebar
+  list's box with its 8 px side margins — lands exactly on the card (both
+  span 440–1000 px on the proof). Opaque, one surface, pixel-verified.
+- Turn actions: the Pin opt-out landed in the library (`33b8d54`,
+  `AssistantTurn::actions(..)`), so assistant turns keep Copy/Retry/Fork and
+  Pin is hidden in both the hover toolbar and the bottom row. The Pin match
+  arm stays for exhaustiveness (unreachable; still toasts). `docs/02-app.md`
+  updated; `improve-integrated-markdown-dark.png` retaken.
+- Screenshots (all `--replay`, 15 s delay):
+  `docs/images/improve-shell-open-{dark,light}.png` (no second line),
+  `improve-integrated-{dark,light}.png`,
+  `improve-shell-rename-{dark,light}.png` (single full-height line, row and
+  header), `improve-integrated-search-{dark,light}.png` (opaque, one
+  surface), `improve-integrated-markdown-dark.png` (no Pin). The
+  `--steps resume` comparison frame was taken to `/tmp` (opaque, one
+  surface) and not committed.
+
 ## 2026-09-10 — Fix-up pass on `wf-improvements` (owner-side audit)
 
 Seven faults from the owner's screenshots, all `--replay`/`--no-connect`

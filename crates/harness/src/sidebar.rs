@@ -44,9 +44,10 @@ pub struct SessionEntry {
     /// Archived out of the list (shown only from the Sessions menu).
     pub archived: bool,
     /// The muted second line: the last summary when one exists, else the
-    /// first prompt — but only when the row's label is not the prompt
-    /// itself (a user-given name or a Muse title). Otherwise the row
-    /// carries the turns meta alone, never a repeated first line.
+    /// first prompt — but only when the row's label does not already say it
+    /// (a user-given name, or a Muse title that is not that prompt retold).
+    /// Otherwise the row carries the turns meta alone, never a repeated
+    /// first line.
     pub description: String,
     /// A `--replay` capture, labelled by file rather than by the index. No
     /// store source speaks for its label, so a rejoin keeps it.
@@ -83,21 +84,27 @@ impl SessionEntry {
         let indexed = index.and_then(IndexEntry::label);
         let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let label = name.or(indexed).or(derived);
-        // The label already is the prompt exactly when no name won and the
-        // index fell through to its first prompt; repeating it below would
-        // put the same words on both lines of the row.
-        let label_from_prompt =
-            name.is_none() && index.is_some_and(IndexEntry::label_from_prompt);
+        // A user-given name always earns the first prompt below it; any other
+        // label earns it only when it does not already say it (see
+        // `describe`): Muse writes whole first prompts into the index title,
+        // and the harness's derived title is cut from the prompt the same
+        // way, so comparing the fallthrough alone misses both.
+        let user_named = name.is_some()
+            || index
+                .and_then(|i| i.session_name.as_deref())
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+        let text = label.unwrap_or(UNNAMED);
         Self {
             id: session.session_id.clone(),
-            label: one_line(label.unwrap_or(UNNAMED)),
+            label: one_line(text),
             updated: parse_time(&session.updated_at),
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             turns: session.turn_count,
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
-            description: describe(meta, index, label_from_prompt),
+            description: describe(meta, index, text, user_named),
             replayed: false,
             named: name.is_some(),
             needs_title: label.is_none(),
@@ -211,20 +218,47 @@ fn elapsed(at: DateTime<Local>) -> String {
 
 /// What the row's muted second line says: the summary the last completed
 /// turn left behind; without one, the index's first prompt — but only when
-/// `label_from_prompt` is false, i.e. the row's label is a user-given name
-/// or a Muse title rather than that same prompt. Otherwise there is no
-/// second line at all: the turns meta speaks for the row. The row's own cap
-/// bounds whatever is shown.
-pub fn describe(meta: Option<&SessionMeta>, index: Option<&IndexEntry>, label_from_prompt: bool) -> String {
+/// the row's label is a user-given name (`user_named`) or a Muse-provided
+/// title that is not a prefix or an elision of that prompt (see
+/// `echoes_prompt`). Otherwise there is no second line at all: the turns
+/// meta speaks for the row. The row's own cap bounds whatever is shown.
+pub fn describe(
+    meta: Option<&SessionMeta>,
+    index: Option<&IndexEntry>,
+    label: &str,
+    user_named: bool,
+) -> String {
     let summary = meta.and_then(|m| m.last_summary.as_deref()).map(str::trim).filter(|s| !s.is_empty());
     if let Some(summary) = summary {
         return one_line(summary);
     }
-    if label_from_prompt {
-        return String::new();
-    }
     let prompt = index.and_then(|i| i.first_user_prompt.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-    prompt.map(one_line).unwrap_or_default()
+    let Some(prompt) = prompt else { return String::new() };
+    if user_named || !echoes_prompt(label, prompt) {
+        return one_line(prompt);
+    }
+    String::new()
+}
+
+/// Whether a row label already says the first prompt: the label, normalised
+/// (lowercased, whitespace collapsed, a trailing elision trimmed), matches
+/// the prompt's normalised first 40 chars in full. Catches the prompt itself,
+/// a Muse index title that is the whole prompt, and a derived title elided
+/// from it — all three read as the same words twice when the prompt follows.
+fn echoes_prompt(label: &str, prompt: &str) -> bool {
+    fn norm(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+    let label: String = norm(label)
+        .trim_end_matches(['\u{2026}', '.', ' '])
+        .chars()
+        .take(40)
+        .collect();
+    if label.is_empty() {
+        return false;
+    }
+    let prompt: String = norm(prompt).chars().take(40).collect();
+    prompt.starts_with(&label)
 }
 
 /// An RFC3339 instant as a local time; anything unparseable is the epoch, which
@@ -330,29 +364,51 @@ mod tests {
         }
     }
 
-    fn indexed(prompt: Option<&str>) -> IndexEntry {
-        IndexEntry { first_user_prompt: prompt.map(str::to_owned), ..IndexEntry::default() }
+    fn indexed(prompt: Option<&str>, title: &str, name: Option<&str>) -> IndexEntry {
+        IndexEntry {
+            session_name: name.map(str::to_owned),
+            title: title.to_owned(),
+            first_user_prompt: prompt.map(str::to_owned),
+            ..IndexEntry::default()
+        }
     }
 
     #[test]
     fn the_description_prefers_the_last_summary_then_the_prompt() {
-        let meta = meta_with(Some("Fixed the parser panic"), Some("cargo test"));
-        let index = indexed(Some("why does this panic"));
+        let prompt = "Run the shell command `ls` in the workspace, then use your question tool";
         // A summary wins even when the label already is the prompt.
-        assert_eq!(describe(Some(&meta), Some(&index), true), "Fixed the parser panic");
-        // A prompt-derived label must not repeat the prompt below itself.
-        assert_eq!(describe(None, Some(&index), true), "");
-        // A named or titled row may still say what was first asked.
-        assert_eq!(describe(None, Some(&index), false), "why does this panic");
-        // The derived title is not a description line; without a summary or
-        // a showable prompt the row carries the turns meta alone.
-        assert_eq!(describe(Some(&meta_with(None, Some("cargo test"))), None, false), "");
-        assert_eq!(describe(None, None, false), "");
+        let meta = meta_with(Some("Fixed the parser panic"), None);
+        let index = indexed(Some(prompt), prompt, None);
+        assert_eq!(describe(Some(&meta), Some(&index), prompt, false), "Fixed the parser panic");
+        // A Muse title that is the whole first prompt must not repeat below itself.
+        assert_eq!(describe(None, Some(&index), prompt, false), "");
+        // A derived title elided from the prompt is the same words twice.
+        assert_eq!(describe(None, Some(&index), "Run the shell command…", false), "");
+        // A user-given name earns the prompt below it.
+        let named = indexed(Some(prompt), "", Some("ls run"));
+        assert_eq!(describe(None, Some(&named), "ls run", true), prompt);
+        // A Muse title of its own earns the prompt too.
+        let titled = indexed(Some("why does this panic"), "Parser panic", None);
+        assert_eq!(describe(None, Some(&titled), "Parser panic", false), "why does this panic");
+        // Without a summary or a showable prompt the row carries the turns
+        // meta alone; a stale derived title is not a description line.
+        assert_eq!(describe(Some(&meta_with(None, Some("cargo test"))), None, "cargo test", false), "");
+        assert_eq!(describe(None, None, "New session", false), "");
+    }
+
+    #[test]
+    fn a_label_cut_from_the_prompt_echoes_it() {
+        let prompt = "Run the shell command `ls` in the workspace, then ask";
+        assert!(echoes_prompt(prompt, prompt));
+        assert!(echoes_prompt("Run the shell command…", prompt));
+        assert!(echoes_prompt("RUN THE SHELL   COMMAND", prompt));
+        assert!(!echoes_prompt("Parser panic", "why does this panic"));
+        assert!(!echoes_prompt("", prompt));
     }
 
     #[test]
     fn a_long_summary_is_cut_where_the_row_would_truncate_it() {
         let meta = meta_with(Some(&"w".repeat(200)), None);
-        assert_eq!(describe(Some(&meta), None, false).chars().count(), 80);
+        assert_eq!(describe(Some(&meta), None, "x", false).chars().count(), 80);
     }
 }

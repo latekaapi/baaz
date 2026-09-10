@@ -2357,9 +2357,10 @@ impl SessionView {
     }
 
     /// An assistant turn's bottom-row action (C6): Copy is local; Retry
-    /// resends the user input behind the turn; Fork opens the turn picker;
-    /// Pin has no meaning on a turn and says where it lives. Wire actions
-    /// are live-only — replay answers with a toast.
+    /// resends the user input behind the turn; Fork opens the turn picker.
+    /// Pin is hidden on turns (it lives on sidebar sessions) and its arm is
+    /// unreachable; the match keeps it because the enum demands it. Wire
+    /// actions are live-only — replay answers with a toast.
     fn assistant_action(
         &mut self,
         turn_id: String,
@@ -2393,7 +2394,8 @@ impl SessionView {
                 cx.emit(SessionEvent::ForkPicker);
             }
             AssistantTurnAction::Pin => {
-                // The bottom row always draws Pin; a turn is not pinnable.
+                // Unreachable: turns hide Pin (see `transcript::block`). Kept
+                // for the exhaustive match, answering in case it ever fires.
                 self.toast("Pin", "Pin lives on sidebar sessions, not on turns.", cx);
             }
         }

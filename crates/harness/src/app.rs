@@ -451,7 +451,13 @@ pub struct Harness {
 impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let rename = cx.new(|cx| composer_state_rows("Name this session", 1, 1, window, cx));
+        // The rename field is one visual line: soft wrap off, so a long name
+        // scrolls under the caret instead of spilling a second line.
+        let rename = cx.new(|cx| {
+            let mut state = composer_state_rows("Name this session", 1, 1, window, cx);
+            state.set_soft_wrap(false, window, cx);
+            state
+        });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         // The divider's last settled x, or the default for a fresh store.
         let restored = layout::sidebar_width(&layout::read());
@@ -1099,10 +1105,15 @@ impl Harness {
             let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let label = name.or_else(|| index.and_then(IndexEntry::label)).or(derived);
-            // Same rule as [`SessionEntry::join`]: the description must not
-            // repeat a label that already is the first prompt.
-            let label_from_prompt =
-                name.is_none() && index.is_some_and(IndexEntry::label_from_prompt);
+            // Same rule as [`SessionEntry::join`]: a user-given name always
+            // earns the first prompt below it, any other label only when it
+            // does not already say it.
+            let user_named = name.is_some()
+                || index
+                    .and_then(|i| i.session_name.as_deref())
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty());
+            let text = label.unwrap_or(crate::sidebar::UNNAMED);
             entry.needs_title = label.is_none();
             // A replayed capture names its own row by file, and no source
             // speaks for it: keep that label rather than blanking it to the
@@ -1115,7 +1126,7 @@ impl Harness {
             entry.hidden = meta.is_some_and(|m| m.hidden);
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
-            entry.description = sidebar::describe(meta, index, label_from_prompt);
+            entry.description = sidebar::describe(meta, index, text, user_named);
             entry.named = name.is_some();
         }
     }
@@ -2096,12 +2107,14 @@ impl Harness {
 
     /// The field the row being renamed holds: the library's dense recipe —
     /// a borderless, chromeless single line at the row-title size, with the
-    /// 1 px focus border on the 22 px wrapper instead of the component. 22 px
-    /// of wrapper in 4 px of row padding is exactly the 30 px row, so siblings
-    /// never move while a rename is open. The commit path is unchanged. One
-    /// line, always: no wrap, horizontal overflow hidden so a long name
-    /// scrolls under the caret instead of spilling a clipped second line.
-    /// The same element serves the sidebar row and the header title.
+    /// 1 px focus border on the wrapper instead of the component. The wrapper
+    /// is a flex row centring its child, and its height is whatever the
+    /// editor's own line-height makes it: the old fixed 22 px box cropped the
+    /// glyphs at the top. Clipping is horizontal only, so a long name scrolls
+    /// under the caret instead of spilling a second line, and the row keeps
+    /// its own height while a rename is open, so siblings never move. The
+    /// commit path is unchanged. The same element serves the sidebar row and
+    /// the header title.
     fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let focused = self.rename.focus_handle(cx).is_focused(window);
@@ -2112,14 +2125,15 @@ impl Harness {
             .child(
                 div()
                     .w_full()
-                    .h(px(aui::nav::DENSE_FIELD_H + 2.0))
-                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .overflow_x_hidden()
                     .px(px(6.0))
                     .rounded(px(scale::R_SM))
                     .border_1()
                     .border_color(if focused { p.accent } else { p.line })
                     .bg(p.surface_1)
-                    .child(dense_field(&self.rename).whitespace_nowrap().overflow_x_hidden()),
+                    .child(dense_field(&self.rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
             )
             .into_any_element()
     }
@@ -2810,6 +2824,17 @@ impl Harness {
             cx.notify();
         });
         let count = rows.len();
+        // A scripted screenshot is a static composition, not an opening: the
+        // card's enter presence (fade + rise) never settles inside a capture,
+        // so screenshots draw the palette at rest — opaque, one surface.
+        // Live opens keep the rise.
+        let mut card = command_palette("palette", query, sections, selected)
+            .placeholder(placeholder)
+            .on_select(move |id, w, cx| select(id, w, cx))
+            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
+        if self.args.screenshot.is_some() {
+            card = card.at_rest();
+        }
         Some(
             popover_layer(
                 div()
@@ -2844,13 +2869,14 @@ impl Harness {
                             .pt(px(PALETTE_TOP))
                             .child(
                                 v_flex()
+                                    // The search field is the sidebar list's
+                                    // box and carries its side margins;
+                                    // centring the column lands the field's
+                                    // visible box exactly on the card's, so
+                                    // the two read as one surface.
+                                    .items_center()
                                     .children(self.render_search_input(cx))
-                                    .child(
-                                        command_palette("palette", query, sections, selected)
-                                            .placeholder(placeholder)
-                                            .on_select(move |id, w, cx| select(id, w, cx))
-                                            .on_dismiss(move |w, cx| dismiss(&(), w, cx)),
-                                    ),
+                                    .child(card),
                             ),
                     ),
             )
