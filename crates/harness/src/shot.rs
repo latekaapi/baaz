@@ -119,8 +119,7 @@ pub fn capture_and_quit(
         // first — the thread then finishes against a dead child and reaps it
         // on drop — and wait, bounded, for that drop, so the pid file is
         // gone too and no `muse` process outlives this quit.
-        crate::tier::kill_live_probes();
-        crate::tier::wait_for_probes_gone(std::time::Duration::from_secs(3));
+        crate::tier::cleanup_probes();
         cx.update(|cx| cx.quit());
     })
     .detach();

@@ -27,13 +27,13 @@ use std::sync::Arc;
 use aui::composer::composer_state_rows;
 use aui::data::button;
 use aui::feedback::{banner, BannerKind, BannerRun};
-use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, ToggleRightPane, ToggleSidebar};
+use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleRightPane, ToggleSidebar};
 use aui::nav::{sidebar_footer, sidebar_search, sidebar_view, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui::screens::{login, LoginIntent, LoginState};
 use aui::shell::{app_shell, centre_header, right_header, sidebar_header};
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -95,6 +95,32 @@ actions!(
         FocusSearch,
         /// Commit the sidebar row's inline rename (Enter).
         ConfirmRename,
+        /// Close the window (⌘W), after the tier-probe cleanup.
+        CloseWindow,
+        /// Quit the app (⌘Q), after the tier-probe cleanup.
+        QuitApp,
+        /// Minimize the window (⌘M).
+        MinimizeWindow,
+        /// Toggle the window's zoom.
+        ZoomWindow,
+        /// Flip the theme between light and dark.
+        ToggleTheme,
+        /// Show the About dialog.
+        ShowAbout,
+        /// Reveal the docs folder in Finder.
+        ShowDocs,
+        /// Undo (Edit menu, for OS recognition; the focused field owns the keys).
+        EditUndo,
+        /// Redo (Edit menu, for OS recognition; the focused field owns the keys).
+        EditRedo,
+        /// Cut (Edit menu, for OS recognition; the focused field owns the keys).
+        EditCut,
+        /// Copy (Edit menu, for OS recognition; the focused field owns the keys).
+        EditCopy,
+        /// Paste (Edit menu, for OS recognition; the focused field owns the keys).
+        EditPaste,
+        /// Select all (Edit menu, for OS recognition; the focused field owns the keys).
+        EditSelectAll,
     ]
 );
 
@@ -141,7 +167,9 @@ const MAX_TITLE_READS: usize = 12;
 /// Binds the harness's own keys on top of the library's.
 ///
 /// `aui::init` has already bound ⌘B, ⌘K, ⌘\\, Escape, Tab and the approval
-/// triad; these are the ones only this app knows about.
+/// triad; these are the ones only this app knows about. The window keys live
+/// here too, so the native menu bar ([`set_menus`]) can show their shortcuts:
+/// macOS reads each item's shortcut from the keymap.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", SendTurn, Some("HarnessComposer && !menu && !field")),
@@ -162,7 +190,90 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-e", OpenEffortMenu, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-p", OpenModeMenu, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-f", FocusSearch, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-w", CloseWindow, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-q", QuitApp, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-m", MinimizeWindow, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("enter", ConfirmRename, Some(RENAME_CONTEXT)),
+    ]);
+}
+
+/// The native menu bar.
+///
+/// Called once, after [`bind_keys`]: macOS reads each item's shortcut from
+/// the keymap, so an action without a binding shows no shortcut. File, View
+/// and Window reuse the actions (and bindings) the app already handles; the
+/// Edit items carry [`gpui::OsAction`] for OS recognition but no bindings —
+/// rebinding ⌘X/⌘C/⌘V/⌘A/⌘Z globally would steal them from the focused field,
+/// which owns editing (docs/08-keymap.md).
+pub fn set_menus(cx: &mut App) {
+    // Close and Quit are global, not window handlers: validation
+    // (`is_action_available`) consults the focused window's dispatch tree,
+    // which has nothing under it on the login screen, so window handlers
+    // validate dimmed there. A global listener is available in every state,
+    // which is what Quit in particular needs. Both run the same probe
+    // cleanup as the window-close and app-quit hooks.
+    // Close and Quit stay global listeners rather than window handlers.
+    // Validation (`is_action_available`) walks the focused window's dispatch
+    // tree, which reaches no handler on the login screen, so window handlers
+    // validate dimmed there — and a dimmed item's shortcut is dead. A global
+    // listener is available in every state, which is what Quit and Close in
+    // particular need. Close walks `cx.windows()` instead of
+    // `active_window()`, which is unset while a menu has the focus; this is
+    // a one-window app, so that is the window. Both run the same probe
+    // cleanup as the window-close and app-quit hooks.
+    cx.on_action(|_: &CloseWindow, cx: &mut App| {
+        eprintln!("harness: CloseWindow");
+        crate::tier::cleanup_probes();
+        // Deferred: menu dispatch already holds this window in an update
+        // (`update_window_id` takes it out of `App.windows` while the
+        // dispatch runs), so closing inline fails with "window not found".
+        let windows = cx.windows();
+        cx.defer(move |cx| {
+            for window in windows {
+                window.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+        });
+    });
+    cx.on_action(|_: &QuitApp, cx: &mut App| {
+        eprintln!("harness: QuitApp (global)");
+        crate::tier::cleanup_probes();
+        cx.quit();
+    });
+    cx.set_menus([
+        gpui::Menu::new("Harness").items([
+            gpui::MenuItem::action("About Harness", ShowAbout),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Quit Harness", QuitApp),
+        ]),
+        gpui::Menu::new("File").items([
+            gpui::MenuItem::action("New Session", NewSession),
+            gpui::MenuItem::action("Close Window", CloseWindow),
+        ]),
+        gpui::Menu::new("Edit").items([
+            gpui::MenuItem::os_action("Undo", EditUndo, gpui::OsAction::Undo),
+            gpui::MenuItem::os_action("Redo", EditRedo, gpui::OsAction::Redo),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::os_action("Cut", EditCut, gpui::OsAction::Cut),
+            gpui::MenuItem::os_action("Copy", EditCopy, gpui::OsAction::Copy),
+            gpui::MenuItem::os_action("Paste", EditPaste, gpui::OsAction::Paste),
+            gpui::MenuItem::os_action("Select All", EditSelectAll, gpui::OsAction::SelectAll),
+        ]),
+        gpui::Menu::new("View").items([
+            gpui::MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            gpui::MenuItem::action("Command Palette\u{2026}", TogglePalette),
+            gpui::MenuItem::action("Find in Sessions", FocusSearch),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Toggle Theme", ToggleTheme),
+        ]),
+        gpui::Menu::new("Window").items([
+            gpui::MenuItem::action("Minimize", MinimizeWindow),
+            gpui::MenuItem::action("Zoom", ZoomWindow),
+        ]),
+        gpui::Menu::new("Help").items([
+            gpui::MenuItem::action("Harness Documentation", ShowDocs),
+        ]),
     ]);
 }
 
@@ -2028,6 +2139,11 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
                 .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+                .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
+                .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
+                .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
+                .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
+                .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
                 }))
@@ -2047,6 +2163,23 @@ impl Render for Harness {
     }
 }
 
+/// Where Help → Harness Documentation looks for the docs folder: beside the
+/// working directory first, then three ancestors above the executable
+/// (`target/debug/harness` is three levels below the repo root: the exe
+/// itself, `debug/`, `target/`). Pure so tests can drive it.
+fn find_docs_dir(
+    cwd: Option<&std::path::Path>,
+    exe: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let from_cwd = cwd.map(|cwd| cwd.join("docs")).filter(|dir| dir.is_dir());
+    if from_cwd.is_some() {
+        return from_cwd;
+    }
+    exe.and_then(|exe| exe.ancestors().nth(3))
+        .map(|root| root.join("docs"))
+        .filter(|dir| dir.is_dir())
+}
+
 impl Harness {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
@@ -2055,6 +2188,43 @@ impl Harness {
 
     /// The right pane is out of scope this phase; the toggle stays wired.
     fn toggle_right(&mut self, _cx: &mut Context<Self>) {}
+
+    /// Harness → About Harness.
+    fn show_about(&mut self, cx: &mut Context<Self>) {
+        self.set_dialog(
+            cx,
+            Dialog {
+                title: "About Harness".into(),
+                detail: format!(
+                    "Harness {} \u{2014} a macOS chat interface to Muse Code.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                kind: DialogKind::Info,
+                primary: "OK",
+                action: DialogAction::Dismiss,
+            },
+        );
+    }
+
+    /// Help → Harness Documentation: the docs folder in Finder.
+    ///
+    /// The docs live beside the repo, so this looks for them next to the
+    /// working directory first (`cargo run` from the repo root) and then
+    /// three ancestors above the executable (`target/debug/harness` is
+    /// three levels below the root). A bundled app moved away from the
+    /// repo has no docs beside it, and that is an `eprintln`, not a dialog.
+    fn show_docs(&mut self) {
+        let cwd = std::env::current_dir().ok();
+        let exe = std::env::current_exe().ok();
+        match find_docs_dir(cwd.as_deref(), exe.as_deref()) {
+            Some(dir) => {
+                if std::process::Command::new("open").arg(&dir).spawn().is_err() {
+                    eprintln!("harness: could not reveal {}", dir.display());
+                }
+            }
+            None => eprintln!("harness: no docs folder beside the app"),
+        }
+    }
 
     /// ⌘⇧M / ⌘⇧E / ⌘⇧P: the same toggle the chip's own click does.
     fn open_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
@@ -2140,5 +2310,67 @@ impl Harness {
         if empty {
             self.interrupt(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_docs_dir;
+    use std::path::PathBuf;
+
+    /// A scratch root with an optional `docs/` child, removed on drop.
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "harness-docs-test-{}-{}",
+                std::process::id(),
+                name
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn with_docs(&self) -> &Self {
+            std::fs::create_dir_all(self.root.join("docs")).unwrap();
+            self
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn docs_prefers_cwd_then_exe_ancestors_then_none() {
+        let home = Scratch::new("home");
+        home.with_docs();
+        // An exe two levels below a root carrying `docs/`.
+        let exe_root = Scratch::new("exeroot");
+        exe_root.with_docs();
+        let exe = exe_root.root.join("target").join("debug").join("harness");
+        let elsewhere = Scratch::new("elsewhere");
+
+        assert_eq!(
+            find_docs_dir(Some(&home.root), Some(&exe)),
+            Some(home.root.join("docs")),
+            "a docs folder beside the cwd wins over the exe ancestors",
+        );
+        assert_eq!(
+            find_docs_dir(Some(&elsewhere.root), Some(&exe)),
+            Some(exe_root.root.join("docs")),
+            "without docs beside the cwd, the exe ancestors are the fallback",
+        );
+        assert_eq!(
+            find_docs_dir(Some(&elsewhere.root), None),
+            None,
+            "no docs anywhere and no exe to search from is None",
+        );
     }
 }
