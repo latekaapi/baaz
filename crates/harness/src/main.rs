@@ -46,6 +46,7 @@ mod images;
 mod index;
 mod overlays;
 mod plan;
+mod search;
 mod session;
 mod sessions;
 mod shot;

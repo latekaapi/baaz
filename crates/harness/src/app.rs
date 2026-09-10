@@ -56,6 +56,7 @@ use crate::session::{SessionEvent, SessionView, TierBanner};
 use crate::tier::{self, Tier};
 use crate::sessions::{self, SessionMeta};
 use crate::sidebar::{self, SessionEntry};
+use crate::search::{FileHit, SessionHit};
 use crate::{files, skills, Args};
 
 actions!(
@@ -260,6 +261,15 @@ pub struct Harness {
     /// slot the library frames and this owns.
     search: Entity<TextareaState>,
     search_open: bool,
+    /// The search palette's query field. The card's own query row shows the
+    /// result count; typing here re-queries `search.db` off the UI thread.
+    search_query: Entity<TextareaState>,
+    /// Full-text session hits for the open search palette, latest query only.
+    search_sessions: Vec<SessionHit>,
+    /// Created-file hits for the open search palette, latest query only.
+    search_files: Vec<FileHit>,
+    /// Monotonic id for palette queries; only the latest result is applied.
+    search_epoch: u64,
     /// The session whose row is being renamed in place, and the field doing it.
     renaming: Option<String>,
     rename: Entity<TextareaState>,
@@ -284,6 +294,7 @@ impl Harness {
     pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| composer_state_rows("Search sessions", 1, 1, window, cx));
         let rename = cx.new(|cx| composer_state_rows("Name this session", 1, 1, window, cx));
+        let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let mut this = Self {
             args,
             client: None,
@@ -310,6 +321,10 @@ impl Harness {
             show_empty: false,
             search: search.clone(),
             search_open: false,
+            search_query: search_query.clone(),
+            search_sessions: Vec::new(),
+            search_files: Vec::new(),
+            search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
             titled: std::collections::HashSet::new(),
@@ -328,6 +343,12 @@ impl Harness {
                 }
             }));
         }
+        // Typing in the search palette's query re-queries off the UI thread.
+        this.subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.refresh_search(cx);
+            }
+        }));
         this.overrides = sessions::read();
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the
@@ -726,6 +747,7 @@ impl Harness {
             let _ = this.update(cx, |this, cx| {
                 this.index = index;
                 this.rejoin();
+                this.rebuild_search_index(cx);
                 cx.notify();
             });
         }));
@@ -841,8 +863,10 @@ impl Harness {
         let (head, rest) = step.split_once(':').unwrap_or((step, ""));
         match head {
             "search" => {
-                self.focus_search(window, cx);
-                self.search.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+                self.open_search(window, cx);
+                if !rest.is_empty() {
+                    self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+                }
             }
             "palette" => self.open_palette(PaletteKind::Commands, cx),
             "resume" => self.open_palette(PaletteKind::Resume, cx),
@@ -979,6 +1003,7 @@ impl Harness {
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
         let view = cx.new(|cx| SessionView::new(session_id, Some(client), provider, workspace, overlays, window, cx));
+        view.update(cx, |view, cx| view.load_history(cx));
         // A switch that pages history in does not swap synchronously: the
         // old view keeps rendering until the new view's first backfill batch
         // applies (C2), so no frame flashes the "New session" screen.
@@ -1136,6 +1161,11 @@ impl Harness {
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
+            SessionEvent::Search => {
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.open_search(window, cx));
+                }));
+            }
         }
         cx.notify();
     }
@@ -1205,6 +1235,7 @@ impl Harness {
         edit(meta);
         self.rejoin();
         sessions::write(&self.overrides);
+        self.rebuild_search_index(cx);
         cx.notify();
     }
 
@@ -1345,14 +1376,6 @@ impl Harness {
         self.search.read(cx).value().to_string()
     }
 
-    /// ⌘⇧F: show the search field and put the keyboard in it.
-    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = true;
-        self.search_open = true;
-        window.focus(&self.search.focus_handle(cx), cx);
-        cx.notify();
-    }
-
     /// Escape in the search field: empty it, close it, and give the keyboard
     /// back to the composer.
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1442,6 +1465,141 @@ impl Harness {
         cx.notify();
     }
 
+    /// Open the full-text search palette and put the keyboard in its query.
+    ///
+    /// Reached from the sidebar search icon, Cmd+Shift+F and `/search`; the
+    /// empty query lists recent sessions and recently created files, so the
+    /// sidebar's quick-filter is still one keypress away.
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlays.update(cx, |overlays, _| {
+            overlays.palette = Some(Palette { kind: PaletteKind::Search, selected: 0 });
+        });
+        self.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.search_sessions.clear();
+        self.search_files.clear();
+        self.refresh_search(cx);
+        window.focus(&self.search_query.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Re-query `search.db` off the UI thread, latest keystroke wins.
+    ///
+    /// A no-op unless the search palette is open: typing anywhere else must
+    /// not touch the disk.
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
+            return;
+        }
+        self.search_epoch += 1;
+        let epoch = self.search_epoch;
+        let query = self.search_query.read(cx).value().to_string();
+        let call = cx.background_spawn(async move {
+            match crate::search::open() {
+                Ok(connection) => (
+                    crate::search::query_sessions(&connection, &query, crate::search::LIMIT),
+                    crate::search::query_files(&connection, &query, crate::search::LIMIT),
+                ),
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let (sessions, files) = call.await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                if this.search_epoch != epoch {
+                    return;
+                }
+                this.search_sessions = sessions;
+                this.search_files = files;
+                // The selection may point past the new list.
+                this.overlays.update(cx, |overlays, _| {
+                    if let Some(palette) = overlays.palette.as_mut() {
+                        palette.selected = 0;
+                    }
+                });
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Rebuild the session half of `search.db` off the UI thread.
+    ///
+    /// Runs at boot and after each index refresh; the files half is never
+    /// touched here, so recorded files survive a rebuild. When the rebuild
+    /// lands while the palette is open, the open query runs again against
+    /// the fresh index.
+    fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
+        let rows: Vec<crate::search::SessionRow> = self
+            .index
+            .iter()
+            .map(|(session_id, entry)| {
+                let meta = self.overrides.get(session_id);
+                let name =
+                    meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+                let derived = meta
+                    .and_then(|m| m.derived_title.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let label =
+                    name.or_else(|| entry.label()).or(derived).unwrap_or(crate::sidebar::UNNAMED);
+                crate::search::SessionRow {
+                    session_id: session_id.clone(),
+                    label: label.to_owned(),
+                    title: entry.title.clone(),
+                    first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
+                    body: entry.search_text.clone(),
+                }
+            })
+            .collect();
+        let call = cx.background_spawn(async move {
+            let mut connection = match crate::search::open() {
+                Ok(connection) => connection,
+                Err(_) => return,
+            };
+            let _ = crate::search::rebuild_sessions(&mut connection, &rows);
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            call.await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.refresh_search(cx);
+            });
+        }));
+    }
+
+    /// The search palette's rows: session hits, then file hits, in the order
+    /// the palette draws them so the keyboard and the click agree.
+    ///
+    /// Each id carries its section (`s:<session>` or `f:<session>:<path>`).
+    /// An empty query is recent sessions from the sidebar order plus recently
+    /// recorded files.
+    fn search_rows(&self, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
+        let mut rows = Vec::new();
+        if self.search_query.read(cx).value().trim().is_empty() {
+            for entry in self.visible_sessions(cx).into_iter().take(PALETTE_ROWS) {
+                rows.push((
+                    format!("s:{}", entry.id).into(),
+                    entry.label.clone().into(),
+                    SharedString::from("recent"),
+                ));
+            }
+        } else {
+            for hit in &self.search_sessions {
+                let detail =
+                    if hit.snippet.is_empty() { SharedString::from("match") } else { hit.snippet.clone().into() };
+                rows.push((format!("s:{}", hit.session_id).into(), hit.label.clone().into(), detail));
+            }
+        }
+        for hit in &self.search_files {
+            let label = self
+                .sessions
+                .iter()
+                .find(|entry| entry.id == hit.session_id)
+                .map(|entry| entry.label.clone())
+                .unwrap_or_else(|| "created file".to_owned());
+            rows.push((format!("f:{}:{}", hit.session_id, hit.path).into(), hit.path.clone().into(), label.into()));
+        }
+        rows
+    }
+
     /// The palette's rows, in the order it draws them, so the keyboard and the
     /// click agree about what row 3 is.
     fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
@@ -1462,6 +1620,7 @@ impl Harness {
                     (entry.id.clone().into(), entry.label.clone().into(), meta)
                 })
                 .collect(),
+            PaletteKind::Search => self.search_rows(cx),
             // The active session's completed turns, newest first; the rows
             // come from the view because the window does not keep a transcript.
             PaletteKind::Fork => self
@@ -1485,6 +1644,13 @@ impl Harness {
         let Some((id, _, _)) = rows.get(selected).cloned() else { return };
         self.overlays.update(cx, |overlays, _| overlays.palette = None);
         match kind {
+            PaletteKind::Search => {
+                if let Some(session_id) = id.strip_prefix("s:") {
+                    self.resume(session_id.to_owned(), window, cx);
+                } else if let Some(rest) = id.strip_prefix("f:") {
+                    self.reveal_created(rest, cx);
+                }
+            }
             PaletteKind::Resume => self.resume(id.to_string(), window, cx),
             PaletteKind::Fork => {
                 self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));
@@ -1738,11 +1904,16 @@ impl Harness {
             let mut view = SessionView::new("replay".to_owned(), None, provider, workspace, overlays, window, cx);
             view.set_at_rest(at_rest);
             view.load_replay(&path, cx);
+            view.load_history(cx);
             view
         });
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
+        // A replayed window has no wire, but the search palette still needs
+        // the host's session index: read it (read-only) and rebuild `search.db`
+        // so `--steps search:<query>` screenshots show session hits.
+        self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
         self.active = Some(view);
@@ -1896,6 +2067,63 @@ impl Harness {
             .into_any_element()
     }
 
+    /// Reveal a created file from the search palette in Finder.
+    ///
+    /// `rest` is `<session_id>:<workspace-relative path>`. A path that no
+    /// longer exists is a toast, not a reveal of whatever happens to sit at
+    /// the workspace root.
+    fn reveal_created(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let Some((_, path)) = rest.split_once(':') else { return };
+        let full = self.args.workspace.join(path);
+        if !full.is_file() {
+            self.overlays.update(cx, |overlays, _| {
+                overlays.toast("File not found", format!("{path} is no longer in this workspace."));
+            });
+            cx.notify();
+            return;
+        }
+        cx.reveal_path(&full);
+    }
+
+    /// The search card's status line: what the query found, or what an
+    /// empty query offers.
+    fn search_status(&self, cx: &gpui::App) -> String {
+        if self.search_query.read(cx).value().trim().is_empty() {
+            return "Search sessions and created files".to_owned();
+        }
+        let (sessions, files) = (self.search_sessions.len(), self.search_files.len());
+        if sessions + files == 0 {
+            return "No matches".to_owned();
+        }
+        let mut parts = Vec::new();
+        if sessions > 0 {
+            parts.push(format!("{sessions} session{}", if sessions == 1 { "" } else { "s" }));
+        }
+        if files > 0 {
+            parts.push(format!("{files} file{}", if files == 1 { "" } else { "s" }));
+        }
+        parts.join(" \u{00b7} ")
+    }
+
+    /// The search palette's query field, above the card. The card's own query
+    /// row is display-only, so the palette needs a real field to type in;
+    /// clearing it returns to the empty state (recents).
+    fn render_search_input(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
+            return None;
+        }
+        let query = self.search_query.read(cx).value().to_string();
+        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        });
+        Some(
+            sidebar_search("palette-search", Textarea::new(&self.search_query).text_size(aui_tokens::scaled(scale::FS_12)))
+                .clearable(!query.is_empty())
+                .on_clear(clear)
+                .into_any_element(),
+        )
+    }
+
     /// ⌘K and `/resume`: the command palette, over everything.
     ///
     /// The same primitive for both lists, because they are the same gesture —
@@ -1904,17 +2132,53 @@ impl Harness {
     fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (kind, selected) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected))?;
         let rows = self.palette_rows(kind, cx);
-        let (title, placeholder, icon) = match kind {
-            PaletteKind::Commands => ("Commands", "Every command in this build", PaletteIcon::Glyph(IconName::Slash)),
-            PaletteKind::Resume => ("Sessions", "Resume a session in this workspace", PaletteIcon::Glyph(IconName::Clock)),
-            PaletteKind::Fork => {
-                ("Fork from", "Pick a completed turn to branch from", PaletteIcon::Glyph(IconName::Git))
+        // The card's own query row mirrors the query for the picking lists;
+        // the search palette edits through its own field above the card, so
+        // the card's row carries the result count instead.
+        let (query, placeholder, sections) = match kind {
+            PaletteKind::Commands => (
+                SharedString::from(""),
+                SharedString::from("Every command in this build"),
+                vec![PaletteSection::new(
+                    "Commands",
+                    palette_items(&rows, PaletteIcon::Glyph(IconName::Slash)),
+                )],
+            ),
+            PaletteKind::Resume => (
+                SharedString::from(""),
+                SharedString::from("Resume a session in this workspace"),
+                vec![PaletteSection::new(
+                    "Sessions",
+                    palette_items(&rows, PaletteIcon::Glyph(IconName::Clock)),
+                )],
+            ),
+            PaletteKind::Fork => (
+                SharedString::from(""),
+                SharedString::from("Pick a completed turn to branch from"),
+                vec![PaletteSection::new(
+                    "Fork from",
+                    palette_items(&rows, PaletteIcon::Glyph(IconName::Git)),
+                )],
+            ),
+            PaletteKind::Search => {
+                let (sessions, files): (Vec<_>, Vec<_>) =
+                    rows.iter().partition(|(id, _, _)| id.starts_with("s:"));
+                let mut sections = Vec::new();
+                if !sessions.is_empty() {
+                    sections.push(PaletteSection::new(
+                        "Sessions",
+                        palette_items_ref(&sessions, PaletteIcon::Glyph(IconName::Clock)),
+                    ));
+                }
+                if !files.is_empty() {
+                    sections.push(PaletteSection::new(
+                        "Files",
+                        palette_items_ref(&files, PaletteIcon::Glyph(IconName::File)),
+                    ));
+                }
+                (SharedString::from(""), self.search_status(cx).into(), sections)
             }
         };
-        let items: Vec<PaletteItem> = rows
-            .iter()
-            .map(|(id, label, detail)| PaletteItem::new(id.clone(), icon, label.clone()).context(detail.clone()))
-            .collect();
         let select = cx.listener(move |this: &mut Self, id: &SharedString, window, cx| {
             let index = this.palette_rows(kind, cx).iter().position(|(row, _, _)| row == id);
             if let Some(index) = index {
@@ -1964,10 +2228,14 @@ impl Harness {
                             .justify_center()
                             .pt(px(PALETTE_TOP))
                             .child(
-                                command_palette("palette", "", vec![PaletteSection::new(title, items)], selected)
-                                    .placeholder(placeholder)
-                                    .on_select(move |id, w, cx| select(id, w, cx))
-                                    .on_dismiss(move |w, cx| dismiss(&(), w, cx)),
+                                v_flex()
+                                    .children(self.render_search_input(cx))
+                                    .child(
+                                        command_palette("palette", query, sections, selected)
+                                            .placeholder(placeholder)
+                                            .on_select(move |id, w, cx| select(id, w, cx))
+                                            .on_dismiss(move |w, cx| dismiss(&(), w, cx)),
+                                    ),
                             ),
                     ),
             )
@@ -2024,6 +2292,23 @@ impl Harness {
     }
 }
 
+/// One palette section's rows under one icon.
+fn palette_items(
+    rows: &[(SharedString, SharedString, SharedString)],
+    icon: PaletteIcon,
+) -> Vec<PaletteItem> {
+    rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon, label.clone()).context(detail.clone())).collect()
+}
+
+/// [`palette_items`] over partitioned row references, which is what the search
+/// palette's two sections are built from.
+fn palette_items_ref(
+    rows: &[&(SharedString, SharedString, SharedString)],
+    icon: PaletteIcon,
+) -> Vec<PaletteItem> {
+    rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon, (*label).clone()).context((*detail).clone())).collect()
+}
+
 /// F10. The first `userShell` command in a session's history, as a row title.
 ///
 /// A session with no user prompt still did something, and what it did is the
@@ -2064,7 +2349,8 @@ impl Render for Harness {
                     sidebar_header("hd-side")
                         .traffic_lights(true)
                         .collapsed(!self.sidebar_open)
-                        .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                        .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+                        .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
                 )
                 .header_centre({
                     let mut centre = centre_header("hd-centre", self.workspace_name())
@@ -2089,8 +2375,17 @@ impl Render for Harness {
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
         // The palette takes the keyboard the frame it opens, so the arrows and
-        // the return reach it rather than the composer under it.
-        if palette.is_some() && !self.focus_palette.is_focused(window) {
+        // the return reach it rather than the composer under it. The search
+        // palette is the exception: its query field owns the keyboard, and the
+        // arrows and the return reach the list through the overlay's own menu
+        // context.
+        let searching = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search);
+        if searching {
+            let query = self.search_query.focus_handle(cx);
+            if !query.is_focused(window) {
+                window.focus(&query, cx);
+            }
+        } else if palette.is_some() && !self.focus_palette.is_focused(window) {
             window.focus(&self.focus_palette, cx);
         }
         aui::keys::track_pointer(
@@ -2109,7 +2404,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &NewSession, _, cx| this.new_session(cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
-                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
                 }))

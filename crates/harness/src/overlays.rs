@@ -95,6 +95,9 @@ pub enum PaletteKind {
     /// `/fork` with nothing named: the session's completed assistant turns,
     /// newest first, under the user prompt that started each one.
     Fork,
+    /// `/search`, the sidebar search icon and Cmd+Shift+F: full-text matches
+    /// over past sessions plus the files this workspace's turns created.
+    Search,
 }
 
 /// The open command palette: which list, and where the keyboard is in it.
@@ -118,8 +121,9 @@ pub struct Overlays {
     pub toasts: Vec<ToastData>,
     /// The `/` menu's **Skills** section, from `muse skills list --json`.
     pub skills: Vec<crate::skills::Skill>,
-    /// The `@` picker's candidates: the workspace's files, relative to it.
-    pub files: Vec<String>,
+    /// The `@` picker's candidates: the workspace's files, relative to it,
+    /// lowercased once at walk time (see [`crate::files::FileEntry`]).
+    pub files: Vec<crate::files::FileEntry>,
     /// Monotonic id source, so two identical toasts are still two toasts.
     next_toast: u64,
 }
@@ -235,6 +239,8 @@ pub enum Command {
     Name,
     /// Resume another session — the command palette over `session/list`.
     Resume,
+    /// Search past sessions and created files.
+    Search,
     /// Hide this session from the sidebar.
     Hide,
     /// Show sessions with no turns in the sidebar again.
@@ -253,7 +259,7 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Command; 15] = [
+    pub const ALL: [Command; 16] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -265,6 +271,7 @@ impl Command {
         Command::Fork,
         Command::Name,
         Command::Resume,
+        Command::Search,
         Command::Hide,
         Command::Empty,
         Command::Logout,
@@ -282,6 +289,7 @@ impl Command {
             Command::Fork => "/fork",
             Command::Name => "/name",
             Command::Resume => "/resume",
+            Command::Search => "/search",
             Command::Hide => "/hide",
             Command::Empty => "/empty",
             Command::Status => "/status",
@@ -303,6 +311,7 @@ impl Command {
             Command::Fork => "Branch this session from an earlier turn",
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
+            Command::Search => "Search sessions and created files",
             Command::Hide => "Hide this session from the sidebar",
             Command::Empty => "Show sessions with no turns in the sidebar",
             Command::Status => "Show current session status",

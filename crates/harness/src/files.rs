@@ -16,10 +16,23 @@ pub const CAP: usize = 5_000;
 /// How many rows the picker shows at once.
 pub const VISIBLE: usize = 8;
 
+/// One mentionable file: the path and its lowercase, lowered once.
+///
+/// Lowercasing at walk time (rather than per keystroke) is what keeps the `@`
+/// menu out of the typing-critical path: [`filter`] lowercases only the query
+/// and compares against these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntry {
+    /// The workspace-relative path, e.g. `src/main.rs`.
+    pub path: String,
+    /// `path` lowercased, for case-insensitive ranking without reallocating.
+    pub lower: String,
+}
+
 /// Walk `root` for mentionable files, relative to it, sorted shortest first.
 ///
 /// Blocking: the caller runs it on the background executor.
-pub fn walk(root: &Path) -> Vec<String> {
+pub fn walk(root: &Path) -> Vec<FileEntry> {
     let mut out = Vec::new();
     for entry in ignore::WalkBuilder::new(root).hidden(true).git_ignore(true).git_global(true).build().flatten() {
         if out.len() >= CAP {
@@ -33,11 +46,13 @@ pub fn walk(root: &Path) -> Vec<String> {
         if rel.is_empty() || rel.starts_with(".git/") {
             continue;
         }
-        out.push(rel.into_owned());
+        let path = rel.into_owned();
+        let lower = path.to_lowercase();
+        out.push(FileEntry { path, lower });
     }
     // Shortest first, so `src/main.rs` beats `vendor/a/b/c/main.rs` on an equal
     // match, and stable within a length so the list never reshuffles.
-    out.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    out.sort_by(|a, b| a.path.len().cmp(&b.path.len()).then_with(|| a.path.cmp(&b.path)));
     out
 }
 
@@ -47,19 +62,23 @@ pub fn walk(root: &Path) -> Vec<String> {
 /// characters appear in it in order, case-insensitively; ties break on how tight
 /// the match is, then on how short the path is, which is what makes typing
 /// `mainrs` land on `src/main.rs`.
-pub fn filter<'a>(paths: &'a [String], query: &str) -> Vec<&'a String> {
+///
+/// Pure and cheap per call (only the query is lowercased), but still called
+/// off the UI thread: 5 000 subsequence scans per keystroke do not belong in
+/// render-adjacent code.
+pub fn filter<'a>(paths: &'a [FileEntry], query: &str) -> Vec<&'a FileEntry> {
     if query.is_empty() {
         return paths.iter().take(VISIBLE).collect();
     }
     let needle: Vec<char> = query.to_lowercase().chars().collect();
-    let mut scored: Vec<(usize, usize, &String)> = Vec::new();
-    for path in paths {
-        if let Some(span) = subsequence_span(&path.to_lowercase(), &needle) {
-            scored.push((span, path.len(), path));
+    let mut scored: Vec<(usize, usize, &FileEntry)> = Vec::new();
+    for entry in paths {
+        if let Some(span) = subsequence_span(&entry.lower, &needle) {
+            scored.push((span, entry.path.len(), entry));
         }
     }
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(b.2)));
-    scored.into_iter().take(VISIBLE).map(|(_, _, path)| path).collect()
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.path.cmp(&b.2.path)));
+    scored.into_iter().take(VISIBLE).map(|(_, _, entry)| entry).collect()
 }
 
 /// How many characters of `haystack` the first subsequence match spans, or
@@ -85,20 +104,18 @@ fn subsequence_span(haystack: &str, needle: &[char]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn paths() -> Vec<String> {
-        vec![
-            "src/main.rs".to_owned(),
-            "src/app.rs".to_owned(),
-            "vendor/deep/nested/main.rs".to_owned(),
-            "README.md".to_owned(),
-        ]
+    fn paths() -> Vec<FileEntry> {
+        ["src/main.rs", "src/app.rs", "vendor/deep/nested/main.rs", "README.md"]
+            .into_iter()
+            .map(|path| FileEntry { path: path.to_owned(), lower: path.to_lowercase() })
+            .collect()
     }
 
     #[test]
     fn a_subsequence_matches_across_separators() {
         let paths = paths();
         let hits = filter(&paths, "mainrs");
-        assert_eq!(hits.first().map(|p| p.as_str()), Some("src/main.rs"));
+        assert_eq!(hits.first().map(|e| e.path.as_str()), Some("src/main.rs"));
         assert_eq!(hits.len(), 2);
     }
 
@@ -117,6 +134,12 @@ mod tests {
     #[test]
     fn matching_is_case_insensitive() {
         let paths = paths();
-        assert_eq!(filter(&paths, "readme").first().map(|p| p.as_str()), Some("README.md"));
+        assert_eq!(filter(&paths, "readme").first().map(|e| e.path.as_str()), Some("README.md"));
+    }
+
+    #[test]
+    fn the_walk_lowercases_once() {
+        let entry = FileEntry { path: "Src/Main.RS".to_owned(), lower: "src/main.rs".to_owned() };
+        assert_eq!(filter(&[entry], "MAIN").len(), 1);
     }
 }
