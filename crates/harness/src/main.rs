@@ -36,6 +36,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod app;
+mod attachments;
 mod auth;
 mod conn;
 mod files;

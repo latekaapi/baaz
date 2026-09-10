@@ -89,6 +89,8 @@ actions!(
         HistoryNext,
         /// ⌘V, which is an image attachment when the clipboard holds one.
         PasteMaybeImage,
+        /// Attach a file or photo (⌘U).
+        AttachFile,
         /// Send what is in an open approval-feedback or question-clarify field.
         ConfirmField,
         /// Put the keyboard in the sidebar's search field (⌘⇧F).
@@ -157,6 +159,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", HistoryPrev, Some("HarnessComposer && histup && !menu")),
         KeyBinding::new("down", HistoryNext, Some("HarnessComposer && histdown && !menu")),
         KeyBinding::new("cmd-v", PasteMaybeImage, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new("cmd-u", AttachFile, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("shift-tab", TogglePlan, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("ctrl-c", Interrupt, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-n", NewSession, Some(aui::keys::ROOT_CONTEXT)),
@@ -1791,6 +1794,9 @@ impl Harness {
                 });
             }))
             .on_action(cx.listener(|this, _: &PasteMaybeImage, window, cx| this.paste(window, cx)))
+            .on_action(cx.listener(|this, _: &AttachFile, _, cx| {
+                this.with_session(cx, |view, cx| view.prompt_for_image(cx));
+            }))
             .on_action(cx.listener(|this, _: &ConfirmField, window, cx| {
                 this.with_session(cx, |view, cx| {
                     view.confirm_field(window, cx);

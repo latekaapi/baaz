@@ -60,6 +60,7 @@ HARNESS_PROVIDER=echo cargo run -p harness -- --workspace /tmp/ws --theme dark \
 | `context:<used>/<window>/<level>` | a **synthetic** `session/contextUsage` |
 | `plan` | turn plan mode on |
 | `image:<path>` | attach an image |
+| `file:<path>` | attach a file (extracted to text, unless it is an image) |
 | `plus` / `drop` | open the `+` menu; raise the drop overlay |
 
 `context:` is the one step that invents a fact, and it exists for one reason:
@@ -238,15 +239,43 @@ does this with a key context rather than a guess: the composer's holder wears
 a popover is open, and the bindings are predicated on them, so ↑, ↓ and ↩ mean
 the menu, the history or the editor without any of the three being taken away.
 
-## 8. Images
+## 8. Images and files
 
 Paste (⌘V with an image on the clipboard), drop (`ExternalPaths` onto the centre
-pane, with the library's drop overlay) and attach (the `+` menu). Each becomes a
-removable chip and a `TurnInputPart::Image { base64Data, mediaType, width,
-height }`; width and height always travel together because both come from the
-decoder. The format is read from the bytes, not the file name, so a `.png` that
-is really a JPEG is not announced wrongly. PNG, JPEG, GIF and WebP, 10 MB each;
-anything else is refused with a reason in the banner.
+pane, with the library's drop overlay) and attach (the `+` menu, or ⌘U). The
+`+` menu holds three rows: **Attach file or photo** (⌘U), **@ Mention file**
+(types `@` into the draft so the mention picker opens) and **/ Slash
+commands** (types `/` so the command menu opens).
+
+Which chip a dropped or picked path becomes is decided by its extension. Image
+extensions (PNG, JPEG, GIF, WebP) become a removable image chip and a
+`TurnInputPart::Image { base64Data, mediaType, width, height }`; width and
+height always travel together because both come from the decoder. The format is
+read from the bytes, not the file name, so a `.png` that is really a JPEG is
+not announced wrongly. Ten megabytes each; anything else is refused with a
+reason in the banner. Each image chip draws a 64 px thumbnail, decoded and
+downscaled once at attach time (`images::THUMB_LONG_EDGE`); the full-resolution
+bytes still go on the wire.
+
+Everything else goes through `attachments::from_path` and becomes a removable
+`ComposerChipKind::File` chip (name plus a muted `KIND · size` detail), because
+MSP's `TurnInputPart` is a closed enum — `text` or `image`, anything else is
+`invalidParams` — and a file's bytes have nowhere else to go. Text-like types
+(md, txt, csv, source code and friends, extensionless files sniffed as UTF-8)
+are read as text; PDF arrives through its text layer (`pdf-extract`), xlsx/xls
+sheet by sheet as CSV-ish text under `## <sheet>` headers (`calamine`), docx
+from `word/document.xml` with its tags stripped (`zip`). Anything else is
+refused with the banner reason. Each file is capped at 64 KB of text
+(`attachments::MAX_FILE_BYTES`, truncated with a `[file truncated to 64 KB]`
+note) and a turn carries at most 8 files (`attachments::MAX_FILES`); `parts()`
+emits one text part per file — `--- file: <name> ---\n<content>` — ahead of
+the prompt text. All three crates are pure Rust, so `cargo tree -d` still shows
+one `gpui-pre` and one `gpui-kit`.
+
+Enter sends because the composer's editor runs with `submit_on_enter`: plain
+Enter emits the submit without a newline and the harness binding sends the
+turn, while Shift+Enter still inserts a newline. The flag lives in the library
+(`composer_state_rows`), so the harness binds nothing of its own for it.
 
 ⌘V is bound in the composer's context and re-dispatches gpui-kit's own `Paste`
 when the clipboard holds no image, so an ordinary text paste is the editor's,
