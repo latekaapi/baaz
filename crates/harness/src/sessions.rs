@@ -38,13 +38,30 @@ pub struct SessionMeta {
     /// so the `session/read` that found it happens once (finding F10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
+    /// Pinned to the top of the sidebar's date view, in its own group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Archived out of the sidebar's list (shown only from the Sessions menu).
+    /// An archived session stays on disk and is never loaded while archived.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// The first line of the last assistant text block, written when a turn
+    /// completes in this app. Free — the fold is already in memory — and the
+    /// sidebar's description line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_summary: Option<String>,
 }
 
 impl SessionMeta {
     /// Whether this entry still says anything, which is what decides if it is
     /// worth keeping in the file.
     fn is_empty(&self) -> bool {
-        self.name.is_none() && !self.hidden && self.derived_title.is_none()
+        self.name.is_none()
+            && !self.hidden
+            && self.derived_title.is_none()
+            && !self.pinned
+            && !self.archived
+            && self.last_summary.is_none()
     }
 }
 
@@ -119,6 +136,36 @@ mod tests {
         overrides.insert("named".into(), SessionMeta { name: Some("x".into()), ..SessionMeta::default() });
         let kept: Vec<&String> = overrides.iter().filter(|(_, m)| !m.is_empty()).map(|(k, _)| k).collect();
         assert_eq!(kept, vec!["named"]);
+    }
+
+    #[test]
+    fn pin_archive_and_summary_all_keep_their_entry() {
+        for meta in [
+            SessionMeta { pinned: true, ..SessionMeta::default() },
+            SessionMeta { archived: true, ..SessionMeta::default() },
+            SessionMeta { last_summary: Some("did a thing".into()), ..SessionMeta::default() },
+        ] {
+            assert!(!meta.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_new_fields_round_trip_as_camel_case() {
+        let meta = SessionMeta {
+            pinned: true,
+            archived: true,
+            last_summary: Some("did a thing".into()),
+            ..SessionMeta::default()
+        };
+        let text = serde_json::to_string(&meta).unwrap();
+        assert!(text.contains("\"pinned\":true"));
+        assert!(text.contains("\"archived\":true"));
+        assert!(text.contains("\"lastSummary\":\"did a thing\""));
+        let back: SessionMeta = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, meta);
+        // Old files without the fields still read.
+        let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
+        assert!(!old.pinned && !old.archived && old.last_summary.is_none());
     }
 
     #[test]

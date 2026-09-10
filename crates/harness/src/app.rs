@@ -25,15 +25,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aui::composer::composer_state_rows;
-use aui::data::button;
+use aui::data::{button, icon_button, ButtonSize};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, ToggleRightPane, ToggleSidebar};
-use aui::nav::{sidebar_footer, sidebar_search, sidebar_view, RowAction};
+use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_search, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui::screens::{login, LoginIntent, LoginState};
-use aui::shell::{app_shell, centre_header, right_header, sidebar_header};
-use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, AuiStyled};
+use aui::shell::{app_shell, header_cell, sidebar_header};
+use aui_icons::{provider_mark, IconName, Provider};
+use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -51,7 +51,7 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::auth::{self, Identity, LoginEvent};
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
-use crate::overlays::{Command, Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
+use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Overlays, Palette, PaletteKind};
 use crate::session::{SessionEvent, SessionView, TierBanner};
 use crate::tier::{self, Tier};
 use crate::sessions::{self, SessionMeta};
@@ -203,6 +203,32 @@ impl Default for Login {
     }
 }
 
+/// What one toast's Undo restores: one `/hide` is a batch of one, one
+/// "Clear empty" is a batch of everything it hid, and one archive confirm is
+/// a batch of one archived session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UndoBatch {
+    Hidden(Vec<String>),
+    Archived(Vec<String>),
+}
+
+/// Actions of the header's overflow menu, in row order.
+#[derive(Clone, Copy)]
+enum OverflowAction {
+    Rename,
+    Fork,
+    Archive,
+}
+
+/// Actions of the Sessions caption's view menu, in row order.
+#[derive(Clone, Copy)]
+enum ViewAction {
+    ToggleEmpty,
+    ToggleHidden,
+    ClearEmpty,
+    ToggleArchived,
+}
+
 /// The whole application.
 pub struct Harness {
     args: Args,
@@ -239,10 +265,12 @@ pub struct Harness {
     /// The harness's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
     overrides: sessions::Overrides,
-    /// Whether hidden sessions are listed anyway (the footer's toggle).
+    /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
     show_hidden: bool,
-    /// Whether sessions with no turns are listed anyway (the footer's toggle).
+    /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
     show_empty: bool,
+    /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
+    show_archived: bool,
     /// The sidebar's search field, and whether it is on screen. The field is a
     /// slot the library frames and this owns.
     search: Entity<TextareaState>,
@@ -253,10 +281,11 @@ pub struct Harness {
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
-    /// Batches hidden in the last few seconds, newest last: the toast's Undo.
-    /// One `/hide` is a batch of one; one "Clear empty" is a batch of
-    /// everything it hid, so one Undo restores the whole batch.
-    hidden_undo: Vec<Vec<String>>,
+    /// Batches taken out of the list in the last few seconds, newest last:
+    /// the toast's Undo. One `/hide` is a batch of one; one "Clear empty" is
+    /// a batch of everything it hid; one archive confirm is a batch of one
+    /// archived session. One Undo restores the whole batch.
+    undo_stack: Vec<UndoBatch>,
     /// The title last given to the window, so it is only set when it changed.
     window_title: Option<String>,
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
@@ -293,12 +322,13 @@ impl Harness {
             overrides: sessions::Overrides::new(),
             show_hidden: false,
             show_empty: false,
+            show_archived: false,
             search: search.clone(),
             search_open: false,
             renaming: None,
             rename: rename.clone(),
             titled: std::collections::HashSet::new(),
-            hidden_undo: Vec::new(),
+            undo_stack: Vec::new(),
             window_title: None,
             send_anyway: false,
             tasks: Vec::new(),
@@ -404,6 +434,7 @@ impl Harness {
                         kind: DialogKind::Error,
                         primary: "Try again",
                         action: DialogAction::Reconnect,
+                        archive_target: None,
                     });
                     cx.notify();
                 }
@@ -442,6 +473,7 @@ impl Harness {
         if completed {
             self.load_index(cx);
             self.load_sessions(cx);
+            self.record_last_summary(cx);
         }
         self.title_from_transcript(cx);
         cx.notify();
@@ -490,6 +522,7 @@ impl Harness {
                         kind: DialogKind::Error,
                         primary: "Reconnect",
                         action: DialogAction::Reconnect,
+                        archive_target: None,
                     });
                     cx.notify();
                 }
@@ -849,6 +882,25 @@ impl Harness {
                 self.show_empty = !self.show_empty;
                 cx.notify();
             }
+            "sidebar" => self.toggle_sidebar(cx),
+            "overflow" => self.open_menu(MenuKind::Overflow, cx),
+            "view-menu" => self.open_menu(MenuKind::ViewOptions, cx),
+            "account" => self.open_menu(MenuKind::Account, cx),
+            "pin" => {
+                if let Some(session_id) = self.active_id(cx) {
+                    self.toggle_pin(session_id, cx);
+                }
+            }
+            "archive" => {
+                if let Some(session_id) = self.active_id(cx) {
+                    self.open_archive_dialog(session_id, cx);
+                }
+            }
+            "archive-confirm" => self.confirm_archive_dialog(window, cx),
+            "show-archived" => {
+                self.show_archived = !self.show_archived;
+                cx.notify();
+            }
             _ => return false,
         }
         cx.notify();
@@ -867,8 +919,18 @@ impl Harness {
             let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let label = name.or_else(|| index.and_then(IndexEntry::label)).or(derived);
             entry.needs_title = label.is_none();
-            entry.label = label.unwrap_or(crate::sidebar::UNNAMED).to_owned();
+            // A replayed capture names its own row by file, and no source
+            // speaks for it: keep that label rather than blanking it to the
+            // fallback on every override write.
+            match label {
+                Some(label) => entry.label = label.to_owned(),
+                None if !entry.replayed => entry.label = crate::sidebar::UNNAMED.to_owned(),
+                None => {}
+            }
             entry.hidden = meta.is_some_and(|m| m.hidden);
+            entry.pinned = meta.is_some_and(|m| m.pinned);
+            entry.archived = meta.is_some_and(|m| m.archived);
+            entry.description = sidebar::describe(meta, index);
             entry.named = name.is_some();
         }
     }
@@ -922,8 +984,11 @@ impl Harness {
     fn resume(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         // A hidden session is never loaded. Hiding is a decision about this
         // window's list, and a list that still opened what it refuses to show
-        // would be a list that means nothing.
+        // would be a list that means nothing. Archived sessions are the same.
         if self.overrides.get(&session_id).is_some_and(|m| m.hidden) && !self.show_hidden {
+            return;
+        }
+        if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
             return;
         }
         let Some(client) = self.client.clone() else { return };
@@ -988,6 +1053,7 @@ impl Harness {
                     kind: DialogKind::Error,
                     primary: "Dismiss",
                     action: DialogAction::Dismiss,
+                    archive_target: None,
                 });
             }
             SessionEvent::SignedOut { message } => {
@@ -997,6 +1063,7 @@ impl Harness {
                     kind: DialogKind::Warning,
                     primary: "Sign in",
                     action: DialogAction::SignIn,
+                    archive_target: None,
                 });
             }
             // The child's exit already reached `route`, which owns the reconnect.
@@ -1030,6 +1097,7 @@ impl Harness {
                     kind: DialogKind::Info,
                     primary: "Done",
                     action: DialogAction::Dismiss,
+                    archive_target: None,
                 });
                 // `/usage` is a person asking; take the reading again behind
                 // the dialog rather than serving a cache they just doubted.
@@ -1117,6 +1185,7 @@ impl Harness {
                 Severity::Dialog => DialogAction::Reconnect,
                 Severity::Banner => DialogAction::Dismiss,
             },
+            archive_target: None,
         };
         self.set_dialog(cx, dialog);
     }
@@ -1191,41 +1260,61 @@ impl Harness {
         for session_id in &ids {
             self.set_override(session_id, |meta| meta.hidden = true, cx);
         }
+        self.push_undo(
+            UndoBatch::Hidden(ids),
+            title,
+            detail.to_owned(),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// One toast with one Undo for one undoable batch, and a timer that takes
+    /// both away together, so a press after the toast has gone does nothing.
+    fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
         let toast =
-            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, detail, "Undo"));
-        // The toast's own timer takes it away; this one takes the undo away
-        // with it, so a press after it has gone does nothing.
-        let undo = ids.clone();
+            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, &detail, "Undo"));
+        let undo = batch.clone();
         self.tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(UNDO_WINDOW).await;
             let _ = this.update(cx, |this, cx| {
                 this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
-                this.hidden_undo.retain(|batch| *batch != undo);
+                this.undo_stack.retain(|batch| *batch != undo);
                 cx.notify();
             });
         }));
-        self.hidden_undo.push(ids);
+        self.undo_stack.push(batch);
         cx.notify();
     }
 
-    /// The toast's Undo: put the newest hidden batch back — one row, or one
-    /// "Clear empty" whole.
-    fn unhide_newest(&mut self, cx: &mut Context<Self>) {
-        let Some(batch) = self.hidden_undo.pop() else { return };
-        for session_id in batch {
-            self.set_override(&session_id, |meta| meta.hidden = false, cx);
+    /// The toast's Undo: put the newest batch back — one hidden row, one
+    /// "Clear empty" whole, or one archived session.
+    fn undo_newest(&mut self, cx: &mut Context<Self>) {
+        let Some(batch) = self.undo_stack.pop() else { return };
+        match batch {
+            UndoBatch::Hidden(ids) => {
+                for session_id in ids {
+                    self.set_override(&session_id, |meta| meta.hidden = false, cx);
+                }
+            }
+            UndoBatch::Archived(ids) => {
+                for session_id in ids {
+                    self.set_override(&session_id, |meta| meta.archived = false, cx);
+                }
+            }
         }
     }
 
     /// "Clear empty": hide every session with no turns, with a way back for
-    /// eight seconds. Rows already hidden stay out of the batch, so Undo
-    /// restores exactly what this hid and nothing it did not.
+    /// eight seconds. Rows already hidden — and archived rows, which Clear
+    /// must never sweep — stay out of the batch, so Undo restores exactly
+    /// what this hid and nothing it did not.
     fn clear_empty(&mut self, cx: &mut Context<Self>) {
         let active = self.active_id(cx);
         let cleared: Vec<String> = self
             .sessions
             .iter()
-            .filter(|entry| !entry.hidden && entry.is_empty(active.as_deref()))
+            .filter(|entry| !entry.hidden && !entry.archived && entry.is_empty(active.as_deref()))
             .map(|entry| entry.id.clone())
             .collect();
         if cleared.is_empty() {
@@ -1240,6 +1329,94 @@ impl Harness {
         );
     }
 
+    /// Pin or unpin a session. Purely local: the list regroups around it
+    /// and the store keeps it.
+    fn toggle_pin(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.set_override(&session_id, |meta| meta.pinned = !meta.pinned, cx);
+    }
+
+    /// Ask before archiving: a danger dialog carrying its target, so only its
+    /// own Archive button can confirm it.
+    fn open_archive_dialog(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let label = self
+            .sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| sidebar::UNNAMED.to_owned());
+        self.set_dialog(cx, Dialog {
+            title: format!("Archive \"{label}\"?"),
+            detail: "Archived sessions stay on disk and can be shown from the Sessions menu.".into(),
+            kind: DialogKind::Warning,
+            primary: "Archive",
+            action: DialogAction::Archive,
+            archive_target: Some(session_id),
+        });
+    }
+
+    /// The archive dialog's Archive button, or the `archive-confirm` step.
+    fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+            (d.action == DialogAction::Archive).then(|| d.archive_target.clone()).flatten()
+        });
+        let Some(session_id) = target else { return };
+        self.close_dialog(cx);
+        self.archive_session(session_id, Some(window), cx);
+    }
+
+    /// Archive a session out of the list, with a way back for eight seconds.
+    ///
+    /// An archived session is never loaded, so the active one closes when it
+    /// is the one archived: the newest remaining visible session opens in its
+    /// place, or the empty state when nothing remains.
+    fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
+        self.set_override(&session_id, |meta| meta.archived = true, cx);
+        if was_active {
+            self.active = None;
+        }
+        self.push_undo(
+            UndoBatch::Archived(vec![session_id]),
+            "Session archived".to_owned(),
+            "It is still on disk; show it again from the Sessions menu.".to_owned(),
+            cx,
+        );
+        // The newest remaining visible session opens in place of the archived
+        // one; with no window (a step, not a click) the empty state stays
+        // until the person picks a session.
+        if was_active {
+            if let Some(window) = window {
+                let next = self.visible_sessions(cx).into_iter().next().map(|e| e.id.clone());
+                if self.client.is_some() {
+                    if let Some(id) = next {
+                        self.resume(id, window, cx);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Put a session back in the list (the Archive tray action on an archived
+    /// row, or the toast's Undo through [`Self::undo_newest`]).
+    fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.set_override(&session_id, |meta| meta.archived = false, cx);
+    }
+
+    /// A turn completed in this app: leave the first line of its last
+    /// assistant text on the sidebar row. Free — the fold is in memory — and
+    /// skipped when nothing new arrived, so the store is not rewritten on
+    /// every completion.
+    fn record_last_summary(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let (session_id, summary) = (view.read(cx).session_id.clone(), view.read(cx).last_summary_text());
+        let Some(summary) = summary else { return };
+        if self.overrides.get(&session_id).and_then(|m| m.last_summary.as_deref()) == Some(summary.as_str()) {
+            return;
+        }
+        self.set_override(&session_id, |meta| meta.last_summary = Some(summary), cx);
+    }
+
     /// The open session's id, which the empty filter never applies to: a
     /// session just created has no turns yet and must stay visible.
     fn active_id(&self, cx: &gpui::App) -> Option<String> {
@@ -1247,8 +1424,9 @@ impl Harness {
     }
 
     /// The rows the sidebar should draw: hidden ones out unless asked for,
-    /// sessions with no turns out unless asked for, and the search field's
-    /// text applied. The open session is always drawn.
+    /// archived ones out unless asked for, sessions with no turns out unless
+    /// asked for, and the search field's text applied. The open session is
+    /// always drawn.
     fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
         let needle = self.search_text(cx);
         let active = self.active_id(cx);
@@ -1256,7 +1434,14 @@ impl Harness {
             .sessions
             .iter()
             .filter(|entry| self.show_hidden || !entry.hidden)
-            .filter(|entry| self.show_empty || !entry.is_empty(active.as_deref()))
+            .filter(|entry| self.show_archived || !entry.archived)
+            .filter(|entry| {
+                // An archived row shown on request is explicitly asked for;
+                // the empty filter must not swallow it back.
+                (self.show_archived && entry.archived)
+                    || self.show_empty
+                    || !entry.is_empty(active.as_deref())
+            })
             .filter(|entry| entry.matches(&needle))
             .cloned()
             .collect();
@@ -1457,6 +1642,36 @@ impl Harness {
             .into_any_element()
     }
 
+    /// Open a header/footer menu, replacing whatever is open. Clicking its
+    /// own button again closes it.
+    fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
+        self.overlays.update(cx, |overlays, _| {
+            overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };
+        });
+        cx.notify();
+    }
+
+    /// The two rows above the Sessions caption: New session, and Automations
+    /// behind a Soon tag until it has somewhere to go.
+    fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
+        let automations = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.overlays.update(cx, |overlays, _| {
+                overlays.toast("Automations", "Automations are not wired up yet.");
+            });
+            cx.notify();
+        });
+        v_flex()
+            .w_full()
+            .flex_none()
+            .px(px(scale::SP_2))
+            .pt(px(scale::SP_2))
+            .child(nav_item("nav-new", IconName::Plus, "New session").on_click(new_session))
+            .child(nav_item("nav-automations", IconName::Zap, "Automations").count("Soon").on_click(automations))
+            .into_any_element()
+    }
+
     fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let visible = self.visible_sessions(cx);
         let empty = self.render_sidebar_empty(&visible, cx);
@@ -1468,13 +1683,29 @@ impl Harness {
         let act = cx.listener(|this: &mut Self, (id, action): &(SharedString, RowAction), window, cx| {
             match action {
                 RowAction::Rename => this.start_rename(id.to_string(), window, cx),
-                RowAction::Hide => this.hide_session(id.to_string(), cx),
+                RowAction::Pin => this.toggle_pin(id.to_string(), cx),
+                // The tray carries one archive affordance: on a listed session
+                // it asks first, on an archived one it puts it straight back.
+                RowAction::Archive => {
+                    let archived =
+                        this.sessions.iter().find(|e| e.id == id.as_ref()).is_some_and(|e| e.archived);
+                    if archived {
+                        this.unarchive_session(id.to_string(), cx);
+                    } else {
+                        this.open_archive_dialog(id.to_string(), cx);
+                    }
+                }
                 _ => {}
             }
         });
+        // The sliders icon toggles the view menu like every other popover.
+        let open_view = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.open_menu(MenuKind::ViewOptions, cx);
+        });
         let mut view = sidebar_view("sessions", grouping)
             .caption("Sessions")
-            .row_actions(vec![RowAction::Rename, RowAction::Hide])
+            .on_view_options(move |w, cx| open_view(&(), w, cx))
+            .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
         if let Some(renaming) = self.renaming.clone() {
@@ -1483,7 +1714,7 @@ impl Harness {
         if let Some(selected) = selected {
             view = view.selected(selected);
         }
-        let mut column = v_flex().size_full();
+        let mut column = v_flex().size_full().child(self.render_nav_block(cx));
         if self.search_open {
             column = column.child(self.render_search(window, cx));
         }
@@ -1514,13 +1745,29 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The field the row being renamed holds.
-    fn rename_field(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The field the row being renamed holds: the library's dense recipe —
+    /// a borderless, chromeless single line at the row-title size, with the
+    /// 1 px focus border on the 22 px wrapper instead of the component. 22 px
+    /// of wrapper in 4 px of row padding is exactly the 30 px row, so siblings
+    /// never move while a rename is open. The commit path is unchanged.
+    fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let focused = self.rename.focus_handle(cx).is_focused(window);
         div()
             .w_full()
             .key_context(RENAME_CONTEXT)
             .on_action(cx.listener(|this, _: &ConfirmRename, window, cx| this.commit_rename(window, cx)))
-            .child(Textarea::new(&self.rename).text_size(aui_tokens::scaled(scale::FS_12)))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(aui::nav::DENSE_FIELD_H + 2.0))
+                    .px(px(6.0))
+                    .rounded(px(scale::R_SM))
+                    .border_1()
+                    .border_color(if focused { p.accent } else { p.line })
+                    .bg(p.surface_1)
+                    .child(dense_field(&self.rename)),
+            )
             .into_any_element()
     }
 
@@ -1545,10 +1792,10 @@ impl Harness {
         let (title, detail) = match (searching, hidden_only, empty_only) {
             (true, _, _) => ("No sessions match", "Try fewer letters, or Esc to clear."),
             (false, true, _) => {
-                ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} below to bring them back.")
+                ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.")
             }
             (false, false, true) => {
-                ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} below to see them.")
+                ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} in the Sessions menu above.")
             }
             (false, false, false) => ("No sessions yet", "\u{2318}N starts one."),
         };
@@ -1564,75 +1811,297 @@ impl Harness {
         )
     }
 
-    /// "Signed in as", with the one action a signed-in person needs here.
+    /// "Signed in as", in the library's shape: avatar, name, the email it is
+    /// really reporting, the plan row, and the provider usage meter with the
+    /// chevron. The whole footer opens the account menu — Sign out lives
+    /// there now, and the list-management toggles live in the Sessions menu.
     fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let Auth::SignedIn(identity) = &self.auth else {
             return div().into_any_element();
         };
-        let sign_out = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.logout(cx));
-        let toggle_hidden = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.show_hidden = !this.show_hidden;
-            cx.notify();
+        let account = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.open_menu(MenuKind::Account, cx);
         });
-        let toggle_empty = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.show_empty = !this.show_empty;
-            cx.notify();
-        });
-        let clear_empty = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.clear_empty(cx);
-        });
-        let hidden = self.sessions.iter().filter(|e| e.hidden).count();
-        let active = self.active_id(cx);
-        let empty = self.sessions.iter().filter(|e| e.is_empty(active.as_deref())).count();
         let mut footer = sidebar_footer("account", identity.initial(), identity.name.clone())
-            .trailing(button("sign-out", "Sign out").ghost().xs().on_click(sign_out));
+            .on_click(move |e, w, cx| account(e, w, cx));
         if !identity.email.is_empty() {
             footer = footer.detail(identity.email.clone());
         }
         // The third row: what this login is entitled to. Warning-tinted for
         // anything that is not a plan in force, because that is the case where
         // the next turn costs money nobody expected.
+        let meter = self.tier.as_ref().and_then(|tier| tier.weekly_fraction());
         if let Some(tier) = &self.tier {
             footer = footer.plan(tier.footer_label(), tier.is_warning());
+        }
+        // The meter is the weekly fraction the probe already reports; with no
+        // reading there is no meter. Either way the chevron stands, so the
+        // account menu stays discoverable — the row's own click opens it too.
+        if let Some(fraction) = meter {
+            footer = footer.meter(Provider::Muse, fraction);
         } else {
-            // No plan row yet and something is hidden: the toggle still needs
-            // a line to live on, so the row exists with nothing in it.
-            footer = footer.plan("", false);
-        }
-        // Either toggle only appears once it has something to show: an
-        // affordance for an empty set is a question nobody asked. Clearing
-        // only appears once the empty rows are on screen to be cleared. The
-        // rows stack vertically and right-aligned: the plan label keeps its
-        // fixed width and truncates first, so the buttons must stay short
-        // rather than squeeze the label into an ellipsis.
-        let mut plan_rows: Vec<AnyElement> = Vec::new();
-        if hidden > 0 {
-            let label =
-                if self.show_hidden { format!("Hide hidden ({hidden})") } else { format!("Show hidden ({hidden})") };
-            plan_rows.push(button("show-hidden", label).ghost().xs().on_click(toggle_hidden).into_any_element());
-        }
-        if empty > 0 {
-            // While the toggle is on, the rows it shows make the count
-            // redundant, and the width is needed for the plan label.
-            let label = if self.show_empty { "Hide empty".to_owned() } else { format!("Show empty ({empty})") };
-            plan_rows.push(
-                h_flex()
-                    .gap(px(scale::SP_2))
-                    .child(button("show-empty", label).ghost().xs().on_click(toggle_empty))
-                    .into_any_element(),
+            footer = footer.trailing(
+                icon_button("account-chevron", IconName::ChevronDown)
+                    .ghost()
+                    .size(ButtonSize::Xs)
+                    .icon_size(px(12.0)),
             );
-            // "Clear empty" gets its own row: beside the toggle it still
-            // squeezed the plan label into an ellipsis.
-            if self.show_empty {
-                plan_rows.push(
-                    button("clear-empty", "Clear empty").ghost().xs().on_click(clear_empty).into_any_element(),
-                );
-            }
-        }
-        if !plan_rows.is_empty() {
-            footer = footer.plan_trailing(v_flex().items_end().gap(px(scale::SP_1)).children(plan_rows));
         }
         footer.into_any_element()
+    }
+
+    /// The centre header: the active session's label ("Harness" with nothing
+    /// open), the provider mark, and the overflow menu — and nothing else.
+    /// The library's `centre_header` always paints the right-pane toggle and
+    /// the right header always paints its close button, so the shell gets a
+    /// plain cell with the same title construction instead. The shell's own
+    /// drag region wraps the whole header row, and buttons keep their clicks.
+    fn render_centre_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let label = self
+            .active
+            .as_ref()
+            .and_then(|view| {
+                let id = view.read(cx).session_id.clone();
+                self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone())
+            })
+            .unwrap_or_else(|| "Harness".to_owned());
+        let overflow =
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
+        let expand = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
+        let title = h_flex()
+            .min_w(px(0.0))
+            .gap(px(7.0))
+            .text_color(p.ink)
+            .ui(scale::FS_13)
+            .semibold()
+            .child(provider_mark(Provider::Muse))
+            .child(div().min_w(px(0.0)).truncate().child(label));
+        let _ = window;
+        let mut cell = header_cell("hd-centre");
+        if !self.sidebar_open {
+            cell = cell.child(
+                icon_button("hd-centre-expand", IconName::Sidebar)
+                    .ghost()
+                    .muted()
+                    .size(ButtonSize::Sm)
+                    .on_click(expand),
+            );
+            // The native lights own x 9–61 whether the sidebar is open or
+            // not; with the rail at 48 px the centre cell starts underneath
+            // them, so the title stands this far off.
+            cell = cell.child(div().w(px(14.0)).flex_none());
+        }
+        cell
+            .child(title)
+            .child(div().flex_1())
+            .child(
+                icon_button("hd-centre-overflow", IconName::Dots)
+                    .ghost()
+                    .muted()
+                    .size(ButtonSize::Sm)
+                    .on_click(overflow),
+            )
+            .into_any_element()
+    }
+
+    /// The collapsed rail: new-session and search cells, a separator, one dot
+    /// per running session mirroring the rows, and the account avatar.
+    fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.active_id(cx);
+        let mut items = vec![
+            RailItem::nav("new", IconName::Plus),
+            RailItem::nav("search", IconName::Search),
+            RailItem::separator(),
+        ];
+        for entry in &self.sessions {
+            if entry.hidden || entry.archived || !entry.running {
+                continue;
+            }
+            let mut cell = RailItem::session(entry.id.clone(), AgentState::Running).pulse();
+            if active.as_deref() == Some(entry.id.as_str()) {
+                cell = cell.selected(true);
+            }
+            items.push(cell);
+        }
+        let mut rail = rail("rail", items).flat(true);
+        if let Auth::SignedIn(identity) = &self.auth {
+            rail = rail.avatar(identity.initial());
+        }
+        let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
+            this.resume(id.to_string(), window, cx);
+        });
+        let action = cx.listener(|this: &mut Self, name: &str, window, cx| match name {
+            "new" => this.new_session(cx),
+            // The search palette is Task E's; until it lands this is the same
+            // quick filter the ⌘⇧F binding opens.
+            "search" => this.focus_search(window, cx),
+            "account" => this.open_menu(MenuKind::Account, cx),
+            _ => {}
+        });
+        rail
+            .on_select(move |id, w, cx| select(id, w, cx))
+            .on_action(move |name, w, cx| action(name, w, cx))
+            .into_any_element()
+    }
+
+    /// The header's overflow menu, anchored under the "…" button: Rename swaps
+    /// the title for the dense inline field, Fork opens the fork picker, and
+    /// Archive asks first through the archive dialog.
+    fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
+            return None;
+        }
+        let rows = vec![
+            MenuRow::Toggle { label: "Rename".into(), checked: false },
+            MenuRow::Toggle { label: "Fork".into(), checked: false },
+            MenuRow::Toggle { label: "Archive".into(), checked: false },
+        ];
+        let actions = [OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
+        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
+            let action = actions.get(*index).copied();
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            match action {
+                Some(OverflowAction::Rename) => {
+                    if let Some(session_id) = this.active_id(cx) {
+                        this.sidebar_open = true;
+                        this.start_rename(session_id, window, cx);
+                    } else {
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Nothing to rename", "No session is open.");
+                        });
+                    }
+                    cx.notify();
+                }
+                Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
+                Some(OverflowAction::Archive) => {
+                    if let Some(session_id) = this.active_id(cx) {
+                        this.open_archive_dialog(session_id, cx);
+                    } else {
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Nothing to archive", "No session is open.");
+                        });
+                        cx.notify();
+                    }
+                }
+                None => {}
+            }
+        });
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .top(px(48.0))
+                    .right(px(8.0))
+                    .child(view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The Sessions caption's view menu: where list management lives now that
+    /// the footer is the library's account row again.
+    fn render_view_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
+            return None;
+        }
+        let active = self.active_id(cx);
+        let hidden = self.sessions.iter().filter(|e| e.hidden).count();
+        let empty = self.sessions.iter().filter(|e| !e.archived && e.is_empty(active.as_deref())).count();
+        let archived = self.sessions.iter().filter(|e| e.archived).count();
+        let mut rows: Vec<MenuRow> = Vec::new();
+        let mut actions: Vec<Option<ViewAction>> = Vec::new();
+        // Either toggle only appears once it has something to show: an
+        // affordance for an empty set is a question nobody asked.
+        if empty > 0 || self.show_empty {
+            let label = if self.show_empty {
+                "Hide empty".to_owned()
+            } else {
+                format!("Show empty ({empty})")
+            };
+            rows.push(MenuRow::Toggle { label: label.into(), checked: self.show_empty });
+            actions.push(Some(ViewAction::ToggleEmpty));
+        }
+        if hidden > 0 || self.show_hidden {
+            let label = if self.show_hidden {
+                "Hide hidden".to_owned()
+            } else {
+                format!("Show hidden ({hidden})")
+            };
+            rows.push(MenuRow::Toggle { label: label.into(), checked: self.show_hidden });
+            actions.push(Some(ViewAction::ToggleHidden));
+        }
+        if empty > 0 {
+            rows.push(MenuRow::Toggle { label: "Clear empty".into(), checked: false });
+            actions.push(Some(ViewAction::ClearEmpty));
+        }
+        if !rows.is_empty() {
+            rows.push(MenuRow::Separator);
+            actions.push(None);
+        }
+        let archived_label = if self.show_archived {
+            "Hide archived".to_owned()
+        } else {
+            format!("Show archived ({archived})")
+        };
+        rows.push(MenuRow::Toggle { label: archived_label.into(), checked: self.show_archived });
+        actions.push(Some(ViewAction::ToggleArchived));
+        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
+            match actions.get(*index).copied().flatten() {
+                // Toggles keep the menu open, so the check is seen to change.
+                Some(ViewAction::ToggleEmpty) => {
+                    this.show_empty = !this.show_empty;
+                    cx.notify();
+                }
+                Some(ViewAction::ToggleHidden) => {
+                    this.show_hidden = !this.show_hidden;
+                    cx.notify();
+                }
+                Some(ViewAction::ToggleArchived) => {
+                    this.show_archived = !this.show_archived;
+                    cx.notify();
+                }
+                Some(ViewAction::ClearEmpty) => {
+                    this.overlays.update(cx, |overlays, _| overlays.menu = None);
+                    this.clear_empty(cx);
+                }
+                None => {}
+            }
+        });
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .top(px(140.0))
+                    .left(px(12.0))
+                    .child(view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The footer's account menu: Sign out, and nothing else.
+    fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.overlays.read(cx).is_open(MenuKind::Account) {
+            return None;
+        }
+        let rows = vec![MenuRow::Toggle { label: "Sign out".into(), checked: false }];
+        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
+            if *index == 0 {
+                this.overlays.update(cx, |overlays, _| overlays.menu = None);
+                this.logout(cx);
+            }
+        });
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .bottom(px(100.0))
+                    .left(px(12.0))
+                    .child(view_menu("account", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+            )
+            .into_any_element(),
+        )
     }
 
     /// The reconnect banner, above everything in the centre column.
@@ -1896,11 +2365,19 @@ impl Harness {
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Read the modal out whole before anything asks `cx` for a listener:
         // the entity's borrow and `cx.listener` cannot be alive at once.
-        let (title, detail, kind, primary_label, action) = {
+        let (title, detail, kind, primary_label, action, danger) = {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
-            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action)
+            let danger = modal.action == DialogAction::Archive;
+            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, danger)
         };
-        let primary = cx.listener(move |this: &mut Self, _: &(), _, cx| {
+        // The archive target stays on the dialog until its own button runs:
+        // closing it any other way drops the target with it.
+        let secondary = if danger { "Cancel" } else { "Dismiss" };
+        let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
+            if action == DialogAction::Archive {
+                this.confirm_archive_dialog(window, cx);
+                return;
+            }
             this.close_dialog(cx);
             match action {
                 DialogAction::Dismiss => {}
@@ -1913,6 +2390,7 @@ impl Harness {
                     this.active = None;
                     this.login = Login::default();
                 }
+                DialogAction::Archive => {}
             }
             cx.notify();
         });
@@ -1923,6 +2401,8 @@ impl Harness {
         Some(
             popover_layer(
                 div()
+                    .absolute()
+                    .inset_0()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
                     .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
@@ -1930,7 +2410,8 @@ impl Harness {
                         dialog("dialog", title)
                             .kind(kind)
                             .body(detail)
-                            .secondary("Dismiss")
+                            .danger(danger)
+                            .secondary(secondary)
                             .primary(primary_label)
                             .on_primary(move |w, cx| primary(&(), w, cx))
                             .on_secondary(move |w, cx| close(&(), w, cx))
@@ -1975,26 +2456,23 @@ impl Render for Harness {
             let sidebar = self.render_sidebar(window, cx);
             let centre = self.render_centre(window, cx);
             app_shell("shell")
-                .traffic_lights(true)
+                // Painted lights off: the window owns real, glossy ones, and
+                // the painted set only ever stacked underneath them.
+                .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
                 .right_open(self.right_open)
                 .header_sidebar(
                     sidebar_header("hd-side")
-                        .traffic_lights(true)
+                        .traffic_lights(false)
                         .collapsed(!self.sidebar_open)
                         .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
-                .header_centre({
-                    let mut centre = centre_header("hd-centre", self.workspace_name())
-                        .provider(aui_icons::Provider::Muse)
-                        .on_toggle_right(cx.listener(|this, _, _, cx| this.toggle_right(cx)));
-                    if !self.sidebar_open {
-                        centre = centre.on_expand_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
-                    }
-                    centre
-                })
-                .header_right(right_header("hd-right").on_close(cx.listener(|this, _, _, cx| this.toggle_right(cx))))
+                .header_centre(self.render_centre_header(window, cx))
+                // The right pane's slot is present and empty; its header cell
+                // carries nothing until the pane arrives.
+                .header_right(header_cell("hd-right").child(div()))
                 .sidebar(sidebar)
+                .rail(self.render_rail(cx))
                 // The right pane's slot is present and empty: the shell keeps
                 // the column, so nothing has to move when Phase 5 fills it.
                 .right(div().size_full())
@@ -2006,6 +2484,9 @@ impl Render for Harness {
         let dialog = self.render_dialog(cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
+        let overflow = self.render_overflow_menu(cx);
+        let view_options = self.render_view_menu(cx);
+        let account = self.render_account_menu(cx);
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it.
         if palette.is_some() && !self.focus_palette.is_focused(window) {
@@ -2042,7 +2523,10 @@ impl Render for Harness {
                 .child(body)
                 .children(toasts)
                 .children(palette)
-                .children(dialog),
+                .children(dialog)
+                .children(overflow)
+                .children(view_options)
+                .children(account),
         )
     }
 }
@@ -2052,9 +2536,6 @@ impl Harness {
         self.sidebar_open = !self.sidebar_open;
         cx.notify();
     }
-
-    /// The right pane is out of scope this phase; the toggle stays wired.
-    fn toggle_right(&mut self, _cx: &mut Context<Self>) {}
 
     /// ⌘⇧M / ⌘⇧E / ⌘⇧P: the same toggle the chip's own click does.
     fn open_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
@@ -2075,10 +2556,11 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismissed));
             cx.notify();
         });
-        // One action exists, and it is Undo on hidden sessions — one row, or
-        // one "Clear empty" batch.
+        // One action exists, and it is Undo — one hidden row, one "Clear
+        // empty" batch, or one archived session, whichever the newest toast
+        // was for.
         let act = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.unhide_newest(cx);
+            this.undo_newest(cx);
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));
             cx.notify();
         });

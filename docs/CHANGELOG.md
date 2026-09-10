@@ -1,5 +1,60 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (A) — shell: header and sidebar
+
+The header shows the active session's label ("Harness" with nothing open) with
+the provider mark and an overflow "…" menu (Rename, Fork, Archive); the shell
+paints no traffic lights of its own, so only the window's native set remains.
+There is no right-pane toggle and no right-header close button — the right
+slot stays empty with `right_open = false` (the library always paints those
+two icons, so the shell uses a plain header cell with the same title
+construction instead of `centre_header`/`right_header`). The shell's drag
+region wraps the header row: press-drag moves the window, double-click zooms,
+and the buttons keep their clicks. Collapsed, the column is the library rail
+(`flat(true)`: New and Search cells, a separator, one dot per running session,
+the account avatar) at 48 px, and the centre title stands 14 px off so it
+clears the native lights.
+
+Above the Sessions caption sit New session (Plus, ⌘N) and Automations (Zap,
+muted "Soon" tag — a placeholder that answers with a toast). The caption's
+sliders icon opens the view menu: Show/Hide empty, Show/Hide hidden (legacy
+`/hide` rows), Clear empty, Show/Hide archived. The footer is the library's
+account row again — avatar, name, email, plan row, the tier probe's weekly
+fraction as the usage meter (omitted while unknown, chevron always shown) —
+and opens the account menu whose only row is Sign out.
+
+`SessionMeta` gains `pinned`, `archived` and `last_summary` (all camelCase,
+old files still read); row actions are Pin, Rename and Archive, with a Pinned
+group first and a muted Archived tag on shown archives. Archive asks first
+through a danger dialog and offers an eight-second Undo on a toast, sharing
+one undo stack with hide/Clear-empty; archiving the open session opens the
+newest remaining visible session (or the empty state), and archives stay out
+of Clear-empty. Every row shows one muted second line — `last_summary`, else
+the first prompt, else the derived title — written free from the in-memory
+fold on `turn/completed` (first line, ≤ 120 chars). Rename uses the library's
+`dense_field` in its 22 px wrapper, so the editing row keeps 30 px. Row
+gutters measure 8 px left / 8 px right (±1 for radius) on the replay capture,
+so no harness container change was needed beyond the library's row-idiom fix.
+New `--steps` verbs: `sidebar`, `overflow`, `view-menu`, `account`, `pin`,
+`archive`, `archive-confirm`, `show-archived`. No key bindings changed, so
+`docs/08-keymap.md` is untouched. `docs/02-app.md` §4–§5 describe the header,
+rail, nav rows, view menu, pin/archive and footer.
+
+- Screenshots (all `--replay fixtures/msp/transcript-real.jsonl`, 15 s
+  delay): `docs/images/improve-shell-{open,collapsed,overflow,viewmenu,
+  account,rename,dialog,archived,pinned}-{dark,light}.png`.
+- Covered by five new offline unit tests (`describe` precedence and cap,
+  pin/archive/summary store retention and camelCase round-trip, weekly
+  fraction); the description line itself is screenshot-proven only in
+  structure — replay rows carry no summary, and writing one needs a live
+  completed turn.
+- Not done: rail dots cover running sessions only (the harness tracks no
+  waiting state); header menus are click + Escape driven with no arrow-key
+  selection; the view menu floats at a fixed offset under the caption rather
+  than anchored to the sliders icon.
+
+## 2026-09-09 — Improvements (E) — fork picker
+
 ## 2026-09-09 — Improvements (E) — fork picker
 
 `/fork` used to fork the newest completed turn with no say in the matter; the

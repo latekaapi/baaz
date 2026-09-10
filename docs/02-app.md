@@ -143,17 +143,13 @@ On success the app **respawns `muse serve`**: the credential is ambient and the
 old child inherited none, so the connection has to be made again before it can
 be used. Then the probe runs again and the app enters.
 
-The sidebar footer shows `user_full_name` over `user_email` and carries a
-"Sign out" button, which runs `muse logout` and returns to the login screen.
-The plan row carries the list toggles: "Show hidden (n)" once something is
-hidden, and "Show empty (n)" once a session with no turns exists — both
-`ghost().xs()` buttons that appear only when their count is above zero. The
-buttons stack in short right-aligned rows — hidden row, empty-toggle row,
-"Clear empty" row — because the plan label keeps a fixed width and
-truncates first. While the empty rows are on screen the toggle reads "Hide
-empty" with no count, and "Clear empty" on its own row hides them all
-through the same `hidden = true` override as `/hide`, with the same
-eight-second Undo.
+The sidebar footer is the library's account row: `user_full_name` over
+`user_email`, the plan row (`Weekly …` label, warning-tinted when it is not a
+plan in force), and the provider usage meter fed by the tier probe's weekly
+fraction — omitted while the probe has said nothing usable. The whole footer
+opens the account menu, whose only row is **Sign out** (`muse logout`, back to
+the login screen). No list-management buttons live in the footer any more;
+they moved to the Sessions caption's view menu (see §5).
 
 The on-state screenshots live in a scratch workspace
 (`/private/tmp/harness-ws`): freshly started turn-less sessions are pruned
@@ -182,7 +178,47 @@ falls back to `Session <first id group>`. Nothing ever writes to it.
 
 The rows are the library's `SessionSummary`, grouped by **calendar day** —
 Today / Yesterday / This week / This month / Earlier — and rendered by
-`nav::sidebar_view` in its date grouping.
+`nav::sidebar_view` in its date grouping, with a **Pinned** group first
+whenever a session is pinned (the library partitions `pinned` rows out of the
+date buckets itself).
+
+Every row carries one muted second line: `last_summary` when a turn completed
+in this app, else the index's first prompt, else the derived title — through
+the row's own one-line cap, with the "N turns" meta after it. `last_summary`
+is written on `turn/completed` from the first line (≤ 120 chars) of the last
+assistant text block: the fold is already in memory, so it costs no model
+call, and it persists through `sessions.json` beside the name, the hidden and
+archived flags, the pin and the derived title.
+
+Above the Sessions caption sit two `nav_item` rows: **New session** (Plus,
+the ⌘N in the sidebar) and **Automations** (Zap) with a muted "Soon" tag —
+a placeholder with no destination yet, so it answers with a toast saying so.
+The caption's sliders icon opens the **view menu**: Show empty (n) / Hide
+empty, Show hidden (n) / Hide hidden (the legacy `/hide` rows), Clear empty,
+and Show archived (n) / Hide archived. Toggles keep the menu open so the
+check is seen to change; Clear empty closes it and hides through the same
+`hidden = true` override as `/hide`, with the same eight-second Undo.
+Archived sessions are excluded from the list and from Clear-empty; shown,
+they carry a muted Archived tag and their Archive tray action puts them back.
+
+Row actions are Pin, Rename and Archive. Pin regroups the list around the
+Pinned group. Rename opens the dense inline field — the library's
+`dense_field` in its 22 px bordered wrapper, so the editing row keeps the 30
+px row height and siblings never move — committing through the existing
+`/name` path and cancelling on Escape. Archive opens a danger dialog
+("Archive \"<label>\"? — archived sessions stay on disk and return through
+the Sessions menu"); on confirm the session leaves the list, the newest
+remaining visible session opens (or the empty state), and a toast offers Undo
+for eight seconds.
+
+Collapsed (⌘B), the sidebar column is the library `rail` (`flat(true)`):
+New and Search cells, a separator, one dot per running session mirroring the
+rows' selection and pulse, and the account avatar. The Search cell opens the
+same quick filter ⌘⇧F does until the search palette lands. The window-level
+`--steps` verbs for all of this are `sidebar` (toggle), `overflow`,
+`view-menu`, `account`, `pin`, `archive`, `archive-confirm`, and
+`show-archived`, beside the older `search`,
+`palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 
 Opening a session is `session/resume { excludeItems: true }` to attach, then
 `view/page` forward from the beginning of the view, paging on `nextCursor` until
@@ -192,8 +228,18 @@ the path that is contiguous, ordered and bounded, and it never replays
 `item/delta`, so a backfilled message arrives whole and the fold takes it that
 way.
 
-⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail. Rename,
-hide and search are Phase 5 and are not built.
+⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail.
+
+The shell paints no traffic lights of its own — the window's native ones are
+the only set. The centre header shows the active session's label ("Harness"
+with nothing open) with the provider mark and the overflow "…" menu (Rename,
+Fork, Archive); there is no right-pane toggle and no right-header close
+button — the right pane's slot stays empty and `right_open` stays false. The
+shell wraps the header row in its drag region, so press-drag moves the window
+and double-click zooms while the buttons and the rename field keep their
+clicks. Collapsed, the rail column is 48 px and the centre title stands 14 px
+off so it clears the native lights (x 9–61), chosen from the collapsed
+screenshot rather than from guesswork.
 
 ---
 
