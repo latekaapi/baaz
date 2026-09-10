@@ -22,7 +22,7 @@ use aui::transcript::{
     goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
     tool_card, user_turn, QuestionOutcome, ToolCardIntent,
 };
-use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, Turn, TurnMeta};
+use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, ToolCall, Turn, TurnMeta};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
@@ -361,49 +361,25 @@ fn block(
                 .on_toggle(toggle)
                 .into_any_element()
         }
-        Block::ToolCall { id: block_id, kind: _, verb, target, status, duration_ms, body, .. } => {
-            let full = folds.full_output.get(block_id);
-            let mut body = body.clone();
-            // A fetched full output replaces the truncated visible text on the
-            // server's result only (D4): the fold never changes, the card just
-            // renders what the fetch returned.
-            if let (ToolBody::Shell { output_lines, .. }, Some(full)) = (&mut body, full) {
-                if let FullOutputState::Ready { lines, capped } = &full.state {
-                    *output_lines = lines.clone();
-                    if *capped {
-                        output_lines.push(crate::full_output::CAPPED_MARKER.to_owned());
-                    }
-                }
-            }
-            // The card's own action slot: its fold row already emits Unfold,
-            // so on a truncated card that intent is "Show full output" and
-            // fetches; everywhere else every intent still just toggles, as
-            // before. The row's label stays the library's ("N more lines") —
-            // the library owns the card's text and this app does not change
-            // it.
-            let (fetchable, idle) = full
-                .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
-                .unwrap_or((false, false));
-            let show = folds.show_full_output.clone();
-            let block_id = block_id.clone();
-            tool_card(id, verb.clone(), target.clone(), *status, body)
-                .duration_ms(*duration_ms)
-                .open(folds.open(key, true))
-                .on_intent({
-                    let toggle = folds.toggle.clone();
-                    let key = key.to_owned();
-                    move |intent, window, cx| match intent {
-                        ToolCardIntent::Unfold if fetchable && idle => {
-                            if let Some(show) = &show {
-                                show(block_id.clone(), window, cx);
-                            } else {
-                                toggle(key.clone(), window, cx);
-                            }
-                        }
-                        _ => toggle(key.clone(), window, cx),
-                    }
+        Block::ToolCall { .. } => {
+            let Some(call) = block.as_tool_call() else {
+                return generic_item_card(id, "tool", "done", String::new()).into_any_element();
+            };
+            tool_call_card(key, id, &call, folds)
+        }
+        // A grouped run renders as its individual cards until the fold learns
+        // the group's own open state: same card, same toggles, one per call.
+        Block::ToolGroup { calls, .. } => {
+            let cards = calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    let sub_key = format!("{key}:{index}");
+                    let sub_id = ElementId::from(SharedString::from(sub_key.clone()));
+                    tool_call_card(&sub_key, sub_id, call, folds)
                 })
-                .into_any_element()
+                .collect::<Vec<_>>();
+            v_flex().w_full().gap(px(8.0)).children(cards).into_any_element()
         }
         Block::Approval { id: approval_id, tool, command, reason, cwd, capabilities, scope, state, rule, choices, stages, current_stage, badges, feedback, resolved_by } => {
             let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
@@ -553,6 +529,54 @@ fn block(
         }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
     }
+}
+
+/// One tool invocation as its card: the body the lone `Block::ToolCall` would
+/// have shown, with the same fold toggle and full-output fetch keyed by the
+/// call's own id (so grouped calls behave like lone ones).
+fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> AnyElement {
+    let block_id = call.id.clone();
+    let full = folds.full_output.get(&block_id);
+    let mut body = call.body.clone();
+    // A fetched full output replaces the truncated visible text on the
+    // server's result only (D4): the fold never changes, the card just
+    // renders what the fetch returned.
+    if let (ToolBody::Shell { output_lines, .. }, Some(full)) = (&mut body, full) {
+        if let FullOutputState::Ready { lines, capped } = &full.state {
+            *output_lines = lines.clone();
+            if *capped {
+                output_lines.push(crate::full_output::CAPPED_MARKER.to_owned());
+            }
+        }
+    }
+    // The card's own action slot: its fold row already emits Unfold,
+    // so on a truncated card that intent is "Show full output" and
+    // fetches; everywhere else every intent still just toggles, as
+    // before. The row's label stays the library's ("N more lines") —
+    // the library owns the card's text and this app does not change
+    // it.
+    let (fetchable, idle) = full
+        .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
+        .unwrap_or((false, false));
+    let show = folds.show_full_output.clone();
+    tool_card(id, call.verb.clone(), call.target.clone(), call.status, body)
+        .duration_ms(call.duration_ms)
+        .open(folds.open(key, true))
+        .on_intent({
+            let toggle = folds.toggle.clone();
+            let key = key.to_owned();
+            move |intent, window, cx| match intent {
+                ToolCardIntent::Unfold if fetchable && idle => {
+                    if let Some(show) = &show {
+                        show(block_id.clone(), window, cx);
+                    } else {
+                        toggle(key.clone(), window, cx);
+                    }
+                }
+                _ => toggle(key.clone(), window, cx),
+            }
+        })
+        .into_any_element()
 }
 
 /// The collapsed row a settled question leaves behind.

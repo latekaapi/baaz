@@ -74,7 +74,14 @@ components with intents out, `popover_layer` for overflow, both themes.
 
 ## Working model
 
-One Opus lead per work package from a self-contained brief (`docs/briefs/` has the shape);
-the main session designs, reviews the diff, reruns one gate, reads the screenshots and
-counts spend itself. A lead that stalls is replaced by a fresh one told to inventory the
-uncommitted trees first; leads leave buildable trees.
+Fable (Claude) designs, writes briefs (`docs/briefs/` has the shape), audits diffs, reruns
+one gate, reads the screenshots, counts spend and commits. **Muse Code implements**:
+`muse exec --json --workspace "$PWD" --trust-workspace --approval-mode never
+--disable-sandbox --user-input-auto-resolve --max-model-steps N --prompt-file
+docs/briefs/<brief>.md` for one package; for parallel packages, prompt a workflow ("use a
+workflow with N children, one per task, each in its own sibling worktree
+`../harness-wt-<task>`, then one integration step") with `--parallel-tool-calls`. Launch it
+with `nohup` from a small script (a Claude Bash call times out at 10 min; `setsid` does not
+exist on macOS) and watch a sentinel file, the worktrees' git state, or the session's
+`session.jsonl`. Briefs say "do NOT commit" unless a branch is named; library changes run
+first as their own package. Operator guide: `docs/11-muse-workflows.md`.
