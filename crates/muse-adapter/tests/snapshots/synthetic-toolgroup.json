@@ -203,6 +203,95 @@
             "reasoning_tokens": 0,
             "cost_usd": 0.0
           }
+        },
+        {
+          "kind": "user",
+          "id": "i-tg2-user-1",
+          "text": "Run the checks.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-2",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg2-bash-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": 8100,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[test] running 42 tests",
+                      "[test] .... ok"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg2-bash-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace --all-targets",
+                  "status": "success",
+                  "duration_ms": 3200,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[lint] clippy clean"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg2-bash-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": 12400,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] linking harness",
+                      "[build] finished in 12.4 s"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "text",
+              "text": "All three checks pass: tests, lint and build.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 24000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
         }
       ]
     },
@@ -220,7 +309,7 @@
       "pending_inputs": {},
       "model": null,
       "approval_mode": "onRequest",
-      "last_cursor": "v:syn:18",
+      "last_cursor": "v:syn:25",
       "command_text": {},
       "restored_prompt": null
     }
