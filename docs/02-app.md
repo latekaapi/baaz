@@ -195,6 +195,17 @@ way.
 ⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail. Rename,
 hide and search are Phase 5 and are not built.
 
+The sidebar is resizable: a 6 px transparent strip over the sidebar/centre
+divider carries the horizontal-resize cursor, and dragging it sets the width
+to `clamp(start_w + dx, 180, 420)` (`aui::shell` tokens). Mid-drag a
+full-window capture overlay owns every move and the release, and the shell
+skips its layout spring so the divider tracks the pointer; the spring
+re-arms on release. The drag clears on mouse-up anywhere and on window
+blur. The settled width persists globally in `layout.json` under the
+harness support dir (restored at boot, clamped on load); double-clicking
+the handle resets to the 252 px default. `--steps sidebar-width:<px>`
+scripts a settled width for screenshots.
+
 ---
 
 ## 6. The centre pane
