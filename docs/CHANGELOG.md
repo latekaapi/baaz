@@ -1,5 +1,34 @@
 # Harness changelog
 
+## 2026-09-10 — Improvements (F) — resizable sidebar
+
+The sidebar divider is now a drag target. A 6 px transparent strip
+(`aui::shell::resize_handle`) sits over the sidebar/centre divider with the
+horizontal-resize cursor; the press arms the drag (`sidebar_width`,
+`resizing`, `grab_x`, `start_w` on `Harness`), every move sets
+`clamp(start_w + dx, 180, 420)` through the library tokens, and a
+full-window `drag_capture_overlay` owns moves and the release while the drag
+is in flight, so outrunning the strip never stalls it. `AppShell::resizing`
+skips the layout spring mid-drag so the divider tracks the pointer, and the
+spring re-arms on release for the settle. The drag clears on mouse-up
+anywhere and when the window loses focus mid-drag.
+
+The settled width persists globally (not per workspace) in
+`~/Library/Application Support/harness/layout.json` via the same
+atomic-write/best-effort-read store pattern as the sessions file
+(`crates/harness/src/layout.rs`), restored at boot and clamped on the way
+in. A double-click on the handle resets to the 252 px default: the handle
+reports positions only, never the click count, so two taps with no travel
+inside 500 ms are the reset signal. Scripted as `--steps sidebar-width:<px>`
+(clamped, settled, persisted like a released drag).
+
+- Screenshots: `docs/images/improve-resize-{min,default,max}-{dark,light}.png`
+  are `--replay fixtures/msp/transcript-real.jsonl` at 180/252/420 px, taken
+  with `--screenshot --screenshot-delay 15000` so they cost nothing.
+- Covered by four offline unit tests on the drag math and the store default
+  (`layout::drag_width`, `layout::sidebar_width`); no test opens a real
+  session. Documented in `docs/02-app.md` §5.
+
 ## 2026-09-09 — Improvements (E) — fork picker
 
 `/fork` used to fork the newest completed turn with no say in the matter; the

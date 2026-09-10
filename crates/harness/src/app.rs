@@ -31,7 +31,10 @@ use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, T
 use aui::nav::{sidebar_footer, sidebar_search, sidebar_view, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui::screens::{login, LoginIntent, LoginState};
-use aui::shell::{app_shell, centre_header, right_header, sidebar_header};
+use aui::shell::{
+    RESIZE_HANDLE_W, SIDEBAR_WIDTH, app_shell, centre_header, clamp_sidebar_width, drag_capture_overlay,
+    resize_handle, right_header, sidebar_header,
+};
 use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use futures::channel::mpsc::UnboundedReceiver;
@@ -56,7 +59,7 @@ use crate::session::{SessionEvent, SessionView, TierBanner};
 use crate::tier::{self, Tier};
 use crate::sessions::{self, SessionMeta};
 use crate::sidebar::{self, SessionEntry};
-use crate::{files, skills, Args};
+use crate::{files, layout, skills, Args};
 
 actions!(
     harness,
@@ -219,6 +222,24 @@ pub struct Harness {
     /// off the composer's own chips (spec §2.3).
     overlays: Entity<Overlays>,
     sidebar_open: bool,
+    /// The sidebar divider's current x, in window pixels. Local state until
+    /// the drag settles, then `layout.json` (see [`crate::layout`]).
+    sidebar_width: f32,
+    /// A resize drag is in flight: the shell skips its layout spring so the
+    /// divider tracks the pointer, and the capture overlay owns every move.
+    resizing: bool,
+    /// The pointer x where the drag started, in window pixels.
+    grab_x: f32,
+    /// [`Self::sidebar_width`] when the drag started: every move measures
+    /// from here, so a stalled frame can never compound an error.
+    start_w: f32,
+    /// How far the width has travelled this drag, in pixels. A release with
+    /// no travel shortly after the previous one is a double-click, which
+    /// resets to the default: the handle reports positions only, never the
+    /// click count, so quick taps are the only double-click signal it gives.
+    drag_moved: f32,
+    /// When the last drag ended, for the double-click reset above.
+    last_release: Option<std::time::Instant>,
     /// The right pane's slot exists; nothing opens it in this phase.
     right_open: bool,
     /// Whether `initialize` granted `userShell`. Requested in `conn::connect`;
@@ -271,6 +292,8 @@ impl Harness {
     pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| composer_state_rows("Search sessions", 1, 1, window, cx));
         let rename = cx.new(|cx| composer_state_rows("Name this session", 1, 1, window, cx));
+        // The divider's last settled x, or the default for a fresh store.
+        let restored = layout::sidebar_width(&layout::read());
         let mut this = Self {
             args,
             client: None,
@@ -282,6 +305,12 @@ impl Harness {
             active: None,
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
+            sidebar_width: restored,
+            resizing: false,
+            grab_x: 0.0,
+            start_w: restored,
+            drag_moved: 0.0,
+            last_release: None,
             right_open: false,
             user_shell: true,
             focus_root: cx.focus_handle(),
@@ -847,6 +876,16 @@ impl Harness {
             }
             "empty" => {
                 self.show_empty = !self.show_empty;
+                cx.notify();
+            }
+            // A scripted width for the resize screenshots: clamped and
+            // settled exactly like a released drag, minus the pointer.
+            "sidebar-width" => {
+                if let Ok(width) = rest.parse::<f32>() {
+                    self.sidebar_width = clamp_sidebar_width(width);
+                    self.resizing = false;
+                    self.persist_width();
+                }
                 cx.notify();
             }
             _ => return false,
@@ -1968,13 +2007,22 @@ impl Render for Harness {
             window.set_window_title(&title);
             self.window_title = Some(title);
         }
+        // A release outside the window never reaches the overlay: a drag that
+        // is still armed while the window is inactive is over, settled where
+        // it stands. One write, on the transition; the frame renders clean.
+        if self.resizing && !window.is_window_active() {
+            self.resizing = false;
+            self.persist_width();
+        }
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
         let body: AnyElement = if signed_in {
             let sidebar = self.render_sidebar(window, cx);
             let centre = self.render_centre(window, cx);
-            app_shell("shell")
+            let shell = app_shell("shell")
+                .sidebar_width(px(self.sidebar_width))
+                .resizing(self.resizing)
                 .traffic_lights(true)
                 .sidebar_open(self.sidebar_open)
                 .right_open(self.right_open)
@@ -1999,13 +2047,56 @@ impl Render for Harness {
                 // the column, so nothing has to move when Phase 5 fills it.
                 .right(div().size_full())
                 .centre(centre)
-                .into_any_element()
+                .into_any_element();
+            // The strip sits over the divider, centred on the settled edge:
+            // the handle reports the drag, this only positions it. Hidden
+            // with the sidebar: there is no divider to grab on the rail.
+            let mut stack = div().relative().size_full().child(shell);
+            if self.sidebar_open {
+                let press = cx.entity().downgrade();
+                let travel = cx.entity().downgrade();
+                let release = cx.entity().downgrade();
+                stack = stack.child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .left(px(self.sidebar_width - RESIZE_HANDLE_W / 2.0))
+                        .child(
+                            resize_handle("sidebar-resize")
+                                .on_drag_start(move |x, _, cx| {
+                                    press.update(cx, |this, cx| this.begin_resize(x, cx)).ok();
+                                })
+                                .on_drag(move |x, _, cx| {
+                                    travel.update(cx, |this, cx| this.drag_resize(x, cx)).ok();
+                                })
+                                .on_drag_end(move |_, cx| {
+                                    release.update(cx, |this, cx| this.end_resize(cx)).ok();
+                                }),
+                        ),
+                );
+            }
+            stack.into_any_element()
         } else {
             self.render_login(cx).into_any_element()
         };
         let dialog = self.render_dialog(cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
+        // Mid-drag the overlay covers the window, so the drag survives the
+        // pointer outrunning the 6 px strip; moves alone would go silent.
+        let capture: Option<AnyElement> = self.resizing.then(|| {
+            let travel = cx.entity().downgrade();
+            let release = cx.entity().downgrade();
+            drag_capture_overlay("resize-capture")
+                .on_drag(move |x, _, cx| {
+                    travel.update(cx, |this, cx| this.drag_resize(x, cx)).ok();
+                })
+                .on_drag_end(move |_, cx| {
+                    release.update(cx, |this, cx| this.end_resize(cx)).ok();
+                })
+                .into_any_element()
+        });
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it.
         if palette.is_some() && !self.focus_palette.is_focused(window) {
@@ -2040,6 +2131,7 @@ impl Render for Harness {
                     window.focus_prev(cx);
                 })
                 .child(body)
+                .children(capture)
                 .children(toasts)
                 .children(palette)
                 .children(dialog),
@@ -2047,9 +2139,62 @@ impl Render for Harness {
     }
 }
 
+/// Two taps with no travel count as a double-click: the handle reports
+/// positions only, never the click count, so recency is the reset signal.
+const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl Harness {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        cx.notify();
+    }
+
+    /// The divider's settled x, for `layout.json`. Small and synchronous like
+    /// the sessions store: one pretty object, best-effort.
+    fn persist_width(&self) {
+        layout::write(&layout::Layout { sidebar_width: Some(self.sidebar_width) });
+    }
+
+    /// The press on the resize strip: arm the drag from the grab point.
+    fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        self.resizing = true;
+        self.grab_x = x;
+        self.start_w = self.sidebar_width;
+        self.drag_moved = 0.0;
+        cx.notify();
+    }
+
+    /// A move with the button held: the divider follows from where the drag
+    /// started, clamped, with no spring between it and the pointer.
+    fn drag_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        if !self.resizing {
+            return;
+        }
+        let width = layout::drag_width(self.start_w, self.grab_x, x);
+        self.drag_moved = self.drag_moved.max((width - self.start_w).abs());
+        self.sidebar_width = width;
+        cx.notify();
+    }
+
+    /// The release, wherever it lands: disarm, settle, persist. A release
+    /// with no travel shortly after the previous one is the handle's
+    /// double-click, which resets to the default width instead of keeping a
+    /// tap that moved nothing.
+    fn end_resize(&mut self, cx: &mut Context<Self>) {
+        if !self.resizing {
+            return;
+        }
+        self.resizing = false;
+        let now = std::time::Instant::now();
+        if self.drag_moved < 2.0
+            && self.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW)
+        {
+            self.sidebar_width = SIDEBAR_WIDTH;
+            self.last_release = None;
+        } else {
+            self.last_release = Some(now);
+        }
+        self.persist_width();
         cx.notify();
     }
 
