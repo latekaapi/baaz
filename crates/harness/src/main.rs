@@ -73,6 +73,26 @@ const WINDOW_MIN_H: f32 = 600.0;
 /// frames to settle.
 const SHOT_DELAY: Duration = Duration::from_millis(600);
 
+/// Which login-screen state `--no-connect` boots into, for captures. Only
+/// sample data is ever shown: the URL, the code and the key-shaped field
+/// text are the example values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoginSample {
+    /// The method choice (the default).
+    #[default]
+    Choose,
+    /// The device flow mid-poll, with the example URL and code.
+    Device,
+    /// The API-key form, with a sample string in the masked field.
+    ApiKey,
+    /// The API-key form with an inline rejection.
+    ApiKeyError,
+    /// `account/loginStart {apiKey}` in flight.
+    Validating,
+    /// A failed flow, with both ways out.
+    Error,
+}
+
 /// Everything the command line and the environment decide.
 #[derive(Clone, Debug)]
 pub struct Args {
@@ -162,6 +182,31 @@ pub struct Args {
     /// approval needs — a shell command under `promptUnmatched` raises a real,
     /// server-minted approval and makes no model call.
     pub approval_mode: Option<muse_client::schema::ApprovalMode>,
+    /// `--login <state>`: which login-screen state `--no-connect` boots
+    /// into for a capture — `choose` (the default), `device`, `apikey`,
+    /// `apikey-error`, `validating` or `error`. Honoured only without a
+    /// connection; a live boot always starts at the method choice and lets
+    /// `account/read` decide.
+    pub login: LoginSample,
+    /// `--login-steps <a;b;c>`: what to do on the login screen before the
+    /// capture. Honoured only when the app is really connected (never with
+    /// `--no-connect` / `--replay`), run once the login screen is up, one
+    /// step per item, the same `;`-separated parsing as `--steps`.
+    ///
+    /// | step | what it does |
+    /// |---|---|
+    /// | `account` | start the device flow (the browser opens) |
+    /// | `apikey` | open the API-key form |
+    /// | `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
+    /// | `submit` | submit the API-key form |
+    /// | `wait:<ms>` | let the wire catch up before the next step |
+    ///
+    /// The key travels from the environment into the field and then into the
+    /// wire call: it never appears in argv, a log or a screenshot argument.
+    /// After sign-in the ordinary `--steps` run as today, so
+    /// `--login-steps 'apikey;key-from-env:MUSE_TEST_KEY;submit;wait:8000'
+    /// --screenshot …` captures the signed-in shell on the API-key lane.
+    pub login_steps: Vec<String>,
 }
 
 fn parse_args() -> Args {
@@ -186,6 +231,8 @@ fn parse_args() -> Args {
         tier: None,
         print_tier: false,
         approval_mode: None,
+        login: LoginSample::Choose,
+        login_steps: Vec::new(),
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -251,6 +298,22 @@ fn parse_args() -> Args {
                     .unwrap_or_else(|| usage(&format!("unknown approval mode `{value}`"))),
                 );
             }
+            "--login" => {
+                let value = args.next().unwrap_or_default();
+                out.login = match value.as_str() {
+                    "choose" => LoginSample::Choose,
+                    "device" => LoginSample::Device,
+                    "apikey" => LoginSample::ApiKey,
+                    "apikey-error" => LoginSample::ApiKeyError,
+                    "validating" => LoginSample::Validating,
+                    "error" => LoginSample::Error,
+                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error, not `{other}`")),
+                };
+            }
+            "--login-steps" => {
+                let value = args.next().unwrap_or_else(|| usage("--login-steps needs `;`-separated steps"));
+                out.login_steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "--no-connect" => out.offline = true,
             "--replay" => {
                 let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
@@ -267,7 +330,11 @@ fn parse_args() -> Args {
     // real turns by accident: Phase 3 spent 25 against a cap of five because the
     // screenshot commands omitted `HARNESS_PROVIDER=echo`. A scripted run is
     // therefore `echo` unless the provider was named explicitly.
-    let scripted = out.screenshot.is_some() || !out.steps.is_empty() || out.send.is_some() || out.replay.is_some();
+    let scripted = out.screenshot.is_some()
+        || !out.steps.is_empty()
+        || !out.login_steps.is_empty()
+        || out.send.is_some()
+        || out.replay.is_some();
     if scripted && !provider_explicit && out.provider != "echo" {
         eprintln!(
             "harness: scripted run, routing through `echo` (still a real turn if it sends one; \
@@ -287,7 +354,8 @@ fn usage(err: &str) -> ! {
          \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
          \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\
          \x20              [--replay <capture.jsonl>] [--tier subscription|payg|unknown]\n\
-         \x20              [--print-tier] [--approval-mode <mode>]\n\n\
+         \x20              [--print-tier] [--approval-mode <mode>]\n\
+         \x20              [--login <state>] [--login-steps <a;b;c>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing."
@@ -314,7 +382,7 @@ fn main() {
     // A `shell:` step raises a real approval over a live wire, which does not
     // land inside a fixed delay (finding F9).
     let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
-    let await_steps = !args.steps.is_empty();
+    let await_steps = !args.steps.is_empty() || !args.login_steps.is_empty();
     // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
     gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.

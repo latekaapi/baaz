@@ -231,6 +231,29 @@ the schema and a capture disagree, the capture wins and it is written down.
    `Session::turn_mut` would find the wrong one. The user turn is keyed on the
    `userMessage` **item id**.
 
+11. **The account surface is gated as a whole.** Without
+    `initialize.capabilities.experimentalApi: true` every `account/*` method
+    answers `-32601` with `data: {"kind": "experimentalRequired",
+    "descriptor": "<method>"}` (`fixtures/msp/transcript-account.jsonl`
+    records the `account/read` case on a second connection). With the opt-in
+    the four methods and two notifications of `docs/diagnosis/login.md` §3
+    are served.
+
+12. **The device-code artifacts travel in the result only.**
+    `account/loginStart {deviceCode}` answers `{verificationUrl, userCode}` in
+    its result; no notification ever carries them.
+
+13. **The cancel notification precedes the cancel result.**
+    `account/loginCancel` emits `account/loginCompleted {outcome: cancelled}`
+    *before* its own `{cancelled: true}` result arrives — a client that waits
+    for the result before leaving the device state shows a stale card.
+
+14. **An empty key is `invalidParams`, not a rejection.**
+    `account/loginStart {type: apiKey}` with a missing or empty `apiKey`
+    member fails with `invalidParams` ("the apiKey login type requires a
+    non-empty apiKey member"); a wrong-but-non-empty key fails as a
+    `failed` outcome instead.
+
 ---
 
 ## 5. What the fold does with the shape mismatch
@@ -376,6 +399,7 @@ What actually costs nothing:
 | `session/start` | opens a session; no model call |
 | `session/userShell` (the `!` path) and the whole approval flow it raises | no model call |
 | `session/fork`, `approval/*`, `session/list`, `view/page` | no model call |
+| `initialize`, `account/*`, `model/list` | the sign-in surface and the catalog query; no model call |
 
 Anything that reaches `turn/start` — including `--send` and a `--steps` list
 containing `send:` or `steer:` — spends a turn.

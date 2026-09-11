@@ -5,3 +5,6 @@ target/
 !assets/icon-*.png
 .DS_Store
 __pycache__/
+# Local secrets for testing (owner-provided API key); never committed.
+.dev.env
+.env

@@ -48,7 +48,15 @@ pub fn connect(program: &str) -> Result<(Connection, UnboundedReceiver<MuseEvent
     let (server, warning) = client.initialize(
         CLIENT_NAME,
         env!("CARGO_PKG_VERSION"),
-        ClientCapabilities { requested_capabilities: Some(vec!["userShell".into()]), ..Default::default() },
+        // Sign-in is on the wire now (D22): `account/*` is experimental, so
+        // the opt-in is required — without it every account method answers
+        // `-32601` / `experimentalRequired`. `userShell` is the `!` escape
+        // hatch, unchanged.
+        ClientCapabilities {
+            experimental_api: Some(true),
+            requested_capabilities: Some(vec!["userShell".into()]),
+            ..Default::default()
+        },
     )?;
     let (tx, rx) = unbounded();
     forward(events, tx);

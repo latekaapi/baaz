@@ -18,8 +18,10 @@ use uuid::Uuid;
 use crate::error::{MuseError, Result};
 use crate::frame::{notification_line, parse_line, request_line, Frame};
 use crate::schema::{
-    ApprovalDecideParams, ApprovalDecideResult, ApprovalListPendingParams,
-    ApprovalListPendingResult, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult,
+    AccountLoginCancelResult, AccountLoginStartParams, AccountLoginStartResult, AccountState,
+    ApprovalDecideParams, ApprovalDecideResult,
+    ApprovalListPendingParams, ApprovalListPendingResult, ClientCapabilities, ClientInfo,
+    InitializeParams, InitializeResult,
     ItemReadOutputParams, ItemReadOutputResult, ModelListParams, ModelListResult,
     SessionCompactParams, SessionCompactResult, SessionForkParams, SessionForkResult,
     SessionListParams, SessionListResult, SessionReadParams, SessionReadResult, SessionResumeParams,
@@ -506,6 +508,63 @@ impl MuseClient {
     /// `model/list` — a query, not a command: no `commandId`, no view event.
     pub fn model_list(&self, params: &ModelListParams) -> Result<ModelListResult> {
         self.call("model/list", params)
+    }
+
+    // ------------------------------------------------------------------- account
+    //
+    // Sign-in over the wire (experimental surface). Every method here
+    // requires `experimentalApi: true` at `initialize`; without the opt-in
+    // each one answers `-32601` with `data.kind: "experimentalRequired"`.
+
+    /// `account/read` — which credential lane is in effect. The only probe:
+    /// `loggedOut` means the login screen, anything else means signed in.
+    ///
+    /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
+    /// `data.kind: "experimentalRequired"`.
+    pub fn account_read(&self) -> Result<AccountState> {
+        self.inner.request_value("account/read", None).and_then(|result| {
+            serde_json::from_value(result).map_err(MuseError::Json)
+        })
+    }
+
+    /// `account/loginStart` — run the device-code flow (`type:
+    /// "deviceCode"`, whose URL and code come back in the result) or store
+    /// and validate an API key (`type: "apiKey"`, synchronous, `{}`).
+    ///
+    /// The key travels in `params` and must never reach a log; the
+    /// hand-written `Debug` on [`AccountLoginStartParams`] redacts it.
+    /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
+    /// `data.kind: "experimentalRequired"`.
+    pub fn account_login_start(
+        &self,
+        params: &AccountLoginStartParams,
+    ) -> Result<AccountLoginStartResult> {
+        self.call("account/loginStart", params)
+    }
+
+    /// `account/loginCancel` — abandon the pending device-code flow. The
+    /// `account/loginCompleted {cancelled}` notification arrives before this
+    /// result.
+    ///
+    /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
+    /// `data.kind: "experimentalRequired"`.
+    pub fn account_login_cancel(&self) -> Result<AccountLoginCancelResult> {
+        self.inner.request_value("account/loginCancel", None).and_then(|result| {
+            serde_json::from_value(result).map_err(MuseError::Json)
+        })
+    }
+
+    /// `account/logout` — clear the stored credential. The result is the new
+    /// [`AccountState`]; apply it like `account/changed`. Note an `envKey`
+    /// lane survives this (the environment still holds the key), so the
+    /// caller must say so.
+    ///
+    /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
+    /// `data.kind: "experimentalRequired"`.
+    pub fn account_logout(&self) -> Result<AccountState> {
+        self.inner.request_value("account/logout", None).and_then(|result| {
+            serde_json::from_value(result).map_err(MuseError::Json)
+        })
     }
 
     // ---------------------------------------------------------------------- view

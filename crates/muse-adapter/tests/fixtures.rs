@@ -120,6 +120,14 @@ fn no_capture_needs_a_generic_fallback() {
 #[test]
 fn every_capture_produces_at_least_one_turn() {
     for path in captures() {
+        // `transcript-account.jsonl` is protocol evidence for the account
+        // surface, not a session transcript: no `session/start` ever opens,
+        // so there is nothing to turn. It stays covered by the snapshot test
+        // (which pins that it folds to nothing) and by `muse-client`'s
+        // round-trip test (which types every one of its frames).
+        if path.file_name().is_some_and(|name| name == "transcript-account.jsonl") {
+            continue;
+        }
         let fold = replay(&path);
         let turns: usize = fold
             .session_ids()
@@ -278,7 +286,14 @@ fn the_synthetic_capture_exercises_every_todo_and_goal_transition() {
 #[test]
 fn every_capture_opens_without_panicking() {
     for path in captures() {
+        // The fold already ran on the line above — a panic there fails this
+        // test for every file, account capture included. Only the session
+        // assert below is transcript-specific (see
+        // `every_capture_produces_at_least_one_turn`).
         let fold = replay(&path);
+        if path.file_name().is_some_and(|name| name == "transcript-account.jsonl") {
+            continue;
+        }
         assert!(fold.session_ids().next().is_some(), "{} folded to no session", path.display());
     }
 }

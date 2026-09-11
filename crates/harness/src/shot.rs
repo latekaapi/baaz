@@ -35,21 +35,43 @@ pub fn set_pending_approval(pending: bool) {
     PENDING_APPROVAL.store(pending, Ordering::Relaxed);
 }
 
-/// Called by the application around its `--steps` loop.
+/// Called by the application around its `--steps` and `--login-steps` loops.
 pub fn set_steps_running(running: bool) {
     STEPS_RUNNING.store(running, Ordering::Relaxed);
 }
 
+/// Sleep `delay` as a loop of [`POLL`] timers so the foreground executor
+/// keeps draining background completions while the deadline runs down.
+/// See [`capture_and_quit`].
+async fn settle(cx: &gpui::AsyncApp, delay: Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        cx.background_executor().timer((deadline - now).min(POLL)).await;
+    }
+}
+
 /// Waits for the first frames, captures the window and exits the process.
 ///
-/// `await_steps` is set whenever `--steps` were given, and `await_approval`
-/// when one of them is a `shell:`, which raises a real, server-minted approval
-/// over a live wire. The fixed delay is the right wait for a fold that is
-/// already in memory and the wrong one for a script or a round-trip to a child
-/// process: `docs/images/phase4-approval-stage1-*.png` were captured before the
-/// card arrived and showed the shell card alone (finding F9). So the capture
-/// waits for the condition, and then for the same settling delay it would have
-/// used anyway.
+/// `await_steps` is set whenever `--steps` or `--login-steps` were given, and
+/// `await_approval` when one of them is a `shell:`, which raises a real,
+/// server-minted approval over a live wire. The fixed delay is the right wait
+/// for a fold that is already in memory and the wrong one for a script or a
+/// round-trip to a child process: `docs/images/phase4-approval-stage1-*.png`
+/// were captured before the card arrived and showed the shell card alone
+/// (finding F9). So the capture waits for the condition, and then for the
+/// same settling delay it would have used anyway.
+///
+/// Every wait here is a loop of [`POLL`] timers, never one `timer(delay)`:
+/// in a headless capture nothing else wakes the foreground executor, so a
+/// single long sleep starves the background continuations it is waiting for —
+/// `--screenshot` without `--steps` never polled the `probe_account`
+/// continuation, `account/read`'s answer sat unapplied, and `--login-steps`
+/// never ran. The 100 ms wake-ups keep the executor draining completions
+/// while the deadline runs down.
 pub fn capture_and_quit(
     handle: WindowHandle<Root>,
     path: PathBuf,
@@ -59,7 +81,7 @@ pub fn capture_and_quit(
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
-        cx.background_executor().timer(delay).await;
+        settle(cx, delay).await;
         let mut waited = false;
         if await_steps {
             let deadline = std::time::Instant::now() + APPROVAL_CEILING;
@@ -85,8 +107,8 @@ pub fn capture_and_quit(
         }
         if waited {
             // Whatever arrived animates in; give it the same settling time the
-            // first frames got.
-            cx.background_executor().timer(delay).await;
+            // first frames got — polled, for the same starvation reason.
+            settle(cx, delay).await;
         }
         let result = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
