@@ -66,7 +66,6 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘K | The command palette: every `/` command and every session operation |
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
-| ⌘\\ | The right pane (wired, and the pane is empty) |
 | ⌘W | Close the window (File → Close Window; probe cleanup first) |
 | ⌘Q | Quit (Harness → Quit Harness; probe cleanup first) |
 | ⌘M | Minimize the window |

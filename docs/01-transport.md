@@ -186,8 +186,9 @@ the schema and a capture disagree, the capture wins and it is written down.
    a real `turnId` — and then `session/started` is the **only** notification
    that ever arrives. No `turn/started`, no items, no `session/tokenUsage`, no
    `turn/completed`, ever. Verified twice, once through `muse-client` and once
-   through the reference Python probe in `fixtures/msp/probe.py`, so it is the
-   server's behaviour and not this client's:
+   through a reference Python probe (`fixtures/msp/probe.py`, removed
+   2026-09-12; git history has it), so it is the server's behaviour and not
+   this client's:
 
    ```
    ['--trust-workspace', '--no-session-log'] durability: ephemeral
@@ -336,14 +337,14 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 ### The probe
 
-Spawns `muse serve --trust-workspace`, initializes, starts an **echo** session
-in a temp workspace, lists models, sends one turn, and prints every folded
-`Delta` as JSON on stdout (progress goes to stderr):
-
-```sh
-cargo run -p muse-adapter --bin harness-probe
-cargo run -p muse-adapter --bin harness-probe -- "say something else"
-```
+`harness-probe` (spawned `muse serve --trust-workspace`, started an **echo**
+session, listed models, sent one turn, and printed every folded `Delta` as
+JSON) was removed 2026-09-12; git history has it. Its docstring's "the echo
+provider is free" claim was wrong (D19: `--provider echo` picks a route, not
+a discount — a signed-in login still bills it), and the binary had no guard
+before its `turn/start`. Use `--replay <capture>` against
+`fixtures/msp/transcript-*.jsonl` to inspect what the fold makes of real wire
+traffic without spending anything.
 
 ### The tests
 

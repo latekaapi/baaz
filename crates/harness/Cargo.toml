@@ -35,3 +35,12 @@ zip.workspace = true
 # The billing-tier probe drives the muse TUI under a pseudo-terminal
 # (`crates/harness/src/tier.rs`); `openpty` and `TIOCSCTTY` are the whole use.
 libc.workspace = true
+
+[package.metadata.cargo-machete]
+# `gpui_platform` has no direct `use` in this crate's source, so cargo-machete
+# flags it, but it is not dead: its `test-support` feature is what makes
+# `gpui`'s own `test-support` feature actually implement
+# `Window::render_to_image` on this platform (B-DEAD, 2026-09-12 audit —
+# verified by removing it: `--screenshot` then fails with "render_to_image
+# not implemented for this platform"). Keep it.
+ignored = ["gpui_platform"]

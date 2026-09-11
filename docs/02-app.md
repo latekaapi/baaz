@@ -42,7 +42,7 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
 | `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
 | `--bench <capture.jsonl> [--bench-cadence-ms <ms>] [--bench-scroll top\|mid\|tail\|sweep] [--bench-frames <n>] [--bench-out <file.json>]` | stream the capture through the fold on a timer while driving the transcript list, and print element / frame / fold-apply timing plus peak RSS (§6). Free: no child, no server. Cadence defaults to 4 ms, scroll to `sweep`, frames to 600. Implies `HARNESS_FRAME_STATS`. |
-| `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). |
+| `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). Scripting only — its full verb table, with which steps cost a turn, lives in `main.rs`'s `Args::steps` doc comment; only `send:` and `steer:` bill. |
 | `--login <state>` | which login-screen state `--no-connect` boots into for a capture: `choose` (the default), `device`, `apikey`, `apikey-error`, `validating` or `error`. Sample data only. |
 | `--login-steps <a;b;c>` | drive the login screen from the command line, once the login screen is up on a live connection (never with `--no-connect` / `--replay`). After sign-in the ordinary `--steps` run as today. |
 
@@ -296,7 +296,8 @@ line, so a whole first prompt as the label can never push the overflow button
 out. Renaming the open session swaps the title for the same dense single-line
 field the sidebar row uses, through the same confirm/Escape path. There is no
 right-pane toggle and no right-header close button — the right pane's slot
-stays empty and `right_open` stays false. The
+stays empty; the shell is always given `right_open(false)`, and there is no
+per-session state for it any more (B-DEAD-3, 2026-09-12). The
 shell wraps the header row in its drag region, so press-drag moves the window
 and double-click zooms while the buttons and the rename field keep their
 clicks. Collapsed, the rail column is 48 px and the centre title stands 14 px

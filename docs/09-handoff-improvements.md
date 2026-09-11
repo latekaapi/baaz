@@ -283,7 +283,7 @@ buildable trees.
 
 - Spec: `docs/00-spec.md` (frozen 2026-09-08). Per-phase docs `01`–`04`, `06`–`08`. Changelog with every finding: `docs/CHANGELOG.md`.
 - Research: `~/Projects/agentic-ui/docs/10-muse-research.md` — §2.4 is wrong about echo; everything else held.
-- Schema: `fixtures/msp/msp-ts/msp.d.ts`, `fixtures/msp/msp/`. Captures: `fixtures/msp/*.jsonl`; `probe*.py` are Python clients and several send turns.
+- Schema: `fixtures/msp/msp-ts/msp.d.ts`, `fixtures/msp/msp/`. Captures: `fixtures/msp/*.jsonl`; the `probe*.py`/`run*.py`/`harness-probe` clients that sent turns were removed 2026-09-12 (git history has them) — `drive.py` and `make-stress-300.py` remain, header-commented with what each sends and costs.
 - Library API overview: `~/Projects/agentic-ui/docs/06-api.md`; agent brief `docs/00-agent-brief.md`.
 - Memory for this project: `~/.claude/projects/-Users-latekaapi-Projects-agentic-ui/memory/` (`project-harness-muse-slice-2026-09-08`, `muse-echo-not-free`).
 

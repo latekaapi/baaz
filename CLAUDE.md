@@ -26,8 +26,9 @@ a signed-in login routes echo to the real model. Anything that reaches `turn/sta
 billed on the login's tier. Free: `--replay <capture>`, `--no-connect`, `session/start`,
 `session/userShell`, `approval/*`, `userInput/*`, `session/fork`, `session/list`,
 `view/page`, `model/list`, and the `muse` TUI opened without a prompt. Never run the
-ignored live tests, `harness-probe`, the `fixtures/msp/probe*.py` scripts, `--send`, or
-`--steps` containing `send:`/`steer:` unless the owner has named the turn. Count spend from
+ignored live tests, `--send`, or `--steps` containing `send:`/`steer:` unless the owner has
+named the turn (`harness-probe` and the `fixtures/msp/probe*.py`/`run*.py` scripts that used
+to carry this warning were removed 2026-09-12; git history has them). Count spend from
 Muse's own logs, never from a report:
 
 ```sh

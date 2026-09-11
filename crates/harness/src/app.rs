@@ -17,9 +17,8 @@
 //! # Screens
 //!
 //! Two, and the auth probe decides which: the device-code login screen (spec
-//! §3.2) or the shell. The right pane's slot exists and stays empty in this
-//! phase; `ToggleRightPane` is bound and does nothing, so the keymap does not
-//! grow a hole later.
+//! §3.2) or the shell. The shell's right pane is not used; the column is
+//! always closed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use std::sync::Arc;
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
 use aui::feedback::{banner, BannerKind, BannerRun};
-use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleRightPane, ToggleSidebar};
+use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleSidebar};
 use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_search, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui::data::secret_field;
@@ -426,8 +425,6 @@ pub struct Harness {
     drag_moved: f32,
     /// When the last drag ended, for the double-click reset above.
     last_release: Option<std::time::Instant>,
-    /// The right pane's slot exists; nothing opens it in this phase.
-    right_open: bool,
     /// Whether `initialize` granted `userShell`. Requested in `conn::connect`;
     /// a server that did not grant it disables the `!` path with a banner
     /// rather than letting the command fail on the wire.
@@ -525,7 +522,6 @@ impl Harness {
             start_w: restored,
             drag_moved: 0.0,
             last_release: None,
-            right_open: false,
             user_shell: true,
             focus_root: cx.focus_handle(),
             focus_dialog: cx.focus_handle(),
@@ -1042,10 +1038,11 @@ impl Harness {
     /// After a successful login: drop the child that inherited no credential,
     /// spawn a fresh one and re-probe.
     ///
-    /// Kept, unused, until the owner's first live turn confirms it is not
-    /// needed: the device flow is host-owned, so the `muse serve` that ran it
-    /// already holds the credential and the app proceeds on
-    /// `account/changed` with no reconnect (D25).
+    /// Delete this once one billed turn, run after a real Meta-account login,
+    /// confirms D25: that the device flow is host-owned, so the `muse serve`
+    /// that ran it already holds the credential and the app proceeds on
+    /// `account/changed` with no reconnect. Until that turn is run, this stays
+    /// as dead code kept warm for the case D25 turns out wrong.
     #[allow(dead_code)]
     fn reconnect_after_login(&mut self, cx: &mut Context<Self>) {
         self.client = None;
@@ -3582,7 +3579,7 @@ impl Render for Harness {
                 .resizing(self.resizing)
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
-                .right_open(self.right_open)
+                .right_open(false)
                 .header_sidebar(
                     sidebar_header("hd-side")
                         .traffic_lights(false)
@@ -3591,13 +3588,12 @@ impl Render for Harness {
                         .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
                 )
                 .header_centre(self.render_centre_header(window, cx))
-                // The right pane's slot is present and empty; its header cell
-                // carries nothing until the pane arrives.
+                // The right pane is never opened; its header cell carries
+                // nothing.
                 .header_right(header_cell("hd-right").child(div()))
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
-                // The right pane's slot is present and empty: the shell keeps
-                // the column, so nothing has to move when Phase 5 fills it.
+                // The right pane is never opened; the slot stays empty.
                 .right(div().size_full())
                 .centre(centre)
                 .into_any_element();
@@ -3677,9 +3673,6 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-                // The slot is wired and does nothing: the keymap should not
-                // grow a hole when the right pane arrives.
-                .on_action(|_: &ToggleRightPane, _, _| {})
                 .on_action(cx.listener(|this, _: &NewSession, _, cx| this.new_session(cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))

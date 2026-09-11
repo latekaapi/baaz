@@ -111,11 +111,14 @@ pub struct Args {
     pub screenshot: Option<PathBuf>,
     /// How long to wait before that capture.
     pub delay: Duration,
-    /// `--session <id>`: resume this session at boot; `latest` picks the most
-    /// recently updated one in the workspace.
+    /// `--session <id>`: resume this session at boot; `latest` (scripting
+    /// only — a screenshot cannot know a session id in advance) picks the
+    /// most recently updated one in the workspace.
     pub session: Option<String>,
     /// `--send <text>`: send one turn once a session is open. The scripting
     /// hook a screenshot needs, modelled on the gallery's `AUI_GALLERY_STEPS`.
+    /// Scripting only, and it reaches `turn/start` — **it costs a real turn**
+    /// on the login's tier, same as the `send:`/`steer:` steps below.
     pub send: Option<String>,
     /// `--no-connect`: render the chrome without spawning `muse serve`, which
     /// is what a screenshot of the login screen wants.
@@ -133,13 +136,17 @@ pub struct Args {
     ///
     /// One step per item, `;`-separated because a step's payload may contain a
     /// comma. Every Phase 3 screenshot is one of these, so every screenshot is
-    /// reproducible from a command line rather than from a pointer.
+    /// reproducible from a command line rather than from a pointer. **The
+    /// whole surface is scripting only**: none of these steps has any other
+    /// entry point, so this table (and its `--help` summary) is the one place
+    /// that documents them. Only `send:` and `steer:` reach `turn/start` and
+    /// bill a real turn (like `--send`, below); every other step is free.
     ///
     /// | step | what it does |
     /// |---|---|
     /// | `draft:<text>` | put text in the composer |
-    /// | `send:<text>` | send a turn |
-    /// | `steer:<text>` | steer the running turn |
+    /// | `send:<text>` | send a turn — **costs a turn** |
+    /// | `steer:<text>` | steer the running turn — **costs a turn** |
     /// | `model` / `effort` / `mode` | open that chip picker |
     /// | `confirm` | activate the open menu's selected row |
     /// | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
@@ -194,7 +201,9 @@ pub struct Args {
     /// `--login-steps <a;b;c>`: what to do on the login screen before the
     /// capture. Honoured only when the app is really connected (never with
     /// `--no-connect` / `--replay`), run once the login screen is up, one
-    /// step per item, the same `;`-separated parsing as `--steps`.
+    /// step per item, the same `;`-separated parsing as `--steps`. Scripting
+    /// only, like `--steps` above; none of these steps reaches `turn/start`,
+    /// so none of them costs anything.
     ///
     /// | step | what it does |
     /// |---|---|
@@ -420,7 +429,10 @@ fn usage(err: &str) -> ! {
          \x20              [--bench-frames <n>] [--bench-out <file.json>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
-         \x20              --replay and --no-connect are the only runs that cost nothing."
+         \x20              --replay and --no-connect are the only runs that cost nothing.\n\n\
+         --send, --steps and --login-steps are scripting-only surfaces (see the `Args`\n\
+         \x20              doc comments in main.rs for the full step tables). --send and the\n\
+         \x20              `send:`/`steer:` steps cost a real turn; every other step is free."
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }

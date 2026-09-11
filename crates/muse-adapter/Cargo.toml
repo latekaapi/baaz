@@ -15,7 +15,3 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 uuid = { workspace = true }
-
-[[bin]]
-name = "harness-probe"
-path = "src/bin/harness-probe.rs"
