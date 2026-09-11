@@ -774,10 +774,11 @@ pub fn empty_state(
     // about the workspace itself, so none of them assumes a project this is
     // not — and picking one only fills the composer, it never sends.
     if let Some(on_pick) = on_pick {
-        column = column.child(
-            aui::composer::suggestion_chips("empty-suggestions", SUGGESTIONS.iter().map(|s| (*s).into()).collect())
-                .on_pick(move |index, window, cx| on_pick(index, window, cx)),
-        );
+        // Under the deterministic flag the chips draw settled rather than
+        // sparkling in: a capture is a static composition.
+        let chips = aui::composer::suggestion_chips("empty-suggestions", SUGGESTIONS.iter().map(|s| (*s).into()).collect());
+        let chips = if crate::clock::deterministic() { chips.at_rest() } else { chips };
+        column = column.child(chips.on_pick(move |index, window, cx| on_pick(index, window, cx)));
     }
     column.into_any_element()
 }

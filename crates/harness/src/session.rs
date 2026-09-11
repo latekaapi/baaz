@@ -650,34 +650,16 @@ impl SessionView {
     /// and it costs nothing at all.
     pub fn load_replay(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         self.replay = true;
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        let (events, sent) = match parse_replay_file(path) {
+            Ok(parsed) => parsed,
             Err(error) => {
                 self.banner = Some(format!("{}: {error}", path.display()));
                 cx.notify();
                 return;
             }
         };
-        let mut sent: Vec<(String, String)> = Vec::new();
-        for (number, line) in text.lines().enumerate() {
-            // A capture holds both directions. The client-to-server half is what
-            // the fixture tests skip, but it is the only record of what a turn
-            // was *sent* with — and that is what an error card's retry needs, so
-            // the prompts are read back out of it here.
-            if let Some(body) = line.strip_prefix("--> ") {
-                sent.extend(submitted_text(body));
-                continue;
-            }
-            let Some(body) = line.strip_prefix("<-- ") else { continue };
-            match muse_client::frame::parse_line(body) {
-                Ok(Some(frame)) => {
-                    if let Some(event) = MuseEvent::from_frame(frame) {
-                        self.fold.apply(event);
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => eprintln!("harness: {}:{}: {error}", path.display(), number + 1),
-            }
+        for event in events {
+            self.fold.apply(event);
         }
         // The capture names its own session; the view was opened on whatever the
         // caller guessed, so it follows the file rather than the guess.
@@ -689,6 +671,36 @@ impl SessionView {
         }
         self.observe_clocks(cx);
         self.follow = true;
+        cx.notify();
+    }
+
+    /// Start a `--bench` run over a capture: read-only like a replay, but the
+    /// events are fed one per cadence tick by the bench driver rather than
+    /// folded all at once, so streaming cost is real.
+    pub fn begin_bench_replay(&mut self, session_id: String, sent: Vec<(String, String)>, cx: &mut Context<Self>) {
+        self.replay = true;
+        self.session_id = session_id;
+        for (command_id, text) in sent {
+            self.fold.record_command(&self.session_id, &command_id, &text);
+        }
+        self.follow = true;
+        cx.notify();
+    }
+
+    /// Drive the transcript list to `frac` of the folded turns (0 = top,
+    /// 1 = tail) without touching the pointer, for `--bench --bench-scroll`.
+    pub fn bench_scroll_to(&mut self, frac: f32, cx: &mut Context<Self>) {
+        self.follow = false;
+        let len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
+        let ix = ((len.saturating_sub(1) as f32) * frac.clamp(0.0, 1.0)) as usize;
+        self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
+        cx.notify();
+    }
+
+    /// Pin the transcript to the tail, for `--bench --bench-scroll tail`.
+    pub fn bench_scroll_tail(&mut self, cx: &mut Context<Self>) {
+        self.follow = true;
+        self.list_state.scroll_to_end();
         cx.notify();
     }
 
@@ -729,7 +741,7 @@ impl SessionView {
             match method.as_str() {
                 "turn/started" => {
                     if let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) {
-                        self.running = Some(Running { turn_id: turn_id.to_owned(), started: Instant::now() });
+                        self.running = Some(Running { turn_id: turn_id.to_owned(), started: crate::clock::now_instant() });
                         self.submitting = false;
                         self.last_tick_secs = None;
                         self.start_ticker(cx);
@@ -1243,7 +1255,7 @@ impl SessionView {
         self.ticker = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
             let alive = this.update(cx, |this, cx| {
-                let secs = this.running.as_ref().map(|r| r.started.elapsed().as_secs());
+                let secs = this.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_secs());
                 if secs != this.last_tick_secs {
                     this.last_tick_secs = secs;
                     cx.notify();
@@ -2248,8 +2260,12 @@ impl SessionView {
                     if ix == 0 {
                         row = row.pt(px(TRANSCRIPT_PAD_TOP));
                     }
+                    // Under the deterministic flag every turn draws settled:
+                    // the newest turn's reveal (fade + rise) never lands on
+                    // the same frame twice.
+                    let settled = ix != last || crate::clock::deterministic();
                     match turns.get(ix) {
-                        Some(turn) => row.children(transcript::turn(turn, ix != last, &folds, window, cx)),
+                        Some(turn) => row.children(transcript::turn(turn, settled, &folds, window, cx)),
                         None => row,
                     }
                     .into_any_element()
@@ -2692,7 +2708,7 @@ impl SessionView {
         let row = if self.loading_history {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
         } else if self.busy() {
-            let elapsed = self.running.as_ref().map(|r| r.started.elapsed().as_millis() as u64).unwrap_or(0);
+            let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
             let mut row = status_row("status", "Working\u{2026}")
                 .lead(StatusLead::Braille)
                 .shimmer(true)
@@ -2789,15 +2805,14 @@ impl SessionView {
             this.list_state.scroll_to_end();
             cx.notify();
         });
+        let banner = needs_you_banner("needs-you", "Muse is waiting for you.", detail);
+        let banner = if crate::clock::deterministic() { banner.at_rest() } else { banner };
         Some(
             div()
                 .w_full()
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_3))
-                .child(
-                    needs_you_banner("needs-you", "Muse is waiting for you.", detail)
-                        .on_jump(move |_, window, cx| jump(&(), window, cx)),
-                )
+                .child(banner.on_jump(move |_, window, cx| jump(&(), window, cx)))
                 .into_any_element(),
         )
     }
@@ -2878,9 +2893,9 @@ impl SessionView {
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
                     this.select_command(id, window, cx);
                 });
-                command_menu("command-menu", format!("/{filter}"), sections, selected)
-                    .on_select(move |id, window, cx| pick(id, window, cx))
-                    .into_any_element()
+                let menu = command_menu("command-menu", format!("/{filter}"), sections, selected);
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                menu.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
             }
             MenuKind::Mention => {
                 let rows = self.mention_rows(&filter, cx);
@@ -2900,9 +2915,9 @@ impl SessionView {
                     let insertion = format!("@{id} ");
                     this.replace_token(&insertion, window, cx);
                 });
-                mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected)
-                    .on_select(move |id, window, cx| pick(id, window, cx))
-                    .into_any_element()
+                let picker = mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected);
+                let picker = if crate::clock::deterministic() { picker.at_rest() } else { picker };
+                picker.on_select(move |id, window, cx| pick(id, window, cx)).into_any_element()
             }
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
@@ -3044,6 +3059,17 @@ impl SessionView {
             }
             cx.notify();
         });
+        let plus_item = plus_menu(
+            "plus",
+            vec![
+                PlusMenuItem::new("attach", IconName::Paperclip, "Attach file or photo").key("⌘U"),
+                PlusMenuItem::new("mention", IconName::At, "@ Mention file"),
+                PlusMenuItem::new("commands", IconName::Slash, "/ Slash commands"),
+            ],
+            self.plus_open,
+        )
+        .on_activate(move |id, window, cx| plus(id, window, cx));
+        let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
         let mut element = composer("composer", &self.composer, aui_icons::Provider::Muse, self.model())
             .docked(true)
             .mode(self.mode_label())
@@ -3076,22 +3102,7 @@ impl SessionView {
             // Blocked context is the server refusing to take more, so the
             // composer refuses too and the meter offers the way out.
             .can_send(!blocked && (!draft.trim().is_empty() || !self.images.is_empty() || !self.files.is_empty()))
-            .plus_menu(
-                self.plus_open,
-                Some(
-                    plus_menu(
-                        "plus",
-                        vec![
-                            PlusMenuItem::new("attach", IconName::Paperclip, "Attach file or photo")
-                                .key("⌘U"),
-                            PlusMenuItem::new("mention", IconName::At, "@ Mention file"),
-                            PlusMenuItem::new("commands", IconName::Slash, "/ Slash commands"),
-                        ],
-                        self.plus_open,
-                    )
-                    .on_activate(move |id, window, cx| plus(id, window, cx)),
-                ),
-            )
+            .plus_menu(self.plus_open, Some(plus_item))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
         for (anchor, menu) in self.render_pickers(cx) {
             element = element.chip_menu(anchor, menu);
@@ -3141,13 +3152,11 @@ impl SessionView {
                     let id = id.to_string();
                     this.pick_model(&id, cx);
                 });
-                vec![(
-                    ComposerChipAnchor::Model,
-                    model_menu("model-menu", rows, selected, true)
-                        .on_pick(move |id, window, cx| pick(id, window, cx))
-                            .on_close(move |window, cx| close(&(), window, cx))
-                        .into_any_element(),
-                )]
+                let menu = model_menu("model-menu", rows, selected, true)
+                    .on_pick(move |id, window, cx| pick(id, window, cx))
+                    .on_close(move |window, cx| close(&(), window, cx));
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                vec![(ComposerChipAnchor::Model, menu.into_any_element())]
             }
             MenuKind::Effort => {
                 let rows: Vec<PickerRow> = EFFORTS
@@ -3169,13 +3178,11 @@ impl SessionView {
                         this.pick_effort(effort, cx);
                     }
                 });
-                vec![(
-                    ComposerChipAnchor::Effort,
-                    effort_menu("effort-menu", rows, selected, true)
-                        .on_pick(move |id, window, cx| pick(id, window, cx))
-                            .on_close(move |window, cx| close(&(), window, cx))
-                        .into_any_element(),
-                )]
+                let menu = effort_menu("effort-menu", rows, selected, true)
+                    .on_pick(move |id, window, cx| pick(id, window, cx))
+                    .on_close(move |window, cx| close(&(), window, cx));
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                vec![(ComposerChipAnchor::Effort, menu.into_any_element())]
             }
             MenuKind::Mode => {
                 let rows: Vec<PickerRow> = MODES
@@ -3187,13 +3194,11 @@ impl SessionView {
                         this.pick_mode(mode, cx);
                     }
                 });
-                vec![(
-                    ComposerChipAnchor::Mode,
-                    mode_menu("mode-menu", rows, selected, true)
-                        .on_pick(move |id, window, cx| pick(id, window, cx))
-                            .on_close(move |window, cx| close(&(), window, cx))
-                        .into_any_element(),
-                )]
+                let menu = mode_menu("mode-menu", rows, selected, true)
+                    .on_pick(move |id, window, cx| pick(id, window, cx))
+                    .on_close(move |window, cx| close(&(), window, cx));
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                vec![(ComposerChipAnchor::Mode, menu.into_any_element())]
             }
             MenuKind::Command
             | MenuKind::Mention
@@ -3763,13 +3768,13 @@ impl SessionView {
         let pending: Vec<String> = side.pending_inputs.keys().cloned().collect();
         let retry = side.retry.as_ref().map(|r| format!("{}:{}", r.turn_id, r.attempt));
         for id in &pending {
-            self.question_started.entry(id.clone()).or_insert_with(Instant::now);
+            self.question_started.entry(id.clone()).or_insert_with(crate::clock::now_instant);
         }
         self.question_started.retain(|id, _| pending.contains(id));
         match retry {
             Some(key) => {
                 if self.retry_started.as_ref().map(|(k, _)| k.as_str()) != Some(key.as_str()) {
-                    self.retry_started = Some((key, Instant::now()));
+                    self.retry_started = Some((key, crate::clock::now_instant()));
                 }
             }
             None => self.retry_started = None,
@@ -3805,7 +3810,7 @@ impl SessionView {
         for (input_id, request) in &side.pending_inputs {
             let Some(total) = request.auto_resolution_ms else { continue };
             let Some(started) = self.question_started.get(input_id) else { continue };
-            let remaining = total.saturating_sub(started.elapsed().as_millis() as u64);
+            let remaining = total.saturating_sub(crate::clock::elapsed_since(*started).as_millis() as u64);
             for question in &request.questions {
                 out.insert(format!("{input_id}:{}", question.id), (remaining, total));
             }
@@ -3863,7 +3868,7 @@ impl SessionView {
     fn retry_countdown(&self) -> Option<(u32, u32, u64, String)> {
         let retry = self.fold.side(&self.session_id)?.retry.clone()?;
         let started = self.retry_started.as_ref()?.1;
-        let remaining = retry.retry_delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        let remaining = retry.retry_delay_ms.saturating_sub(crate::clock::elapsed_since(started).as_millis() as u64);
         Some((retry.attempt, retry.max_attempts, remaining, retry.reason))
     }
 }
@@ -3927,6 +3932,40 @@ fn position_of(text: &str, offset: usize) -> Position {
 /// `displayText` is what the person typed and is preferred; the text parts are
 /// the fallback, joined the way the server joins them. A fresh `turn/start`'s
 /// `commandId` equals its `turnId`, which is what makes this a turn-text map.
+/// A capture file parsed: fold events plus the prompts turns were sent with.
+type ParsedReplay = (Vec<MuseEvent>, Vec<(String, String)>);
+
+/// Read a capture file into fold events plus the prompts turns were sent
+/// with: the `<-- ` half the fixture tests fold, and the `--> ` half an
+/// error card's retry needs. Shared by `--replay` (folds all at once) and
+/// `--bench` (feeds one per cadence tick).
+pub(crate) fn parse_replay_file(path: &std::path::Path) -> Result<ParsedReplay, std::io::Error> {
+    let text = std::fs::read_to_string(path)?;
+    let mut events = Vec::new();
+    let mut sent: Vec<(String, String)> = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        // A capture holds both directions. The client-to-server half is what
+        // the fixture tests skip, but it is the only record of what a turn
+        // was *sent* with — and that is what an error card's retry needs, so
+        // the prompts are read back out of it here.
+        if let Some(body) = line.strip_prefix("--> ") {
+            sent.extend(submitted_text(body));
+            continue;
+        }
+        let Some(body) = line.strip_prefix("<-- ") else { continue };
+        match muse_client::frame::parse_line(body) {
+            Ok(Some(frame)) => {
+                if let Some(event) = MuseEvent::from_frame(frame) {
+                    events.push(event);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("harness: {}:{}: {error}", path.display(), number + 1),
+        }
+    }
+    Ok((events, sent))
+}
+
 fn submitted_text(line: &str) -> Option<(String, String)> {
     let frame: serde_json::Value = serde_json::from_str(line).ok()?;
     if frame.get("method")?.as_str()? != "turn/start" {
@@ -4026,21 +4065,59 @@ fn wire_mode(mode: PermissionMode) -> ApprovalMode {
 /// Blocking: every call waits on the wire, so this runs on the background
 /// executor. A page that comes back empty, or a `nextCursor` of `null`, is the
 /// end of the view in that direction.
+/// Whether element-construction timing is recorded: `HARNESS_FRAME_STATS=1`
+/// or `--bench`, which implies it. Read once (A-MECH-14): the flag never
+/// changes at runtime, and the old code paid an env lookup per frame.
+fn frame_stats_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HARNESS_FRAME_STATS").as_deref() == Ok("1")
+            || BENCH_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+/// Set by `--bench` before the window boots: frame stats are on, and the
+/// periodic stderr percentiles stay quiet — the bench prints its own table
+/// from the full sample at the end.
+pub(crate) fn enable_frame_stats_for_bench() {
+    BENCH_FRAMES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static BENCH_FRAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The recorded element-construction samples (microseconds), shared by the
+/// periodic stderr percentiles and the bench's end-of-run drain.
+static FRAME_SAMPLES: std::sync::OnceLock<std::sync::Mutex<Vec<u128>>> = std::sync::OnceLock::new();
+
+/// One paint timestamp per recorded sample, kept only while `--bench` holds
+/// them for its frame-interval table (bounded by the run, not by the
+/// session: long `HARNESS_FRAME_STATS` runs pay no timestamp vec).
+static FRAME_TIMES: std::sync::OnceLock<std::sync::Mutex<Vec<std::time::Instant>>> = std::sync::OnceLock::new();
+
+static FRAME_SAMPLE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Debug-only frame timer (C1/P1): with `HARNESS_FRAME_STATS=1`, record
 /// every `render_transcript` duration and print p50/p90/p99 to stderr every
 /// 120 frames, so the stress capture reports bounded per-frame cost.
 fn record_frame_stats(elapsed: std::time::Duration) {
-    use std::sync::{Mutex, OnceLock};
-    static SAMPLES: OnceLock<Mutex<Vec<u128>>> = OnceLock::new();
-    if std::env::var("HARNESS_FRAME_STATS").as_deref() != Ok("1") {
+    if !frame_stats_enabled() {
         return;
     }
-    let samples = SAMPLES.get_or_init(|| Mutex::new(Vec::with_capacity(128)));
+    FRAME_SAMPLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if BENCH_FRAMES.load(std::sync::atomic::Ordering::Relaxed) {
+        FRAME_TIMES
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .map(|mut times| times.push(std::time::Instant::now()))
+            .ok();
+    }
+    let samples = FRAME_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::with_capacity(128)));
     let Ok(mut samples) = samples.lock() else {
         return;
     };
     samples.push(elapsed.as_micros());
-    if samples.len() >= 120 {
+    if !BENCH_FRAMES.load(std::sync::atomic::Ordering::Relaxed) && samples.len() >= 120 {
         let mut sorted = samples.clone();
         sorted.sort_unstable();
         let at = |q: f64| sorted[((q * sorted.len() as f64) as usize).min(sorted.len() - 1)];
@@ -4054,6 +4131,26 @@ fn record_frame_stats(elapsed: std::time::Duration) {
         );
         samples.clear();
     }
+}
+
+/// How many `render_transcript` constructions have been recorded. Every frame
+/// renders the transcript, so the delta over a quiet window is the frame
+/// count there — the bench's idle assertion.
+pub(crate) fn frame_sample_count() -> u64 {
+    FRAME_SAMPLE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Drain the recorded element-construction samples (microseconds), for the
+/// bench's end-of-run table.
+pub(crate) fn take_frame_samples() -> Vec<u128> {
+    let samples = FRAME_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    samples.lock().map(|mut samples| std::mem::take(&mut *samples)).unwrap_or_default()
+}
+
+/// Drain the recorded paint timestamps, for the bench's frame-interval table.
+pub(crate) fn take_frame_times() -> Vec<std::time::Instant> {
+    let times = FRAME_TIMES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    times.lock().map(|mut times| std::mem::take(&mut *times)).unwrap_or_default()
 }
 
 fn page_all(client: &MuseClient, session_id: &str) -> Vec<MuseEvent> {
