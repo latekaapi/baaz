@@ -62,32 +62,56 @@ macro_rules! open_enum {
     ) => {
         $(#[$outer])*
         ///
-        /// **Open enum.** A value this build does not know deserializes to `Unknown` rather than
-        /// failing — that is deliberate: the schema declares this domain open. Use
-        /// [`Self::as_wire`] for the wire string; serializing `Unknown` cannot recover the value
-        /// the server actually sent and is a caller bug.
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(rename_all = "camelCase")]
+        /// **Open enum.** A value this build does not know deserializes to `Unknown(String)`
+        /// rather than failing — that is deliberate: the schema declares this domain open. The
+        /// original wire string is kept (finding `client-adapter-15`), so an `Unknown` value
+        /// round-trips through serialization byte-exact instead of coming back as the literal
+        /// `"Unknown"`. Use [`Self::as_wire`] for a *known* variant's wire string.
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
         pub enum $name {
             $(
                 #[doc = concat!("The `", $wire, "` value.")]
-                #[serde(rename = $wire)]
                 $variant,
             )*
-            /// A value outside this build's vocabulary — render it generically, never as an error.
-            #[serde(other)]
-            Unknown,
+            /// A value outside this build's vocabulary, with the original string it came in
+            /// as — rendered generically, never as an error.
+            Unknown(String),
         }
 
         impl $name {
-            /// The wire string for this variant, or `None` for [`Self::Unknown`] (whose original
-            /// string was not retained).
+            /// The wire string for this variant, or `None` for [`Self::Unknown`] — read its
+            /// carried string directly for that case.
             #[must_use]
             pub fn as_wire(&self) -> Option<&'static str> {
                 match self {
                     $( Self::$variant => Some($wire), )*
-                    Self::Unknown => None,
+                    Self::Unknown(_) => None,
                 }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                match self {
+                    $( Self::$variant => serializer.serialize_str($wire), )*
+                    Self::Unknown(raw) => serializer.serialize_str(raw),
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let raw = String::deserialize(deserializer)?;
+                Ok(match raw.as_str() {
+                    $( $wire => Self::$variant, )*
+                    _ => Self::Unknown(raw),
+                })
             }
         }
     };

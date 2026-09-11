@@ -1,0 +1,59 @@
+[
+  {
+    "sessionId": "synthetic-modelrouteunserved",
+    "session": {
+      "id": "synthetic-modelrouteunserved",
+      "agent": "muse",
+      "model": "muse-spark-1.3",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": []
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn:2",
+      "command_text": {},
+      "restored_prompt": null,
+      "model_route_unserved": {
+        "commandId": "c-syn-1",
+        "installedProviderId": "meta",
+        "modelId": "muse-spark-1.3",
+        "providerId": "openai",
+        "sessionId": "synthetic-modelrouteunserved",
+        "sourceRange": {
+          "first": {
+            "id": "e-syn-1",
+            "sequence": 1
+          },
+          "last": {
+            "id": "e-syn-1",
+            "sequence": 1
+          },
+          "stream": {
+            "id": "synthetic-modelrouteunserved",
+            "kind": "session"
+          }
+        },
+        "viewCursor": "v:syn:2"
+      },
+      "decode_failures": 0
+    }
+  }
+]

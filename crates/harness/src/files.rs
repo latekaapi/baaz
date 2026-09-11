@@ -29,13 +29,33 @@ pub struct FileEntry {
     pub lower: String,
 }
 
+/// [`walk`]'s result: the entries it found, and whether it stopped at [`CAP`]
+/// rather than running out of files on its own (finding `support-8`) — a
+/// monorepo's mention picker silently missing files past 5 000 with no
+/// signal at all was the bug; this is the signal.
+pub struct WalkResult {
+    /// The mentionable files, sorted shortest path first.
+    pub entries: Vec<FileEntry>,
+    /// `true` when the walk hit [`CAP`] and stopped, meaning some files in
+    /// the workspace are not in `entries` at all.
+    pub truncated: bool,
+}
+
 /// Walk `root` for mentionable files, relative to it, sorted shortest first.
 ///
 /// Blocking: the caller runs it on the background executor.
-pub fn walk(root: &Path) -> Vec<FileEntry> {
+pub fn walk(root: &Path) -> WalkResult {
+    walk_capped(root, CAP)
+}
+
+/// [`walk`] against an explicit cap, which is what the test uses to exercise
+/// truncation without creating [`CAP`] real files.
+fn walk_capped(root: &Path, cap: usize) -> WalkResult {
     let mut out = Vec::new();
+    let mut truncated = false;
     for entry in ignore::WalkBuilder::new(root).hidden(true).git_ignore(true).git_global(true).build().flatten() {
-        if out.len() >= CAP {
+        if out.len() >= cap {
+            truncated = true;
             break;
         }
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -53,7 +73,7 @@ pub fn walk(root: &Path) -> Vec<FileEntry> {
     // Shortest first, so `src/main.rs` beats `vendor/a/b/c/main.rs` on an equal
     // match, and stable within a length so the list never reshuffles.
     out.sort_by(|a, b| a.path.len().cmp(&b.path.len()).then_with(|| a.path.cmp(&b.path)));
-    out
+    WalkResult { entries: out, truncated }
 }
 
 /// Rank `paths` against `query` by subsequence match.
@@ -141,5 +161,25 @@ mod tests {
     fn the_walk_lowercases_once() {
         let entry = FileEntry { path: "Src/Main.RS".to_owned(), lower: "src/main.rs".to_owned() };
         assert_eq!(filter(&[entry], "MAIN").len(), 1);
+    }
+
+    /// **support-8 / A-MECH-17.** The walk used to stop at `CAP` with no
+    /// signal at all; it must now say so.
+    #[test]
+    fn a_walk_that_hits_the_cap_reports_truncated() {
+        let dir = std::env::temp_dir().join(format!("harness-files-walk-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("file{i}.txt")), "x").expect("temp file");
+        }
+        let capped = walk_capped(&dir, 3);
+        assert!(capped.truncated, "hitting the cap must be reported");
+        assert_eq!(capped.entries.len(), 3);
+
+        let uncapped = walk_capped(&dir, 100);
+        assert!(!uncapped.truncated, "not hitting the cap must not be reported");
+        assert_eq!(uncapped.entries.len(), 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

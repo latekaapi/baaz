@@ -125,7 +125,13 @@ fn every_capture_produces_at_least_one_turn() {
         // so there is nothing to turn. It stays covered by the snapshot test
         // (which pins that it folds to nothing) and by `muse-client`'s
         // round-trip test (which types every one of its frames).
-        if path.file_name().is_some_and(|name| name == "transcript-account.jsonl") {
+        // Neither carries a turn on purpose: `transcript-account.jsonl` is
+        // protocol evidence for the account surface, and
+        // `synthetic-modelrouteunserved.jsonl` exists only to pin a
+        // side-state marker that fires with no turn ever open.
+        if path.file_name().is_some_and(|name| {
+            name == "transcript-account.jsonl" || name == "synthetic-modelrouteunserved.jsonl"
+        }) {
             continue;
         }
         let fold = replay(&path);
@@ -190,6 +196,92 @@ fn a_retraction_removes_the_turn_and_hands_the_prompt_back() {
         !folded.turns.iter().any(|turn| matches!(turn, aui_protocol::Turn::User { .. })),
         "the retracted turn's user message is still in the transcript"
     );
+}
+
+/// **client-adapter-1 / A-MECH-1.** `turn/retracted` removes a *middle*
+/// turn (a user turn plus its assistant turn — two entries in the
+/// transcript), which shifts every later turn's raw index down by two. The
+/// last turn's agent-message item already has a cached `Slot` in the fold's
+/// `items` map from its first revision; the revision-2 update after the
+/// retraction must land on that same turn's text block, in place, not get
+/// dropped (leaving a stale duplicate on the next push) or land on the wrong
+/// turn. Before the `reindex` fix this failed: the cached slot's `turn`
+/// stayed at its pre-removal raw index instead of being remapped through the
+/// rebuilt id → position map, so the retained-by-raw-index check in the old
+/// code either evicted the slot or matched the wrong turn.
+#[test]
+fn a_retraction_of_a_middle_turn_remaps_the_last_turns_cached_slot() {
+    use aui_protocol::{Block, Turn};
+    let fold = replay(&fixtures_dir().join("synthetic-turn-removed.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let session = fold.session(&id).expect("session exists");
+
+    // The middle turn (t-syn-2) is gone: its user turn and its assistant
+    // turn both left the transcript.
+    assert!(
+        !session.turns.iter().any(|turn| turn.id() == "t-syn-2"),
+        "the retracted turn is still in the transcript"
+    );
+    assert!(
+        !session.turns.iter().any(|turn| matches!(turn, Turn::User { text, .. } if text == "two")),
+        "the retracted turn's user message is still in the transcript"
+    );
+
+    // What remains: user "one", assistant t-syn-1, user "three", assistant
+    // t-syn-3 — in that order.
+    let turn = assistant_turn(&fold, &id, "t-syn-3");
+    let blocks = turn.blocks();
+    assert_eq!(blocks.len(), 1, "the revision-2 update landed as a second block: {blocks:?}");
+    assert_eq!(
+        blocks[0],
+        Block::Text { text: "Reply three final".into(), streaming: false },
+        "the update did not land on t-syn-3's text block"
+    );
+
+    // The turn just before t-syn-3 must be t-syn-1's assistant turn, never
+    // the retracted t-syn-2 nor a stray duplicate — confirms the whole list
+    // reindexed rather than one slot silently vanishing. `turn/retracted`
+    // appends its own marker turn after the removal, which is expected here.
+    let ids: Vec<&str> = session.turns.iter().map(Turn::id).collect();
+    assert_eq!(
+        ids,
+        vec!["i-syn-user-1", "t-syn-1", "i-syn-user-3", "t-syn-3", "marker:v:syn:13"]
+    );
+}
+
+/// **client-adapter-3 / A-MECH-5.** A decode failure (a required field
+/// missing, or a shape `serde` rejects) used to return an empty `Vec<Delta>`
+/// with no counter, no log and no marker — a server shape-change was
+/// invisible in the transcript. It must now be counted in `SideState`.
+#[test]
+fn a_malformed_item_notification_counts_as_a_decode_failure() {
+    let mut fold = MuseFold::new();
+    let event = |method: &str, params: serde_json::Value| MuseEvent::Notification {
+        method: method.to_owned(),
+        cursor: None,
+        session_id: Some("s".to_owned()),
+        params,
+    };
+    // A well-formed event first, so the session exists and the count starts
+    // at zero.
+    fold.apply(event(
+        "item/completed",
+        serde_json::json!({
+            "sessionId": "s",
+            "item": {"itemId": "i", "kind": "agentMessage", "turnId": "t",
+                     "revision": 1, "status": "completed", "text": "hi"}
+        }),
+    ));
+    assert_eq!(fold.side("s").expect("side state exists").decode_failures, 0);
+
+    // `item/completed` with no `item` at all: the fold cannot decode it.
+    fold.apply(event("item/completed", serde_json::json!({"sessionId": "s"})));
+    assert_eq!(fold.side("s").expect("side state exists").decode_failures, 1);
+
+    // An unknown method falls into the catch-all, which is the same kind of
+    // blind spot.
+    fold.apply(event("session/somethingNew", serde_json::json!({"sessionId": "s"})));
+    assert_eq!(fold.side("s").expect("side state exists").decode_failures, 2);
 }
 
 #[test]
@@ -471,6 +563,21 @@ fn a_tool_card_that_raised_an_approval_stays_above_it_in_both_folds() {
     let backfill = kinds(&replay_as_backfill(&path));
     assert_eq!(live, vec!["tool", "approval"], "the live fold lost the log's order");
     assert_eq!(backfill, live, "the backfilled fold ordered the turn differently");
+}
+
+/// **client-adapter-12 / A-MECH-4.** `session/modelRouteUnserved` has no
+/// `Delta` — the standing model selection does not change — so it must be
+/// visible in side state rather than silently dropped through the fold's
+/// untyped-method catch-all.
+#[test]
+fn model_route_unserved_is_kept_visible_in_side_state() {
+    let fold = replay(&fixtures_dir().join("synthetic-modelrouteunserved.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let side = fold.side(&id).expect("side state exists");
+    let marker = side.model_route_unserved.as_ref().expect("the notification was dropped");
+    assert_eq!(marker.installed_provider_id, "meta");
+    assert_eq!(marker.model_id, "muse-spark-1.3");
+    assert_eq!(marker.provider_id.as_deref(), Some("openai"));
 }
 
 /// A truncated tool item keeps its `outputRef` for an `item/readOutput` fetch.

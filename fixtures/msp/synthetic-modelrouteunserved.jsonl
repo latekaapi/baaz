@@ -1,0 +1,12 @@
+# synthetic-modelrouteunserved.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# No capture carries `session/modelRouteUnserved`: it fires only when an
+# accepted `login.credential_update` installs a provider that cannot serve
+# the session's standing model route, which no recorded run happened to hit.
+# This file pins finding `client-adapter-12`: the fold must keep the
+# notification in side state as a visible marker rather than dropping it
+# through the untyped-method catch-all (`_ => Vec::new()`).
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire.
+<-- {"jsonrpc":"2.0","method":"session/started","params":{"viewCursor":"v:syn:1","session":{"sessionId":"synthetic-modelrouteunserved","workspaceRoot":"/tmp/synthetic","modelId":"muse-spark-1.3","status":"idle","createdAt":"2026-09-09T09:00:00Z","updatedAt":"2026-09-09T09:00:00Z","turnCount":0,"approvalMode":{"mode":"onRequest","source":"session"},"path":"/Users/latekaapi/.local/share/muse/sessions/2026/09/09/synthetic-modelrouteunserved/session.jsonl","activeTurnId":null}}}
+<-- {"jsonrpc":"2.0","method":"session/modelRouteUnserved","params":{"viewCursor":"v:syn:2","sessionId":"synthetic-modelrouteunserved","commandId":"c-syn-1","installedProviderId":"meta","modelId":"muse-spark-1.3","providerId":"openai","sourceRange":{"stream":{"kind":"session","id":"synthetic-modelrouteunserved"},"first":{"id":"e-syn-1","sequence":1},"last":{"id":"e-syn-1","sequence":1}}}}

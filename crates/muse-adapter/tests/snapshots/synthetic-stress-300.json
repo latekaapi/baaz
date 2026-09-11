@@ -9751,7 +9751,9 @@
       "approval_mode": "onRequest",
       "last_cursor": "v:stress:1291",
       "command_text": {},
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

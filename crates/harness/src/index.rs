@@ -72,17 +72,43 @@ pub fn read() -> HashMap<String, IndexEntry> {
 }
 
 /// [`read`] against an explicit path, which is what the test uses.
+///
+/// Every failure mode degrades to an empty map (the sidebar falls back to
+/// wire-only labels) rather than an error the person has to see — but a
+/// silent one is indistinguishable from "Muse never wrote an index yet",
+/// which is the common, harmless case. A schema drift or a locked database
+/// are not: they mean titles are missing for a session that has them, so
+/// each of the three failure points logs a one-line warning naming which it
+/// was (finding `support-5`).
 pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
     let Ok(connection) = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) else {
+        // A missing file is the ordinary case (no index has ever been
+        // written); anything else — permissions, a lock SQLite could not
+        // clear within `BUSY_TIMEOUT`, a corrupt file — is worth a line.
+        if path.exists() {
+            crate::harness_log!(
+                "session index at {} could not be opened (locked or unreadable); sidebar titles will be blank",
+                path.display()
+            );
+        }
         return HashMap::new();
     };
     let _ = connection.busy_timeout(BUSY_TIMEOUT);
     let sql = "SELECT session_id, session_name, title, first_user_prompt, search_text, updated_at_us FROM sessions";
-    let Ok(mut statement) = connection.prepare(sql) else {
-        return HashMap::new();
+    let mut statement = match connection.prepare(sql) {
+        Ok(statement) => statement,
+        Err(error) => {
+            // rusqlite's own message already says "no such table" or "no
+            // such column", which is exactly the table-vs-column distinction
+            // the finding asks for — passed through rather than re-guessed.
+            crate::harness_log!(
+                "session index schema drift ({error}); sidebar titles will be blank"
+            );
+            return HashMap::new();
+        }
     };
     let rows = statement.query_map([], |row| {
         Ok((
@@ -96,7 +122,13 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
             },
         ))
     });
-    let Ok(rows) = rows else { return HashMap::new() };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            crate::harness_log!("session index query failed ({error}); sidebar titles will be blank");
+            return HashMap::new();
+        }
+    };
     rows.filter_map(Result::ok).collect()
 }
 

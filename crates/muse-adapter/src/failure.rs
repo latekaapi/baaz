@@ -20,7 +20,7 @@ use muse_client::schema::TurnErrorKind;
 /// The `TurnErrorKind` for a wire string, or [`TurnErrorKind::Unknown`].
 fn parse_kind(kind: &str) -> TurnErrorKind {
     serde_json::from_value(serde_json::Value::String(kind.to_owned()))
-        .unwrap_or(TurnErrorKind::Unknown)
+        .unwrap_or_else(|_| TurnErrorKind::Unknown(kind.to_owned()))
 }
 
 /// The headline and the body of a failed turn.
@@ -52,7 +52,7 @@ pub fn title(kind: &str) -> String {
         // The open enum drops the string it could not name, so the raw one is
         // what the card shows: a class this build has never heard of is still
         // more informative as its own wire name than as "Error".
-        TurnErrorKind::Unknown => kind.to_owned(),
+        TurnErrorKind::Unknown(_) => kind.to_owned(),
     }
 }
 
@@ -132,6 +132,7 @@ mod tests {
             ("projectionError", "Projection error"),
             ("logError", "Log error"),
             ("workflowLaunchError", "Workflow launch error"),
+            ("authRequired", "Authentication required"),
         ];
         for (kind, expected) in kinds {
             assert_eq!(title(kind), expected);

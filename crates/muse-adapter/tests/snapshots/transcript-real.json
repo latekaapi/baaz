@@ -110,7 +110,9 @@
       "command_text": {
         "01a081ed-2ed2-72d3-b87e-c73e0780e714": "Run the shell command `ls` in the workspace, then use your question tool to ask me which of the listed files I want described. Do not do anything else."
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

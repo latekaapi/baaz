@@ -1850,7 +1850,7 @@ impl SessionView {
             "setmode" => {
                 match MODES.iter().copied().find(|m| format!("{m:?}").eq_ignore_ascii_case(rest) || m.label().eq_ignore_ascii_case(rest)) {
                     Some(mode) => self.set_mode(mode, cx),
-                    None => eprintln!("harness: unknown approval mode `{rest}`"),
+                    None => crate::harness_log!("unknown approval mode `{rest}`"),
                 }
             }
             // The n-th choice of the newest pending approval, 1-based, exactly
@@ -1881,7 +1881,7 @@ impl SessionView {
                     if let Some(index) = labels.iter().position(|l| l == wanted) {
                         self.select_option(block_id.clone(), index, cx);
                     } else {
-                        eprintln!("harness: no option labelled `{wanted}`");
+                        crate::harness_log!("no option labelled `{wanted}`");
                     }
                 }
                 self.answer_question(block_id, cx);
@@ -1965,7 +1965,7 @@ impl SessionView {
             // `wait` is handled by the runner, which is the only thing that can
             // let the wire catch up; seeing it here means it slipped through.
             "wait" => {}
-            other => eprintln!("harness: unknown step `{other}`"),
+            other => crate::harness_log!("unknown step `{other}`"),
         }
     }
 
@@ -3960,7 +3960,7 @@ pub(crate) fn parse_replay_file(path: &std::path::Path) -> Result<ParsedReplay, 
                 }
             }
             Ok(None) => {}
-            Err(error) => eprintln!("harness: {}:{}: {error}", path.display(), number + 1),
+            Err(error) => crate::harness_log!("{}:{}: {error}", path.display(), number + 1),
         }
     }
     Ok((events, sent))

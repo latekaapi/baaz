@@ -236,7 +236,7 @@ pub fn set_menus(cx: &mut App) {
     // a one-window app, so that is the window. Both run the same probe
     // cleanup as the window-close and app-quit hooks.
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
-        eprintln!("harness: CloseWindow");
+        crate::harness_log!("CloseWindow");
         crate::tier::cleanup_probes();
         // Deferred: menu dispatch already holds this window in an update
         // (`update_window_id` takes it out of `App.windows` while the
@@ -249,7 +249,7 @@ pub fn set_menus(cx: &mut App) {
         });
     });
     cx.on_action(|_: &QuitApp, cx: &mut App| {
-        eprintln!("harness: QuitApp (global)");
+        crate::harness_log!("QuitApp (global)");
         crate::tier::cleanup_probes();
         cx.quit();
     });
@@ -342,7 +342,7 @@ impl Login {
         self.url = None;
         self.code = None;
         self.method = None;
-        eprintln!("harness: login → choose");
+        crate::harness_log!("login → choose");
     }
 }
 
@@ -639,11 +639,11 @@ impl Harness {
             let _ = this.update(cx, |this, cx| match result {
                 Ok((connection, events)) => {
                     let server = &connection.server.server_info;
-                    eprintln!("harness: connected to {} {}", server.name, server.version);
+                    crate::harness_log!("connected to {} {}", server.name, server.version);
                     if let Some(warning) = &connection.warning {
                         // A fingerprint mismatch is additive evolution, never a
                         // failure: say so on stderr and carry on.
-                        eprintln!("harness: {warning:?}");
+                        crate::harness_log!("{warning:?}");
                     }
                     this.user_shell = connection
                         .server
@@ -690,7 +690,7 @@ impl Harness {
     /// Hand an event to the session it belongs to, and notice a dead child.
     fn route(&mut self, event: MuseEvent, cx: &mut Context<Self>) {
         if let MuseEvent::Closed(code) = &event {
-            eprintln!("harness: muse serve exited ({code:?}); reconnecting");
+            crate::harness_log!("muse serve exited ({code:?}); reconnecting");
             self.wire = Wire::Reconnecting;
             self.reconnect(cx);
         }
@@ -775,7 +775,7 @@ impl Harness {
     /// run follows the flow by. The line carries the state name only — never
     /// a URL, a code or a key.
     fn set_login_state(&mut self, state: LoginState, cx: &mut Context<Self>) {
-        eprintln!("harness: login → {}", login_state_name(&state));
+        crate::harness_log!("login → {}", login_state_name(&state));
         self.login.state = state;
         cx.notify();
     }
@@ -794,8 +794,8 @@ impl Harness {
                     // The wire is up but the probe failed: say so and show
                     // the login screen, like the old probe did. Never logs
                     // more than the failure itself.
-                    eprintln!("harness: account/read failed: {error}");
-                    eprintln!("harness: account → loggedOut");
+                    crate::harness_log!("account/read failed: {error}");
+                    crate::harness_log!("account → loggedOut");
                     this.auth = Auth::SignedOut;
                     this.login.reset_to_choose();
                     this.run_login_steps(cx);
@@ -817,7 +817,7 @@ impl Harness {
         let lane = state.state.as_wire().unwrap_or("unknown").to_owned();
         match Identity::from_account(&state) {
             Some(identity) => {
-                eprintln!("harness: account → {lane}");
+                crate::harness_log!("account → {lane}");
                 let api_key = identity.is_api_key();
                 self.auth = Auth::SignedIn(identity);
                 self.load_sessions(cx);
@@ -840,7 +840,7 @@ impl Harness {
                 cx.notify();
             }
             None => {
-                eprintln!("harness: account → loggedOut");
+                crate::harness_log!("account → loggedOut");
                 let was_in = matches!(self.auth, Auth::SignedIn(_));
                 self.active = None;
                 self.sessions.clear();
@@ -1141,12 +1141,12 @@ impl Harness {
         match method {
             "account/changed" => match serde_json::from_value::<AccountState>(params.clone()) {
                 Ok(state) => self.apply_account(state, cx),
-                Err(error) => eprintln!("harness: ignoring malformed account/changed: {error}"),
+                Err(error) => crate::harness_log!("ignoring malformed account/changed: {error}"),
             },
             "account/loginCompleted" => {
                 match serde_json::from_value::<AccountLoginCompletedParams>(params.clone()) {
                     Ok(completed) => self.on_login_completed(completed, cx),
-                    Err(error) => eprintln!("harness: ignoring malformed account/loginCompleted: {error}"),
+                    Err(error) => crate::harness_log!("ignoring malformed account/loginCompleted: {error}"),
                 }
             }
             _ => {}
@@ -1165,8 +1165,8 @@ impl Harness {
         // The outcome and its display message are the server's typed
         // vocabulary — never the URL, the code or a key — so a headless run
         // can be followed from stderr.
-        eprintln!(
-            "harness: loginCompleted → {}{}",
+        crate::harness_log!(
+            "loginCompleted → {}{}",
             completed.outcome.as_wire().unwrap_or("unknown"),
             message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()
         );
@@ -1203,7 +1203,7 @@ impl Harness {
             }
             // An outcome a newer server invented: the honest card is the
             // method's error, with the server's message when it sent one.
-            AccountLoginOutcome::Unknown => {
+            AccountLoginOutcome::Unknown(_) => {
                 let text: SharedString =
                     message.unwrap_or_else(|| "The sign-in ended in a way this build does not understand.".to_owned())
                         .into();
@@ -1280,13 +1280,13 @@ impl Harness {
                     api_key.update(cx, |state, cx| state.set_value(value, window, cx));
                 }
                 Err(_) => {
-                    eprintln!("harness: login step `key-from-env:{rest}` failed: variable is not set");
+                    crate::harness_log!("login step `key-from-env:{rest}` failed: variable is not set");
                     return false;
                 }
             },
             "submit" => self.login_intent(LoginIntent::SubmitApiKey, window, cx),
             _ => {
-                eprintln!("harness: unknown login step `{step}`");
+                crate::harness_log!("unknown login step `{step}`");
                 return false;
             }
         }
@@ -1932,10 +1932,17 @@ impl Harness {
         let call = cx.background_spawn(async move { (skills::list(&program), files::walk(&root)) });
         self.tasks.push(cx.spawn(async move |this, cx| {
             let (skills, files) = call.await;
+            if files.truncated {
+                crate::harness_log!(
+                    "@ mention index stopped at {} files; some workspace files are not mentionable",
+                    files::CAP
+                );
+            }
             let _ = this.update(cx, |this, cx| {
                 this.overlays.update(cx, |overlays, _| {
                     overlays.skills = skills;
-                    overlays.files = files;
+                    overlays.files = files.entries;
+                    overlays.files_truncated = files.truncated;
                 });
                 cx.notify();
             });
@@ -2253,7 +2260,7 @@ impl Harness {
                         exclude_items: Some(false),
                     });
                     if let Err(error) = &read {
-                        eprintln!("harness: session/read for a title failed: {error}");
+                        crate::harness_log!("session/read for a title failed: {error}");
                     }
                     let title = read.ok().and_then(|read| first_shell_command(&read));
                     (session_id, title)
@@ -3712,6 +3719,21 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 /// working directory first, then three ancestors above the executable
 /// (`target/debug/harness` is three levels below the repo root: the exe
 /// itself, `debug/`, `target/`). Pure so tests can drive it.
+/// `find_docs_dir`, resolved once and cached: neither the working directory
+/// nor the executable path change while the app runs, so probing the
+/// filesystem for it on every `show_docs` keypress (finding `app-core-17`)
+/// gains nothing over doing it the first time.
+fn docs_dir() -> Option<&'static std::path::Path> {
+    static DOCS_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DOCS_DIR
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().ok();
+            let exe = std::env::current_exe().ok();
+            find_docs_dir(cwd.as_deref(), exe.as_deref())
+        })
+        .as_deref()
+}
+
 fn find_docs_dir(
     cwd: Option<&std::path::Path>,
     exe: Option<&std::path::Path>,
@@ -3806,15 +3828,13 @@ impl Harness {
     /// three levels below the root). A bundled app moved away from the
     /// repo has no docs beside it, and that is an `eprintln`, not a dialog.
     fn show_docs(&mut self) {
-        let cwd = std::env::current_dir().ok();
-        let exe = std::env::current_exe().ok();
-        match find_docs_dir(cwd.as_deref(), exe.as_deref()) {
+        match docs_dir() {
             Some(dir) => {
-                if std::process::Command::new("open").arg(&dir).spawn().is_err() {
-                    eprintln!("harness: could not reveal {}", dir.display());
+                if std::process::Command::new("open").arg(dir).spawn().is_err() {
+                    crate::harness_log!("could not reveal {}", dir.display());
                 }
             }
-            None => eprintln!("harness: no docs folder beside the app"),
+            None => crate::harness_log!("no docs folder beside the app"),
         }
     }
 

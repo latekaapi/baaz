@@ -49,13 +49,18 @@ impl AttachedFile {
 /// everywhere else; here the extension decides, because a `.md` that fails to
 /// decode is a broken file, not a binary one.
 const TEXT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "txt", "text", "csv", "tsv", "json", "jsonl", "toml", "yaml", "yml", "xml",
-    "html", "htm", "css", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rs", "py", "rb", "go", "java",
-    "kt", "kts", "swift", "c", "h", "hpp", "cpp", "cc", "cs", "sh", "bash", "zsh", "fish", "sql",
-    "graphql", "gql", "proto", "log", "ini", "cfg", "conf", "env", "rst", "tex", "textile", "diff",
-    "patch", "vue", "svelte", "r", "lua", "pl", "pm", "scala", "hs", "ex", "exs", "erl", "clj",
-    "elm", "dart", "php", "zig",
+    "md", "markdown", "mdx", "txt", "text", "csv", "tsv", "json", "jsonl", "ipynb", "toml", "yaml",
+    "yml", "xml", "html", "htm", "css", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rs", "py", "rb",
+    "go", "java", "kt", "kts", "swift", "c", "h", "hpp", "cpp", "cc", "cs", "sh", "bash", "zsh",
+    "fish", "sql", "graphql", "gql", "proto", "log", "ini", "cfg", "conf", "env", "pem", "rst",
+    "tex", "textile", "diff", "patch", "vue", "svelte", "r", "lua", "pl", "pm", "scala", "hs", "ex",
+    "exs", "erl", "clj", "elm", "dart", "php", "zig",
 ];
+
+/// A small-file cap for the "unknown extension, but it decodes as UTF-8" path
+/// (finding `support-19`): past this it is more likely genuine binary data
+/// that happens to decode, not a text file this table simply has never seen.
+const UNKNOWN_TEXT_SNIFF_CAP: usize = 256 * 1024;
 
 /// Read a file from disk and extract its text, or say why not.
 pub fn from_path(id: impl Into<String>, path: &Path) -> Result<AttachedFile, String> {
@@ -94,6 +99,19 @@ pub fn from_bytes(
         }
         "" => String::from_utf8(bytes.to_vec())
             .map_err(|_| format!("{name} is not text (no extension to go on)"))?,
+        // An extension this table has never seen (a `.rules`, a vendor's
+        // odd config suffix) is not refused outright any more: a small file
+        // that decodes clean as UTF-8 is text, whatever its suffix is
+        // called (finding `support-19`). The chip's kind label still shows
+        // the real extension, so nothing is hidden about what was sniffed.
+        _ if bytes.len() <= UNKNOWN_TEXT_SNIFF_CAP => match String::from_utf8(bytes.to_vec()) {
+            Ok(text) => text,
+            Err(_) => {
+                return Err(format!(
+                    ".{ext} files cannot be attached (text, PDF, xlsx/xls and docx can)"
+                ));
+            }
+        },
         _ => {
             return Err(format!(
                 ".{ext} files cannot be attached (text, PDF, xlsx/xls and docx can)"
@@ -262,7 +280,34 @@ mod tests {
 
     #[test]
     fn an_unknown_extension_is_refused() {
-        let error = from_bytes("f1", "app.bin", "bin", b"\x00\x01\x02").expect_err("refused");
+        // Genuinely invalid UTF-8 (a lone continuation byte): the sniff
+        // fails to decode it, so it is still refused on its extension.
+        let error = from_bytes("f1", "app.bin", "bin", &[0xff, 0xfe, 0x00]).expect_err("refused");
+        assert!(error.contains(".bin"), "{error}");
+    }
+
+    /// **support-19 / A-MECH-23.** `.mdx`, `.ipynb` and `.pem` are plain text
+    /// and were refused for having an extension the table did not list.
+    #[test]
+    fn mdx_ipynb_and_pem_are_accepted_as_text() {
+        assert!(from_bytes("f1", "guide.mdx", "mdx", b"# Title\n\nSome text").is_ok());
+        assert!(from_bytes("f1", "nb.ipynb", "ipynb", b"{\"cells\": []}").is_ok());
+        assert!(from_bytes("f1", "key.pem", "pem", b"-----BEGIN CERTIFICATE-----").is_ok());
+    }
+
+    /// A small file with an extension this table has never seen is sniffed
+    /// as text when it decodes clean as UTF-8, rather than refused outright.
+    #[test]
+    fn a_small_unknown_extension_that_decodes_as_utf8_is_accepted() {
+        let file = from_bytes("f1", "app.rules", "rules", b"allow: *\ndeny: none").expect("sniffed as text");
+        assert_eq!(file.text, "allow: *\ndeny: none");
+    }
+
+    /// Genuine binary data under an unknown extension is still refused: the
+    /// sniff only ever accepts what actually decodes as UTF-8.
+    #[test]
+    fn a_small_unknown_extension_that_is_not_utf8_is_still_refused() {
+        let error = from_bytes("f1", "app.bin", "bin", &[0xff, 0xfe, 0x00]).expect_err("refused");
         assert!(error.contains(".bin"), "{error}");
     }
 

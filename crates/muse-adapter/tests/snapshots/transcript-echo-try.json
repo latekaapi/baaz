@@ -63,7 +63,9 @@
       "command_text": {
         "01a081e5-dbfb-744c-820f-82e3a51f5353": "say hi"
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]
