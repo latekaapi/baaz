@@ -30,7 +30,8 @@ use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleRightPane, ToggleSidebar};
 use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_search, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
-use aui::screens::{login, LoginIntent, LoginState};
+use aui::data::secret_field;
+use aui::screens::{login, LoginIntent, LoginMethod, LoginState};
 use aui::shell::{
     RESIZE_HANDLE_W, SIDEBAR_WIDTH, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
@@ -43,15 +44,16 @@ use gpui::{
     actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding,
     SharedString, Subscription, Task, Window,
 };
-use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::{
-    ModelCatalogSource, ModelListParams, SessionListParams, SessionResumeParams, SessionStartParams,
+    AccountLoginCompletedParams, AccountLoginOutcome, AccountLoginStartParams, AccountLoginType,
+    AccountState, AccountStateKind, SessionListParams, SessionResumeParams, SessionStartParams,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
-use crate::auth::{self, Identity, LoginEvent};
+use crate::auth::{self, Identity};
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Overlays, Palette, PaletteKind};
@@ -60,7 +62,7 @@ use crate::tier::{self, Tier};
 use crate::sessions::{self, SessionMeta};
 use crate::sidebar::{self, SessionEntry};
 use crate::search::{FileHit, SessionHit};
-use crate::{files, layout, skills, Args};
+use crate::{files, layout, skills, Args, LoginSample};
 
 actions!(
     harness,
@@ -289,13 +291,14 @@ pub fn set_menus(cx: &mut App) {
     ]);
 }
 
-/// Where the boot probe got to (spec §3.2).
+/// Where the boot probe got to: sign-in is on the wire now
+/// (`docs/diagnosis/login.md`, D22), so this is the `account/read` answer.
 enum Auth {
-    /// Reading `auth.json` and asking `model/list` where its catalog came from.
+    /// Waiting for `account/read`.
     Probing,
-    /// Either half of the probe failed: the login screen.
+    /// `loggedOut`: the login screen.
     SignedOut,
-    /// Both halves passed.
+    /// Any other lane, with the wire's identity.
     SignedIn(Identity),
 }
 
@@ -311,18 +314,50 @@ enum Wire {
     Down(String),
 }
 
-/// The login screen's own state, plus the child that drives it.
+/// The login screen's own state. The screen itself is stateless (it is the
+/// library's `aui::screens::login`): this owns the [`LoginState`], the
+/// device flow's URL and code, which method is running, and the API-key
+/// field. There is no task field: every wire call runs on the background
+/// executor and returns through `update`, like every other command.
 struct Login {
     state: LoginState,
     url: Option<String>,
     code: Option<String>,
-    expires: Option<String>,
-    task: Option<Task<()>>,
+    method: Option<LoginMethod>,
+    /// The masked API-key field, created once in [`Harness::new`]. The key
+    /// text is read once on submit and the field is cleared when the call
+    /// returns; the key never lands in `Harness`, a log, or a fixture.
+    api_key: Entity<InputState>,
+    /// Mirror of the field's masked flag, kept in sync by both toggle paths
+    /// (the eye button and `ToggleReveal`) so the intent can flip from it.
+    revealed: bool,
 }
 
-impl Default for Login {
-    fn default() -> Self {
-        Self { state: LoginState::Idle, url: None, code: None, expires: None, task: None }
+impl Login {
+    /// The method choice: forget the flow. The field keeps whatever it
+    /// holds — callers that leave the key form (`Back`, `ChooseAnother`,
+    /// a returned submit) clear it explicitly — so notify after calling.
+    fn reset_to_choose(&mut self) {
+        self.state = LoginState::Choose;
+        self.url = None;
+        self.code = None;
+        self.method = None;
+        eprintln!("harness: login → choose");
+    }
+}
+
+/// The [`LoginState`] name as the `harness: login → …` stderr line spells it,
+/// so a headless `--login-steps` run can be followed from a log. No URL,
+/// code or key ever reaches that line.
+fn login_state_name(state: &LoginState) -> &'static str {
+    match state {
+        LoginState::Choose => "choose",
+        LoginState::Starting => "starting",
+        LoginState::Device { .. } => "device",
+        LoginState::ApiKey { .. } => "apikey",
+        LoginState::Validating => "validating",
+        LoginState::Success => "success",
+        LoginState::Error { .. } => "error",
     }
 }
 
@@ -459,6 +494,9 @@ impl Harness {
             state
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
+        // The API-key field: masked, with the capture-safe placeholder. Enter
+        // inside it submits (single-line inputs always emit `PressEnter`).
+        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
         // The divider's last settled x, or the default for a fresh store.
         let restored = layout::sidebar_width(&layout::read());
         let mut this = Self {
@@ -466,7 +504,14 @@ impl Harness {
             client: None,
             wire: Wire::Connecting,
             auth: Auth::Probing,
-            login: Login::default(),
+            login: Login {
+                state: LoginState::Choose,
+                url: None,
+                code: None,
+                method: None,
+                api_key: api_key.clone(),
+                revealed: false,
+            },
             sessions: Vec::new(),
             index: HashMap::new(),
             active: None,
@@ -517,6 +562,16 @@ impl Harness {
                 this.refresh_search(cx);
             }
         }));
+        // The API-key field: Enter submits, and any change re-renders the
+        // form — `can_submit` is recomputed in `render_login`, so the Sign
+        // in button tracks the field's non-empty trimmed text.
+        this.subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => this.submit_api_key(cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }
+        }));
         this.overrides = sessions::read();
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the
@@ -527,18 +582,19 @@ impl Harness {
             // The shell is the point — the transcript is what is being looked
             // at — so the auth probe is skipped rather than faked into a login.
             this.auth = Auth::SignedIn(Identity {
+                lane: AccountStateKind::AccountLogin,
                 name: "Replay".into(),
                 email: String::new(),
-                api_key: false,
             });
             this.wire = Wire::Ready;
             return this;
         }
         if this.args.offline {
             // `--no-connect`: the chrome without a child, for a screenshot of
-            // the login screen with sample data.
+            // the login screen with sample data (`--login` picks the state).
             this.auth = Auth::SignedOut;
             this.wire = Wire::Down("not connected".into());
+            this.apply_login_sample(window, cx);
             return this;
         }
         this.connect(cx);
@@ -597,7 +653,7 @@ impl Harness {
                     this.client = Some(connection.client);
                     this.wire = Wire::Ready;
                     this.pump(events, cx);
-                    this.probe_catalog(cx);
+                    this.probe_account(cx);
                     cx.notify();
                 }
                 Err(error) => {
@@ -637,6 +693,15 @@ impl Harness {
             eprintln!("harness: muse serve exited ({code:?}); reconnecting");
             self.wire = Wire::Reconnecting;
             self.reconnect(cx);
+        }
+        // The account notifications own sign-in: they are folded before the
+        // session view sees anything, and the session view never sees them.
+        if let MuseEvent::Notification { method, params, .. } = &event {
+            if method.starts_with("account/") {
+                self.route_account(method, params, cx);
+                cx.notify();
+                return;
+            }
         }
         // A finished turn is when the index has something new to say about the
         // session, so the sidebar is refreshed then rather than on a timer.
@@ -706,91 +771,282 @@ impl Harness {
 
     // ------------------------------------------------------------------ auth
 
-    /// The second half of the boot probe: `model/list` reporting
-    /// `source: "providerCatalog"` means the catalog was fetched with a live
-    /// credential.
-    fn probe_catalog(&mut self, cx: &mut Context<Self>) {
+    /// Move to `state`, with the one stderr line a headless `--login-steps`
+    /// run follows the flow by. The line carries the state name only — never
+    /// a URL, a code or a key.
+    fn set_login_state(&mut self, state: LoginState, cx: &mut Context<Self>) {
+        eprintln!("harness: login → {}", login_state_name(&state));
+        self.login.state = state;
+        cx.notify();
+    }
+
+    /// The boot probe and the re-probe after every `account/changed`:
+    /// `account/read` is the only sign-in signal (`model/list` answers from
+    /// the provider catalog while logged out, so it never was one).
+    fn probe_account(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        let stored = auth::identity();
-        let call = cx.background_spawn(async move { client.model_list(&ModelListParams { session_id: None }) });
+        let call = cx.background_spawn(async move { client.account_read() });
         self.tasks.push(cx.spawn(async move |this, cx| {
-            let live = matches!(call.await, Ok(result) if result.source == ModelCatalogSource::ProviderCatalog);
-            let _ = this.update(cx, |this, cx| {
-                this.auth = match (stored, live) {
-                    (Some(identity), true) => Auth::SignedIn(identity),
-                    _ => Auth::SignedOut,
-                };
-                if matches!(this.auth, Auth::SignedIn(_)) {
-                    this.load_sessions(cx);
-                    // A fresh login has a fresh `auth.json`, so the cache
-                    // misses and this is also the re-probe a login asks for.
-                    this.probe_tier(false, cx);
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(state) => this.apply_account(state, cx),
+                Err(error) => {
+                    // The wire is up but the probe failed: say so and show
+                    // the login screen, like the old probe did. Never logs
+                    // more than the failure itself.
+                    eprintln!("harness: account/read failed: {error}");
+                    eprintln!("harness: account → loggedOut");
+                    this.auth = Auth::SignedOut;
+                    this.login.reset_to_choose();
+                    this.run_login_steps(cx);
+                    cx.notify();
                 }
-                cx.notify();
             });
         }));
     }
 
-    /// Start `muse login` and follow its stderr.
-    fn start_login(&mut self, cx: &mut Context<Self>) {
-        self.login = Login { state: LoginState::Starting, ..Login::default() };
-        cx.notify();
-        let program = self.args.program.clone();
-        let events = match auth::spawn_login(&program) {
-            Ok(events) => events,
-            Err(error) => {
-                self.login.state = LoginState::Error { message: error.to_string().into() };
+    /// Rebuild [`Auth`] from an [`AccountState`] — the probe answer and the
+    /// `account/changed` notification share this exactly.
+    ///
+    /// `loggedOut` clears the shell and shows the login screen (with the
+    /// "removed outside the app" dialog when a signed-in session loses its
+    /// credential); any other lane signs in, loads the sessions, and works
+    /// out the tier — the TUI probe for `accountLogin`, pay-as-you-go by
+    /// construction for the key lanes.
+    fn apply_account(&mut self, state: AccountState, cx: &mut Context<Self>) {
+        let lane = state.state.as_wire().unwrap_or("unknown").to_owned();
+        match Identity::from_account(&state) {
+            Some(identity) => {
+                eprintln!("harness: account → {lane}");
+                let api_key = identity.is_api_key();
+                self.auth = Auth::SignedIn(identity);
+                self.load_sessions(cx);
+                // `--tier` fakes the probe for a screenshot, and nothing else:
+                // it wins over the lane, exactly as `probe_tier` does, so a
+                // scripted capture can get past the pay-as-you-go guard.
+                if let Some(faked) = self.args.tier.clone() {
+                    self.tier = Some(faked);
+                    self.push_tier(cx);
+                } else if api_key {
+                    // The TUI probe is about subscriptions; a stored key or
+                    // `META_API_KEY` bills pay-as-you-go by construction, so
+                    // the footer says so without probing.
+                    self.tier = Some(Tier::PayAsYouGo);
+                    self.push_tier(cx);
+                } else {
+                    // A fresh login is also the re-probe a login asks for.
+                    self.probe_tier(false, cx);
+                }
                 cx.notify();
-                return;
             }
+            None => {
+                eprintln!("harness: account → loggedOut");
+                let was_in = matches!(self.auth, Auth::SignedIn(_));
+                self.active = None;
+                self.sessions.clear();
+                self.auth = Auth::SignedOut;
+                self.login.reset_to_choose();
+                if was_in {
+                    self.set_dialog(cx, Dialog {
+                        title: "Signed out of Muse".into(),
+                        detail: "The credential was removed outside the app.".into(),
+                        kind: DialogKind::Warning,
+                        primary: "Sign in",
+                        action: DialogAction::SignIn,
+                        archive_target: None,
+                    });
+                }
+                self.run_login_steps(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// One [`LoginIntent`]: the login screen's buttons, the Escape walk, and
+    /// the `--login-steps` verbs all arrive here. Needs the window for the
+    /// field (focus, clearing) — background completions that touch the field
+    /// go through `update_in` to get one.
+    fn login_intent(&mut self, intent: LoginIntent, window: &mut Window, cx: &mut Context<Self>) {
+        match intent {
+            LoginIntent::StartAccount => self.start_device_flow(cx),
+            LoginIntent::UseApiKey => {
+                self.login.method = Some(LoginMethod::ApiKey);
+                self.set_login_state(LoginState::ApiKey { can_submit: false, error: None }, cx);
+                window.focus(&self.login.api_key.focus_handle(cx), cx);
+            }
+            LoginIntent::SubmitApiKey => self.submit_api_key(cx),
+            LoginIntent::ToggleReveal => {
+                let next = !self.login.revealed;
+                self.login.revealed = next;
+                let api_key = self.login.api_key.clone();
+                api_key.update(cx, |state, cx| state.set_masked(next, window, cx));
+                cx.notify();
+            }
+            LoginIntent::Back | LoginIntent::ChooseAnother => {
+                self.login.reset_to_choose();
+                let api_key = self.login.api_key.clone();
+                api_key.update(cx, |state, cx| state.clean(window, cx));
+                cx.notify();
+            }
+            LoginIntent::OpenBrowser => {
+                if let Some(url) = self.login.url.clone() {
+                    // Straight into the child's argv; never into a log.
+                    let _ = auth::open_in_browser(&url);
+                }
+            }
+            LoginIntent::CopyCode => {
+                if let Some(code) = self.login.code.clone() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+                }
+            }
+            LoginIntent::Retry => match self.login.method {
+                Some(LoginMethod::Account) => self.start_device_flow(cx),
+                Some(LoginMethod::ApiKey) => self.login_intent(LoginIntent::UseApiKey, window, cx),
+                None => {
+                    self.login.reset_to_choose();
+                    cx.notify();
+                }
+            },
+            LoginIntent::Cancel => self.cancel_login_flow(cx),
+        }
+    }
+
+    /// Start the device-code flow: `account/loginStart {deviceCode}` on the
+    /// background executor. The URL and code come back in the result — never
+    /// in a notification — and the browser opens once, on entering the
+    /// device state (D26). Nothing here is logged but the state name.
+    fn start_device_flow(&mut self, cx: &mut Context<Self>) {
+        self.login.method = Some(LoginMethod::Account);
+        let Some(client) = self.client.clone() else {
+            self.set_login_state(
+                LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
+                cx,
+            );
+            return;
         };
-        self.login.task = Some(cx.spawn(async move |this, cx| loop {
-            let events = events.clone();
-            let next = cx.background_executor().spawn(async move { events.recv().ok() }).await;
-            let Some(event) = next else { return };
-            if this.update(cx, |this, cx| this.on_login(event, cx)).is_err() {
-                return;
-            }
+        self.set_login_state(LoginState::Starting, cx);
+        let call = cx.background_spawn(async move {
+            client.account_login_start(&AccountLoginStartParams {
+                api_key: None,
+                r#type: AccountLoginType::DeviceCode,
+            })
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(start) => match (start.verification_url, start.user_code) {
+                    (Some(url), Some(code)) => {
+                        this.login.url = Some(url.clone());
+                        this.login.code = Some(code.clone());
+                        this.set_login_state(
+                            LoginState::Device {
+                                url: url.clone().into(),
+                                code: code.clone().into(),
+                                expires: None,
+                                waiting: true,
+                            },
+                            cx,
+                        );
+                        let _ = auth::open_in_browser(&url);
+                    }
+                    _ => {
+                        this.set_login_state(
+                            LoginState::Error {
+                                message: "The server started no device flow.".into(),
+                                method: Some(LoginMethod::Account),
+                            },
+                            cx,
+                        );
+                    }
+                },
+                Err(error) => {
+                    this.set_login_state(
+                        LoginState::Error { message: error.to_string().into(), method: Some(LoginMethod::Account) },
+                        cx,
+                    );
+                }
+            });
         }));
     }
 
-    /// One line from the login child. The URL and the code go straight to the
-    /// screen and are never logged.
-    fn on_login(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
-        match event {
-            LoginEvent::Url(url) => self.login.url = Some(url),
-            LoginEvent::Code(code) => self.login.code = Some(code),
-            LoginEvent::Waiting { expires } => self.login.expires = expires,
-            LoginEvent::Success => {
-                self.login.state = LoginState::Success;
-                // The credential is ambient: `muse serve` picked it up at spawn,
-                // so the connection has to be made again before it can use it.
-                self.login.task = None;
-                self.wire = Wire::Reconnecting;
-                self.auth = Auth::Probing;
-                self.reconnect_after_login(cx);
-                cx.notify();
-                return;
-            }
-            LoginEvent::Failed(message) => {
-                self.login.state = LoginState::Error { message: message.into() };
-                cx.notify();
-                return;
-            }
+    /// Submit the API-key form: read the field once, trim, send
+    /// `account/loginStart {apiKey}` on the background executor. The key is
+    /// a local in the task closure and nowhere else; the field is cleared
+    /// when the call returns, whatever it returned (D24). An empty field
+    /// does nothing — the Sign in button is disabled until there is text.
+    fn submit_api_key(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.login.state, LoginState::ApiKey { .. }) {
+            return;
         }
-        if let (Some(url), Some(code)) = (&self.login.url, &self.login.code) {
-            self.login.state = LoginState::Device {
-                url: url.clone().into(),
-                code: code.clone().into(),
-                expires: self.login.expires.clone().map(SharedString::from),
-                waiting: true,
-            };
+        let key = self.login.api_key.read(cx).value().to_string();
+        let trimmed = key.trim().to_owned();
+        if trimmed.is_empty() {
+            return;
         }
+        let Some(client) = self.client.clone() else {
+            self.set_login_state(
+                LoginState::ApiKey {
+                    can_submit: false,
+                    error: Some("Muse is not running.".into()),
+                },
+                cx,
+            );
+            return;
+        };
+        self.login.method = Some(LoginMethod::ApiKey);
+        self.set_login_state(LoginState::Validating, cx);
+        let call = cx.background_spawn(async move {
+            client.account_login_start(&AccountLoginStartParams {
+                api_key: Some(trimmed),
+                r#type: AccountLoginType::ApiKey,
+            })
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = call.await;
+            // `update_in` for the window the field-clear needs.
+            let _ = this.update_in(cx, |this, window, cx| {
+                let api_key = this.login.api_key.clone();
+                api_key.update(cx, |state, cx| state.clean(window, cx));
+                match result {
+                    // A stored key: the signed-in `account/changed` follows
+                    // and enters the app; until then the spinner stays.
+                    Ok(_) => cx.notify(),
+                    Err(error) => {
+                        this.set_login_state(
+                            LoginState::ApiKey {
+                                can_submit: false,
+                                error: Some(error.to_string().into()),
+                            },
+                            cx,
+                        );
+                    }
+                }
+            });
+        }));
+    }
+
+    /// Abandon the running flow: back to the method choice immediately, and
+    /// `account/loginCancel` in the background. The `cancelled`
+    /// notification that precedes its result is then a no-op — the screen is
+    /// already where it would go.
+    fn cancel_login_flow(&mut self, cx: &mut Context<Self>) {
+        self.login.reset_to_choose();
         cx.notify();
+        let Some(client) = self.client.clone() else { return };
+        cx.background_spawn(async move {
+            let _ = client.account_login_cancel();
+        })
+        .detach();
     }
 
     /// After a successful login: drop the child that inherited no credential,
     /// spawn a fresh one and re-probe.
+    ///
+    /// Kept, unused, until the owner's first live turn confirms it is not
+    /// needed: the device flow is host-owned, so the `muse serve` that ran it
+    /// already holds the credential and the app proceeds on
+    /// `account/changed` with no reconnect (D25).
+    #[allow(dead_code)]
     fn reconnect_after_login(&mut self, cx: &mut Context<Self>) {
         self.client = None;
         self.active = None;
@@ -802,38 +1058,296 @@ impl Harness {
                 Ok((connection, events)) => {
                     this.client = Some(connection.client);
                     this.wire = Wire::Ready;
-                    this.login = Login::default();
+                    this.login.reset_to_choose();
                     this.pump(events, cx);
-                    this.probe_catalog(cx);
+                    this.probe_account(cx);
                     cx.notify();
                 }
                 Err(error) => {
                     this.wire = Wire::Down(error.to_string());
-                    this.login.state = LoginState::Error { message: error.to_string().into() };
+                    this.set_login_state(
+                        LoginState::Error { message: error.to_string().into(), method: this.login.method },
+                        cx,
+                    );
                     this.auth = Auth::SignedOut;
-                    cx.notify();
                 }
             });
         }));
     }
 
-    /// `muse logout`, then straight back to the login screen.
+    /// Sign out over the wire: `account/logout` in the background, and its
+    /// result — an [`AccountState`] — applied like `account/changed`, except
+    /// a deliberate sign-out never raises the "removed outside the app"
+    /// dialog. An `envKey` lane survives this (the environment still holds
+    /// the key), so that case keeps the shell and explains itself in a toast
+    /// (D28).
     fn logout(&mut self, cx: &mut Context<Self>) {
-        let program = self.args.program.clone();
-        let call = cx.background_spawn(async move { auth::logout(&program) });
+        let Some(client) = self.client.clone() else {
+            self.active = None;
+            self.sessions.clear();
+            self.auth = Auth::SignedOut;
+            self.login.reset_to_choose();
+            cx.notify();
+            return;
+        };
+        let call = cx.background_spawn(async move { client.account_logout() });
         self.tasks.push(cx.spawn(async move |this, cx| {
             let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                this.active = None;
-                this.sessions.clear();
-                this.auth = Auth::SignedOut;
-                this.login = Login::default();
-                if let Err(message) = result {
-                    this.login.state = LoginState::Error { message: message.into() };
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(state) => match Identity::from_account(&state) {
+                    Some(identity) => {
+                        let env_key = identity.lane == AccountStateKind::EnvKey;
+                        this.auth = Auth::SignedIn(identity);
+                        if env_key {
+                            this.overlays.update(cx, |overlays, _| {
+                                overlays.toast(
+                                    "Still signed in",
+                                    "META_API_KEY is set in the environment; unset it and relaunch to sign out.",
+                                );
+                            });
+                        }
+                        cx.notify();
+                    }
+                    None => {
+                        this.active = None;
+                        this.sessions.clear();
+                        this.auth = Auth::SignedOut;
+                        this.login.reset_to_choose();
+                        cx.notify();
+                    }
+                },
+                Err(error) => {
+                    this.set_dialog(cx, Dialog {
+                        title: "Sign out failed".into(),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    });
                 }
-                cx.notify();
             });
         }));
+    }
+
+    /// One `account/*` notification, folded before the session view sees
+    /// anything. `account/changed` rebuilds [`Auth`] exactly as
+    /// [`Self::probe_account`] does — a signed-in lane while on the login
+    /// screen enters the app with no reconnect (D25) — and
+    /// `account/loginCompleted` advances the login screen's own state. A
+    /// frame that does not decode is stderr and nothing else: the wire owns
+    /// the flow, and a malformed outcome must not move the screen.
+    fn route_account(&mut self, method: &str, params: &serde_json::Value, cx: &mut Context<Self>) {
+        match method {
+            "account/changed" => match serde_json::from_value::<AccountState>(params.clone()) {
+                Ok(state) => self.apply_account(state, cx),
+                Err(error) => eprintln!("harness: ignoring malformed account/changed: {error}"),
+            },
+            "account/loginCompleted" => {
+                match serde_json::from_value::<AccountLoginCompletedParams>(params.clone()) {
+                    Ok(completed) => self.on_login_completed(completed, cx),
+                    Err(error) => eprintln!("harness: ignoring malformed account/loginCompleted: {error}"),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The terminal outcome of the running login flow.
+    ///
+    /// `granted` shows Success (the signed-in `account/changed` that follows
+    /// enters the app); `denied` / `expired` / `failed` show the screen for
+    /// the running method — the full error card, except an API-key `failed`,
+    /// which goes back to the key form so the key can be fixed;
+    /// `cancelled` returns to the method choice unless already there.
+    fn on_login_completed(&mut self, completed: AccountLoginCompletedParams, cx: &mut Context<Self>) {
+        let message = completed.message.filter(|message| !message.trim().is_empty());
+        // The outcome and its display message are the server's typed
+        // vocabulary — never the URL, the code or a key — so a headless run
+        // can be followed from stderr.
+        eprintln!(
+            "harness: loginCompleted → {}{}",
+            completed.outcome.as_wire().unwrap_or("unknown"),
+            message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()
+        );
+        match completed.outcome {
+            AccountLoginOutcome::Granted => {
+                self.set_login_state(LoginState::Success, cx);
+            }
+            AccountLoginOutcome::Denied | AccountLoginOutcome::Expired | AccountLoginOutcome::Failed => {
+                let fallback = match completed.outcome {
+                    AccountLoginOutcome::Denied => "The sign-in request was denied.",
+                    AccountLoginOutcome::Expired => "The sign-in request expired before it was approved.",
+                    _ => "Sign-in failed.",
+                };
+                let text: SharedString =
+                    message.unwrap_or_else(|| fallback.to_owned()).into();
+                // An API-key failure belongs on the key form, where the key
+                // can be fixed — not on the error card with its way back.
+                if completed.outcome == AccountLoginOutcome::Failed
+                    && self.login.method == Some(LoginMethod::ApiKey)
+                {
+                    self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
+                } else {
+                    self.set_login_state(
+                        LoginState::Error { message: text, method: self.login.method },
+                        cx,
+                    );
+                }
+            }
+            AccountLoginOutcome::Cancelled => {
+                if !matches!(self.login.state, LoginState::Choose) {
+                    self.login.reset_to_choose();
+                    cx.notify();
+                }
+            }
+            // An outcome a newer server invented: the honest card is the
+            // method's error, with the server's message when it sent one.
+            AccountLoginOutcome::Unknown => {
+                let text: SharedString =
+                    message.unwrap_or_else(|| "The sign-in ended in a way this build does not understand.".to_owned())
+                        .into();
+                if self.login.method == Some(LoginMethod::ApiKey) {
+                    self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
+                } else {
+                    self.set_login_state(
+                        LoginState::Error { message: text, method: self.login.method },
+                        cx,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `--login-steps <a;b;c>`: drive the login screen from the command line
+    /// so a signed-in capture is reproducible without a pointer. Honoured
+    /// only when the app is really connected — the offline and replay boots
+    /// never call the probe that calls this — one step per item, the same
+    /// `;`-separated parsing as `--steps`. Consumed, so a later re-probe
+    /// does not replay them.
+    fn run_login_steps(&mut self, cx: &mut Context<Self>) {
+        let steps = std::mem::take(&mut self.args.login_steps);
+        if steps.is_empty() {
+            return;
+        }
+        // Raise the flag the capture waits on, exactly like [`Self::run_steps`]
+        // does, so a headless `--screenshot` waits for the login script to
+        // finish before the settling delay.
+        crate::shot::set_steps_running(true);
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            for step in steps {
+                if let Some(ms) = step.strip_prefix("wait:") {
+                    let ms: u64 = ms.parse().unwrap_or(0);
+                    cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
+                    continue;
+                }
+                // `update_in` for the window the field and the focus need.
+                let ran = this.update_in(cx, |this, window, cx| this.login_step(&step, window, cx));
+                match ran {
+                    Ok(true) => {}
+                    _ => {
+                        crate::shot::set_steps_running(false);
+                        return;
+                    }
+                }
+            }
+            crate::shot::set_steps_running(false);
+        }));
+    }
+
+    /// One `--login-steps` verb. Returns whether the run continues; a failed
+    /// or unknown step ends it with a stderr line.
+    ///
+    /// | step | what it does |
+    /// |---|---|
+    /// | `account` | `LoginIntent::StartAccount` (the device flow; the browser opens) |
+    /// | `apikey` | `LoginIntent::UseApiKey` |
+    /// | `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
+    /// | `submit` | `LoginIntent::SubmitApiKey` |
+    /// | `wait:<ms>` | let the wire catch up before the next step |
+    fn login_step(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (head, rest) = step.split_once(':').unwrap_or((step, ""));
+        match head {
+            "account" => self.login_intent(LoginIntent::StartAccount, window, cx),
+            "apikey" => self.login_intent(LoginIntent::UseApiKey, window, cx),
+            // The value travels from the environment into the field and then
+            // into the wire call: it never appears in argv, a log, or a
+            // screenshot argument. An unset variable fails naming the
+            // variable, not its value.
+            "key-from-env" => match std::env::var(rest) {
+                Ok(value) => {
+                    let api_key = self.login.api_key.clone();
+                    api_key.update(cx, |state, cx| state.set_value(value, window, cx));
+                }
+                Err(_) => {
+                    eprintln!("harness: login step `key-from-env:{rest}` failed: variable is not set");
+                    return false;
+                }
+            },
+            "submit" => self.login_intent(LoginIntent::SubmitApiKey, window, cx),
+            _ => {
+                eprintln!("harness: unknown login step `{step}`");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `--no-connect --login <state>`: the login screen's sample data for
+    /// captures. The URL, the code and the key-shaped field text are the
+    /// example values, never anything the wire sent.
+    fn apply_login_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const URL: &str = "https://example.invalid/device";
+        const CODE: &str = "WXYZ-2946";
+        // A mask with something behind it: the dots the capture wants.
+        const SAMPLE_KEY: &str = "capture-sample-key";
+        match self.args.login {
+            LoginSample::Choose => {
+                self.login.reset_to_choose();
+                cx.notify();
+            }
+            LoginSample::Device => {
+                self.login.url = Some(URL.to_owned());
+                self.login.code = Some(CODE.to_owned());
+                self.login.method = Some(LoginMethod::Account);
+                self.set_login_state(
+                    LoginState::Device { url: URL.into(), code: CODE.into(), expires: None, waiting: true },
+                    cx,
+                );
+            }
+            LoginSample::ApiKey => {
+                self.login.method = Some(LoginMethod::ApiKey);
+                self.set_login_state(LoginState::ApiKey { can_submit: true, error: None }, cx);
+                let api_key = self.login.api_key.clone();
+                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
+            }
+            LoginSample::ApiKeyError => {
+                self.login.method = Some(LoginMethod::ApiKey);
+                self.set_login_state(
+                    LoginState::ApiKey {
+                        can_submit: true,
+                        error: Some("That key was rejected. Check the key and try again.".into()),
+                    },
+                    cx,
+                );
+                let api_key = self.login.api_key.clone();
+                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
+            }
+            LoginSample::Validating => {
+                self.login.method = Some(LoginMethod::ApiKey);
+                self.set_login_state(LoginState::Validating, cx);
+            }
+            LoginSample::Error => {
+                self.login.method = Some(LoginMethod::Account);
+                self.set_login_state(
+                    LoginState::Error {
+                        message: "The sign-in request expired before it was approved.".into(),
+                        method: Some(LoginMethod::Account),
+                    },
+                    cx,
+                );
+            }
+        }
     }
 
     // ---------------------------------------------------------- billing tier
@@ -1987,29 +2501,36 @@ impl Harness {
     // ---------------------------------------------------------------- render
 
     fn render_login(&self, cx: &mut Context<Self>) -> AnyElement {
-        let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, _, cx| match intent {
-            LoginIntent::Start | LoginIntent::Retry => this.start_login(cx),
-            LoginIntent::OpenBrowser => {
-                if let Some(url) = this.login.url.clone() {
-                    // Straight into the child's argv; never into a log.
-                    let _ = auth::open_in_browser(&url);
-                }
-            }
-            LoginIntent::CopyCode => {
-                if let Some(code) = this.login.code.clone() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
-                }
-            }
-            LoginIntent::Cancel => {
-                this.login = Login::default();
-                cx.notify();
-            }
+        let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
+            this.login_intent(*intent, window, cx);
         });
-        login("login", self.login.state.clone())
+        // `can_submit` tracks the field's non-empty trimmed text, recomputed
+        // every frame; the stored bool is only the shape the state needs.
+        let state = match &self.login.state {
+            LoginState::ApiKey { error, .. } => LoginState::ApiKey {
+                can_submit: !self.login.api_key.read(cx).value().trim().is_empty(),
+                error: error.clone(),
+            },
+            other => other.clone(),
+        };
+        // The eye flips the field's masked flag and keeps `revealed` in sync,
+        // so `ToggleReveal` flips from the truth. The component never sees
+        // the key: it only reads the masked flag for the glyph.
+        let harness = cx.entity().downgrade();
+        let toggle = self.login.api_key.clone();
+        let field = secret_field("login-key", &self.login.api_key)
+            .placeholder("Paste your key")
+            .on_toggle_reveal(move |window, cx| {
+                let next = !toggle.read(cx).presentation().is_masked();
+                toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
+                let _ = harness.update(cx, |this, _| this.login.revealed = next);
+            });
+        login("login", state)
             .product("Muse")
             .headline("Sign in to Muse")
-            .subtitle("The harness drives the muse CLI, so it signs in the same way the CLI does.")
+            .subtitle("The harness signs in over the wire, the same way the muse CLI does.")
             .provider(aui_icons::Provider::Muse)
+            .api_key_field(field)
             .on_intent(move |i, window, cx| intent(&i, window, cx))
             .into_any_element()
     }
@@ -2187,16 +2708,26 @@ impl Harness {
         let account = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.open_menu(MenuKind::Account, cx);
         });
-        let mut footer = sidebar_footer("account", identity.initial(), identity.name.clone())
+        let mut footer = sidebar_footer("account", identity.initial(), identity.footer_name())
             .on_click(move |e, w, cx| account(e, w, cx));
         if !identity.email.is_empty() {
             footer = footer.detail(identity.email.clone());
         }
         // The third row: what this login is entitled to. Warning-tinted for
         // anything that is not a plan in force, because that is the case where
-        // the next turn costs money nobody expected.
+        // the next turn costs money nobody expected. The key lanes say so
+        // without a probe: a stored key or `META_API_KEY` is pay-as-you-go by
+        // construction.
         let meter = self.tier.as_ref().and_then(|tier| tier.weekly_fraction());
-        if let Some(tier) = &self.tier {
+        // `--tier` fakes the probe it names: the footer reads the faked tier
+        // like any other probe answer, even on the key lanes.
+        if self.args.tier.is_some() {
+            if let Some(tier) = &self.tier {
+                footer = footer.plan(tier.footer_label(), tier.is_warning());
+            }
+        } else if identity.is_api_key() {
+            footer = footer.plan("Pay-as-you-go · API key", true);
+        } else if let Some(tier) = &self.tier {
             footer = footer.plan(tier.footer_label(), tier.is_warning());
         }
         // The meter is the weekly fraction the probe already reports; with no
@@ -2472,12 +3003,20 @@ impl Harness {
         )
     }
 
-    /// The footer's account menu: Sign out, and nothing else.
+    /// The footer's account menu: Sign out, and nothing else. The environment
+    /// lane names itself: `META_API_KEY` survives a sign-out, so the row says
+    /// where the credential really comes from (D28).
     fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
         }
-        let rows = vec![MenuRow::Toggle { label: "Sign out".into(), checked: false }];
+        let label = match &self.auth {
+            Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
+                "Sign out (set by META_API_KEY)"
+            }
+            _ => "Sign out",
+        };
+        let rows = vec![MenuRow::Toggle { label: label.into(), checked: false }];
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
             if *index == 0 {
                 this.overlays.update(cx, |overlays, _| overlays.menu = None);
@@ -2910,7 +3449,7 @@ impl Harness {
                 DialogAction::SignIn => {
                     this.auth = Auth::SignedOut;
                     this.active = None;
-                    this.login = Login::default();
+                    this.login.reset_to_choose();
                 }
                 DialogAction::Archive => {}
             }
@@ -3317,11 +3856,29 @@ impl Harness {
     }
 
     /// Escape: close whatever is open, and otherwise stop the running turn if
-    /// the composer is empty (spec §3.9).
-    fn cancel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// the composer is empty (spec §3.9). On the login screen there is no
+    /// session stack: Escape walks the login states instead — `Cancel` in
+    /// `Starting` / `Device`, `Back` in `ApiKey`, `ChooseAnother` in `Error`,
+    /// nothing in the other states.
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
         if closed {
             cx.notify();
+            return;
+        }
+        if !matches!(self.auth, Auth::SignedIn(_)) {
+            match &self.login.state {
+                LoginState::Starting | LoginState::Device { .. } => {
+                    self.login_intent(LoginIntent::Cancel, window, cx);
+                }
+                LoginState::ApiKey { .. } => {
+                    self.login_intent(LoginIntent::Back, window, cx);
+                }
+                LoginState::Error { .. } => {
+                    self.login_intent(LoginIntent::ChooseAnother, window, cx);
+                }
+                _ => {}
+            }
             return;
         }
         // An open rename is the next thing Escape takes back. (There is no

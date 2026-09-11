@@ -143,7 +143,17 @@ path, no pseudo-terminal, a card that never arrived — becomes
 
 ---
 
-## 5. Checking it yourself
+## 5. The API-key lane
+
+A stored API key or `META_API_KEY` is pay-as-you-go by construction: there is
+no subscription it could draw on, so there is nothing to probe. When
+`account/read` reports the `apiKey` or `envKey` lane the harness sets the tier
+to pay-as-you-go directly — the TUI probe is about subscriptions and never
+runs — and the footer reads "Pay-as-you-go · API key" without one. The
+`/status` lines, the banner and the "Send anyway" guard are the same objects
+as on any other pay-as-you-go login.
+
+## 6. Checking it yourself
 
 ```bash
 cargo run -p harness -- --print-tier      # probe, print, exit; costs nothing

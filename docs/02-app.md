@@ -42,6 +42,28 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
 | `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
 | `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). |
+| `--login <state>` | which login-screen state `--no-connect` boots into for a capture: `choose` (the default), `device`, `apikey`, `apikey-error`, `validating` or `error`. Sample data only. |
+| `--login-steps <a;b;c>` | drive the login screen from the command line, once the login screen is up on a live connection (never with `--no-connect` / `--replay`). After sign-in the ordinary `--steps` run as today. |
+
+`--login-steps`, one step per item, the same `;`-separated parsing as
+`--steps`:
+
+| step | what it does |
+|---|---|
+| `account` | start the device flow (the browser opens) |
+| `apikey` | open the API-key form |
+| `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
+| `submit` | submit the API-key form |
+| `wait:<ms>` | let the wire catch up before the next step |
+
+The key travels from the environment into the field and then into the wire
+call: it never appears in argv, a log or a screenshot argument. If `VAR` is
+unset the step fails with a stderr line naming the variable, not its value.
+Every login-state transition prints one stderr line (`harness: login →
+<state>`, `harness: account → <lane>`, no secrets), so a headless run can be
+followed from a log: `--login-steps
+'apikey;key-from-env:MUSE_TEST_KEY;submit;wait:8000' --screenshot …` captures
+the signed-in shell on the API-key lane.
 | `--approval-mode <mode>` | the mode every session this window **starts** in. Not the same as the `setmode:` step: `session/start` is the only surface that declares a session's policy, and on this server `session/setApprovalMode` does not reach `promptUnmatched`. |
 | `--tier subscription\|payg\|unknown` | fake the billing probe, for a screenshot of the guard (`docs/06-billing.md`). |
 | `--print-tier` | probe the billing tier, print it and exit, without opening a window. Free. |
@@ -105,7 +127,7 @@ muse serve ──stdout──▶ muse-reader ──▶ crossbeam ──▶ muse-
 of them runs on `cx.background_spawn` and returns to the entity through
 `update`. The UI thread issues intents; it never waits on the wire. That is why
 `send`, `interrupt`, `session/start`, `session/resume`, `session/list`,
-`model/list`, the login child and the sqlite read all have the same shape: a
+`model/list`, the `account/*` calls and the sqlite read all have the same shape: a
 background task, then one `update` that folds the answer in.
 
 **Ack ≠ outcome.** Nothing gates folding on an ack. `turn/start` comes back with
@@ -115,41 +137,57 @@ event.
 
 ---
 
-## 4. Auth (spec §3.2)
+## 4. Auth (superseded: `docs/diagnosis/login.md`, D22–D29)
 
-The boot probe is two halves, and both must pass:
+Sign-in is on the wire. `conn.rs` sets `experimentalApi: true` at
+`initialize` (without it every `account/*` method answers `-32601` /
+`experimentalRequired`), and the boot probe is a single `account/read`:
+`loggedOut` → the login screen, any other lane → signed in, sessions load,
+and the tier is worked out (`accountLogin` runs the TUI probe; the key lanes
+are pay-as-you-go by construction, no probe). `model/list` is not a sign-in
+signal — it answers from the provider catalog while logged out.
 
-1. `~/.config/muse/auth.json` has `providers.meta` (or `META_API_KEY` is set,
-   which takes priority and is reported as the "API key" identity);
-2. `model/list` reports `source: "providerCatalog"`, which means the catalog was
-   fetched with a live credential.
+The login screen (`aui::screens::login`) is one screen with two methods. The
+idle state is the method choice — *Continue with Meta account* (primary; the
+subscription lane) and *Use an API key* (pay-as-you-go) — with one line saying
+which bills what. The device flow (`account/loginStart {deviceCode}`) returns
+the URL and code in the **result**, shows them with a spinner, and opens the
+browser once on entering the device state; *Cancel* runs `account/loginCancel`
+and returns immediately. The API-key form is a masked field with a reveal
+toggle: on submit the text is read once, trimmed, sent in
+`account/loginStart {apiKey}`, and the field is cleared when the call returns,
+whatever it returned. An empty key never sends (invalidParams needs a
+non-empty key); a rejected key returns to the form with the message inline.
 
-Either missing → the login screen (`aui::screens::login`).
+**The URL, the code and the key are never logged.** They travel from the
+`account/loginStart` result or the masked field onto the screen, the URL
+additionally into `open`'s argv, and nowhere else — not stderr, not a file,
+not a fixture (`fixtures/msp/transcript-account.jsonl` carries the example
+values).
 
-The login screen spawns `muse login` with `MUSE_LOGIN=1` — without it the
-launcher refuses to prompt when stderr is not a tty — and parses **stderr**,
-which is where the device-code flow prints. The parser is a small state machine:
-`Open this page to sign in:` claims the next non-empty line as the URL,
-`Confirm this code matches:` / `Enter this code:` claims the next as the code,
-`Waiting for approval (…)` carries the expiry, `Signed in.` is success and any
-`muse: …` line is the failure. SGR escapes are stripped, because the launcher
-bolds the code through `tput`.
+`account/loginCompleted` advances the screen (`granted` → Success, `denied` /
+`expired` / `failed` → the error card, or the key form for an API-key
+`failed`; `cancelled` → the method choice), and `account/changed` rebuilds
+`Auth` exactly as the probe does: a signed-in lane while on the login screen
+enters the app with **no reconnect** (the flow is host-owned, so the `muse
+serve` that ran it already holds the credential), and `loggedOut` while
+signed in clears the shell and raises the "Signed out of Muse" dialog ("The
+credential was removed outside the app."). There is no reconnect-after-login:
+the old function stays, unused, until the owner's first live turn confirms it
+is not needed. Escape walks the login states (`Cancel` in `Starting` /
+`Device`, `Back` in `ApiKey`, `ChooseAnother` in `Error`).
 
-**The URL and the code are never logged.** They go from the child's stderr into
-the screen's state and onto the screen, and the URL additionally into `open`'s
-argv. Nothing writes either to stdout, stderr or a file.
-
-On success the app **respawns `muse serve`**: the credential is ambient and the
-old child inherited none, so the connection has to be made again before it can
-be used. Then the probe runs again and the app enters.
-
-The sidebar footer is the library's account row: `user_full_name` over
-`user_email`, the plan row (`Weekly …` label, warning-tinted when it is not a
-plan in force), and the provider usage meter fed by the tier probe's weekly
-fraction — omitted while the probe has said nothing usable. The whole footer
-opens the account menu, whose only row is **Sign out** (`muse logout`, back to
-the login screen). No list-management buttons live in the footer any more;
-they moved to the Sessions caption's view menu (see §5).
+`auth.json` is read-only now, only for the two display strings (`user_full_name`
+/ `user_email`) when the wire's `label` is absent. The sidebar footer is the
+library's account row: the wire identity over the stored email, the plan row
+(`Weekly …` label, warning-tinted when it is not a plan in force; the key
+lanes read "Pay-as-you-go · API key" without a probe), and the provider usage
+meter fed by the tier probe's weekly fraction — omitted while the probe has
+said nothing usable. The whole footer opens the account menu, whose only row
+is **Sign out** (`account/logout`, back to the login screen) — or **Sign out
+(set by META_API_KEY)** on the environment lane, which a sign-out cannot clear
+(the toast says to unset it and relaunch). No list-management buttons live in
+the footer any more; they moved to the Sessions caption's view menu (see §5).
 
 The on-state screenshots live in a scratch workspace
 (`/private/tmp/harness-ws`): freshly started turn-less sessions are pruned

@@ -48,7 +48,7 @@ Two gpui entities own state, and a third owns everything that floats.
 
 | entity | file | owns |
 |---|---|---|
-| `Harness` | `app.rs` | the one `MuseClient`, the auth state and the login child, the session list, the billing tier, the sidebar's search and rename fields, the active session |
+| `Harness` | `app.rs` | the one `MuseClient`, the wire account state and the login flow, the session list, the billing tier, the sidebar's search and rename fields, the active session |
 | `SessionView` | `session.rs` | one Muse session: its `MuseFold`, the composer draft, the scroll position, the folded cards, the running turn, the pending questions' clocks |
 | `Overlays` | `overlays.rs` | **state only**: the modal, the open menu and its selection, the palette, the toasts, and the two lists the menus are built from |
 
@@ -91,10 +91,11 @@ Two directions cross the boundary, and each has exactly one shape.
   runs on `background_spawn` and comes back through `update`. The UI thread
   issues intents and never waits.
 
-The two blocking things that are not requests follow the same rule: the
-`muse login` child is parsed on its own named thread and reports through a
-channel (`auth.rs`), and the billing probe drives a pseudo-terminal on the
-background executor with a 20 s ceiling (`tier.rs`).
+The one blocking thing that is not a request follows the same rule: the
+billing probe drives a pseudo-terminal on the background executor with a 20 s
+ceiling (`tier.rs`). Sign-in is requests all the way down — `account/*` on the
+background executor like everything else — and `auth.rs` only reads
+`auth.json` for the two display strings.
 
 ## 4. The fold
 

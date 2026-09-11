@@ -23,7 +23,14 @@ const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/m
 /// that proves an unknown method is rejected. `model/list` takes none either —
 /// it asks for the whole catalog — and `muse-client` sends it bare, which
 /// `transcript-userinput-answer.jsonl` records.
-const UNTYPED_METHODS: &[&str] = &["nope/nope", "initialized", "model/list"];
+const UNTYPED_METHODS: &[&str] = &[
+    "nope/nope",
+    "initialized",
+    "model/list",
+    "account/read",
+    "account/loginCancel",
+    "account/logout",
+];
 
 fn fixture_files() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(FIXTURE_DIR)
@@ -74,6 +81,7 @@ fn roundtrip_request_params(method: &str, params: &Value) -> bool {
         "userInput/answer" => roundtrip::<UserInputAnswerParams>(w, params),
         "userInput/cancel" => roundtrip::<UserInputCancelParams>(w, params),
         "userInput/clarify" => roundtrip::<UserInputClarifyParams>(w, params),
+        "account/loginStart" => roundtrip::<AccountLoginStartParams>(w, params),
         "subagent/sendMessage" | "subagent/followupTask" => {
             roundtrip::<SubagentInputParams>(w, params);
         }
@@ -115,6 +123,9 @@ fn roundtrip_result(method: &str, result: &Value) -> bool {
         "userInput/answer" => roundtrip::<UserInputAnswerResult>(w, result),
         "userInput/cancel" => roundtrip::<UserInputCancelResult>(w, result),
         "userInput/clarify" => roundtrip::<UserInputClarifyResult>(w, result),
+        "account/read" | "account/logout" => roundtrip::<AccountState>(w, result),
+        "account/loginStart" => roundtrip::<AccountLoginStartResult>(w, result),
+        "account/loginCancel" => roundtrip::<AccountLoginCancelResult>(w, result),
         _ => return false,
     }
     true
@@ -144,6 +155,8 @@ fn roundtrip_server_params(method: &str, params: &Value) -> bool {
             roundtrip::<UserInputRequestParams>(w, params);
         }
         "userInput/settled" => roundtrip::<UserInputSettledParams>(w, params),
+        "account/changed" => roundtrip::<AccountState>(w, params),
+        "account/loginCompleted" => roundtrip::<AccountLoginCompletedParams>(w, params),
         "session/modelChanged" => roundtrip::<SessionModelChangedParams>(w, params),
         "session/goalChanged" => roundtrip::<SessionGoalChangedParams>(w, params),
         "session/todoListChanged" => roundtrip::<SessionTodoListChangedParams>(w, params),
@@ -364,6 +377,25 @@ fn constructors_produce_the_documented_shapes() {
     assert_eq!(
         serde_json::to_value(TurnInputPart::image("QUJD", "image/png")).unwrap(),
         serde_json::json!({"base64Data": "QUJD", "mediaType": "image/png", "type": "image"})
+    );
+}
+
+#[test]
+fn login_start_params_debug_redacts_the_key() {
+    let params = AccountLoginStartParams {
+        api_key: Some("test-key-abcdef-1234".to_owned()),
+        r#type: AccountLoginType::ApiKey,
+    };
+    let debug = format!("{params:?}");
+    assert!(debug.contains("apiKey"), "the field is named, {debug}");
+    assert!(debug.contains("<redacted>"), "the key is redacted, {debug}");
+    assert!(!debug.contains("test-key-abcdef-1234"), "the raw key leaked: {debug}");
+    // …and the wire shape still carries the real key: redaction is
+    // `Debug`-only, not serialization.
+    let wire = serde_json::to_value(&params).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"type": "apiKey", "apiKey": "test-key-abcdef-1234"})
     );
 }
 

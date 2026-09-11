@@ -1,5 +1,61 @@
 # Harness changelog
 
+## 2026-09-11 — Sign-in over the wire: Meta account and API key
+
+What was wrong (one paragraph, see `docs/diagnosis/login.md`): the harness
+parsed the wrong stream of the wrong program. `auth.rs` spawned `muse login`
+with stdout to `/dev/null` and parsed **stderr** for the launcher's
+device-code wording, but the real binary prints the device flow on **stdout**
+with different wording — so no event ever reached the screen, the card sat on
+"Starting sign-in…" until the code expired, and two smaller faults hid behind
+it: `model/list` answers from the provider catalog while logged out (so the
+"live" half of the boot probe never decided anything), and there was no
+API-key path at all.
+
+What changed: sign-in moved onto the wire. `conn.rs` opts in to
+`experimentalApi` at `initialize`; `muse-client` mirrors the eight `Account*`
+types and adds `account_read`, `account_login_start`, `account_login_cancel`
+and `account_logout` (each documented with its `-32601` /
+`experimentalRequired` gating). `auth.rs` lost the stderr parser, the `muse
+login` / `muse logout` children and the probe halves: the wire owns sign-in
+and `auth.json` is read-only, only for the two display strings when the
+wire's `label` is absent. `app.rs` probes with `account/read` (`loggedOut` →
+login screen, anything else → signed in), runs the two-method screen from the
+library (device code with auto-open browser, masked API-key field that is
+cleared when the submit call returns), folds `account/loginCompleted` and
+`account/changed` before the session view sees them, enters the app with no
+reconnect, and signs out with `account/logout` (an `envKey` lane survives it
+and says so). New: `--login <state>` for `--no-connect` captures,
+`--login-steps <a;b;c>` for scripted sign-in, `fixtures/msp/
+transcript-account.jsonl` (device flow started and cancelled, secrets
+sanitized), the experimental schema bundles beside the stable ones, and
+`docs/images/login-*.png` in all six states × both themes.
+
+Spend: zero. No live test, no probe script, no `--send`, no `send:` /
+`steer:` step and no `turn/start` ran anywhere in this task — only `muse
+schema`, `muse serve` driven through `initialize` / `account/*`, `--replay`,
+`--no-connect`, and the offline gates. The log count reads 139 accepted
+turns in total (`grep -c runtime.user_intent.accepted
+~/.local/share/muse/sessions/*/*/*/*/session.jsonl`), all predating or
+outside this task's turn-free wire traffic.
+
+Fix-ups after the owner-side audit (same day): the Device state's hint moved
+out of the three-button action row in the library (`login-methods` `2e56405`);
+`--login-steps` now sets the capture's `await_steps` and raises the
+steps-running flag so a headless sign-in is captured after it finishes;
+`--tier` wins over the lane-derived tier (it is how a scripted capture gets
+past the pay-as-you-go guard); the footer avatar for the key lanes is "A", not
+the wire label's initial; `account/loginCompleted` is logged on stderr as
+outcome and display message (the server's typed vocabulary, never a secret).
+
+Verified live on 2026-09-11/12 (`docs/diagnosis/login.md` §7): the API-key
+lane end to end from a signed-out machine, and a real turn on it. The
+Meta-account lane reached the device screen and opened the browser three
+times; each code expired unapproved (the server's lifetime is 611 s), so the
+approval itself is still the owner's to do. Spend for the tests: one billed
+turn on the API key ("OK", 24.2k tokens, `muse-spark-1.3-contributor`); the
+implementation ran on the owner's API key through `muse exec`.
+
 ## 2026-09-10 — Fix-up 2 on `wf-improvements` (owner re-read of the retakes)
 
 Four faults, all `--replay` proofs, no live turn spent.

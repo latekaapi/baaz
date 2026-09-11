@@ -30,6 +30,19 @@ the whole interface.
 `agentic-ui` must be checked out **beside** this repository, on branch
 `muse-support`: the `aui` crates are path dependencies.
 
+Scripted sign-in for captures: `--login-steps <a;b;c>` drives the login
+screen once it is up on a live connection (never with `--no-connect` /
+`--replay`), and `--login <state>` picks the state a `--no-connect` capture
+boots into.
+
+| step | what it does |
+|---|---|
+| `account` | start the device flow (the browser opens) |
+| `apikey` | open the API-key form |
+| `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
+| `submit` | submit the API-key form |
+| `wait:<ms>` | let the wire catch up before the next step |
+
 ## What a turn costs
 
 Read this before running anything scripted.

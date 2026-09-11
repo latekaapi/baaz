@@ -147,6 +147,8 @@ MSP has no plan mode; the TUI's `/plan` is a skill. Plan mode in the harness:
 
 ### 3.2 Auth
 
+Superseded 2026-09-11 by docs/diagnosis/login.md (D22–D29).
+
 - Signed-in probe at boot: `~/.config/muse/auth.json` has `providers.meta` **and**
   `model/list` reports `source: "providerCatalog"`. Either missing → login screen.
 - Login screen spawns `muse login` with `MUSE_LOGIN=1`, parses stderr for the URL and the
