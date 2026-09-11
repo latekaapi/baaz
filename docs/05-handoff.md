@@ -120,8 +120,10 @@ same way live and backfilled. Regenerate snapshots with `UPDATE_SNAPSHOTS=1` and
   aui gaps): `/Users/latekaapi/Projects/agentic-ui/docs/10-muse-research.md`
 - Exact schema for this muse build: `fixtures/msp/msp-ts/msp.d.ts`,
   `fixtures/msp/msp/`
-- Wire captures (ground truth): `fixtures/msp/transcript-*.jsonl`. The `probe*.py`
-  scripts are working Python clients for re-probing; **several of them send
-  turns**, so read one before you run it.
+- Wire captures (ground truth): `fixtures/msp/transcript-*.jsonl`. The
+  `probe*.py`/`run*.py`/`harness-probe` scripts and binary that used to
+  re-probe the wire (several sent turns) were removed 2026-09-12; git history
+  has them. `fixtures/msp/drive.py` and `make-stress-300.py` remain, each with
+  a header comment on what it sends and costs.
 - Persistent memory for this project lives at
   `~/.claude/projects/-Users-latekaapi-Projects-agentic-ui/memory/`.

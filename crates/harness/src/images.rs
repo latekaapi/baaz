@@ -153,10 +153,11 @@ mod tests {
 
     /// A real 1×1 transparent PNG, CRCs and all.
     ///
-    /// The bytes `fixtures/msp/probe_phase3.py` sent are **not** a valid PNG —
-    /// its IDAT CRC is wrong — and MSP accepted the part anyway, which is the
-    /// probe's other finding: the wire validates base64 and the media type and
-    /// never decodes the image. The app does, here, so these bytes are the real
+    /// The bytes `fixtures/msp/probe_phase3.py` (removed 2026-09-12; git
+    /// history has it) sent were **not** a valid PNG — its IDAT CRC was wrong
+    /// — and MSP accepted the part anyway, which was the probe's other
+    /// finding: the wire validates base64 and the media type and never
+    /// decodes the image. The app does, here, so these bytes are the real
     /// thing.
     const PNG: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,

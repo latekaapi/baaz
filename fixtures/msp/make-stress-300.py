@@ -12,6 +12,10 @@ Task B folds into one `Block::ToolGroup`.
 
 The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
 it must never be read as evidence of what Muse does.
+
+Sends and costs: nothing. This script never spawns `muse` or opens a
+connection — it only writes a `.jsonl` capture file by hand, fed later to
+`--replay`, so it is free under the spend rule in `CLAUDE.md`.
 """
 
 import argparse

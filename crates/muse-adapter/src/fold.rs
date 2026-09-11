@@ -710,17 +710,6 @@ impl Folded {
     fn turn_retry_scheduled(&mut self, params: &Value) -> Vec<Delta> {
         let retry: Option<msp::TurnRetryScheduledParams> =
             serde_json::from_value(params.clone()).ok();
-        let text = match &retry {
-            Some(retry) => format!(
-                "attempt {}/{} · retrying in {}s · {}",
-                retry.attempt,
-                retry.max_attempts,
-                retry.retry_delay_ms / 1000,
-                retry.reason
-            ),
-            None => "retrying".to_owned(),
-        };
-        let _ = text;
         self.side.retry = retry;
         // A scheduled retry is a **live** fact, not a transcript row: it is the
         // countdown above the composer, and the turn's own terminal replaces it.

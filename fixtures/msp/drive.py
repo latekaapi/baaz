@@ -1,3 +1,16 @@
+"""Drive the real `muse` TUI over a pty and snapshot its screen.
+
+Forks `muse` (default args: `--provider echo --trust-workspace`) under a pty,
+answers the terminal's own query escapes (cursor position, OSC color
+queries) so the TUI does not stall, then plays a fixed key script: open the
+`/` menu and arrow through it. As written it never types a prompt or presses
+Enter, so it never reaches `turn/start` and sends no turn — `--provider echo`
+here only picks a route (D19: a signed-in login still bills it), and this
+script never exercises that route. If you extend the key script to submit
+text, that submission is a billed turn under the spend rule in `CLAUDE.md`;
+count it from Muse's own `session.jsonl`, not from this script.
+"""
+
 import os, pty, select, time, re, fcntl, termios, struct, sys
 ws = os.path.abspath("ws")
 args = sys.argv[1:] or ["--provider","echo","--trust-workspace"]

@@ -338,21 +338,6 @@ impl Command {
         }
     }
 
-    /// Whether this build actually does it. The three that do not still appear.
-    pub fn available(&self) -> bool {
-        true
-    }
-
-    /// The phase that would bring a command this build does not have.
-    ///
-    /// Nothing is unavailable any more — `/fork` landed in Phase 4, `/name`
-    /// and `/resume` in Phase 5 — so this is the empty sentence the toast
-    /// would have carried. The pair is kept because a build that grows a
-    /// command before it grows the code should say so rather than do nothing.
-    pub fn coming_in(&self) -> &'static str {
-        ""
-    }
-
     /// Parse a typed slash command.
     pub fn parse(text: &str) -> Option<Command> {
         Command::ALL.into_iter().find(|c| c.slash() == text)

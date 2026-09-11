@@ -527,6 +527,10 @@ impl MuseClient {
     }
 
     /// `turn/cancel` — the non-urgent cancel, on the normal command lane.
+    ///
+    /// No caller in `crates/harness` yet (the shell uses `turn_interrupt`
+    /// instead); kept as wire surface covered by `schema_roundtrip.rs`, not
+    /// dead code.
     pub fn turn_cancel(&self, params: &TurnCancelParams) -> Result<TurnCancelResult> {
         self.call("turn/cancel", params)
     }
@@ -605,12 +609,19 @@ impl MuseClient {
 
     /// `view/subscribe` — attach this connection's live view subscription at an
     /// explicit cursor. The re-attach path after `view/unsubscribe`.
+    ///
+    /// No caller in `crates/harness` yet (the app never detaches its
+    /// subscription); kept as wire surface covered by `schema_roundtrip.rs`,
+    /// not dead code.
     pub fn view_subscribe(&self, params: &ViewSubscribeParams) -> Result<ViewSubscribeResult> {
         self.call("view/subscribe", params)
     }
 
     /// `view/unsubscribe` — stop following a session. Idempotent; does not
     /// unload the session.
+    ///
+    /// No caller in `crates/harness` yet (nothing detaches); kept as wire
+    /// surface covered by `schema_roundtrip.rs`, not dead code.
     pub fn view_unsubscribe(
         &self,
         params: &ViewUnsubscribeParams,

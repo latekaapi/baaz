@@ -1571,11 +1571,6 @@ impl SessionView {
     /// [`SessionView::run_command`] with whatever followed the command.
     fn run_command_with(&mut self, command: Command, argument: String, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_token("", window, cx);
-        if !command.available() {
-            let label = command.slash().to_owned();
-            self.toast(format!("{label} is not in this build yet"), command.coming_in(), cx);
-            return;
-        }
         match command {
             Command::Model => self.toggle_picker(MenuKind::Model, cx),
             Command::Effort => self.toggle_picker(MenuKind::Effort, cx),
