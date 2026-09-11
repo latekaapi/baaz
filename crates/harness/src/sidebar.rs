@@ -115,13 +115,14 @@ impl SessionEntry {
     ///
     /// It is labelled by the file rather than by the index, because a replayed
     /// session is not one this host ever ran and the index has nothing to say
-    /// about it.
+    /// about it. The timestamp is the deterministic clock, so two runs label
+    /// the row the same way (see [`grouping`]).
     pub fn replayed(session_id: &str, capture: &std::path::Path) -> Self {
         let label = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
         Self {
             id: session_id.to_owned(),
             label,
-            updated: Local::now(),
+            updated: crate::clock::now_local(),
             running: false,
             turns: 0,
             hidden: false,
@@ -150,9 +151,9 @@ impl SessionEntry {
         }
     }
 
-    /// The library row for this session.
-    fn summary(&self) -> SessionSummary {
-        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed(self.updated))
+    /// The library row for this session, labelled against `now`.
+    fn summary(&self, now: DateTime<Local>) -> SessionSummary {
+        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
             .provider(Provider::Muse);
         // The description first, so the second line reads what was done here
         // last; the turn count stays in the meta after it.
@@ -178,15 +179,30 @@ impl SessionEntry {
 }
 
 /// Group the entries by calendar day, newest first, into the date view.
+///
+/// One clock per frame: the caller hands the entries in and this reads "now"
+/// once. Under `HARNESS_DETERMINISTIC=1` "now" is the newest `updated` in the
+/// data, so the newest row reads "now" however old the fixture is and two
+/// runs group and label identically.
 pub fn grouping(entries: &[SessionEntry]) -> Grouping {
+    let now = if crate::clock::deterministic() {
+        entries.iter().map(|e| e.updated).max().unwrap_or_else(crate::clock::now_local)
+    } else {
+        Local::now()
+    };
+    grouping_at(entries, now)
+}
+
+/// [`grouping`] against an explicit clock, so tests can pin it.
+fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
     let mut sorted: Vec<&SessionEntry> = entries.iter().collect();
     sorted.sort_by_key(|e| std::cmp::Reverse(e.updated));
     let mut groups: Vec<DateGroup> = Vec::new();
     for entry in sorted {
-        let label = bucket(entry.updated, Local::now());
+        let label = bucket(entry.updated, now);
         match groups.last_mut() {
-            Some(group) if group.label == label => group.sessions.push(entry.summary()),
-            _ => groups.push(DateGroup::new(label, vec![entry.summary()])),
+            Some(group) if group.label == label => group.sessions.push(entry.summary(now)),
+            _ => groups.push(DateGroup::new(label, vec![entry.summary(now)])),
         }
     }
     Grouping::Date(groups)
@@ -205,9 +221,10 @@ fn bucket(at: DateTime<Local>, now: DateTime<Local>) -> &'static str {
     }
 }
 
-/// `now`, `14m`, `2h`, `3d` — the elapsed tag at the end of a session row.
-fn elapsed(at: DateTime<Local>) -> String {
-    let seconds = (Local::now() - at).num_seconds().max(0);
+/// `now`, `14m`, `2h`, `3d` — the elapsed tag at the end of a session row,
+/// against an explicit clock so one frame reads it once.
+fn elapsed_at(at: DateTime<Local>, now: DateTime<Local>) -> String {
+    let seconds = (now - at).num_seconds().max(0);
     match seconds {
         s if s < 60 => "now".into(),
         s if s < 3_600 => format!("{}m", s / 60),
@@ -305,6 +322,30 @@ mod tests {
     #[test]
     fn an_unparseable_timestamp_sorts_last_rather_than_first() {
         assert!(parse_time("not a date") < Local::now() - chrono::Duration::days(365));
+    }
+
+    #[test]
+    fn elapsed_labels_are_quantised_against_the_given_clock() {
+        let now = Local::now();
+        assert_eq!(elapsed_at(now, now), "now");
+        assert_eq!(elapsed_at(now - chrono::Duration::seconds(90), now), "1m");
+        assert_eq!(elapsed_at(now - chrono::Duration::hours(2), now), "2h");
+        assert_eq!(elapsed_at(now - chrono::Duration::days(3), now), "3d");
+    }
+
+    #[test]
+    fn grouping_against_a_fixed_clock_is_stable_run_to_run() {
+        let now = Local::now();
+        let mut fresh = entry("a");
+        fresh.updated = now;
+        let mut old = entry("b");
+        old.updated = now - chrono::Duration::days(2);
+        let entries = vec![old, fresh];
+        // Twice against the same clock: identical grouping, newest first,
+        // newest reading "now".
+        let first = grouping_at(&entries, now);
+        let second = grouping_at(&entries, now);
+        assert_eq!(format!("{first:?}"), format!("{second:?}"));
     }
 
     fn entry(id: &str) -> SessionEntry {

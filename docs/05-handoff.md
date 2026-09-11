@@ -33,7 +33,9 @@ what it costs depends on the login's tier. Count turns from the logs, never from
 GATES, before every commit. Harness: cargo build --workspace; cargo test --workspace;
 cargo clippy --workspace --all-targets -- -D warnings; RUSTDOCFLAGS="-D warnings" cargo doc
 --workspace --no-deps; `cargo tree -d` shows one gpui-pre and one gpui-kit; snapshots
-regenerated with UPDATE_SNAPSHOTS=1 and the diff READ. Library: the same plus the
+regenerated with UPDATE_SNAPSHOTS=1 and the diff READ; captures compared with
+HARNESS_DETERMINISTIC=1 (byte-identical run to run); performance claims from
+`--bench`, never from the old `bench:` step alone. Library: the same plus the
 all-features build (aui-webview/wry, aui-terminal/pty, aui-terminal/tui) and
 python3 scripts/api-doc.py, and a gallery entry for anything new.
 

@@ -38,6 +38,8 @@
 mod app;
 mod attachments;
 mod auth;
+mod bench;
+mod clock;
 mod conn;
 mod files;
 mod full_output;
@@ -207,6 +209,20 @@ pub struct Args {
     /// `--login-steps 'apikey;key-from-env:MUSE_TEST_KEY;submit;wait:8000'
     /// --screenshot …` captures the signed-in shell on the API-key lane.
     pub login_steps: Vec<String>,
+    /// `--bench <capture.jsonl>`: stream the capture's `<--` lines through
+    /// the fold on a timer while driving the transcript list, and report
+    /// element, frame and fold-apply timing plus peak RSS. Free: no child,
+    /// no server (implies `--no-connect`), and it implies
+    /// `HARNESS_FRAME_STATS`. See `docs/02-app.md` §6.
+    pub bench: Option<PathBuf>,
+    /// `--bench-cadence-ms <ms>`: the delay between streamed events.
+    pub bench_cadence: Duration,
+    /// `--bench-scroll top|mid|tail|sweep`: how the list is driven.
+    pub bench_scroll: bench::BenchScroll,
+    /// `--bench-frames <n>`: the minimum frames to observe before stopping.
+    pub bench_frames: usize,
+    /// `--bench-out <file.json>`: write the numbers as one JSON object.
+    pub bench_out: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -233,6 +249,11 @@ fn parse_args() -> Args {
         approval_mode: None,
         login: LoginSample::Choose,
         login_steps: Vec::new(),
+        bench: None,
+        bench_cadence: Duration::from_millis(4),
+        bench_scroll: bench::BenchScroll::Sweep,
+        bench_frames: 600,
+        bench_out: None,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -320,11 +341,49 @@ fn parse_args() -> Args {
                 out.replay = Some(PathBuf::from(shellexpand(&value)));
                 out.offline = true;
             }
+            "--bench" => {
+                let value = args.next().unwrap_or_else(|| usage("--bench needs <capture.jsonl>"));
+                out.bench = Some(PathBuf::from(shellexpand(&value)));
+                out.offline = true;
+            }
+            "--bench-cadence-ms" => {
+                let value = args.next().unwrap_or_default();
+                let ms: u64 = value.parse().unwrap_or_else(|_| usage("--bench-cadence-ms needs milliseconds"));
+                out.bench_cadence = Duration::from_millis(ms);
+            }
+            "--bench-scroll" => {
+                let value = args.next().unwrap_or_default();
+                out.bench_scroll =
+                    bench::BenchScroll::parse(&value).unwrap_or_else(|| usage("--bench-scroll takes top|mid|tail|sweep"));
+            }
+            "--bench-frames" => {
+                let value = args.next().unwrap_or_default();
+                out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
+            }
+            "--bench-out" => {
+                let value = args.next().unwrap_or_else(|| usage("--bench-out needs <file.json>"));
+                out.bench_out = Some(PathBuf::from(value));
+            }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument `{other}`")),
         }
     }
     out.workspace = canonical(out.workspace);
+
+    // A bench run is its own window: it streams rather than replaying, so a
+    // screenshot, a step list, a send and a second capture make no sense
+    // beside it. Fail loudly rather than silently ignoring them.
+    if out.bench.is_some() {
+        if out.screenshot.is_some() {
+            usage("--bench takes no --screenshot");
+        }
+        if !out.steps.is_empty() || !out.login_steps.is_empty() || out.send.is_some() {
+            usage("--bench takes no --steps, --login-steps or --send");
+        }
+        if out.replay.is_some() {
+            usage("--bench takes no --replay");
+        }
+    }
 
     // Scripted runs — screenshots, `--steps`, `--send` — are how a phase burns
     // real turns by accident: Phase 3 spent 25 against a cap of five because the
@@ -355,12 +414,86 @@ fn usage(err: &str) -> ! {
          \x20              [--screenshot <out.png>] [--screenshot-delay <ms>] [--no-connect]\n\
          \x20              [--replay <capture.jsonl>] [--tier subscription|payg|unknown]\n\
          \x20              [--print-tier] [--approval-mode <mode>]\n\
-         \x20              [--login <state>] [--login-steps <a;b;c>]\n\n\
+         \x20              [--login <state>] [--login-steps <a;b;c>]\n\
+         \x20              [--bench <capture.jsonl>] [--bench-cadence-ms <ms>] [--bench-scroll top|mid|tail|sweep]\n\
+         \x20              [--bench-frames <n>] [--bench-out <file.json>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing."
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 });
+}
+
+/// `--bench`: boot the bench window — one replayed session, streamed on a
+/// timer — and drive it. The boot order is the library's contract, exactly as
+/// in [`main`]: assets, `aui::init`, text scale, keys, menus, then the
+/// window. Free: no child is ever spawned and no server is ever dialled.
+fn run_bench(args: Args) {
+    // Frame stats before the first frame: the flag is read once, so forcing
+    // it after boot would miss the run.
+    session::enable_frame_stats_for_bench();
+    let theme = args.theme;
+    let opts = bench::BenchOptions {
+        capture: args.bench.clone().unwrap_or_else(|| usage("--bench needs <capture.jsonl>")),
+        cadence: args.bench_cadence,
+        scroll: args.bench_scroll,
+        frames: args.bench_frames,
+        out: args.bench_out.clone(),
+    };
+    let command = std::env::args().collect::<Vec<_>>().join(" ");
+    let (workspace, provider) = (
+        args.workspace.to_string_lossy().into_owned(),
+        args.provider.clone(),
+    );
+    gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
+        aui::init(theme, cx);
+        // Same reduced-motion hold as the shell boot: a deterministic bench
+        // measures stable numbers.
+        if crate::clock::deterministic() {
+            cx.set_reduce_motion(true);
+        }
+        AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
+        app::bind_keys(cx);
+        app::set_menus(cx);
+
+        let bounds = Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_H))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Harness".into()),
+                ..TitleBar::window_options().titlebar.unwrap_or_default()
+            }),
+            ..TitleBar::window_options()
+        };
+        let stashed: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<bench::BenchRoot>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let capture_stash = stashed.clone();
+        let handle = cx
+            .open_window(options, |window, cx| {
+                let view = cx.new(|cx| bench::BenchRoot::new(workspace.clone(), provider.clone(), window, cx));
+                capture_stash.borrow_mut().replace(view.clone());
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+            .expect("open the bench window");
+        let Some(root) = stashed.borrow().clone() else {
+            eprintln!("bench: the window closed before the run started");
+            return;
+        };
+        handle
+            .update(cx, |_, window, cx| {
+                window.on_window_should_close(cx, |_, _| {
+                    crate::tier::cleanup_probes();
+                    true
+                });
+            })
+            .ok();
+        cx.on_app_quit(|_| async {
+            crate::tier::cleanup_probes();
+        })
+        .detach();
+        bench::run(handle, root, opts, command, cx);
+    });
 }
 
 /// `~` at the start of a path, the one expansion a shell would have done.
@@ -378,6 +511,12 @@ fn main() {
     if args.print_tier {
         tier::print_and_exit(&args.program);
     }
+    // The bench is its own window (one replayed session, streamed): it never
+    // reaches the shell below.
+    if args.bench.is_some() {
+        run_bench(args);
+        return;
+    }
     let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
     // A `shell:` step raises a real approval over a live wire, which does not
     // land inside a fixed delay (finding F9).
@@ -387,6 +526,13 @@ fn main() {
     gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(theme, cx);
+        // A deterministic capture holds the platform's reduced-motion switch:
+        // every motion primitive (loops, tweens, presence, springs, the
+        // streaming caret) resolves to its resting state, so spinners and
+        // shimmers with no `at_rest` of their own still paint one frame.
+        if crate::clock::deterministic() {
+            cx.set_reduce_motion(true);
+        }
         // 3. The product text scale.
         AuiTheme::set_text_scale(scale::TEXT_SCALE, None, cx);
         // 4. The app's own keys, then the native menu bar: macOS reads each

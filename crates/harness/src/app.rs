@@ -1751,7 +1751,7 @@ impl Harness {
             let tier_banner = self.tier_banner();
             view.update(cx, |view, cx| {
                 view.set_context(titles, self.user_shell);
-                view.set_at_rest(self.args.screenshot.is_some());
+                view.set_at_rest(self.still());
                 view.set_tier_banner(tier_banner, cx);
             });
             self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
@@ -1770,7 +1770,7 @@ impl Harness {
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| {
             view.set_context(titles, self.user_shell);
-            view.set_at_rest(self.args.screenshot.is_some());
+            view.set_at_rest(self.still());
             view.set_tier_banner(tier_banner, cx);
         });
         self.active = Some(view);
@@ -2500,6 +2500,14 @@ impl Harness {
 
     // ---------------------------------------------------------------- render
 
+    /// Whether this window draws settled rather than entering: a
+    /// `--screenshot` run, or a deterministic capture
+    /// (`HARNESS_DETERMINISTIC=1`), which is always a static composition even
+    /// without a screenshot on the end.
+    fn still(&self) -> bool {
+        self.args.screenshot.is_some() || crate::clock::deterministic()
+    }
+
     fn render_login(&self, cx: &mut Context<Self>) -> AnyElement {
         let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
             this.login_intent(*intent, window, cx);
@@ -2525,14 +2533,16 @@ impl Harness {
                 toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
                 let _ = harness.update(cx, |this, _| this.login.revealed = next);
             });
-        login("login", state)
+        // A deterministic capture draws the card settled: the login screen's
+        // enter presence never lands on the same frame twice.
+        let card = login("login", state)
             .product("Muse")
             .headline("Sign in to Muse")
             .subtitle("The harness signs in over the wire, the same way the muse CLI does.")
             .provider(aui_icons::Provider::Muse)
-            .api_key_field(field)
-            .on_intent(move |i, window, cx| intent(&i, window, cx))
-            .into_any_element()
+            .api_key_field(field);
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        card.on_intent(move |i, window, cx| intent(&i, window, cx)).into_any_element()
     }
 
     /// Open a header/footer menu, replacing whatever is open. Clicking its
@@ -3058,7 +3068,7 @@ impl Harness {
     /// frame that has a `Window` to build a composer with.
     fn open_replay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.args.replay.take() else { return };
-        let at_rest = self.args.screenshot.is_some();
+        let at_rest = self.still();
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
         // The capture names its own session; this id is a placeholder the view
@@ -3094,7 +3104,10 @@ impl Harness {
         let banner = self.render_wire_banner(cx);
         let body = match self.active.clone() {
             Some(view) => {
-                if std::mem::take(&mut self.focus_composer) {
+                // A deterministic capture never takes keyboard focus: a
+                // focused composer paints the textarea's blinking caret,
+                // which lands on a different phase every run.
+                if std::mem::take(&mut self.focus_composer) && !crate::clock::deterministic() {
                     view.update(cx, |view, cx| view.focus_composer(window, cx));
                 }
                 view.update(cx, |view, cx| view.render_centre(window, cx))
@@ -3371,7 +3384,7 @@ impl Harness {
             .placeholder(placeholder)
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        if self.args.screenshot.is_some() {
+        if self.still() {
             card = card.at_rest();
         }
         Some(
@@ -3459,6 +3472,18 @@ impl Harness {
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        // A deterministic capture draws the dialog settled rather than rising
+        // in: the enter presence never lands on the same frame twice.
+        let card = dialog("dialog", title)
+            .kind(kind)
+            .body(detail)
+            .danger(danger)
+            .secondary(secondary)
+            .primary(primary_label)
+            .on_primary(move |w, cx| primary(&(), w, cx))
+            .on_secondary(move |w, cx| close(&(), w, cx))
+            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
         Some(
             popover_layer(
                 div()
@@ -3467,17 +3492,7 @@ impl Harness {
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
                     .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
-                    .child(
-                        dialog("dialog", title)
-                            .kind(kind)
-                            .body(detail)
-                            .danger(danger)
-                            .secondary(secondary)
-                            .primary(primary_label)
-                            .on_primary(move |w, cx| primary(&(), w, cx))
-                            .on_secondary(move |w, cx| close(&(), w, cx))
-                            .on_dismiss(move |w, cx| dismiss(&(), w, cx)),
-                    ),
+                    .child(card),
             )
             .into_any_element(),
         )
@@ -3830,6 +3845,10 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));
             cx.notify();
         });
+        // A deterministic capture draws the stack settled: toasts slide in,
+        // which never lands on the same frame twice.
+        let stack = aui::feedback::toast_stack("toasts", toasts);
+        let stack = if crate::clock::deterministic() { stack.at_rest() } else { stack };
         Some(
             popover_layer(
                 div()
@@ -3839,7 +3858,7 @@ impl Harness {
                     .w(px(TOAST_W))
                     .h(px(TOAST_STACK_H))
                     .child(
-                        aui::feedback::toast_stack("toasts", toasts)
+                        stack
                             .on_action(move |_, window, cx| act(&(), window, cx))
                             .on_close(move |window, cx| close(&(), window, cx)),
                     ),
