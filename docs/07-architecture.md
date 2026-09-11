@@ -27,8 +27,11 @@ here is already described somewhere else in more detail; this is the map.
                                     │ aui_protocol::{Session, Delta}
                     ┌───────────────▼──────────────────────────┐
                     │ harness (gpui)                           │
-                    │   app.rs      the window, auth, sessions │
+                    │   app.rs      the window, sessions, shell│
                     │   session.rs  one open session           │
+                    │   login.rs    the login screen, account/*│
+                    │   steps.rs    --steps / --login-steps    │
+                    │   wire.rs     call, then update          │
                     │   + tier, store, sessions, index,        │
                     │     overlays, transcript, sidebar, shot  │
                     └──────────────────────────────────────────┘
@@ -49,6 +52,15 @@ Two gpui entities own state, and a third owns everything that floats.
 | entity | file | owns |
 |---|---|---|
 | `Harness` | `app.rs` | the one `MuseClient`, the wire account state and the login flow, the session list, the billing tier, the sidebar's search and rename fields, the active session |
+
+Three of `Harness`'s concerns keep their fields there but live in their own
+modules, each reached through one call per seam (C1, 2026-09-12):
+
+| module | owns |
+|---|---|
+| `login.rs` | the login screen's state, the `account/*` notifications, the device-code and API-key flows, sign-out, and `render_login` (`docs/diagnosis/login.md` §4, D22–D28) |
+| `steps.rs` | the whole scripting surface: one parser, one verb table per scope (window, session, login), the two runners, and the cost notes |
+| `wire.rs` | `WireCall`: run a blocking request on the background executor, then return through `update` / `update_in` — the shape every wire call in the app has |
 | `SessionView` | `session.rs` | one Muse session: its `MuseFold`, the composer draft, the scroll position, the folded cards, the running turn, the pending questions' clocks |
 | `Overlays` | `overlays.rs` | **state only**: the modal, the open menu and its selection, the palette, the toasts, and the two lists the menus are built from |
 

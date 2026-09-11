@@ -76,6 +76,7 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
+use crate::wire::WireCall;
 use crate::{attachments, files, full_output, history, images, plan, search, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock: 1 Hz, the finest
@@ -380,6 +381,12 @@ pub struct SessionView {
 
 impl EventEmitter<SessionEvent> for SessionView {}
 
+impl WireCall for SessionView {
+    fn wire_tasks(&mut self) -> &mut Vec<Task<()>> {
+        &mut self.tasks
+    }
+}
+
 impl SessionView {
     /// A view over `session_id`. Nothing is loaded yet: the caller either just
     /// started the session or is about to [`SessionView::backfill`] it.
@@ -562,8 +569,9 @@ impl SessionView {
 
     /// Pick the n-th choice of the newest pending approval (`1`–`9`).
     pub fn choose_nth(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let step = format!("choose:{}", index + 1);
-        self.step(&step, window, cx);
+        // The same handler the `choose:<n>` step reaches, with the same
+        // 1-based numbering the digits on the card carry.
+        self.step_choose(&(index + 1).to_string(), window, cx);
     }
 
     /// Whether plan mode is on, for the app's Shift+Tab.
@@ -832,14 +840,12 @@ impl SessionView {
         if records.is_empty() {
             return;
         }
-        let call = cx.background_spawn(async move {
+        let work = move || {
             if let Ok(connection) = search::open() {
                 let _ = search::record_files(&connection, &records);
             }
-        });
-        self.tasks.push(cx.spawn(async move |_this, _cx| {
-            call.await;
-        }));
+        };
+        self.wire_call(cx, work, |_this, (), _cx| {});
     }
 
     /// This workspace's prompt history, read off the UI thread (finding P4).
@@ -848,14 +854,10 @@ impl SessionView {
     /// runs on the UI thread any more.
     pub fn load_history(&mut self, cx: &mut Context<Self>) {
         let key = self.workspace_key.clone();
-        let call = cx.background_spawn(async move { history::read(&key) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let entries = call.await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                this.history.set(entries);
-                cx.notify();
-            });
-        }));
+        self.wire_call(cx, move || history::read(&key), |this: &mut Self, entries, cx| {
+            this.history.set(entries);
+            cx.notify();
+        });
     }
 
     /// Append a sent prompt to the history off the UI thread (finding P4).
@@ -864,14 +866,10 @@ impl SessionView {
     /// still reached the wire first — history is a convenience, not a record.
     fn append_history(&mut self, text: String, cx: &mut Context<Self>) {
         let key = self.workspace_key.clone();
-        let call = cx.background_spawn(async move { history::append(&key, &text) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let entries = call.await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                this.history.set(entries);
-                cx.notify();
-            });
-        }));
+        self.wire_call(cx, move || history::append(&key, &text), |this: &mut Self, entries, cx| {
+            this.history.set(entries);
+            cx.notify();
+        });
     }
 
     /// A `turn/completed` with `terminal: "failed"`: the fold already drew the
@@ -909,21 +907,17 @@ impl SessionView {
         self.loading_history = true;
         cx.notify();
         let session_id = self.session_id.clone();
-        let pages = cx.background_spawn(async move { page_all(&client, &session_id) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let events = pages.await;
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    this.fold.apply(event);
-                }
-                this.loading_history = false;
-                this.follow = true;
-                cx.notify();
-                // The deferred switch's cue: the application swaps this view
-                // in now, instead of having flashed the empty state (C2).
-                cx.emit(SessionEvent::HistoryReady);
-            });
-        }));
+        self.wire_call(cx, move || page_all(&client, &session_id), |this, events, cx| {
+            for event in events {
+                this.fold.apply(event);
+            }
+            this.loading_history = false;
+            this.follow = true;
+            cx.notify();
+            // The deferred switch's cue: the application swaps this view
+            // in now, instead of having flashed the empty state (C2).
+            cx.emit(SessionEvent::HistoryReady);
+        });
     }
 
     // -------------------------------------------------------------- commands
@@ -1000,11 +994,9 @@ impl SessionView {
         self.files.clear();
         let Some(client) = self.wire_client(cx) else { return };
         let planning = self.plan;
-        let call = cx.background_spawn(async move { client.turn_start(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| this.sent(result, text, planning, cx));
-        }));
+        self.wire_call(cx, move || client.turn_start(&params), move |this, result, cx| {
+            this.sent(result, text, planning, cx);
+        });
         cx.notify();
     }
 
@@ -1069,7 +1061,7 @@ impl SessionView {
         self.steer_text(text, cx);
     }
 
-    fn steer_text(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn steer_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(turn_id) = self.running.as_ref().map(|r| r.turn_id.clone()) else {
             self.restore_prompt(text, cx);
             return;
@@ -1087,12 +1079,11 @@ impl SessionView {
         self.images.clear();
         self.files.clear();
         let Some(client) = self.wire_client(cx) else { return };
-        let call = cx.background_spawn(async move { client.turn_steer(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            if let Err(error) = call.await {
-                let _ = this.update(cx, |this, cx| this.report(&error, cx));
+        self.wire_call(cx, move || client.turn_steer(&params), |this, result, cx| {
+            if let Err(error) = result {
+                this.report(&error, cx);
             }
-        }));
+        });
         cx.notify();
     }
 
@@ -1109,15 +1100,11 @@ impl SessionView {
             turn_id: self.running.as_ref().map(|r| r.turn_id.clone()),
         };
         let Some(client) = self.wire_client(cx) else { return };
-        let call = cx.background_spawn(async move { client.turn_interrupt(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.report(&error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.turn_interrupt(&params), |this, result, cx| {
+            if let Err(error) = result {
+                this.report(&error, cx);
+            }
+        });
     }
 
     /// `turn/unqueue`, remembering why so `turn/unqueued` knows what to do with
@@ -1134,24 +1121,20 @@ impl SessionView {
         };
         let Some(client) = self.wire_client(cx) else { return };
         let turn_id = turn_id.to_owned();
-        let call = cx.background_spawn(async move { client.turn_unqueue(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    // The reclaim lost the race; the row stays, because only
-                    // the wire removes it.
-                    this.unqueueing.remove(&turn_id);
-                    this.report(&error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.turn_unqueue(&params), move |this, result, cx| {
+            if let Err(error) = result {
+                // The reclaim lost the race; the row stays, because only
+                // the wire removes it.
+                this.unqueueing.remove(&turn_id);
+                this.report(&error, cx);
+            }
+        });
         cx.notify();
     }
 
     /// `session/setModel`. The chip changes on `session/modelChanged`, never
     /// here.
-    fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
         let row = self.models.iter().find(|m| m.model_id == model_id);
         let params = SessionSetModelParams {
             command_id: new_command_id(),
@@ -1164,14 +1147,13 @@ impl SessionView {
             },
         };
         let Some(client) = self.wire_client(cx) else { return };
-        let call = cx.background_spawn(async move { client.session_set_model(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            if let Err(error) = call.await {
+        self.wire_call(cx, move || client.session_set_model(&params), |this, result, cx| {
+            if let Err(error) = result {
                 // On the echo provider this is `commandRejected:
                 // unsupported_route`, and the banner saying so is correct.
-                let _ = this.update(cx, |this, cx| this.report(&error, cx));
+                this.report(&error, cx);
             }
-        }));
+        });
     }
 
     /// `session/setApprovalMode`. The chip and the marker both come from
@@ -1183,34 +1165,29 @@ impl SessionView {
             mode: wire_mode(mode),
         };
         let Some(client) = self.wire_client(cx) else { return };
-        let call = cx.background_spawn(async move { client.session_set_approval_mode(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            if let Err(error) = call.await {
-                let _ = this.update(cx, |this, cx| this.report(&error, cx));
+        self.wire_call(cx, move || client.session_set_approval_mode(&params), |this, result, cx| {
+            if let Err(error) = result {
+                this.report(&error, cx);
             }
-        }));
+        });
     }
 
     /// `session/compact`. An ack of `noop` is a success, and says why.
-    fn compact(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn compact(&mut self, cx: &mut Context<Self>) {
         let params = SessionCompactParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
             turn_id: None,
         };
         let Some(client) = self.wire_client(cx) else { return };
-        let call = cx.background_spawn(async move { client.session_compact(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(ack) if ack.status == muse_client::schema::CompactStatus::Noop => {
-                    let reason = ack.reason.unwrap_or_else(|| "nothing to summarize".to_owned());
-                    this.toast("Nothing to compact", reason, cx);
-                }
-                Ok(_) => {}
-                Err(error) => this.report(&error, cx),
-            });
-        }));
+        self.wire_call(cx, move || client.session_compact(&params), |this, result, cx| match result {
+            Ok(ack) if ack.status == muse_client::schema::CompactStatus::Noop => {
+                let reason = ack.reason.unwrap_or_else(|| "nothing to summarize".to_owned());
+                this.toast("Nothing to compact", reason, cx);
+            }
+            Ok(_) => {}
+            Err(error) => this.report(&error, cx),
+        });
     }
 
     /// Fetch the catalog for this session. A snapshot, on every open: MSP has
@@ -1218,16 +1195,12 @@ impl SessionView {
     fn load_models(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.wire_client(cx) else { return };
         let params = ModelListParams { session_id: Some(self.session_id.clone()) };
-        let call = cx.background_spawn(async move { client.model_list(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Ok(list) = result {
-                    this.models = list.models;
-                }
-                cx.notify();
-            });
-        }));
+        self.wire_call(cx, move || client.model_list(&params), |this, result, cx| {
+            if let Ok(list) = result {
+                this.models = list.models;
+            }
+            cx.notify();
+        });
     }
 
     /// Route a failed command to its banner or its dialog (spec §3.8).
@@ -1569,7 +1542,7 @@ impl SessionView {
     }
 
     /// [`SessionView::run_command`] with whatever followed the command.
-    fn run_command_with(&mut self, command: Command, argument: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_command_with(&mut self, command: Command, argument: String, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_token("", window, cx);
         match command {
             Command::Model => self.toggle_picker(MenuKind::Model, cx),
@@ -1792,175 +1765,173 @@ impl SessionView {
 
     // -------------------------------------------------------------- scripting
 
-    /// One `--steps` item. Everything a screenshot needs, driven from a
-    /// command line so every capture is reproducible.
-    pub fn step(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let (head, rest) = step.split_once(':').unwrap_or((step, ""));
-        match head {
-            "draft" => self.set_draft(rest.to_owned(), window, cx),
-            "send" => self.send_text(rest.to_owned(), cx),
-            "steer" => self.steer_text(rest.to_owned(), cx),
-            "model" => self.toggle_picker(MenuKind::Model, cx),
-            "effort" => self.toggle_picker(MenuKind::Effort, cx),
-            "mode" => self.toggle_picker(MenuKind::Mode, cx),
-            "confirm" => self.confirm_menu(window, cx),
-            // The Phase 5 session operations, so their screenshots come from a
-            // command line rather than from a pointer.
-            "name" => self.run_command_with(Command::Name, rest.to_owned(), window, cx),
-            "hide" => cx.emit(SessionEvent::Hide),
-            "resume" => cx.emit(SessionEvent::Resume),
-            "setmodel" => self.set_model(rest, cx),
-            "compact" => self.compact(cx),
-            "meter" => {
-                self.meter_open = true;
-                cx.notify();
+    // One handler per `--steps` verb that needs more than a single existing
+    // call. The verb table that reaches them — and the parser, the runner and
+    // the cost notes — is [`crate::steps`]; these are only the bodies that
+    // touch this view's own state, which is why they live here.
+
+    /// `meter`: pin the context meter's breakdown open.
+    pub(crate) fn step_meter(&mut self, cx: &mut Context<Self>) {
+        self.meter_open = true;
+        cx.notify();
+    }
+
+    /// `context:<used>/<window>/<level>`: a pressure state the echo provider
+    /// cannot be pushed into — a synthetic `session/contextUsage`, only ever
+    /// reachable from this flag.
+    pub(crate) fn step_context(&mut self, rest: &str, cx: &mut Context<Self>) {
+        self.fake_context = parse_context(rest);
+        cx.notify();
+    }
+
+    /// `plus`: toggle the composer's `+` menu.
+    pub(crate) fn step_plus(&mut self, cx: &mut Context<Self>) {
+        self.plus_open = !self.plus_open;
+        cx.notify();
+    }
+
+    /// `drop`: raise the drop overlay.
+    pub(crate) fn step_drop(&mut self, cx: &mut Context<Self>) {
+        self.dragging = true;
+        cx.notify();
+    }
+
+    /// `command:<filter>` / `mention:<filter>`: type the sigil and the filter
+    /// into the draft, which is what opens the caret popover.
+    pub(crate) fn step_caret_menu(&mut self, sigil: &str, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = format!("{sigil}{rest}");
+        self.set_draft(text, window, cx);
+        self.on_draft_changed(cx);
+    }
+
+    /// `setmode:<mode>`: `session/setApprovalMode`, without opening the picker.
+    pub(crate) fn step_setmode(&mut self, rest: &str, cx: &mut Context<Self>) {
+        match MODES
+            .iter()
+            .copied()
+            .find(|m| format!("{m:?}").eq_ignore_ascii_case(rest) || m.label().eq_ignore_ascii_case(rest))
+        {
+            Some(mode) => self.set_mode(mode, cx),
+            None => crate::harness_log!("unknown approval mode `{rest}`"),
+        }
+    }
+
+    /// `choose:<n>`: the n-th choice of the newest pending approval, 1-based,
+    /// exactly as the digits on the card are.
+    pub(crate) fn step_choose(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(n) = rest.parse::<usize>() else { return };
+        let Some((approval_id, choices)) = self.newest_pending_approval() else { return };
+        let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
+        if choice.accepts_feedback && self.feedback_open.is_none() {
+            // The same two-press dance a person does: the first press
+            // opens the field, `feedback:` fills it, the second sends.
+            self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+            return;
+        }
+        let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
+        self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
+    }
+
+    /// `feedback:<text>`: type into whichever field is open — an approval's
+    /// feedback or a question's clarification — without sending it.
+    pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let field = if self.feedback_open.is_some() { self.feedback.clone() } else { self.clarify.clone() };
+        field.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+        cx.notify();
+    }
+
+    /// `answer:<label>` / `answers:<a|b>`: pick options on the newest question
+    /// and send them.
+    pub(crate) fn step_answer(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let Some((block_id, labels)) = self.newest_pending_question() else { return };
+        for wanted in rest.split('|').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(index) = labels.iter().position(|l| l == wanted) {
+                self.select_option(block_id.clone(), index, cx);
+            } else {
+                crate::harness_log!("no option labelled `{wanted}`");
             }
-            // A pressure state the echo provider cannot be pushed into: a
-            // synthetic `session/contextUsage`, and it is only ever reachable
-            // from this flag.
-            "context" => {
-                self.fake_context = parse_context(rest);
-                cx.notify();
-            }
-            "plan" => self.set_plan(true, cx),
-            "image" => self.attach_paths(vec![PathBuf::from(rest)], cx),
-            "file" => self.attach_paths(vec![PathBuf::from(rest)], cx),
-            "plus" => {
-                self.plus_open = !self.plus_open;
-                cx.notify();
-            }
-            "drop" => {
-                self.dragging = true;
-                cx.notify();
-            }
-            "command" | "mention" => {
-                let sigil = if head == "command" { "/" } else { "@" };
-                let text = format!("{sigil}{rest}");
-                self.set_draft(text, window, cx);
-                self.on_draft_changed(cx);
-            }
-            // `session/userShell`: free on every provider, and the only way to
-            // raise a real approval without spending a turn.
-            "shell" => self.run_user_shell(rest.to_owned(), cx),
-            "setmode" => {
-                match MODES.iter().copied().find(|m| format!("{m:?}").eq_ignore_ascii_case(rest) || m.label().eq_ignore_ascii_case(rest)) {
-                    Some(mode) => self.set_mode(mode, cx),
-                    None => crate::harness_log!("unknown approval mode `{rest}`"),
-                }
-            }
-            // The n-th choice of the newest pending approval, 1-based, exactly
-            // as the digits on the card are.
-            "choose" => {
-                let Ok(n) = rest.parse::<usize>() else { return };
-                let Some((approval_id, choices)) = self.newest_pending_approval() else { return };
-                let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
-                if choice.accepts_feedback && self.feedback_open.is_none() {
-                    // The same two-press dance a person does: the first press
-                    // opens the field, `feedback:` fills it, the second sends.
-                    self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+        }
+        self.answer_question(block_id, cx);
+    }
+
+    /// `clarify:<text>`: with no text this only opens the field, which is what
+    /// a screenshot of the open field wants; with text it opens, fills and
+    /// sends, which is what the round-trip wants.
+    pub(crate) fn step_clarify(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((block_id, _)) = self.newest_pending_question() else { return };
+        self.clarify_open = Some(block_id.clone());
+        self.clarify.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+        if rest.trim().is_empty() {
+            cx.notify();
+            return;
+        }
+        self.send_clarification(&block_id, window, cx);
+    }
+
+    /// `preview:<n>`: the n-th option's preview on the newest question, 0-based.
+    pub(crate) fn step_preview(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let Ok(n) = rest.parse::<usize>() else { return };
+        if let Some((block_id, _)) = self.newest_pending_question() {
+            self.toggle_preview(block_id, n, cx);
+        }
+    }
+
+    /// `select:<label>`: pick without sending, for a capture of a half-answered
+    /// card.
+    pub(crate) fn step_select(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let Some((block_id, labels)) = self.newest_pending_question() else { return };
+        if let Some(index) = labels.iter().position(|l| l == rest) {
+            self.select_option(block_id, index, cx);
+        }
+    }
+
+    /// `skip`: decline the newest question.
+    pub(crate) fn step_skip(&mut self, cx: &mut Context<Self>) {
+        if let Some((block_id, _)) = self.newest_pending_question() {
+            self.skip_question(block_id, cx);
+        }
+    }
+
+    /// `top`: jump to the head of the transcript without touching the pointer.
+    pub(crate) fn step_top(&mut self, cx: &mut Context<Self>) {
+        self.follow = false;
+        self.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+        cx.notify();
+    }
+
+    /// `end`: jump to the tail of the transcript.
+    pub(crate) fn step_end(&mut self, cx: &mut Context<Self>) {
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// `mid`: jump to the middle of the transcript.
+    pub(crate) fn step_mid(&mut self, cx: &mut Context<Self>) {
+        self.follow = false;
+        let mid = self.list_len / 2;
+        self.list_state.scroll_to(gpui::ListOffset { item_ix: mid, offset_in_item: px(0.0) });
+        cx.notify();
+    }
+
+    /// `bench:<n>`: the frame-stats driver — N back-to-back frames so
+    /// `HARNESS_FRAME_STATS` percentiles have samples on a static replay,
+    /// which would otherwise idle after a few frames.
+    pub(crate) fn step_bench(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let n: usize = rest.parse().unwrap_or(240);
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            for _ in 0..n {
+                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
                     return;
                 }
-                let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
-                self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
             }
-            // Type into whichever field is open — an approval's feedback or a
-            // question's clarification — without sending it.
-            "feedback" => {
-                let field = if self.feedback_open.is_some() { self.feedback.clone() } else { self.clarify.clone() };
-                field.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-                cx.notify();
-            }
-            "answer" | "answers" => {
-                let Some((block_id, labels)) = self.newest_pending_question() else { return };
-                for wanted in rest.split('|').map(str::trim).filter(|s| !s.is_empty()) {
-                    if let Some(index) = labels.iter().position(|l| l == wanted) {
-                        self.select_option(block_id.clone(), index, cx);
-                    } else {
-                        crate::harness_log!("no option labelled `{wanted}`");
-                    }
-                }
-                self.answer_question(block_id, cx);
-            }
-            // `clarify` with no text only opens the field, which is what a
-            // screenshot of the open field wants; with text it opens, fills and
-            // sends, which is what the round-trip wants.
-            "clarify" => {
-                let Some((block_id, _)) = self.newest_pending_question() else { return };
-                self.clarify_open = Some(block_id.clone());
-                self.clarify.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-                if rest.trim().is_empty() {
-                    cx.notify();
-                    return;
-                }
-                self.send_clarification(&block_id, window, cx);
-            }
-            // The n-th option's preview on the newest question, 0-based.
-            "preview" => {
-                let Ok(n) = rest.parse::<usize>() else { return };
-                if let Some((block_id, _)) = self.newest_pending_question() {
-                    self.toggle_preview(block_id, n, cx);
-                }
-            }
-            // Pick without sending, for a capture of a half-answered card.
-            "select" => {
-                let Some((block_id, labels)) = self.newest_pending_question() else { return };
-                if let Some(index) = labels.iter().position(|l| l == rest) {
-                    self.select_option(block_id, index, cx);
-                }
-            }
-            "skip" => {
-                if let Some((block_id, _)) = self.newest_pending_question() {
-                    self.skip_question(block_id, cx);
-                }
-            }
-            // Transcript inspection (Task C): jump without touching the
-            // pointer, and open every tool group for its screenshot.
-            // A scripted text selection for the selection screenshot (C8b):
-            // `select-text:<turn>:<from>-<to>` over the turn's first
-            // paragraph.
-            "select-text" => self.select_text_step(rest, cx),
-            "top" => {
-                self.follow = false;
-                self.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-                cx.notify();
-            }
-            "end" => {
-                self.list_state.scroll_to_end();
-                cx.notify();
-            }
-            "bench" => {
-                // Frame-stats driver (Task C item 3): N back-to-back frames
-                // so HARNESS_FRAME_STATS percentiles have samples on a static
-                // replay, which would otherwise idle after a few frames.
-                let n: usize = rest.parse().unwrap_or(240);
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    for _ in 0..n {
-                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                }));
-            }
-            "mid" => {
-                self.follow = false;
-                let mid = self.list_len / 2;
-                self.list_state.scroll_to(gpui::ListOffset { item_ix: mid, offset_in_item: px(0.0) });
-                cx.notify();
-            }
-            "expand-groups" => {
-                self.expand_all_groups(cx);
-            }
-            "fork" => self.fork(None, cx),
-            "retry" => {
-                if let Some(turn_id) = self.newest_failed_turn() {
-                    self.retry_turn(turn_id, cx);
-                }
-            }
-            // `wait` is handled by the runner, which is the only thing that can
-            // let the wire catch up; seeing it here means it slipped through.
-            "wait" => {}
-            other => crate::harness_log!("unknown step `{other}`"),
+        }));
+    }
+
+    /// `retry`: retry the newest failed turn.
+    pub(crate) fn step_retry(&mut self, cx: &mut Context<Self>) {
+        if let Some(turn_id) = self.newest_failed_turn() {
+            self.retry_turn(turn_id, cx);
         }
     }
 
@@ -2578,7 +2549,7 @@ impl SessionView {
     /// `<turn>` is the turn's index in the live transcript; the range is
     /// byte offsets, clamped to the paragraph. A turn with no text paragraph
     /// (or a bad range) holds nothing rather than a lie.
-    fn select_text_step(&mut self, rest: &str, cx: &mut Context<Self>) {
+    pub(crate) fn select_text_step(&mut self, rest: &str, cx: &mut Context<Self>) {
         let (turn, range) = rest.split_once(':').unwrap_or((rest, ""));
         let (from, to) = range.split_once('-').unwrap_or((range, ""));
         let (Ok(index), Ok(mut from), Ok(mut to)) =
@@ -2614,7 +2585,7 @@ impl SessionView {
 
     /// Open every tool group for a screenshot: group keys default closed, so
     /// marking them toggled opens them; calls default open.
-    fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.fold.session(&self.session_id).cloned() else {
             return;
         };
@@ -3004,21 +2975,17 @@ impl SessionView {
         // always starts a newer rank (bumping the epoch), so whatever lands
         // here is either current or dropped above.
         let wanted = filter.clone();
-        let call = cx.background_spawn(async move {
-            files::filter(&files, &filter).into_iter().map(|entry| entry.path.clone()).collect::<Vec<_>>()
+        let work =
+            move || files::filter(&files, &filter).into_iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
+        self.wire_call(cx, work, move |this: &mut Self, rows, cx| {
+            if this.mention_epoch != epoch {
+                return;
+            }
+            this.mention_pending = None;
+            this.mention_cache_for = wanted;
+            this.mention_cache = rows;
+            cx.notify();
         });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let rows = call.await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.mention_epoch != epoch {
-                    return;
-                }
-                this.mention_pending = None;
-                this.mention_cache_for = wanted;
-                this.mention_cache = rows;
-                cx.notify();
-            });
-        }));
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3246,18 +3213,14 @@ impl SessionView {
             requirement_id,
             session_id: self.session_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.approval_decide(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                // The ack's `terminal` flag is admission only: what the card
-                // shows next comes from `approval/updated` or
-                // `approval/resolved`, never from here.
-                if let Err(error) = result {
-                    this.decide_failed(&approval_id, &error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.approval_decide(&params), move |this, result, cx| {
+            // The ack's `terminal` flag is admission only: what the card
+            // shows next comes from `approval/updated` or
+            // `approval/resolved`, never from here.
+            if let Err(error) = result {
+                this.decide_failed(&approval_id, &error, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -3407,15 +3370,11 @@ impl SessionView {
             session_id: self.session_id.clone(),
             user_input_id: input_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.user_input_answer(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.settle_failed(&input_id, &error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.user_input_answer(&params), move |this, result, cx| {
+            if let Err(error) = result {
+                this.settle_failed(&input_id, &error, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -3431,15 +3390,11 @@ impl SessionView {
             session_id: self.session_id.clone(),
             user_input_id: input_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.user_input_cancel(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.settle_failed(&input_id, &error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.user_input_cancel(&params), move |this, result, cx| {
+            if let Err(error) = result {
+                this.settle_failed(&input_id, &error, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -3473,15 +3428,11 @@ impl SessionView {
             session_id: self.session_id.clone(),
             user_input_id: input_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.user_input_clarify(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.settle_failed(&input_id, &error, cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.user_input_clarify(&params), move |this, result, cx| {
+            if let Err(error) = result {
+                this.settle_failed(&input_id, &error, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -3529,15 +3480,11 @@ impl SessionView {
             command_text: command_text.clone(),
             session_id: self.session_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.session_user_shell(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.report_retryable(&error, BannerAction::RetryShell(command_text.clone()), cx);
-                }
-            });
-        }));
+        self.wire_call(cx, move || client.session_user_shell(&params), move |this, result, cx| {
+            if let Err(error) = result {
+                this.report_retryable(&error, BannerAction::RetryShell(command_text.clone()), cx);
+            }
+        });
         cx.notify();
     }
 
@@ -3560,20 +3507,16 @@ impl SessionView {
             exclude_items: Some(true),
             session_id: self.session_id.clone(),
         };
-        let call = cx.background_spawn(async move { client.session_fork(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(forked) => cx.emit(SessionEvent::Forked {
-                    session_id: forked.session.session_id.clone(),
-                    session: serde_json::to_value(&forked.session).unwrap_or_default(),
-                }),
-                Err(error) if error.kind() == Some(&ErrorKind::ForkBoundaryInvalid) => {
-                    this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
-                }
-                Err(error) => this.report(&error, cx),
-            });
-        }));
+        self.wire_call(cx, move || client.session_fork(&params), |this, result, cx| match result {
+            Ok(forked) => cx.emit(SessionEvent::Forked {
+                session_id: forked.session.session_id.clone(),
+                session: serde_json::to_value(&forked.session).unwrap_or_default(),
+            }),
+            Err(error) if error.kind() == Some(&ErrorKind::ForkBoundaryInvalid) => {
+                this.set_banner("That turn is still running, so there is nothing to fork from yet.", None, cx);
+            }
+            Err(error) => this.report(&error, cx),
+        });
     }
 
     /// The completed assistant turns, newest first: the rows of the `/fork`
@@ -3656,26 +3599,19 @@ impl SessionView {
         let fetch_id = block_id.clone();
         // Every MSP request can block, so the pages run here and the card is
         // replaced below, on the server's result.
-        let call = cx.background_spawn(async move {
-            full_output::fetch_full_output(&client, &session_id, &fetch_id, &output_ref)
+        let work = move || full_output::fetch_full_output(&client, &session_id, &fetch_id, &output_ref);
+        self.wire_call(cx, work, move |this, result, cx| match result {
+            Ok(fetched) => {
+                this.full_outputs
+                    .insert(block_id, full_output::Fetch::Ready { lines: fetched.lines, capped: fetched.capped });
+                this.refresh_render_cache();
+                cx.notify();
+            }
+            Err(error) => {
+                this.full_outputs.remove(&block_id);
+                this.report(&error, cx);
+            }
         });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(fetched) => {
-                    this.full_outputs.insert(
-                        block_id,
-                        full_output::Fetch::Ready { lines: fetched.lines, capped: fetched.capped },
-                    );
-                    this.refresh_render_cache();
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.full_outputs.remove(&block_id);
-                    this.report(&error, cx);
-                }
-            });
-        }));
     }
 
     // ----------------------------------------------------------------- retry
@@ -3823,32 +3759,29 @@ impl SessionView {
         let Some(client) = self.client.clone() else { return };
         let params = ApprovalListPendingParams { session_id: self.session_id.clone() };
         let session_id = self.session_id.clone();
-        let call = cx.background_spawn(async move { client.approval_list_pending(&params) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let Ok(pending) = call.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                let fold = |this: &mut Self, method: &str, value: &serde_json::Value| {
-                    this.fold.apply(MuseEvent::Notification {
-                        method: method.to_owned(),
-                        params: value.clone(),
-                        cursor: value.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned),
-                        session_id: Some(session_id.clone()),
-                    });
-                };
-                for approval in &pending.approvals {
-                    if let Ok(value) = serde_json::to_value(approval) {
-                        fold(this, "approval/requested", &value);
-                    }
+        self.wire_call(cx, move || client.approval_list_pending(&params), move |this, result, cx| {
+            let Ok(pending) = result else { return };
+            let fold = |this: &mut Self, method: &str, value: &serde_json::Value| {
+                this.fold.apply(MuseEvent::Notification {
+                    method: method.to_owned(),
+                    params: value.clone(),
+                    cursor: value.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned),
+                    session_id: Some(session_id.clone()),
+                });
+            };
+            for approval in &pending.approvals {
+                if let Ok(value) = serde_json::to_value(approval) {
+                    fold(this, "approval/requested", &value);
                 }
-                for request in &pending.user_inputs {
-                    if let Ok(value) = serde_json::to_value(request) {
-                        fold(this, "userInput/requested", &value);
-                    }
+            }
+            for request in &pending.user_inputs {
+                if let Ok(value) = serde_json::to_value(request) {
+                    fold(this, "userInput/requested", &value);
                 }
-                this.observe_clocks(cx);
-                cx.notify();
-            });
-        }));
+            }
+            this.observe_clocks(cx);
+            cx.notify();
+        });
     }
 
     /// Whether anything is waiting on the person, for the needs-you banner.

@@ -12,13 +12,25 @@
 //!   and a frame always renders a consistent transcript.
 //! * **Commands out.** Every request blocks, so every one of them runs on
 //!   `background_spawn` and returns through `update`. The UI thread issues
-//!   intents and never waits.
+//!   intents and never waits, and [`crate::wire::WireCall`] is the one shape
+//!   every one of those calls has.
 //!
 //! # Screens
 //!
-//! Two, and the auth probe decides which: the device-code login screen (spec
-//! §3.2) or the shell. The shell's right pane is not used; the column is
-//! always closed.
+//! Two, and the auth probe decides which: the login screen (spec §3.2,
+//! superseded by `docs/diagnosis/login.md`) or the shell. The shell's right
+//! pane is not used; the column is always closed.
+//!
+//! # What lives elsewhere
+//!
+//! [`Harness`] keeps the fields, but three of its concerns have their own
+//! modules and reach back in through one call per seam:
+//!
+//! * [`crate::login`] — the login screen, the `account/*` lane, the device
+//!   and API-key flows, sign-out, and `render_login`.
+//! * [`crate::steps`] — `--steps` and `--login-steps`: the verb tables, the
+//!   parser and the two runners.
+//! * [`crate::wire`] — background call, then update.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,8 +41,6 @@ use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleSidebar};
 use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_search, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
-use aui::data::secret_field;
-use aui::screens::{login, LoginIntent, LoginMethod, LoginState};
 use aui::shell::{
     RESIZE_HANDLE_W, SIDEBAR_WIDTH, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
@@ -47,21 +57,22 @@ use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::{
-    AccountLoginCompletedParams, AccountLoginOutcome, AccountLoginStartParams, AccountLoginType,
-    AccountState, AccountStateKind, SessionListParams, SessionResumeParams, SessionStartParams,
+    AccountStateKind, SessionListParams, SessionResumeParams, SessionStartParams,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
-use crate::auth::{self, Identity};
+use crate::auth::Identity;
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
+use crate::login::{Auth, Login};
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Overlays, Palette, PaletteKind};
 use crate::session::{SessionEvent, SessionView, TierBanner};
 use crate::tier::{self, Tier};
 use crate::sessions::{self, SessionMeta};
 use crate::sidebar::{self, SessionEntry};
 use crate::search::{FileHit, SessionHit};
-use crate::{files, layout, skills, Args, LoginSample};
+use crate::wire::WireCall;
+use crate::{files, layout, skills, Args};
 
 actions!(
     harness,
@@ -290,19 +301,8 @@ pub fn set_menus(cx: &mut App) {
     ]);
 }
 
-/// Where the boot probe got to: sign-in is on the wire now
-/// (`docs/diagnosis/login.md`, D22), so this is the `account/read` answer.
-enum Auth {
-    /// Waiting for `account/read`.
-    Probing,
-    /// `loggedOut`: the login screen.
-    SignedOut,
-    /// Any other lane, with the wire's identity.
-    SignedIn(Identity),
-}
-
 /// The connection's own state, which is what the reconnect banner reads.
-enum Wire {
+pub(crate) enum Wire {
     /// Spawning `muse serve` and shaking hands.
     Connecting,
     /// Live.
@@ -311,53 +311,6 @@ enum Wire {
     Reconnecting,
     /// The respawn failed. The dialog offers another try.
     Down(String),
-}
-
-/// The login screen's own state. The screen itself is stateless (it is the
-/// library's `aui::screens::login`): this owns the [`LoginState`], the
-/// device flow's URL and code, which method is running, and the API-key
-/// field. There is no task field: every wire call runs on the background
-/// executor and returns through `update`, like every other command.
-struct Login {
-    state: LoginState,
-    url: Option<String>,
-    code: Option<String>,
-    method: Option<LoginMethod>,
-    /// The masked API-key field, created once in [`Harness::new`]. The key
-    /// text is read once on submit and the field is cleared when the call
-    /// returns; the key never lands in `Harness`, a log, or a fixture.
-    api_key: Entity<InputState>,
-    /// Mirror of the field's masked flag, kept in sync by both toggle paths
-    /// (the eye button and `ToggleReveal`) so the intent can flip from it.
-    revealed: bool,
-}
-
-impl Login {
-    /// The method choice: forget the flow. The field keeps whatever it
-    /// holds — callers that leave the key form (`Back`, `ChooseAnother`,
-    /// a returned submit) clear it explicitly — so notify after calling.
-    fn reset_to_choose(&mut self) {
-        self.state = LoginState::Choose;
-        self.url = None;
-        self.code = None;
-        self.method = None;
-        crate::harness_log!("login → choose");
-    }
-}
-
-/// The [`LoginState`] name as the `harness: login → …` stderr line spells it,
-/// so a headless `--login-steps` run can be followed from a log. No URL,
-/// code or key ever reaches that line.
-fn login_state_name(state: &LoginState) -> &'static str {
-    match state {
-        LoginState::Choose => "choose",
-        LoginState::Starting => "starting",
-        LoginState::Device { .. } => "device",
-        LoginState::ApiKey { .. } => "apikey",
-        LoginState::Validating => "validating",
-        LoginState::Success => "success",
-        LoginState::Error { .. } => "error",
-    }
 }
 
 /// What one toast's Undo restores: one `/hide` is a batch of one, one
@@ -388,15 +341,15 @@ enum ViewAction {
 
 /// The whole application.
 pub struct Harness {
-    args: Args,
-    client: Option<Arc<MuseClient>>,
-    wire: Wire,
-    auth: Auth,
-    login: Login,
+    pub(crate) args: Args,
+    pub(crate) client: Option<Arc<MuseClient>>,
+    pub(crate) wire: Wire,
+    pub(crate) auth: Auth,
+    pub(crate) login: Login,
     /// Rows from `session/list`, joined with the local index.
-    sessions: Vec<SessionEntry>,
+    pub(crate) sessions: Vec<SessionEntry>,
     index: HashMap<String, IndexEntry>,
-    active: Option<Entity<SessionView>>,
+    pub(crate) active: Option<Entity<SessionView>>,
     /// A session switch paging history in: the view kept off-stage until its
     /// first backfill batch applies, so no frame flashes empty (C2).
     pending_active: Option<Entity<SessionView>>,
@@ -405,7 +358,7 @@ pub struct Harness {
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
-    overlays: Entity<Overlays>,
+    pub(crate) overlays: Entity<Overlays>,
     sidebar_open: bool,
     /// The sidebar divider's current x, in window pixels. Local state until
     /// the drag settles, then `layout.json` (see [`crate::layout`]).
@@ -437,7 +390,7 @@ pub struct Harness {
     /// What the billing probe said, or `None` while it has not said it yet
     /// (spec §3.2, Phase 5 A1). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
-    tier: Option<Tier>,
+    pub(crate) tier: Option<Tier>,
     /// A probe is in flight; a second one is not started on top of it.
     tier_probing: bool,
     /// The harness's own facts about each session: its name, whether it is
@@ -480,6 +433,12 @@ pub struct Harness {
     subscriptions: Vec<Subscription>,
 }
 
+impl WireCall for Harness {
+    fn wire_tasks(&mut self) -> &mut Vec<Task<()>> {
+        &mut self.tasks
+    }
+}
+
 impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -501,14 +460,7 @@ impl Harness {
             client: None,
             wire: Wire::Connecting,
             auth: Auth::Probing,
-            login: Login {
-                state: LoginState::Choose,
-                url: None,
-                code: None,
-                method: None,
-                api_key: api_key.clone(),
-                revealed: false,
-            },
+            login: Login::new(api_key.clone()),
             sessions: Vec::new(),
             index: HashMap::new(),
             active: None,
@@ -629,47 +581,43 @@ impl Harness {
     /// Spawn `muse serve`, initialize, and start draining its events.
     fn connect(&mut self, cx: &mut Context<Self>) {
         let program = self.args.program.clone();
-        let call = cx.background_spawn(async move { conn::connect(&program) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok((connection, events)) => {
-                    let server = &connection.server.server_info;
+        self.wire_call(cx, move || conn::connect(&program), |this, result, cx| match result {
+            Ok((connection, events)) => {
+                let server = &connection.server.server_info;
                     crate::harness_log!("connected to {} {}", server.name, server.version);
-                    if let Some(warning) = &connection.warning {
-                        // A fingerprint mismatch is additive evolution, never a
-                        // failure: say so on stderr and carry on.
-                        crate::harness_log!("{warning:?}");
-                    }
-                    this.user_shell = connection
-                        .server
-                        .granted_capabilities
-                        .iter()
-                        .any(|c| c.as_wire() == Some("userShell"));
-                    this.client = Some(connection.client);
-                    this.wire = Wire::Ready;
-                    this.pump(events, cx);
-                    this.probe_account(cx);
-                    cx.notify();
+                if let Some(warning) = &connection.warning {
+                    // A fingerprint mismatch is additive evolution, never a
+                    // failure: say so on stderr and carry on.
+                    crate::harness_log!("{warning:?}");
                 }
-                Err(error) => {
-                    this.wire = Wire::Down(error.to_string());
-                    this.set_dialog(cx, Dialog {
-                        title: "Muse could not be started".into(),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Try again",
-                        action: DialogAction::Reconnect,
-                        archive_target: None,
-                    });
-                    cx.notify();
-                }
-            });
-        }));
+                this.user_shell = connection
+                    .server
+                    .granted_capabilities
+                    .iter()
+                    .any(|c| c.as_wire() == Some("userShell"));
+                this.client = Some(connection.client);
+                this.wire = Wire::Ready;
+                this.pump(events, cx);
+                this.probe_account(cx);
+                cx.notify();
+            }
+            Err(error) => {
+                this.wire = Wire::Down(error.to_string());
+                this.set_dialog(cx, Dialog {
+                    title: "Muse could not be started".into(),
+                    detail: error.to_string(),
+                    kind: DialogKind::Error,
+                    primary: "Try again",
+                    action: DialogAction::Reconnect,
+                    archive_target: None,
+                });
+                cx.notify();
+            }
+        });
     }
 
     /// Drain the bridge onto the UI thread, one event at a time, in wire order.
-    fn pump(&mut self, mut events: UnboundedReceiver<MuseEvent>, cx: &mut Context<Self>) {
+    pub(crate) fn pump(&mut self, mut events: UnboundedReceiver<MuseEvent>, cx: &mut Context<Self>) {
         self.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let closed = matches!(event, MuseEvent::Closed(_));
@@ -724,7 +672,7 @@ impl Harness {
             .active
             .as_ref()
             .map(|a| (a.read(cx).session_id.clone(), a.read(cx).last_cursor()));
-        let call = cx.background_spawn(async move {
+        let work = move || {
             let connected = conn::connect(&program)?;
             if let Some((session_id, cursor)) = &resume {
                 connected.0.client.session_resume(&SessionResumeParams {
@@ -736,615 +684,30 @@ impl Harness {
                 })?;
             }
             Ok::<_, MuseError>(connected)
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok((connection, events)) => {
-                    this.client = Some(connection.client.clone());
-                    this.wire = Wire::Ready;
-                    if let Some(active) = &this.active {
-                        active.update(cx, |view, _| view.reconnected(connection.client.clone()));
-                    }
-                    this.pump(events, cx);
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.wire = Wire::Down(error.to_string());
-                    this.set_dialog(cx, Dialog {
-                        title: conn::title(&error),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Reconnect",
-                        action: DialogAction::Reconnect,
-                        archive_target: None,
-                    });
-                    cx.notify();
-                }
-            });
-        }));
-    }
-
-    // ------------------------------------------------------------------ auth
-
-    /// Move to `state`, with the one stderr line a headless `--login-steps`
-    /// run follows the flow by. The line carries the state name only — never
-    /// a URL, a code or a key.
-    fn set_login_state(&mut self, state: LoginState, cx: &mut Context<Self>) {
-        crate::harness_log!("login → {}", login_state_name(&state));
-        self.login.state = state;
-        cx.notify();
-    }
-
-    /// The boot probe and the re-probe after every `account/changed`:
-    /// `account/read` is the only sign-in signal (`model/list` answers from
-    /// the provider catalog while logged out, so it never was one).
-    fn probe_account(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let call = cx.background_spawn(async move { client.account_read() });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(state) => this.apply_account(state, cx),
-                Err(error) => {
-                    // The wire is up but the probe failed: say so and show
-                    // the login screen, like the old probe did. Never logs
-                    // more than the failure itself.
-                    crate::harness_log!("account/read failed: {error}");
-                    crate::harness_log!("account → loggedOut");
-                    this.auth = Auth::SignedOut;
-                    this.login.reset_to_choose();
-                    this.run_login_steps(cx);
-                    cx.notify();
-                }
-            });
-        }));
-    }
-
-    /// Rebuild [`Auth`] from an [`AccountState`] — the probe answer and the
-    /// `account/changed` notification share this exactly.
-    ///
-    /// `loggedOut` clears the shell and shows the login screen (with the
-    /// "removed outside the app" dialog when a signed-in session loses its
-    /// credential); any other lane signs in, loads the sessions, and works
-    /// out the tier — the TUI probe for `accountLogin`, pay-as-you-go by
-    /// construction for the key lanes.
-    fn apply_account(&mut self, state: AccountState, cx: &mut Context<Self>) {
-        let lane = state.state.as_wire().unwrap_or("unknown").to_owned();
-        match Identity::from_account(&state) {
-            Some(identity) => {
-                crate::harness_log!("account → {lane}");
-                let api_key = identity.is_api_key();
-                self.auth = Auth::SignedIn(identity);
-                self.load_sessions(cx);
-                // `--tier` fakes the probe for a screenshot, and nothing else:
-                // it wins over the lane, exactly as `probe_tier` does, so a
-                // scripted capture can get past the pay-as-you-go guard.
-                if let Some(faked) = self.args.tier.clone() {
-                    self.tier = Some(faked);
-                    self.push_tier(cx);
-                } else if api_key {
-                    // The TUI probe is about subscriptions; a stored key or
-                    // `META_API_KEY` bills pay-as-you-go by construction, so
-                    // the footer says so without probing.
-                    self.tier = Some(Tier::PayAsYouGo);
-                    self.push_tier(cx);
-                } else {
-                    // A fresh login is also the re-probe a login asks for.
-                    self.probe_tier(false, cx);
-                }
-                cx.notify();
-            }
-            None => {
-                crate::harness_log!("account → loggedOut");
-                let was_in = matches!(self.auth, Auth::SignedIn(_));
-                self.active = None;
-                self.sessions.clear();
-                self.auth = Auth::SignedOut;
-                self.login.reset_to_choose();
-                if was_in {
-                    self.set_dialog(cx, Dialog {
-                        title: "Signed out of Muse".into(),
-                        detail: "The credential was removed outside the app.".into(),
-                        kind: DialogKind::Warning,
-                        primary: "Sign in",
-                        action: DialogAction::SignIn,
-                        archive_target: None,
-                    });
-                }
-                self.run_login_steps(cx);
-                cx.notify();
-            }
-        }
-    }
-
-    /// One [`LoginIntent`]: the login screen's buttons, the Escape walk, and
-    /// the `--login-steps` verbs all arrive here. Needs the window for the
-    /// field (focus, clearing) — background completions that touch the field
-    /// go through `update_in` to get one.
-    fn login_intent(&mut self, intent: LoginIntent, window: &mut Window, cx: &mut Context<Self>) {
-        match intent {
-            LoginIntent::StartAccount => self.start_device_flow(cx),
-            LoginIntent::UseApiKey => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::ApiKey { can_submit: false, error: None }, cx);
-                window.focus(&self.login.api_key.focus_handle(cx), cx);
-            }
-            LoginIntent::SubmitApiKey => self.submit_api_key(cx),
-            LoginIntent::ToggleReveal => {
-                let next = !self.login.revealed;
-                self.login.revealed = next;
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.set_masked(next, window, cx));
-                cx.notify();
-            }
-            LoginIntent::Back | LoginIntent::ChooseAnother => {
-                self.login.reset_to_choose();
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.clean(window, cx));
-                cx.notify();
-            }
-            LoginIntent::OpenBrowser => {
-                if let Some(url) = self.login.url.clone() {
-                    // Straight into the child's argv; never into a log.
-                    let _ = auth::open_in_browser(&url);
-                }
-            }
-            LoginIntent::CopyCode => {
-                if let Some(code) = self.login.code.clone() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
-                }
-            }
-            LoginIntent::Retry => match self.login.method {
-                Some(LoginMethod::Account) => self.start_device_flow(cx),
-                Some(LoginMethod::ApiKey) => self.login_intent(LoginIntent::UseApiKey, window, cx),
-                None => {
-                    self.login.reset_to_choose();
-                    cx.notify();
-                }
-            },
-            LoginIntent::Cancel => self.cancel_login_flow(cx),
-        }
-    }
-
-    /// Start the device-code flow: `account/loginStart {deviceCode}` on the
-    /// background executor. The URL and code come back in the result — never
-    /// in a notification — and the browser opens once, on entering the
-    /// device state (D26). Nothing here is logged but the state name.
-    fn start_device_flow(&mut self, cx: &mut Context<Self>) {
-        self.login.method = Some(LoginMethod::Account);
-        let Some(client) = self.client.clone() else {
-            self.set_login_state(
-                LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
-                cx,
-            );
-            return;
         };
-        self.set_login_state(LoginState::Starting, cx);
-        let call = cx.background_spawn(async move {
-            client.account_login_start(&AccountLoginStartParams {
-                api_key: None,
-                r#type: AccountLoginType::DeviceCode,
-            })
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(start) => match (start.verification_url, start.user_code) {
-                    (Some(url), Some(code)) => {
-                        this.login.url = Some(url.clone());
-                        this.login.code = Some(code.clone());
-                        this.set_login_state(
-                            LoginState::Device {
-                                url: url.clone().into(),
-                                code: code.clone().into(),
-                                expires: None,
-                                waiting: true,
-                            },
-                            cx,
-                        );
-                        let _ = auth::open_in_browser(&url);
-                    }
-                    _ => {
-                        this.set_login_state(
-                            LoginState::Error {
-                                message: "The server started no device flow.".into(),
-                                method: Some(LoginMethod::Account),
-                            },
-                            cx,
-                        );
-                    }
-                },
-                Err(error) => {
-                    this.set_login_state(
-                        LoginState::Error { message: error.to_string().into(), method: Some(LoginMethod::Account) },
-                        cx,
-                    );
+        self.wire_call(cx, work, |this, result, cx| match result {
+            Ok((connection, events)) => {
+                this.client = Some(connection.client.clone());
+                this.wire = Wire::Ready;
+                if let Some(active) = &this.active {
+                    active.update(cx, |view, _| view.reconnected(connection.client.clone()));
                 }
-            });
-        }));
-    }
-
-    /// Submit the API-key form: read the field once, trim, send
-    /// `account/loginStart {apiKey}` on the background executor. The key is
-    /// a local in the task closure and nowhere else; the field is cleared
-    /// when the call returns, whatever it returned (D24). An empty field
-    /// does nothing — the Sign in button is disabled until there is text.
-    fn submit_api_key(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.login.state, LoginState::ApiKey { .. }) {
-            return;
-        }
-        let key = self.login.api_key.read(cx).value().to_string();
-        let trimmed = key.trim().to_owned();
-        if trimmed.is_empty() {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            self.set_login_state(
-                LoginState::ApiKey {
-                    can_submit: false,
-                    error: Some("Muse is not running.".into()),
-                },
-                cx,
-            );
-            return;
-        };
-        self.login.method = Some(LoginMethod::ApiKey);
-        self.set_login_state(LoginState::Validating, cx);
-        let call = cx.background_spawn(async move {
-            client.account_login_start(&AccountLoginStartParams {
-                api_key: Some(trimmed),
-                r#type: AccountLoginType::ApiKey,
-            })
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            // `update_in` for the window the field-clear needs.
-            let _ = this.update_in(cx, |this, window, cx| {
-                let api_key = this.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.clean(window, cx));
-                match result {
-                    // A stored key: the signed-in `account/changed` follows
-                    // and enters the app; until then the spinner stays.
-                    Ok(_) => cx.notify(),
-                    Err(error) => {
-                        this.set_login_state(
-                            LoginState::ApiKey {
-                                can_submit: false,
-                                error: Some(error.to_string().into()),
-                            },
-                            cx,
-                        );
-                    }
-                }
-            });
-        }));
-    }
-
-    /// Abandon the running flow: back to the method choice immediately, and
-    /// `account/loginCancel` in the background. The `cancelled`
-    /// notification that precedes its result is then a no-op — the screen is
-    /// already where it would go.
-    fn cancel_login_flow(&mut self, cx: &mut Context<Self>) {
-        self.login.reset_to_choose();
-        cx.notify();
-        let Some(client) = self.client.clone() else { return };
-        cx.background_spawn(async move {
-            let _ = client.account_login_cancel();
-        })
-        .detach();
-    }
-
-    /// After a successful login: drop the child that inherited no credential,
-    /// spawn a fresh one and re-probe.
-    ///
-    /// Delete this once one billed turn, run after a real Meta-account login,
-    /// confirms D25: that the device flow is host-owned, so the `muse serve`
-    /// that ran it already holds the credential and the app proceeds on
-    /// `account/changed` with no reconnect. Until that turn is run, this stays
-    /// as dead code kept warm for the case D25 turns out wrong.
-    #[allow(dead_code)]
-    fn reconnect_after_login(&mut self, cx: &mut Context<Self>) {
-        self.client = None;
-        self.active = None;
-        let program = self.args.program.clone();
-        let call = cx.background_spawn(async move { conn::connect(&program) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok((connection, events)) => {
-                    this.client = Some(connection.client);
-                    this.wire = Wire::Ready;
-                    this.login.reset_to_choose();
-                    this.pump(events, cx);
-                    this.probe_account(cx);
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.wire = Wire::Down(error.to_string());
-                    this.set_login_state(
-                        LoginState::Error { message: error.to_string().into(), method: this.login.method },
-                        cx,
-                    );
-                    this.auth = Auth::SignedOut;
-                }
-            });
-        }));
-    }
-
-    /// Sign out over the wire: `account/logout` in the background, and its
-    /// result — an [`AccountState`] — applied like `account/changed`, except
-    /// a deliberate sign-out never raises the "removed outside the app"
-    /// dialog. An `envKey` lane survives this (the environment still holds
-    /// the key), so that case keeps the shell and explains itself in a toast
-    /// (D28).
-    fn logout(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            self.active = None;
-            self.sessions.clear();
-            self.auth = Auth::SignedOut;
-            self.login.reset_to_choose();
-            cx.notify();
-            return;
-        };
-        let call = cx.background_spawn(async move { client.account_logout() });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(state) => match Identity::from_account(&state) {
-                    Some(identity) => {
-                        let env_key = identity.lane == AccountStateKind::EnvKey;
-                        this.auth = Auth::SignedIn(identity);
-                        if env_key {
-                            this.overlays.update(cx, |overlays, _| {
-                                overlays.toast(
-                                    "Still signed in",
-                                    "META_API_KEY is set in the environment; unset it and relaunch to sign out.",
-                                );
-                            });
-                        }
-                        cx.notify();
-                    }
-                    None => {
-                        this.active = None;
-                        this.sessions.clear();
-                        this.auth = Auth::SignedOut;
-                        this.login.reset_to_choose();
-                        cx.notify();
-                    }
-                },
-                Err(error) => {
-                    this.set_dialog(cx, Dialog {
-                        title: "Sign out failed".into(),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Dismiss",
-                        action: DialogAction::Dismiss,
-                        archive_target: None,
-                    });
-                }
-            });
-        }));
-    }
-
-    /// One `account/*` notification, folded before the session view sees
-    /// anything. `account/changed` rebuilds [`Auth`] exactly as
-    /// [`Self::probe_account`] does — a signed-in lane while on the login
-    /// screen enters the app with no reconnect (D25) — and
-    /// `account/loginCompleted` advances the login screen's own state. A
-    /// frame that does not decode is stderr and nothing else: the wire owns
-    /// the flow, and a malformed outcome must not move the screen.
-    fn route_account(&mut self, method: &str, params: &serde_json::Value, cx: &mut Context<Self>) {
-        match method {
-            "account/changed" => match serde_json::from_value::<AccountState>(params.clone()) {
-                Ok(state) => self.apply_account(state, cx),
-                Err(error) => crate::harness_log!("ignoring malformed account/changed: {error}"),
-            },
-            "account/loginCompleted" => {
-                match serde_json::from_value::<AccountLoginCompletedParams>(params.clone()) {
-                    Ok(completed) => self.on_login_completed(completed, cx),
-                    Err(error) => crate::harness_log!("ignoring malformed account/loginCompleted: {error}"),
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// The terminal outcome of the running login flow.
-    ///
-    /// `granted` shows Success (the signed-in `account/changed` that follows
-    /// enters the app); `denied` / `expired` / `failed` show the screen for
-    /// the running method — the full error card, except an API-key `failed`,
-    /// which goes back to the key form so the key can be fixed;
-    /// `cancelled` returns to the method choice unless already there.
-    fn on_login_completed(&mut self, completed: AccountLoginCompletedParams, cx: &mut Context<Self>) {
-        let message = completed.message.filter(|message| !message.trim().is_empty());
-        // The outcome and its display message are the server's typed
-        // vocabulary — never the URL, the code or a key — so a headless run
-        // can be followed from stderr.
-        crate::harness_log!(
-            "loginCompleted → {}{}",
-            completed.outcome.as_wire().unwrap_or("unknown"),
-            message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()
-        );
-        match completed.outcome {
-            AccountLoginOutcome::Granted => {
-                self.set_login_state(LoginState::Success, cx);
-            }
-            AccountLoginOutcome::Denied | AccountLoginOutcome::Expired | AccountLoginOutcome::Failed => {
-                let fallback = match completed.outcome {
-                    AccountLoginOutcome::Denied => "The sign-in request was denied.",
-                    AccountLoginOutcome::Expired => "The sign-in request expired before it was approved.",
-                    _ => "Sign-in failed.",
-                };
-                let text: SharedString =
-                    message.unwrap_or_else(|| fallback.to_owned()).into();
-                // An API-key failure belongs on the key form, where the key
-                // can be fixed — not on the error card with its way back.
-                if completed.outcome == AccountLoginOutcome::Failed
-                    && self.login.method == Some(LoginMethod::ApiKey)
-                {
-                    self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
-                } else {
-                    self.set_login_state(
-                        LoginState::Error { message: text, method: self.login.method },
-                        cx,
-                    );
-                }
-            }
-            AccountLoginOutcome::Cancelled => {
-                if !matches!(self.login.state, LoginState::Choose) {
-                    self.login.reset_to_choose();
-                    cx.notify();
-                }
-            }
-            // An outcome a newer server invented: the honest card is the
-            // method's error, with the server's message when it sent one.
-            AccountLoginOutcome::Unknown(_) => {
-                let text: SharedString =
-                    message.unwrap_or_else(|| "The sign-in ended in a way this build does not understand.".to_owned())
-                        .into();
-                if self.login.method == Some(LoginMethod::ApiKey) {
-                    self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
-                } else {
-                    self.set_login_state(
-                        LoginState::Error { message: text, method: self.login.method },
-                        cx,
-                    );
-                }
-            }
-        }
-    }
-
-    /// `--login-steps <a;b;c>`: drive the login screen from the command line
-    /// so a signed-in capture is reproducible without a pointer. Honoured
-    /// only when the app is really connected — the offline and replay boots
-    /// never call the probe that calls this — one step per item, the same
-    /// `;`-separated parsing as `--steps`. Consumed, so a later re-probe
-    /// does not replay them.
-    fn run_login_steps(&mut self, cx: &mut Context<Self>) {
-        let steps = std::mem::take(&mut self.args.login_steps);
-        if steps.is_empty() {
-            return;
-        }
-        // Raise the flag the capture waits on, exactly like [`Self::run_steps`]
-        // does, so a headless `--screenshot` waits for the login script to
-        // finish before the settling delay.
-        crate::shot::set_steps_running(true);
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            for step in steps {
-                if let Some(ms) = step.strip_prefix("wait:") {
-                    let ms: u64 = ms.parse().unwrap_or(0);
-                    cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
-                    continue;
-                }
-                // `update_in` for the window the field and the focus need.
-                let ran = this.update_in(cx, |this, window, cx| this.login_step(&step, window, cx));
-                match ran {
-                    Ok(true) => {}
-                    _ => {
-                        crate::shot::set_steps_running(false);
-                        return;
-                    }
-                }
-            }
-            crate::shot::set_steps_running(false);
-        }));
-    }
-
-    /// One `--login-steps` verb. Returns whether the run continues; a failed
-    /// or unknown step ends it with a stderr line.
-    ///
-    /// | step | what it does |
-    /// |---|---|
-    /// | `account` | `LoginIntent::StartAccount` (the device flow; the browser opens) |
-    /// | `apikey` | `LoginIntent::UseApiKey` |
-    /// | `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
-    /// | `submit` | `LoginIntent::SubmitApiKey` |
-    /// | `wait:<ms>` | let the wire catch up before the next step |
-    fn login_step(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let (head, rest) = step.split_once(':').unwrap_or((step, ""));
-        match head {
-            "account" => self.login_intent(LoginIntent::StartAccount, window, cx),
-            "apikey" => self.login_intent(LoginIntent::UseApiKey, window, cx),
-            // The value travels from the environment into the field and then
-            // into the wire call: it never appears in argv, a log, or a
-            // screenshot argument. An unset variable fails naming the
-            // variable, not its value.
-            "key-from-env" => match std::env::var(rest) {
-                Ok(value) => {
-                    let api_key = self.login.api_key.clone();
-                    api_key.update(cx, |state, cx| state.set_value(value, window, cx));
-                }
-                Err(_) => {
-                    crate::harness_log!("login step `key-from-env:{rest}` failed: variable is not set");
-                    return false;
-                }
-            },
-            "submit" => self.login_intent(LoginIntent::SubmitApiKey, window, cx),
-            _ => {
-                crate::harness_log!("unknown login step `{step}`");
-                return false;
-            }
-        }
-        true
-    }
-
-    /// `--no-connect --login <state>`: the login screen's sample data for
-    /// captures. The URL, the code and the key-shaped field text are the
-    /// example values, never anything the wire sent.
-    fn apply_login_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const URL: &str = "https://example.invalid/device";
-        const CODE: &str = "WXYZ-2946";
-        // A mask with something behind it: the dots the capture wants.
-        const SAMPLE_KEY: &str = "capture-sample-key";
-        match self.args.login {
-            LoginSample::Choose => {
-                self.login.reset_to_choose();
+                this.pump(events, cx);
                 cx.notify();
             }
-            LoginSample::Device => {
-                self.login.url = Some(URL.to_owned());
-                self.login.code = Some(CODE.to_owned());
-                self.login.method = Some(LoginMethod::Account);
-                self.set_login_state(
-                    LoginState::Device { url: URL.into(), code: CODE.into(), expires: None, waiting: true },
-                    cx,
-                );
+            Err(error) => {
+                this.wire = Wire::Down(error.to_string());
+                this.set_dialog(cx, Dialog {
+                    title: conn::title(&error),
+                    detail: error.to_string(),
+                    kind: DialogKind::Error,
+                    primary: "Reconnect",
+                    action: DialogAction::Reconnect,
+                    archive_target: None,
+                });
+                cx.notify();
             }
-            LoginSample::ApiKey => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::ApiKey { can_submit: true, error: None }, cx);
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
-            }
-            LoginSample::ApiKeyError => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(
-                    LoginState::ApiKey {
-                        can_submit: true,
-                        error: Some("That key was rejected. Check the key and try again.".into()),
-                    },
-                    cx,
-                );
-                let api_key = self.login.api_key.clone();
-                api_key.update(cx, |state, cx| state.set_value(SAMPLE_KEY, window, cx));
-            }
-            LoginSample::Validating => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::Validating, cx);
-            }
-            LoginSample::Error => {
-                self.login.method = Some(LoginMethod::Account);
-                self.set_login_state(
-                    LoginState::Error {
-                        message: "The sign-in request expired before it was approved.".into(),
-                        method: Some(LoginMethod::Account),
-                    },
-                    cx,
-                );
-            }
-        }
+        });
     }
 
     // ---------------------------------------------------------- billing tier
@@ -1356,7 +719,7 @@ impl Harness {
     /// has changed since the cached answer was taken, or when `force` says the
     /// person asked. **A probe that fails never stops the app**: it becomes
     /// [`Tier::Unavailable`], which draws a quiet banner and blocks nothing.
-    fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(crate) fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
         // `--tier` fakes the probe for a screenshot, and nothing else.
         if let Some(faked) = self.args.tier.clone() {
             self.tier = Some(faked);
@@ -1375,19 +738,15 @@ impl Harness {
         }
         self.tier_probing = true;
         let program = self.args.program.clone();
-        let call = cx.background_spawn(async move { tier::probe(&program) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                this.tier_probing = false;
-                // The reason is the module's own words, never the terminal's.
-                let tier = result.unwrap_or_else(Tier::Unavailable);
-                tier::remember(&tier);
-                this.tier = Some(tier);
-                this.push_tier(cx);
-                cx.notify();
-            });
-        }));
+        self.wire_call(cx, move || tier::probe(&program), |this, result, cx| {
+            this.tier_probing = false;
+            // The reason is the module's own words, never the terminal's.
+            let tier = result.unwrap_or_else(Tier::Unavailable);
+            tier::remember(&tier);
+            this.tier = Some(tier);
+            this.push_tier(cx);
+            cx.notify();
+        });
     }
 
     /// The banner the open session should be drawing, given the tier and
@@ -1411,7 +770,7 @@ impl Harness {
     }
 
     /// Hand the current banner to whatever session is open.
-    fn push_tier(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn push_tier(&mut self, cx: &mut Context<Self>) {
         let banner = self.tier_banner();
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.set_tier_banner(banner, cx));
@@ -1423,49 +782,38 @@ impl Harness {
 
     /// Read the local index once at boot; it is a cache, not a source of truth.
     fn load_index(&mut self, cx: &mut Context<Self>) {
-        let call = cx.background_spawn(async move { index::read() });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let index = call.await;
-            let _ = this.update(cx, |this, cx| {
-                this.index = index;
-                this.rejoin();
-                this.rebuild_search_index(cx);
-                cx.notify();
-            });
-        }));
+        self.wire_call(cx, index::read, |this, index, cx| {
+            this.index = index;
+            this.rejoin();
+            this.rebuild_search_index(cx);
+            cx.notify();
+        });
     }
 
     /// `session/list`, filtered to this window's workspace.
-    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
         let workspace = self.workspace();
-        let call = cx.background_spawn(async move {
+        let work = move || {
             client.session_list(&SessionListParams {
                 workspace_root: Some(workspace),
                 ..Default::default()
             })
+        };
+        self.wire_call_in(cx, work, |this, result, window, cx| {
+            if let Ok(list) = result {
+                this.sessions = list
+                    .sessions
+                    .iter()
+                    .map(|s| {
+                        SessionEntry::join(s, this.index.get(&s.session_id), this.overrides.get(&s.session_id))
+                    })
+                    .collect();
+                this.derive_titles(cx);
+            }
+            this.open_boot_session(window, cx);
+            cx.notify();
         });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Ok(list) = result {
-                    this.sessions = list
-                        .sessions
-                        .iter()
-                        .map(|s| {
-                            SessionEntry::join(
-                                s,
-                                this.index.get(&s.session_id),
-                                this.overrides.get(&s.session_id),
-                            )
-                        })
-                        .collect();
-                    this.derive_titles(cx);
-                }
-                this.open_boot_session(window, cx);
-                cx.notify();
-            });
-        }));
     }
 
     /// `--session <id>` (or `latest`): open one session at boot, once the list
@@ -1505,104 +853,82 @@ impl Harness {
 
     /// `--steps`: drive the open session from the command line so a screenshot
     /// is reproducible. Consumed, so a later refresh does not replay them.
+    /// The verbs, and the loop that runs them, are [`crate::steps`].
     fn run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let steps = std::mem::take(&mut self.args.steps);
-        if steps.is_empty() {
-            return;
-        }
         let _ = window;
-        // The steps run on a task rather than in a loop, because `wait:<ms>` is
-        // the only way a scripted approval round-trip can exist: a decision has
-        // to reach the wire and its `approval/updated` has to come back before
-        // the next `choose:` means anything.
-        crate::shot::set_steps_running(true);
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            for step in steps {
-                if let Some(ms) = step.strip_prefix("wait:") {
-                    let ms: u64 = ms.parse().unwrap_or(0);
-                    cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
-                    continue;
-                }
-                let ran = this.update_in(cx, |this, window, cx| {
-                    if !this.step(&step, window, cx) {
-                        this.with_session(cx, |view, cx| view.step(&step, window, cx));
-                    }
-                });
-                if ran.is_err() {
-                    crate::shot::set_steps_running(false);
-                    return;
-                }
-            }
-            crate::shot::set_steps_running(false);
-        }));
+        crate::steps::run_steps(self, cx);
     }
 
-    /// The `--steps` verbs that belong to the window rather than to a session.
-    ///
-    /// Returns whether the step was one of them; anything else goes on to
-    /// [`SessionView::step`].
-    fn step(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let (head, rest) = step.split_once(':').unwrap_or((step, ""));
-        match head {
-            "search" => {
-                self.open_search(window, cx);
-                if !rest.is_empty() {
-                    self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-                }
+    /// `--steps`, taken out of the arguments so a later refresh does not
+    /// replay them.
+    pub(crate) fn take_steps(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.args.steps)
+    }
+
+    // One handler per `--steps` verb that belongs to the window rather than to
+    // a session and needs more than a single existing call. The verb table
+    // that reaches them is [`crate::steps`].
+
+    /// `search:<query>`: open the search palette, optionally on a query.
+    pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(window, cx);
+        if !rest.is_empty() {
+            self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+        }
+    }
+
+    /// `rename:<name>`: open the active row's inline field, optionally filled.
+    pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
+        if let Some(session_id) = session_id {
+            self.start_rename(session_id, window, cx);
+            if !rest.is_empty() {
+                self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
             }
-            "palette" => self.open_palette(PaletteKind::Commands, cx),
-            "resume" => self.open_palette(PaletteKind::Resume, cx),
-            "fork-picker" => self.open_palette(PaletteKind::Fork, cx),
-            "rename" => {
-                let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-                if let Some(session_id) = session_id {
-                    self.start_rename(session_id, window, cx);
-                    if !rest.is_empty() {
-                        self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-                    }
-                }
-            }
-            "hidden" => {
-                self.show_hidden = !self.show_hidden;
-                cx.notify();
-            }
-            "empty" => {
-                self.show_empty = !self.show_empty;
-                cx.notify();
-            }
-            // A scripted width for the resize screenshots: clamped and
-            // settled exactly like a released drag, minus the pointer.
-            "sidebar-width" => {
-                if let Ok(width) = rest.parse::<f32>() {
-                    self.sidebar_width = clamp_sidebar_width(width);
-                    self.resizing = false;
-                    self.persist_width();
-                }
-                cx.notify();
-            }
-            "sidebar" => self.toggle_sidebar(cx),
-            "overflow" => self.open_menu(MenuKind::Overflow, cx),
-            "view-menu" => self.open_menu(MenuKind::ViewOptions, cx),
-            "account" => self.open_menu(MenuKind::Account, cx),
-            "pin" => {
-                if let Some(session_id) = self.active_id(cx) {
-                    self.toggle_pin(session_id, cx);
-                }
-            }
-            "archive" => {
-                if let Some(session_id) = self.active_id(cx) {
-                    self.open_archive_dialog(session_id, cx);
-                }
-            }
-            "archive-confirm" => self.confirm_archive_dialog(window, cx),
-            "show-archived" => {
-                self.show_archived = !self.show_archived;
-                cx.notify();
-            }
-            _ => return false,
+        }
+    }
+
+    /// `hidden`: list hidden sessions anyway.
+    pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        self.show_hidden = !self.show_hidden;
+        cx.notify();
+    }
+
+    /// `empty`: list sessions with no turns anyway.
+    pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) {
+        self.show_empty = !self.show_empty;
+        cx.notify();
+    }
+
+    /// `show-archived`: list archived sessions anyway.
+    pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) {
+        self.show_archived = !self.show_archived;
+        cx.notify();
+    }
+
+    /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
+    /// clamped and settled exactly like a released drag, minus the pointer.
+    pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
+        if let Ok(width) = rest.parse::<f32>() {
+            self.sidebar_width = clamp_sidebar_width(width);
+            self.resizing = false;
+            self.persist_width();
         }
         cx.notify();
-        true
+    }
+
+    /// `pin`: pin or unpin the active session.
+    pub(crate) fn step_pin(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.active_id(cx) {
+            self.toggle_pin(session_id, cx);
+        }
+    }
+
+    /// `archive`: raise the active session's archive confirmation.
+    pub(crate) fn step_archive(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.active_id(cx) {
+            self.open_archive_dialog(session_id, cx);
+        }
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,
@@ -1655,7 +981,7 @@ impl Harness {
         // up front; `session/setApprovalMode` afterwards is a different thing,
         // and on this server it does not reach `promptUnmatched`.
         let approval_mode = self.args.approval_mode.clone();
-        let call = cx.background_spawn(async move {
+        let work = move || {
             client.session_start(&SessionStartParams {
                 command_id: new_command_id(),
                 workspace_root: Some(workspace),
@@ -1663,28 +989,25 @@ impl Harness {
                 approval_mode,
                 ..Default::default()
             })
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(started) => {
-                    this.open(started.session.session_id.clone(), false, window, cx);
-                    // The result carries the session object `session/started`
-                    // would have carried, and it is the only place a mode set
-                    // at start-up is reported: `session/start` with an
-                    // `approvalMode` raises no `session/approvalModeChanged`,
-                    // so a session started under one mode drew the chip of
-                    // another until this was folded.
-                    if let Some(view) = this.active.clone() {
-                        if let Ok(envelope) = serde_json::to_value(&started.session) {
-                            view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                        }
+        };
+        self.wire_call_in(cx, work, |this, result, window, cx| match result {
+            Ok(started) => {
+                this.open(started.session.session_id.clone(), false, window, cx);
+                // The result carries the session object `session/started`
+                // would have carried, and it is the only place a mode set
+                // at start-up is reported: `session/start` with an
+                // `approvalMode` raises no `session/approvalModeChanged`,
+                // so a session started under one mode drew the chip of
+                // another until this was folded.
+                if let Some(view) = this.active.clone() {
+                    if let Ok(envelope) = serde_json::to_value(&started.session) {
+                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
                     }
-                    this.load_sessions(cx);
                 }
-                Err(error) => this.report(&error, cx),
-            });
-        }));
+                this.load_sessions(cx);
+            }
+            Err(error) => this.report(&error, cx),
+        });
     }
 
     /// `session/resume`, then page the whole transcript in.
@@ -1700,7 +1023,7 @@ impl Harness {
         }
         let Some(client) = self.client.clone() else { return };
         self.open(session_id.clone(), true, window, cx);
-        let call = cx.background_spawn(async move {
+        let work = move || {
             client.session_resume(&SessionResumeParams {
                 command_id: new_command_id(),
                 session_id,
@@ -1710,23 +1033,20 @@ impl Harness {
                 cursor: None,
                 history: None,
             })
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let result = call.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    // A failed switch keeps the old view (C2): only a boot
-                    // open with nothing behind it clears the centre pane.
-                    if this.pending_active.take().is_some() {
-                        this.pending_ready = false;
-                    } else {
-                        this.active = None;
-                    }
-                    this.report(&error, cx);
+        };
+        self.wire_call(cx, work, |this, result, cx| {
+            if let Err(error) = result {
+                // A failed switch keeps the old view (C2): only a boot
+                // open with nothing behind it clears the centre pane.
+                if this.pending_active.take().is_some() {
+                    this.pending_ready = false;
+                } else {
+                    this.active = None;
                 }
-                cx.notify();
-            });
-        }));
+                this.report(&error, cx);
+            }
+            cx.notify();
+        });
     }
 
     /// Put a session in the centre pane and subscribe to what it needs help
@@ -1908,7 +1228,7 @@ impl Harness {
 
     /// Put a modal up. Only one at a time, which is what makes Escape's order
     /// (menu, then modal) a single rule.
-    fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
+    pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
         self.overlays.update(cx, |overlays, _| overlays.dialog = Some(dialog));
         cx.notify();
     }
@@ -1926,24 +1246,21 @@ impl Harness {
     fn load_menu_sources(&mut self, cx: &mut Context<Self>) {
         let program = self.args.program.clone();
         let root = self.args.workspace.clone();
-        let call = cx.background_spawn(async move { (skills::list(&program), files::walk(&root)) });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let (skills, files) = call.await;
+        let work = move || (skills::list(&program), files::walk(&root));
+        self.wire_call(cx, work, |this, (skills, files), cx| {
             if files.truncated {
                 crate::harness_log!(
                     "@ mention index stopped at {} files; some workspace files are not mentionable",
                     files::CAP
                 );
             }
-            let _ = this.update(cx, |this, cx| {
-                this.overlays.update(cx, |overlays, _| {
-                    overlays.skills = skills;
-                    overlays.files = files.entries;
-                    overlays.files_truncated = files.truncated;
-                });
-                cx.notify();
+            this.overlays.update(cx, |overlays, _| {
+                overlays.skills = skills;
+                overlays.files = files.entries;
+                overlays.files_truncated = files.truncated;
             });
-        }));
+            cx.notify();
+        });
     }
 
     /// A failed command that the application, rather than a session, issued.
@@ -2132,7 +1449,7 @@ impl Harness {
     }
 
     /// The archive dialog's Archive button, or the `archive-confirm` step.
-    fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
             (d.action == DialogAction::Archive).then(|| d.archive_target.clone()).flatten()
         });
@@ -2248,7 +1565,7 @@ impl Harness {
             return;
         }
         self.titled.extend(wanted.iter().cloned());
-        let call = cx.background_spawn(async move {
+        let work = move || {
             wanted
                 .into_iter()
                 .map(|session_id| {
@@ -2263,16 +1580,13 @@ impl Harness {
                     (session_id, title)
                 })
                 .collect::<Vec<_>>()
+        };
+        self.wire_call(cx, work, |this, derived, cx| {
+            for (session_id, title) in derived {
+                let Some(title) = title else { continue };
+                this.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
+            }
         });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let derived = call.await;
-            let _ = this.update(cx, |this, cx| {
-                for (session_id, title) in derived {
-                    let Some(title) = title else { continue };
-                    this.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
-                }
-            });
-        }));
     }
 
     /// F10. The open session's transcript may name it when nothing else does.
@@ -2295,7 +1609,7 @@ impl Harness {
     }
 
     /// Open the palette on one list.
-    fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
+    pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
         let already = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.palette = if already { None } else { Some(Palette { kind, selected: 0 }) };
@@ -2331,32 +1645,27 @@ impl Harness {
         self.search_epoch += 1;
         let epoch = self.search_epoch;
         let query = self.search_query.read(cx).value().to_string();
-        let call = cx.background_spawn(async move {
-            match crate::search::open() {
-                Ok(connection) => (
-                    crate::search::query_sessions(&connection, &query, crate::search::LIMIT),
-                    crate::search::query_files(&connection, &query, crate::search::LIMIT),
-                ),
-                Err(_) => (Vec::new(), Vec::new()),
+        let work = move || match crate::search::open() {
+            Ok(connection) => (
+                crate::search::query_sessions(&connection, &query, crate::search::LIMIT),
+                crate::search::query_files(&connection, &query, crate::search::LIMIT),
+            ),
+            Err(_) => (Vec::new(), Vec::new()),
+        };
+        self.wire_call(cx, work, move |this: &mut Self, (sessions, files), cx| {
+            if this.search_epoch != epoch {
+                return;
             }
-        });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let (sessions, files) = call.await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.search_epoch != epoch {
-                    return;
+            this.search_sessions = sessions;
+            this.search_files = files;
+            // The selection may point past the new list.
+            this.overlays.update(cx, |overlays, _| {
+                if let Some(palette) = overlays.palette.as_mut() {
+                    palette.selected = 0;
                 }
-                this.search_sessions = sessions;
-                this.search_files = files;
-                // The selection may point past the new list.
-                this.overlays.update(cx, |overlays, _| {
-                    if let Some(palette) = overlays.palette.as_mut() {
-                        palette.selected = 0;
-                    }
-                });
-                cx.notify();
             });
-        }));
+            cx.notify();
+        });
     }
 
     /// Rebuild the session half of `search.db` off the UI thread.
@@ -2388,19 +1697,16 @@ impl Harness {
                 }
             })
             .collect();
-        let call = cx.background_spawn(async move {
+        let work = move || {
             let mut connection = match crate::search::open() {
                 Ok(connection) => connection,
                 Err(_) => return,
             };
             let _ = crate::search::rebuild_sessions(&mut connection, &rows);
+        };
+        self.wire_call(cx, work, |this: &mut Self, (), cx| {
+            this.refresh_search(cx);
         });
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            call.await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                this.refresh_search(cx);
-            });
-        }));
     }
 
     /// The search palette's rows: session hits, then file hits, in the order
@@ -2512,46 +1818,9 @@ impl Harness {
         self.args.screenshot.is_some() || crate::clock::deterministic()
     }
 
-    fn render_login(&self, cx: &mut Context<Self>) -> AnyElement {
-        let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
-            this.login_intent(*intent, window, cx);
-        });
-        // `can_submit` tracks the field's non-empty trimmed text, recomputed
-        // every frame; the stored bool is only the shape the state needs.
-        let state = match &self.login.state {
-            LoginState::ApiKey { error, .. } => LoginState::ApiKey {
-                can_submit: !self.login.api_key.read(cx).value().trim().is_empty(),
-                error: error.clone(),
-            },
-            other => other.clone(),
-        };
-        // The eye flips the field's masked flag and keeps `revealed` in sync,
-        // so `ToggleReveal` flips from the truth. The component never sees
-        // the key: it only reads the masked flag for the glyph.
-        let harness = cx.entity().downgrade();
-        let toggle = self.login.api_key.clone();
-        let field = secret_field("login-key", &self.login.api_key)
-            .placeholder("Paste your key")
-            .on_toggle_reveal(move |window, cx| {
-                let next = !toggle.read(cx).presentation().is_masked();
-                toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
-                let _ = harness.update(cx, |this, _| this.login.revealed = next);
-            });
-        // A deterministic capture draws the card settled: the login screen's
-        // enter presence never lands on the same frame twice.
-        let card = login("login", state)
-            .product("Muse")
-            .headline("Sign in to Muse")
-            .subtitle("The harness signs in over the wire, the same way the muse CLI does.")
-            .provider(aui_icons::Provider::Muse)
-            .api_key_field(field);
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        card.on_intent(move |i, window, cx| intent(&i, window, cx)).into_any_element()
-    }
-
     /// Open a header/footer menu, replacing whatever is open. Clicking its
     /// own button again closes it.
-    fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+    pub(crate) fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };
@@ -3200,7 +2469,7 @@ impl Harness {
         context
     }
 
-    fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
+    pub(crate) fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| f(view, cx));
         }
@@ -3741,7 +3010,7 @@ fn find_docs_dir(
 }
 
 impl Harness {
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         cx.notify();
     }
@@ -3899,18 +3168,7 @@ impl Harness {
             return;
         }
         if !matches!(self.auth, Auth::SignedIn(_)) {
-            match &self.login.state {
-                LoginState::Starting | LoginState::Device { .. } => {
-                    self.login_intent(LoginIntent::Cancel, window, cx);
-                }
-                LoginState::ApiKey { .. } => {
-                    self.login_intent(LoginIntent::Back, window, cx);
-                }
-                LoginState::Error { .. } => {
-                    self.login_intent(LoginIntent::ChooseAnother, window, cx);
-                }
-                _ => {}
-            }
+            self.login_escape(window, cx);
             return;
         }
         // An open rename is the next thing Escape takes back. (There is no

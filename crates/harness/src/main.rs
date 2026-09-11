@@ -48,6 +48,7 @@ mod images;
 mod index;
 mod layout;
 mod log;
+mod login;
 mod overlays;
 mod plan;
 mod search;
@@ -56,9 +57,11 @@ mod sessions;
 mod shot;
 mod sidebar;
 mod skills;
+mod steps;
 mod store;
 mod tier;
 mod transcript;
+mod wire;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -137,39 +140,11 @@ pub struct Args {
     /// One step per item, `;`-separated because a step's payload may contain a
     /// comma. Every Phase 3 screenshot is one of these, so every screenshot is
     /// reproducible from a command line rather than from a pointer. **The
-    /// whole surface is scripting only**: none of these steps has any other
-    /// entry point, so this table (and its `--help` summary) is the one place
-    /// that documents them. Only `send:` and `steer:` reach `turn/start` and
-    /// bill a real turn (like `--send`, below); every other step is free.
-    ///
-    /// | step | what it does |
-    /// |---|---|
-    /// | `draft:<text>` | put text in the composer |
-    /// | `send:<text>` | send a turn — **costs a turn** |
-    /// | `steer:<text>` | steer the running turn — **costs a turn** |
-    /// | `model` / `effort` / `mode` | open that chip picker |
-    /// | `confirm` | activate the open menu's selected row |
-    /// | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
-    /// | `compact` | `session/compact` |
-    /// | `command:<filter>` / `mention:<filter>` | open the caret popover |
-    /// | `meter` | pin the context meter's breakdown open |
-    /// | `context:<used>/<window>/<level>` | a synthetic `session/contextUsage` |
-    /// | `plan` | turn plan mode on |
-    /// | `image:<path>` | attach an image |
-    /// | `plus` / `drop` | open the `+` menu; raise the drop overlay |
-    /// | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
-    /// | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
-    /// | `choose:<n>` | the n-th choice of the newest pending approval |
-    /// | `feedback:<text>` | type into an open feedback or clarify field |
-    /// | `answer:<label>` / `answers:<a\|b>` | pick options on the newest question |
-    /// | `confirm-answer` | send the answer |
-    /// | `preview:<n>` | open the n-th option's preview (0-based) |
-    /// | `select:<label>` | pick an option without sending |
-    /// | `clarify:<text>` | "Explain instead"; with no text, only opens the field |
-    /// | `skip` | decline the newest question |
-    /// | `fork` | `session/fork` at the newest completed turn |
-    /// | `retry` | retry the newest failed turn |
-    /// | `wait:<ms>` | let the wire catch up before the next step |
+    /// whole surface is scripting only**, and the `steps` module is the one
+    /// place that documents it: the verb table, which verbs the window owns
+    /// and which the session does, and which of them cost a turn (only
+    /// `send:` and `steer:` do, like `--send` above; every other step is
+    /// free).
     pub steps: Vec<String>,
     /// `--tier subscription|payg|unknown`: skip the billing probe and pretend
     /// it said this.
@@ -203,19 +178,13 @@ pub struct Args {
     /// `--no-connect` / `--replay`), run once the login screen is up, one
     /// step per item, the same `;`-separated parsing as `--steps`. Scripting
     /// only, like `--steps` above; none of these steps reaches `turn/start`,
-    /// so none of them costs anything.
+    /// so none of them costs anything. The verbs are in the `steps` module
+    /// with the rest of the scripting surface.
     ///
-    /// | step | what it does |
-    /// |---|---|
-    /// | `account` | start the device flow (the browser opens) |
-    /// | `apikey` | open the API-key form |
-    /// | `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
-    /// | `submit` | submit the API-key form |
-    /// | `wait:<ms>` | let the wire catch up before the next step |
-    ///
-    /// The key travels from the environment into the field and then into the
-    /// wire call: it never appears in argv, a log or a screenshot argument.
-    /// After sign-in the ordinary `--steps` run as today, so
+    /// The key a `key-from-env:<VAR>` step carries travels from the
+    /// environment into the field and then into the wire call: it never
+    /// appears in argv, a log or a screenshot argument. After sign-in the
+    /// ordinary `--steps` run as today, so
     /// `--login-steps 'apikey;key-from-env:MUSE_TEST_KEY;submit;wait:8000'
     /// --screenshot …` captures the signed-in shell on the API-key lane.
     pub login_steps: Vec<String>,
