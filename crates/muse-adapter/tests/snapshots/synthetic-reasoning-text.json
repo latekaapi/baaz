@@ -71,7 +71,9 @@
       "approval_mode": "onRequest",
       "last_cursor": "v:syn:7",
       "command_text": {},
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

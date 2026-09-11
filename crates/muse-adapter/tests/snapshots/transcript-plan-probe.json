@@ -78,7 +78,9 @@
       "command_text": {
         "01a08285-99b5-7850-b1c7-aaad5ab4af92": "/plan reply with a one-line plan for printing hello"
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

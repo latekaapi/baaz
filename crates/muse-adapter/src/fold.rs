@@ -306,13 +306,7 @@ impl MuseFold {
                 };
                 let allowed = resolution.decision.starts_with("approved");
                 let rule = request.subject.command.clone().unwrap_or_else(|| resolution.decision.clone());
-                let state = match (by, allowed) {
-                    (Some(ResolvedBy::User), true) => ApprovalState::Approving,
-                    (Some(ResolvedBy::User), false) => ApprovalState::Denied,
-                    (_, true) => ApprovalState::AutoAllowed { rule },
-                    (_, false) => ApprovalState::AutoDenied { rule },
-                };
-                (state, by)
+                (approval_state(by, allowed, rule), by)
             }
             // `approvalNotFound`: the server has forgotten it and will never say
             // how it ended. "Denied" would be a guess; the honest card is the
@@ -397,6 +391,7 @@ impl Folded {
             "session/branchChanged" => self.branch_changed(params),
             "session/approvalModeChanged" => self.approval_mode_changed(params),
             "session/modelChanged" => self.model_changed(params),
+            "session/modelRouteUnserved" => self.model_route_unserved(params),
             "session/contextUsage" => self.context_usage(params),
             "session/tokenUsage" => self.token_usage(params),
             "session/todoListChanged" => self.todo_changed(params),
@@ -416,15 +411,25 @@ impl Folded {
             "userInput/requested" => self.user_input_requested(params),
             "userInput/settled" => self.user_input_settled(params),
             "view/gap" => self.view_gap(params),
-            _ => Vec::new(),
+            _ => {
+                // An unhandled method is the same kind of blind spot as a
+                // decode failure: the fold produced nothing and nothing said
+                // so (finding `client-adapter-3`).
+                self.side.decode_failures += 1;
+                Vec::new()
+            }
         }
     }
 
     // ------------------------------------------------------------ session facts
 
     fn session_started(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(session) = params.get("session") else { return Vec::new() };
+        let Some(session) = params.get("session") else {
+            self.side.decode_failures += 1;
+            return Vec::new();
+        };
         let Ok(session) = serde_json::from_value::<msp::Session>(session.clone()) else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         self.session.model = session.model_id.clone().unwrap_or_default();
@@ -457,8 +462,12 @@ impl Folded {
     }
 
     fn approval_mode_changed(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(mode) = params.get("mode") else { return Vec::new() };
+        let Some(mode) = params.get("mode") else {
+            self.side.decode_failures += 1;
+            return Vec::new();
+        };
         let Ok(mode) = serde_json::from_value::<ApprovalMode>(mode.clone()) else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         self.side.approval_mode = mode.clone();
@@ -484,6 +493,16 @@ impl Folded {
             self.session.model = model_id.to_owned();
         }
         self.side.model = serde_json::from_value(params.clone()).ok();
+        Vec::new()
+    }
+
+    /// Disclosure only (finding `client-adapter-12`): an accepted
+    /// `login.credential_update` installed a provider that cannot serve the
+    /// session's standing model route. No `Delta` exists for it — the
+    /// standing selection does not change — so it is folded into side state
+    /// as a marker instead of falling through the untyped-method catch-all.
+    fn model_route_unserved(&mut self, params: &Value) -> Vec<Delta> {
+        self.side.model_route_unserved = serde_json::from_value(params.clone()).ok();
         Vec::new()
     }
 
@@ -616,7 +635,7 @@ impl Folded {
             let turn = self.ensure_assistant_turn(&turn_id, &mut deltas);
             let (added, _) = self.push_block(
                 turn,
-                Block::Marker { kind: MarkerKind::TurnCancelled, text: reason.to_owned() },
+                Block::Marker { kind: MarkerKind::TurnCancelled, text: cancellation_text(reason) },
             );
             deltas.extend(added);
         }
@@ -721,8 +740,12 @@ impl Folded {
     // -------------------------------------------------------------------- items
 
     fn item(&mut self, params: &Value, terminal: bool) -> Vec<Delta> {
-        let Some(item) = params.get("item") else { return Vec::new() };
+        let Some(item) = params.get("item") else {
+            self.side.decode_failures += 1;
+            return Vec::new();
+        };
         let Ok(item) = serde_json::from_value::<msp::Item>(item.clone()) else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         // Apply rule: replace iff the revision is higher.
@@ -1242,6 +1265,7 @@ impl Folded {
     fn approval_requested(&mut self, params: &Value) -> Vec<Delta> {
         let Ok(request) = serde_json::from_value::<msp::ApprovalRequestParams>(params.clone())
         else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         if self.seen_requests.insert(request.approval_id.clone(), ()).is_some() {
@@ -1295,6 +1319,7 @@ impl Folded {
     fn approval_resolved(&mut self, params: &Value) -> Vec<Delta> {
         let Ok(resolved) = serde_json::from_value::<msp::ApprovalResolvedParams>(params.clone())
         else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         self.break_groups();
@@ -1320,15 +1345,10 @@ impl Folded {
             .clone()
             .or_else(|| known.clone())
             .unwrap_or_else(|| approval_mode_name(&self.side.approval_mode).to_owned());
-        let state = match (by, allowed) {
-            // A policy or judge resolution can arrive with no user interaction
-            // at all — the card opened and closed in the same breath and was
-            // never actionable.
-            (Some(ResolvedBy::User), true) => ApprovalState::Approving,
-            (Some(ResolvedBy::User), false) => ApprovalState::Denied,
-            (_, true) => ApprovalState::AutoAllowed { rule },
-            (_, false) => ApprovalState::AutoDenied { rule },
-        };
+        // A policy or judge resolution can arrive with no user interaction at
+        // all — the card opened and closed in the same breath and was never
+        // actionable.
+        let state = approval_state(by, allowed, rule);
         let Some(request) = request else { return Vec::new() };
         // Nothing better than the mode's name yet: the reason is still in
         // flight on the gated item, so remember where to put it. Only for a
@@ -1382,6 +1402,7 @@ impl Folded {
     fn user_input_requested(&mut self, params: &Value) -> Vec<Delta> {
         let Ok(request) = serde_json::from_value::<msp::UserInputRequestParams>(params.clone())
         else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         if self.seen_requests.insert(request.user_input_id.clone(), ()).is_some() {
@@ -1407,6 +1428,7 @@ impl Folded {
     fn user_input_settled(&mut self, params: &Value) -> Vec<Delta> {
         let Ok(settled) = serde_json::from_value::<msp::UserInputSettledParams>(params.clone())
         else {
+            self.side.decode_failures += 1;
             return Vec::new();
         };
         self.break_groups();
@@ -1620,17 +1642,23 @@ impl Folded {
     }
 
     fn remove_turn(&mut self, turn_id: &str) -> Vec<Delta> {
+        // Captured before `apply` shifts every later turn down, so slots
+        // (which cache a raw turn *index*, not an id) can be translated from
+        // their old index to the turn id they actually meant.
+        let old_turns: Vec<String> = self.session.turns.iter().map(|turn| turn.id().to_owned()).collect();
         let delta = Delta::TurnRemoved { turn_id: turn_id.to_owned() };
         if !self.session.apply(delta.clone()) {
             return Vec::new();
         }
-        self.reindex();
+        self.reindex(&old_turns);
         vec![delta]
     }
 
     /// Turn indices shift when a turn is removed, so every cached slot is
-    /// rebuilt from the transcript itself.
-    fn reindex(&mut self) {
+    /// remapped through the rebuilt id → position map (finding
+    /// `client-adapter-1`); a slot whose turn id no longer exists is dropped
+    /// rather than kept under its stale index.
+    fn reindex(&mut self, old_turns: &[String]) {
         let positions: HashMap<String, usize> = self
             .session
             .turns
@@ -1646,23 +1674,58 @@ impl Folded {
             }
             None => false,
         });
-        let live: std::collections::HashSet<usize> = self.assistant_turns.values().copied().collect();
-        self.items.retain(|_, slot| live.contains(&slot.turn));
-        self.approvals.retain(|_, slot| live.contains(&slot.turn));
-        self.inputs.retain(|_, slots| slots.iter().all(|slot| live.contains(&slot.turn)));
-        if let Some(slot) = self.todo {
-            if !live.contains(&slot.turn) {
+        // Old raw index → new raw index, via the turn id it named before the
+        // removal. `None` means that turn is gone.
+        let remap = |old_index: usize| -> Option<usize> {
+            old_turns.get(old_index).and_then(|id| positions.get(id).copied())
+        };
+        let remap_slot = |slot: &mut Slot| match remap(slot.turn) {
+            Some(new_index) => {
+                slot.turn = new_index;
+                true
+            }
+            None => false,
+        };
+        self.items.retain(|_, slot| remap_slot(slot));
+        self.approvals.retain(|_, slot| remap_slot(slot));
+        self.inputs.retain(|_, slots| slots.iter_mut().all(&remap_slot));
+        if let Some(slot) = &mut self.todo {
+            if !remap_slot(slot) {
                 self.todo = None;
             }
         }
-        if let Some(slot) = self.goal {
-            if !live.contains(&slot.turn) {
+        if let Some(slot) = &mut self.goal {
+            if !remap_slot(slot) {
                 self.goal = None;
             }
         }
         // A turn that is gone takes its block ordering with it, or a turn id
         // reused after a retraction would inherit the old turn's keys.
         self.block_order.retain(|id, _| positions.contains_key(id));
+    }
+}
+
+/// A cancellation marker's text has no separate detail line the way a
+/// failure card does, so the raw reason is kept verbatim only up to this
+/// cap; past it the marker would stop reading as one honest line (finding
+/// `client-adapter-18`).
+const CANCEL_REASON_CAP: usize = 200;
+
+/// A `turn/completed { terminal: "cancelled" }` reason, humanized like a
+/// failure's through `failure::reason_sentence` when the code is one this
+/// build recognizes, and truncated rather than shown raw and unbounded
+/// otherwise. Unlike `failure::humanize`, there is no second line to keep the
+/// raw code on — a marker is one line — so an unrecognized reason is capped
+/// instead of doubled.
+fn cancellation_text(reason: &str) -> String {
+    if let Some(sentence) = crate::failure::reason_sentence(reason) {
+        return sentence.to_owned();
+    }
+    if reason.chars().count() > CANCEL_REASON_CAP {
+        let truncated: String = reason.chars().take(CANCEL_REASON_CAP).collect();
+        format!("{truncated}…")
+    } else {
+        reason.to_owned()
     }
 }
 
@@ -1720,6 +1783,10 @@ fn denial_reason(text: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
+/// `session/todoListChanged`'s status, a closed MSP enum. See
+/// [`todo_entry_state`] for the free-string sibling a `todo` *tool call*'s
+/// `args` carries, and why the two are not unified (finding
+/// `client-adapter-9`).
 fn todo_state(status: &msp::TodoStatus) -> TodoState {
     match status {
         msp::TodoStatus::Pending => TodoState::Pending,
@@ -1738,6 +1805,22 @@ fn tool_status(status: &msp::ItemStatus) -> ToolStatus {
         // `failed`, `rejected`, `timedOut` and anything this build has never
         // heard of are all "it did not work".
         _ => ToolStatus::Error,
+    }
+}
+
+/// The one `(by, allowed) -> ApprovalState` mapping (finding
+/// `client-adapter-9`): a user's own decision is `Approving`/`Denied`, and
+/// anything auto-resolved (policy, an LLM judge, or a resolution nobody
+/// attended) carries the rule that decided it. Both `resolve_approval` (a
+/// losing `approval/decide`) and `Folded::approval_resolved` (the live
+/// `approval/resolved` notification) resolve through this, so a policy fix
+/// cannot diverge between the two paths the way it used to.
+fn approval_state(by: Option<ResolvedBy>, allowed: bool, rule: String) -> ApprovalState {
+    match (by, allowed) {
+        (Some(ResolvedBy::User), true) => ApprovalState::Approving,
+        (Some(ResolvedBy::User), false) => ApprovalState::Denied,
+        (_, true) => ApprovalState::AutoAllowed { rule },
+        (_, false) => ApprovalState::AutoDenied { rule },
     }
 }
 
@@ -1850,7 +1933,17 @@ fn todo_entries(args: Option<&str>) -> Option<Vec<TodoEntry>> {
         .collect()
 }
 
-/// A todo tool's status words, which are looser than MSP's own enum.
+/// A todo tool's status words, which are looser than MSP's own enum
+/// ([`todo_state`]'s domain): a `todo` tool call's `args` is model-authored
+/// JSON with a bare string field, not the closed `TodoStatus` a
+/// `session/todoListChanged` notification carries, so the model is free to
+/// spell "active" or "canceled" or anything else a real transcript has not
+/// said yet — this table normalizes by case and separator instead of
+/// matching a fixed set, and defaults unrecognized words to `Pending` rather
+/// than guessing "done". Kept separate from `todo_state` on purpose: folding
+/// the two into one function would either force the closed enum to grow
+/// synonyms it does not own, or make the notification path tolerate strings
+/// the wire never sends.
 fn todo_entry_state(status: &str) -> TodoState {
     match status.to_lowercase().replace(['_', '-'], "").as_str() {
         "inprogress" | "running" | "active" | "started" => TodoState::Running,
@@ -2264,4 +2357,27 @@ fn answer_for(question: &msp::UserInputQuestion, settled: &msp::UserInputSettled
         answer.other = Some(clarification.content.clone());
     }
     answer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_known_cancel_reason_becomes_its_sentence() {
+        assert_eq!(cancellation_text("cancel:user"), "You cancelled the turn.");
+    }
+
+    #[test]
+    fn an_unknown_short_reason_is_kept_verbatim() {
+        assert_eq!(cancellation_text("cancelled during model step"), "cancelled during model step");
+    }
+
+    #[test]
+    fn an_unknown_long_reason_is_truncated() {
+        let reason = "x".repeat(CANCEL_REASON_CAP + 50);
+        let text = cancellation_text(&reason);
+        assert_eq!(text.chars().count(), CANCEL_REASON_CAP + 1, "cap plus the ellipsis mark");
+        assert!(text.ends_with('…'));
+    }
 }

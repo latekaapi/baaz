@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use muse_client::schema::{
     ApprovalMode, ApprovalRequestParams, ContextUsage, CumulativeTokenUsage, EffectiveModel, Goal,
-    TurnRetryScheduledParams, UserInputRequestParams,
+    SessionModelRouteUnservedParams, TurnRetryScheduledParams, UserInputRequestParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +67,19 @@ pub struct SideState {
     /// The prompt a `turn/retracted` or `turn/unqueued` handed back, for the
     /// composer to pick up. The app clears it once it has.
     pub restored_prompt: Option<String>,
+    /// The most recent `session/modelRouteUnserved`, if the standing model
+    /// route has gone unroutable (finding `client-adapter-12`). Disclosure
+    /// only — the standing selection is unchanged and there is no `Delta`
+    /// for it — kept here so the app can show it rather than silently drop
+    /// it through the fold's untyped-method catch-all.
+    pub model_route_unserved: Option<SessionModelRouteUnservedParams>,
+    /// How many notifications this session's fold could not decode: a
+    /// missing required field or a shape `serde` rejected. Every decode
+    /// failure previously returned an empty `Vec<Delta>` with no counter, no
+    /// log and no marker, so a server shape-change was invisible in the
+    /// transcript (finding `client-adapter-3`). Counted, never displayed as
+    /// an error card — this is a diagnostic, not a transcript event.
+    pub decode_failures: u32,
 }
 
 impl Default for SideState {
@@ -88,6 +101,8 @@ impl Default for SideState {
             last_cursor: String::new(),
             command_text: BTreeMap::new(),
             restored_prompt: None,
+            model_route_unserved: None,
+            decode_failures: 0,
         }
     }
 }

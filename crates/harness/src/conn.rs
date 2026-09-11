@@ -59,21 +59,29 @@ pub fn connect(program: &str) -> Result<(Connection, UnboundedReceiver<MuseEvent
         },
     )?;
     let (tx, rx) = unbounded();
-    forward(events, tx);
+    let _ = forward(events, tx);
     Ok((Connection { client: Arc::new(client), server, warning }, rx))
 }
 
 /// Move every event from the client's crossbeam receiver onto a futures channel
 /// a gpui task can await. The thread ends when the client's sender is dropped,
-/// which happens when the client is.
-fn forward(events: crossbeam_channel::Receiver<MuseEvent>, tx: UnboundedSender<MuseEvent>) {
-    let _ = std::thread::Builder::new().name("muse-bridge".into()).spawn(move || {
+/// which happens when the client is (finding `support-13`: no join handle is
+/// kept for shutdown ordering, which is the accepted design — this only
+/// names each bridge thread distinctly, so a stack of them from repeated
+/// reconnects is not one unlabelled thread repeated).
+fn forward(
+    events: crossbeam_channel::Receiver<MuseEvent>,
+    tx: UnboundedSender<MuseEvent>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    static CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::thread::Builder::new().name(format!("muse-bridge-{n}")).spawn(move || {
         while let Ok(event) = events.recv() {
             if tx.unbounded_send(event).is_err() {
                 break;
             }
         }
-    });
+    })
 }
 
 /// Where a failed command belongs on screen (spec §3.8).
@@ -162,5 +170,26 @@ mod tests {
         assert!(!looks_like_signed_out(Some("modelError"), "the model timed out"));
         // The right words but the wrong kind is still not an auth failure.
         assert!(!looks_like_signed_out(Some("stepLimit"), "not authenticated"));
+    }
+
+    /// **support-13 / A-MECH-19.** The bridge thread has no join handle kept
+    /// for shutdown ordering by design (nothing here changes that), but it
+    /// must still actually exit once the client's sender side is dropped —
+    /// which is the whole reason that design is safe.
+    #[test]
+    fn the_bridge_thread_exits_when_its_sender_is_dropped() {
+        use futures::StreamExt;
+        let (events_tx, events_rx) = crossbeam_channel::unbounded::<MuseEvent>();
+        let (tx, mut rx) = unbounded();
+        let handle = forward(events_rx, tx).expect("spawn the bridge thread");
+        assert!(handle.thread().name().is_some_and(|name| name.starts_with("muse-bridge-")));
+
+        events_tx.send(MuseEvent::Closed(None)).expect("send while the bridge is alive");
+        assert_eq!(futures::executor::block_on(rx.next()), Some(MuseEvent::Closed(None)));
+
+        // Dropping every sender is what `MuseClient::shutdown`/`Drop` does;
+        // the bridge's `recv()` then returns `Err` and the loop ends.
+        drop(events_tx);
+        handle.join().expect("the bridge thread panicked instead of exiting");
     }
 }

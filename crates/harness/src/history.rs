@@ -32,15 +32,22 @@ pub fn read(workspace: &str) -> Vec<String> {
     read_all().remove(workspace).unwrap_or_default()
 }
 
+/// How many of the most recent entries a resend is checked against (finding
+/// `support-6`): the old check compared only the newest entry, so
+/// alternating A/B resends (A, B, A, B, …) grew the file to the cap with
+/// duplicates instead of settling into two.
+const RECENT_DEDUP_WINDOW: usize = 3;
+
 /// Append `text` to `workspace`'s history and write the file back.
 ///
 /// Returns the history as it now stands, so the caller does not have to read it
-/// again. A prompt equal to the newest one is not appended: holding Enter on the
-/// same message should not fill the history with it.
+/// again. A prompt equal to any of the last few is not appended again: holding
+/// Enter on the same message, or bouncing between a couple of prompts, should
+/// not fill the history with repeats.
 pub fn append(workspace: &str, text: &str) -> Vec<String> {
     let mut all = read_all();
     let entry = all.entry(workspace.to_owned()).or_default();
-    if entry.last().map(String::as_str) != Some(text) {
+    if !is_recent_duplicate(entry, text) {
         entry.push(text.to_owned());
     }
     if entry.len() > CAP {
@@ -50,6 +57,14 @@ pub fn append(workspace: &str, text: &str) -> Vec<String> {
     let out = entry.clone();
     write_all(&all);
     out
+}
+
+/// Whether `text` equals any of `entries`' last [`RECENT_DEDUP_WINDOW`]
+/// prompts. Pure, so the window's boundary is unit-testable without
+/// touching disk.
+fn is_recent_duplicate(entries: &[String], text: &str) -> bool {
+    let recent_len = entries.len().saturating_sub(RECENT_DEDUP_WINDOW);
+    entries[recent_len..].iter().any(|prompt| prompt == text)
 }
 
 fn write_all(all: &BTreeMap<String, Vec<String>>) {
@@ -158,5 +173,26 @@ mod tests {
         let mut c = Cursor::new(Vec::new());
         assert_eq!(c.prev("draft"), None);
         assert_eq!(c.next(), None);
+    }
+
+    /// **support-6 / A-MECH-16.** The old check compared only the newest
+    /// entry, so an alternating A/B resend grew without bound; the last
+    /// `RECENT_DEDUP_WINDOW` entries are checked now.
+    #[test]
+    fn a_resend_within_the_recent_window_is_not_a_duplicate_append() {
+        let entries: Vec<String> = vec!["a".into(), "b".into()];
+        assert!(is_recent_duplicate(&entries, "a"), "an alternating resend must be caught");
+        assert!(is_recent_duplicate(&entries, "b"), "the newest entry is still caught");
+        assert!(!is_recent_duplicate(&entries, "c"), "a genuinely new prompt is not a duplicate");
+    }
+
+    #[test]
+    fn a_repeat_older_than_the_window_is_not_a_duplicate() {
+        let entries: Vec<String> =
+            vec!["old".into(), "a".into(), "b".into(), "c".into()];
+        // "old" is now four back — outside the 3-entry window — so it may
+        // reappear.
+        assert!(!is_recent_duplicate(&entries, "old"));
+        assert!(is_recent_duplicate(&entries, "c"));
     }
 }

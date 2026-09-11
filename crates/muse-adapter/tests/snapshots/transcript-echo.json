@@ -85,7 +85,9 @@
       "command_text": {
         "01a081e5-3401-7813-884a-b7c4f774ead7": "hello from the probe"
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

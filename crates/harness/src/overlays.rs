@@ -136,6 +136,10 @@ pub struct Overlays {
     /// The `@` picker's candidates: the workspace's files, relative to it,
     /// lowercased once at walk time (see [`crate::files::FileEntry`]).
     pub files: Vec<crate::files::FileEntry>,
+    /// Whether the walk that produced `files` hit `files::CAP` and stopped
+    /// (finding `support-8`): some files in the workspace are then missing
+    /// from `files` with nothing in the picker to say so.
+    pub files_truncated: bool,
     /// Monotonic id source, so two identical toasts are still two toasts.
     next_toast: u64,
 }
@@ -263,7 +267,7 @@ pub enum Command {
     Usage,
     /// Start a new session in this workspace.
     Clear,
-    /// `muse logout`.
+    /// `account/logout`.
     Logout,
     /// Show this menu, unfiltered.
     Help,

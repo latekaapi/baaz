@@ -246,7 +246,9 @@
       "command_text": {
         "01a081ee-70bb-719f-a35e-85cc42903110": "one"
       },
-      "restored_prompt": "one"
+      "restored_prompt": "one",
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   },
   {
@@ -302,7 +304,9 @@
       "approval_mode": "promptUnmatched",
       "last_cursor": "",
       "command_text": {},
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

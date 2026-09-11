@@ -232,7 +232,9 @@
       "approval_mode": "promptUnmatched",
       "last_cursor": "v:01a081ef-2588-78b3-8dd9-9c5c14f4b118:2",
       "command_text": {},
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

@@ -88,7 +88,9 @@
       "command_text": {
         "01a08501-5fb4-7860-a4bc-406e96c03a7f": "Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it."
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]

@@ -180,7 +180,8 @@ mod tests {
     #[test]
     fn an_unknown_lane_is_still_signed_in() {
         let identity =
-            Identity::from_account(&state(AccountStateKind::Unknown, None)).expect("open enum");
+            Identity::from_account(&state(AccountStateKind::Unknown("futureLane".to_owned()), None))
+                .expect("open enum");
         assert!(!identity.is_api_key());
         assert_eq!(identity.footer_name(), identity.name);
     }

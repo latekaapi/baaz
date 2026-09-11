@@ -75,7 +75,9 @@ fn roundtrip_request_params(method: &str, params: &Value) -> bool {
         "turn/unqueue" => roundtrip::<TurnUnqueueParams>(w, params),
         "model/list" => roundtrip::<ModelListParams>(w, params),
         "view/page" => roundtrip::<ViewPageParams>(w, params),
+        "view/subscribe" => roundtrip::<ViewSubscribeParams>(w, params),
         "view/unsubscribe" => roundtrip::<ViewUnsubscribeParams>(w, params),
+        "item/readOutput" => roundtrip::<ItemReadOutputParams>(w, params),
         "approval/decide" => roundtrip::<ApprovalDecideParams>(w, params),
         "approval/listPending" => roundtrip::<ApprovalListPendingParams>(w, params),
         "userInput/answer" => roundtrip::<UserInputAnswerParams>(w, params),
@@ -117,7 +119,9 @@ fn roundtrip_result(method: &str, result: &Value) -> bool {
         "turn/unqueue" => roundtrip::<TurnUnqueueResult>(w, result),
         "model/list" => roundtrip::<ModelListResult>(w, result),
         "view/page" => roundtrip::<ViewPageResult>(w, result),
+        "view/subscribe" => roundtrip::<ViewSubscribeResult>(w, result),
         "view/unsubscribe" => roundtrip::<ViewUnsubscribeResult>(w, result),
+        "item/readOutput" => roundtrip::<ItemReadOutputResult>(w, result),
         "approval/decide" => roundtrip::<ApprovalDecideResult>(w, result),
         "approval/listPending" => roundtrip::<ApprovalListPendingResult>(w, result),
         "userInput/answer" => roundtrip::<UserInputAnswerResult>(w, result),
@@ -158,6 +162,7 @@ fn roundtrip_server_params(method: &str, params: &Value) -> bool {
         "account/changed" => roundtrip::<AccountState>(w, params),
         "account/loginCompleted" => roundtrip::<AccountLoginCompletedParams>(w, params),
         "session/modelChanged" => roundtrip::<SessionModelChangedParams>(w, params),
+        "session/modelRouteUnserved" => roundtrip::<SessionModelRouteUnservedParams>(w, params),
         "session/goalChanged" => roundtrip::<SessionGoalChangedParams>(w, params),
         "session/todoListChanged" => roundtrip::<SessionTodoListChangedParams>(w, params),
         "session/branchChanged" => roundtrip::<SessionBranchChangedParams>(w, params),
@@ -288,20 +293,30 @@ fn every_recorded_frame_round_trips() {
 #[test]
 fn open_enums_tolerate_unknown_server_values() {
     let kind: ItemKind = serde_json::from_value(Value::from("someFutureKind")).unwrap();
-    assert_eq!(kind, ItemKind::Unknown);
+    assert_eq!(kind, ItemKind::Unknown("someFutureKind".to_owned()));
     assert_eq!(kind.as_wire(), None);
 
     let status: ItemStatus = serde_json::from_value(Value::from("halfway")).unwrap();
-    assert_eq!(status, ItemStatus::Unknown);
+    assert_eq!(status, ItemStatus::Unknown("halfway".to_owned()));
 
     let terminal: TurnTerminal = serde_json::from_value(Value::from("exploded")).unwrap();
-    assert_eq!(terminal, TurnTerminal::Unknown);
+    assert_eq!(terminal, TurnTerminal::Unknown("exploded".to_owned()));
 
     // A known value still decodes to its own variant and reports its wire string.
     let known: ItemKind = serde_json::from_value(Value::from("toolCall")).unwrap();
     assert_eq!(known, ItemKind::ToolCall);
     assert_eq!(known.as_wire(), Some("toolCall"));
     assert_eq!(serde_json::to_value(&known).unwrap(), Value::from("toolCall"));
+}
+
+/// **client-adapter-15 / A-MECH-10.** `Unknown` used to discard the
+/// original string entirely — it deserialized fine but re-serialized as the
+/// literal `"Unknown"`, breaking round-trip for exactly the values the open
+/// enum exists to tolerate. Retaining the string fixes that.
+#[test]
+fn an_unknown_open_enum_value_round_trips_byte_exact() {
+    let kind: ItemKind = serde_json::from_value(Value::from("someFutureKind")).unwrap();
+    assert_eq!(serde_json::to_value(&kind).unwrap(), Value::from("someFutureKind"));
 }
 
 #[test]
@@ -396,6 +411,62 @@ fn login_start_params_debug_redacts_the_key() {
     assert_eq!(
         wire,
         serde_json::json!({"type": "apiKey", "apiKey": "test-key-abcdef-1234"})
+    );
+}
+
+/// **client-adapter-12 / A-MECH-4.** No capture in `fixtures/msp/` carries
+/// `view/subscribe`, `item/readOutput` or `session/modelRouteUnserved` —
+/// `every_recorded_frame_round_trips` skips `synthetic-*` captures on
+/// purpose (see its doc comment), so those three typed surfaces had no wire
+/// coverage at all even after their dispatch arms were added above. These
+/// are direct schema round trips instead, to the shapes in
+/// `fixtures/msp/msp-ts/msp.d.ts`.
+#[test]
+fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
+    roundtrip::<ViewSubscribeParams>(
+        "view/subscribe params",
+        &serde_json::json!({"sessionId": "s1", "after": "v:s1:9"}),
+    );
+    roundtrip::<ViewSubscribeResult>(
+        "view/subscribe result",
+        &serde_json::json!({"viewCursor": "v:s1:9"}),
+    );
+    roundtrip::<ItemReadOutputParams>(
+        "item/readOutput params",
+        &serde_json::json!({
+            "sessionId": "s1",
+            "itemId": "i-1",
+            "outputRef": "out-1",
+            "offsetBytes": 0,
+            "lengthBytes": 4096,
+        }),
+    );
+    roundtrip::<ItemReadOutputResult>(
+        "item/readOutput result",
+        &serde_json::json!({
+            "content": "hello",
+            "byteLen": 5,
+            "offsetBytes": 0,
+            "eof": true,
+            "encoding": "utf8",
+            "mediaType": "text/plain",
+        }),
+    );
+    roundtrip::<SessionModelRouteUnservedParams>(
+        "session/modelRouteUnserved params",
+        &serde_json::json!({
+            "sessionId": "s1",
+            "commandId": "c1",
+            "installedProviderId": "meta",
+            "modelId": "muse-spark-1.3",
+            "providerId": "openai",
+            "sourceRange": {
+                "stream": {"kind": "session", "id": "s1"},
+                "first": {"id": "e1", "sequence": 1},
+                "last": {"id": "e1", "sequence": 1},
+            },
+            "viewCursor": "v:s1:1",
+        }),
     );
 }
 

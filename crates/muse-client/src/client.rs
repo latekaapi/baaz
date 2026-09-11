@@ -139,8 +139,7 @@ impl MuseEvent {
     pub fn from_frame(frame: Frame) -> Option<MuseEvent> {
         match frame {
             Frame::Notification { method, params } => {
-                let cursor = params.get("viewCursor").and_then(Value::as_str).map(str::to_owned);
-                let session_id = params.get("sessionId").and_then(Value::as_str).map(str::to_owned);
+                let (cursor, session_id) = event_cursor_session(&params);
                 Some(MuseEvent::Notification { method, params, cursor, session_id })
             }
             Frame::ServerRequest { id, method, params } => {
@@ -149,6 +148,17 @@ impl MuseEvent {
             Frame::Response { .. } | Frame::ErrorResponse { .. } => None,
         }
     }
+}
+
+/// `params.viewCursor` and `params.sessionId`, read the one way every caller
+/// needs them (finding `client-adapter-9`): [`MuseEvent::from_frame`] reads
+/// them off a freshly parsed notification, and `handle_frame` reads the same
+/// two fields off a live one arriving on the reader thread. Both used to
+/// re-spell the same two `Value::get` calls.
+fn event_cursor_session(params: &Value) -> (Option<String>, Option<String>) {
+    let cursor = params.get("viewCursor").and_then(Value::as_str).map(str::to_owned);
+    let session_id = params.get("sessionId").and_then(Value::as_str).map(str::to_owned);
+    (cursor, session_id)
 }
 
 /// How to spawn the child.
@@ -262,9 +272,19 @@ impl Inner {
 
     /// Emit an event, or park it if its session is mid-backfill.
     fn dispatch(&self, event: MuseEvent) {
+        // `approval/request` / `userInput/request` carry `sessionId` in
+        // `params`, exactly like their sibling `…/requested` notification.
+        // Both must park during that session's `view/gap` backfill (finding
+        // `client-adapter-2`) or a request arriving mid-fill folds its card
+        // immediately while the item it gates is still queued behind the
+        // parked notifications, landing the approval/question before (or
+        // instead of alongside) the tool card it belongs to.
         let session = match &event {
             MuseEvent::Notification { session_id, .. } => session_id.clone(),
-            _ => None,
+            MuseEvent::ServerRequest { params, .. } => {
+                params.get("sessionId").and_then(Value::as_str).map(str::to_owned)
+            }
+            MuseEvent::Closed(_) => None,
         };
         if let Some(session) = session {
             let mut gap = self.gap.lock().expect("gap mutex");
@@ -345,8 +365,13 @@ impl MuseClient {
         Self { inner, events: events_rx, child, threads: vec![reader, writer] }
     }
 
-    /// The event stream. Clone the receiver to fan out; every event is delivered
-    /// once, in wire order.
+    /// The event stream, in wire order.
+    ///
+    /// `crossbeam_channel::Receiver::clone` is a **competing** consumer, not a
+    /// broadcast: each event goes to exactly one clone, so two live clones
+    /// split the transcript between them rather than each seeing it whole
+    /// (finding `client-adapter-14`). Keep exactly one consumer — the pump in
+    /// `conn.rs` — and fan out from there.
     pub fn events(&self) -> Receiver<MuseEvent> {
         self.events.clone()
     }
@@ -362,6 +387,15 @@ impl MuseClient {
     fn call<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: &P) -> Result<R> {
         let params = serde_json::to_value(params)?;
         let result = self.inner.request_value(method, Some(params))?;
+        serde_json::from_value(result).map_err(MuseError::Json)
+    }
+
+    /// [`MuseClient::call`]'s sibling for a method that takes no params
+    /// (finding `client-adapter-17`): `account/read`, `account/loginCancel`
+    /// and `account/logout` each hand-rolled this `request_value` +
+    /// `from_value` + `map_err` sequence because they have no params struct.
+    fn call_no_params<R: DeserializeOwned>(&self, method: &str) -> Result<R> {
+        let result = self.inner.request_value(method, None)?;
         serde_json::from_value(result).map_err(MuseError::Json)
     }
 
@@ -522,9 +556,7 @@ impl MuseClient {
     /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
     /// `data.kind: "experimentalRequired"`.
     pub fn account_read(&self) -> Result<AccountState> {
-        self.inner.request_value("account/read", None).and_then(|result| {
-            serde_json::from_value(result).map_err(MuseError::Json)
-        })
+        self.call_no_params("account/read")
     }
 
     /// `account/loginStart` — run the device-code flow (`type:
@@ -549,9 +581,7 @@ impl MuseClient {
     /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
     /// `data.kind: "experimentalRequired"`.
     pub fn account_login_cancel(&self) -> Result<AccountLoginCancelResult> {
-        self.inner.request_value("account/loginCancel", None).and_then(|result| {
-            serde_json::from_value(result).map_err(MuseError::Json)
-        })
+        self.call_no_params("account/loginCancel")
     }
 
     /// `account/logout` — clear the stored credential. The result is the new
@@ -562,9 +592,7 @@ impl MuseClient {
     /// Requires `experimentalApi: true` at `initialize`, else `-32601` /
     /// `data.kind: "experimentalRequired"`.
     pub fn account_logout(&self) -> Result<AccountState> {
-        self.inner.request_value("account/logout", None).and_then(|result| {
-            serde_json::from_value(result).map_err(MuseError::Json)
-        })
+        self.call_no_params("account/logout")
     }
 
     // ---------------------------------------------------------------------- view
@@ -692,8 +720,27 @@ fn read_loop(inner: Arc<Inner>, child: Arc<Mutex<Child>>, stdout: ChildStdout) {
 fn handle_frame(inner: &Arc<Inner>, frame: Frame) {
     match frame {
         Frame::Response { id, result } => {
-            if let Some(waiter) = inner.pending.lock().expect("pending mutex").remove(&id) {
-                let _ = waiter.tx.send(Ok(result));
+            match inner.pending.lock().expect("pending mutex").remove(&id) {
+                Some(waiter) => {
+                    let _ = waiter.tx.send(Ok(result));
+                }
+                // No waiter means either the id is unknown (a protocol
+                // fault) or `request_value` already gave up after
+                // `REQUEST_TIMEOUT` — a response that arrives after that is
+                // otherwise silently dropped, leaving no trace to
+                // distinguish "the server never answered" from "the server
+                // answered late" (finding `client-adapter-5`).
+                None => {
+                    let _ = inner.events.send(MuseEvent::Notification {
+                        method: "client/protocolError".into(),
+                        params: serde_json::json!({
+                            "message": format!("response for unknown or timed-out request id {id}"),
+                            "id": id,
+                        }),
+                        cursor: None,
+                        session_id: None,
+                    });
+                }
             }
         }
         Frame::ErrorResponse { id, error } => {
@@ -718,8 +765,7 @@ fn handle_frame(inner: &Arc<Inner>, frame: Frame) {
             inner.dispatch(MuseEvent::ServerRequest { id, method, params });
         }
         Frame::Notification { method, params } => {
-            let cursor = params.get("viewCursor").and_then(Value::as_str).map(str::to_owned);
-            let session_id = params.get("sessionId").and_then(Value::as_str).map(str::to_owned);
+            let (cursor, session_id) = event_cursor_session(&params);
             if method == "view/gap" {
                 start_gap_fill(inner, &params);
             }
@@ -795,7 +841,17 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
             let _ = inner.events.send(event);
         }
         for event in buffered {
-            if let MuseEvent::Notification { cursor: Some(cursor), .. } = &event {
+            // The same cursor-dedup pass covers a parked `ServerRequest`: its
+            // `params.viewCursor` is compared against the page's `seen` set
+            // exactly like a parked notification's `cursor` field.
+            let cursor = match &event {
+                MuseEvent::Notification { cursor, .. } => cursor.clone(),
+                MuseEvent::ServerRequest { params, .. } => {
+                    params.get("viewCursor").and_then(Value::as_str).map(str::to_owned)
+                }
+                MuseEvent::Closed(_) => None,
+            };
+            if let Some(cursor) = &cursor {
                 if seen.contains(cursor) {
                     continue;
                 }

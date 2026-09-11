@@ -47,6 +47,7 @@ mod history;
 mod images;
 mod index;
 mod layout;
+mod log;
 mod overlays;
 mod plan;
 mod search;

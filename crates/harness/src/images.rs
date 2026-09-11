@@ -93,7 +93,14 @@ pub fn from_bytes(id: impl Into<String>, name: impl Into<String>, bytes: &[u8]) 
         return Err("the image is empty".to_owned());
     }
     if bytes.len() > MAX_BYTES {
-        return Err(format!("the image is {} MB; the limit is {} MB", bytes.len() / 1_048_576, MAX_BYTES / 1_048_576));
+        // One decimal, like `attachments::human_bytes` already does (finding
+        // `support-9`): integer division rounded a 10.9 MB image down to
+        // "10 MB".
+        return Err(format!(
+            "the image is {:.1} MB; the limit is {:.1} MB",
+            bytes.len() as f64 / 1_048_576.0,
+            MAX_BYTES as f64 / 1_048_576.0
+        ));
     }
     let format = image::guess_format(bytes).map_err(|_| "that is not an image".to_owned())?;
     let media_type = media_type(format).ok_or_else(|| format!("{format:?} images are not supported"))?;

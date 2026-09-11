@@ -111,7 +111,9 @@
       "command_text": {
         "01a08284-e45b-7c90-8c73-245f5e76b670": "effort probe high"
       },
-      "restored_prompt": null
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
     }
   }
 ]
