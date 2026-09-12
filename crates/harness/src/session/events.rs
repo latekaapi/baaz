@@ -190,28 +190,92 @@ impl SessionView {
         cx.notify();
     }
 
-    /// Page the whole transcript in, oldest first, and fold it.
+    /// Page the transcript in, oldest first, folding each page as it arrives.
     ///
     /// `session/resume` is what attaches; the history itself comes through
     /// `view/page` from the beginning of the view, which is the one path that
     /// is contiguous, ordered and bounded. `view/page` never replays
     /// `item/delta`, so a backfilled message arrives whole and the fold takes
-    /// it that way.
+    /// it that way. Each page folds in its own update, so frames interleave
+    /// with the paging instead of waiting for the whole transcript; page 1
+    /// already draws before page 2 is requested.
     pub fn backfill(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.wire_client(cx) else { return };
+        if self.loading_history {
+            // A chain is already in flight (the view was parked and reopened
+            // mid-backfill): it keeps filling this same fold, so a second
+            // chain would page everything twice.
+            return;
+        }
         self.loading_history = true;
         cx.notify();
+        self.backfill_page(None, FIRST_PAGE_LIMIT, true, cx);
+    }
+
+    /// One page of a [`Self::backfill`] chain: fetch it on the background
+    /// executor, fold it on the UI thread, then chain the next page. `first`
+    /// marks the page the [`SessionEvent::HistoryReady`] cue fires after —
+    /// the first, so the tail pins while later pages land.
+    fn backfill_page(&mut self, cursor: Option<String>, limit: u32, first: bool, cx: &mut Context<Self>) {
+        let Some(client) = self.wire_client(cx) else {
+            self.loading_history = false;
+            return;
+        };
         let session_id = self.session_id.clone();
-        self.wire_call(cx, move || page_all(&client, &session_id), |this, events, cx| {
-            for event in events {
-                this.fold.apply(event);
-            }
-            this.loading_history = false;
-            this.follow = true;
-            cx.notify();
-            // The deferred switch's cue: the application swaps this view
-            // in now, instead of having flashed the empty state (C2).
-            cx.emit(SessionEvent::HistoryReady);
-        });
+        crate::log::trace_mark("page-request");
+        self.wire_call(
+            cx,
+            move || {
+                let page = client.view_page(&ViewPageParams {
+                    session_id: session_id.clone(),
+                    limit,
+                    cursor: cursor.clone(),
+                    direction: None,
+                    anchor: None,
+                });
+                (session_id, page)
+            },
+            move |this, (session_id, result), cx| {
+                match result {
+                    Ok(page) => {
+                        let events = page_events(&session_id, &page.events);
+                        let n = events.len();
+                        crate::log::trace_mark(&format!("page n={n}"));
+                        for event in events {
+                            this.fold.apply(event);
+                        }
+                        crate::log::trace_mark(&format!("folded n={n}"));
+                        this.follow = true;
+                        cx.notify();
+                        if first {
+                            // The cue for the tail pin, not for a swap: the
+                            // view is already on screen.
+                            crate::log::trace_mark("HistoryReady");
+                            cx.emit(SessionEvent::HistoryReady);
+                        }
+                        match page.next_cursor {
+                            Some(next) if n > 0 => this.backfill_page(Some(next), PAGE_LIMIT, false, cx),
+                            _ => {
+                                this.loading_history = false;
+                                this.follow = true;
+                                cx.notify();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // What arrived so far stays (the old whole-transcript
+                        // backfill likewise kept its partial pages); the
+                        // loading row stands down and the tail pins.
+                        crate::harness_log!("backfill page failed: {error}");
+                        this.loading_history = false;
+                        this.follow = true;
+                        cx.notify();
+                        if first {
+                            crate::log::trace_mark("HistoryReady");
+                            cx.emit(SessionEvent::HistoryReady);
+                        }
+                    }
+                }
+            },
+        );
     }
 }

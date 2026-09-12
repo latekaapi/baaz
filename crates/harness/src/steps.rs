@@ -69,6 +69,7 @@
 //! | `fork` | `session/fork` at the newest completed turn |
 //! | `retry` | retry the newest failed turn |
 //! | `search:<query>` | open the search palette, optionally on a query |
+//! | `open:<session_id>` | open a session as a sidebar click does (scripting only) |
 //! | `palette` | open the command palette |
 //! | `resume` | open the resume picker |
 //! | `fork-picker` | open the fork picker |
@@ -149,6 +150,7 @@ pub(crate) struct LoginVerb {
 /// exactly as it did when the two matches were tried in this order.
 pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "search", run: |this, rest, window, cx| this.step_search(rest, window, cx) },
+    WindowVerb { verb: "open", run: |this, rest, window, cx| this.resume(rest.to_owned(), window, cx) },
     WindowVerb { verb: "palette", run: |this, _, _, cx| this.open_palette(PaletteKind::Commands, cx) },
     WindowVerb { verb: "resume", run: |this, _, _, cx| this.open_palette(PaletteKind::Resume, cx) },
     WindowVerb { verb: "fork-picker", run: |this, _, _, cx| this.open_palette(PaletteKind::Fork, cx) },

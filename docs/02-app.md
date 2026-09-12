@@ -286,12 +286,24 @@ quick-filter, so the two can never be open together. The window-level
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 
 Opening a session is `session/resume { excludeItems: true }` to attach, then
-`view/page` forward from the beginning of the view, paging on `nextCursor` until
-it runs out, feeding every event through the fold. A "Loading history…" status
-row sits under the transcript while that runs. Resume attaches; `view/page` is
-the path that is contiguous, ordered and bounded, and it never replays
-`item/delta`, so a backfilled message arrives whole and the fold takes it that
-way.
+`view/page` forward from the beginning of the view, paging on `nextCursor`
+until it runs out. Every page folds in its own UI update as it arrives, so the
+first page draws before the second is requested; `HistoryReady` fires after
+page 1 (the cue that pins the tail), not at the end. A "Loading history…"
+status row sits under the transcript while that runs. Resume attaches;
+`view/page` is the path that is contiguous, ordered and bounded, and it never
+replays `item/delta`, so a backfilled message arrives whole and the fold takes
+it that way.
+
+Reopening keeps what was opened: the harness holds an MRU of the last eight
+session views (fold, scroll position and draft riding along in the parked
+entity; its event subscription dropped). The reopened view shows at once and
+tops up with `session/resume { cursor: <last observed viewCursor> }` — the
+reconnect procedure of `docs/01-transport.md` §3, which serves `history.mode:
+"none"` and streams only the suffix through the live stream. A forward
+`view/page` anchored at the cached head is not the top-up path: it answers
+`notFound/missingAnchor`. Hidden, archived and replayed views are never
+cached; eviction drops the view.
 
 ⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail.
 ⌘⇧F opens the full-text search palette (`PaletteKind::Search`): sessions by
@@ -398,10 +410,13 @@ implies `HARNESS_FRAME_STATS` (read once, so disabled builds pay one relaxed
 load per frame) and replaces the old `bench:<n>` step's role — the step still
 works, driving N frames on a static replay for the stderr percentiles.
 
-A session switch never flashes the empty state: `Harness::open` keeps the old
-view rendered until the new session's first backfill batch applies (marked by
-`SessionEvent::HistoryReady`), then swaps; with no old view a neutral loading
-row stands in, and a failed switch keeps the old view with the error banner.
+A session switch answers on the click's own frame: `resume` records the
+target id at once (the sidebar row highlights and the centre header labels
+from it, never from the view), and the centre swaps at once to the new view —
+the cached one when the MRU holds it, otherwise a fresh view showing its
+neutral loading row, never the empty state. Pages stream in behind it, each
+folding in its own update. A failed `session/resume` keeps the new view and
+reports.
 
 Turns carry an in-flow action row under the prose (`actions_bottom`) for both
 roles. Assistant: Copy writes the turn's text to the clipboard, Retry resends

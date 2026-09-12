@@ -1,10 +1,14 @@
 //! The session list's lifecycle: reading the index, listing, starting,
-//! resuming and opening sessions, and the deferred swap that keeps a switch
-//! from flashing an empty transcript.
+//! resuming and opening sessions, the immediate swap that answers a click on
+//! its own frame, and the MRU of parked views that makes reopening instant.
 //!
 //! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
 
 use super::*;
+
+/// How many parked session views the MRU keeps (folds keep an MRU of eight
+/// too, so a parked view's own fold never grows past it either).
+const SESSION_CACHE_LIMIT: usize = 8;
 
 impl Harness {
     // -------------------------------------------------------------- sessions
@@ -244,7 +248,12 @@ impl Harness {
         });
     }
 
-    /// `session/resume`, then page the whole transcript in.
+    /// `session/resume`, then stream the transcript in.
+    ///
+    /// The target is recorded and shown at once: a cached view reopens
+    /// instantly and tops up from its last cursor, otherwise a fresh view
+    /// opens on its loading row and pages stream in behind it. Either way a
+    /// failed `session/resume` keeps the new view and reports.
     pub(crate) fn resume(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         // A hidden session is never loaded. Hiding is a decision about this
         // window's list, and a list that still opened what it refuses to show
@@ -256,7 +265,21 @@ impl Harness {
             return;
         }
         let Some(client) = self.client.clone() else { return };
+        crate::log::trace_reset();
+        crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
+        self.pending_id = Some(session_id.clone());
+        if let Some(view) = self.cache_take(&session_id) {
+            crate::log::trace_mark("cache-hit");
+            self.activate(view, window, cx);
+            crate::log::trace_mark("swap");
+            crate::log::trace_arm_first_frame();
+            self.top_up(cx);
+            return;
+        }
+        crate::log::trace_mark("cache-miss");
         self.open(session_id.clone(), true, window, cx);
+        crate::log::trace_mark("swap");
+        crate::log::trace_arm_first_frame();
         let work = move || {
             client.session_resume(&SessionResumeParams {
                 command_id: new_command_id(),
@@ -269,54 +292,50 @@ impl Harness {
             })
         };
         self.wire_call(cx, work, |this, result, cx| {
-            if let Err(error) = result {
-                // A failed switch keeps the old view (C2): only a boot
-                // open with nothing behind it clears the centre pane.
-                if this.pending_active.take().is_some() {
-                    this.pending_ready = false;
-                } else {
-                    this.active = None;
+            match &result {
+                Ok(_) => crate::log::trace_mark("resume-ack"),
+                Err(error) => {
+                    crate::log::trace_mark("resume-ack-err");
+                    this.report(error, cx);
                 }
-                this.report(&error, cx);
             }
             cx.notify();
         });
     }
 
-    /// Put a session in the centre pane and subscribe to what it needs help
-    /// with.
+    /// Put a fresh session view in the centre pane now and subscribe to what
+    /// it needs help with. The swap is immediate — the view, or its loading
+    /// row while the first page is still on the wire — never the old view
+    /// held past its switch.
     pub(super) fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };
-        let view = cx.new(|cx| SessionView::new(session_id, Some(client), host, window, cx));
+        let view = cx.new(|cx| SessionView::new(session_id.clone(), Some(client), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
-        // A switch that pages history in does not swap synchronously: the
-        // old view keeps rendering until the new view's first backfill batch
-        // applies (C2), so no frame flashes the "New session" screen.
-        // Backfill failure keeps the old view and reports (see `resume`).
-        if backfill && self.active.is_some() {
-            view.update(cx, |view, cx| view.backfill(cx));
-            let titles: HashMap<String, String> =
-                self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-            let tier_banner = self.tier_banner();
-            view.update(cx, |view, cx| {
-                view.set_context(titles, self.user_shell);
-                view.set_at_rest(self.still());
-                view.set_tier_banner(tier_banner, cx);
-            });
-            self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-            self.pending_active = Some(view);
-            self.pending_ready = false;
-            cx.notify();
-            return;
+        self.pending_id = Some(session_id);
+        self.activate(view, window, cx);
+        if backfill {
+            if let Some(view) = self.active.clone() {
+                view.update(cx, |view, cx| view.backfill(cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Make `view` the centre pane now: park the outgoing view in the MRU,
+    /// point the event subscription at the new one, refresh its context, and
+    /// run anything scripted. The frame after this draws the new view.
+    fn activate(&mut self, view: Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
+        self.park_active(cx);
+        // A parked view's client predates a reconnect; the current child is
+        // the one that can page.
+        if let Some(client) = self.client.clone() {
+            view.update(cx, |view, _| view.reconnected(client));
         }
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        if backfill {
-            view.update(cx, |view, cx| view.backfill(cx));
-        }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
         let tier_banner = self.tier_banner();
@@ -332,20 +351,75 @@ impl Harness {
         cx.notify();
     }
 
-    /// Swap the deferred session view in once its backfill landed (C2).
-    pub(super) fn swap_pending_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.pending_active.take() else {
-            self.pending_ready = false;
-            return;
+    /// Park the outgoing view in the MRU: its event subscription drops with
+    /// `subscriptions`, while its fold, scroll position and draft ride along
+    /// in the entity. Hidden, archived and replayed views are never cached.
+    fn park_active(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active.take() else { return };
+        let session_id = view.read(cx).session_id.clone();
+        let cacheable = !view.read(cx).is_replay()
+            && !self.overrides.get(&session_id).is_some_and(|m| m.hidden)
+            && !self.overrides.get(&session_id).is_some_and(|m| m.archived);
+        if cacheable {
+            self.session_cache.retain(|(id, _)| *id != session_id);
+            self.session_cache.insert(0, (session_id, view));
+            self.session_cache.truncate(SESSION_CACHE_LIMIT);
+        }
+    }
+
+    /// Take a parked view back out of the MRU.
+    fn cache_take(&mut self, session_id: &str) -> Option<Entity<SessionView>> {
+        let ix = self.session_cache.iter().position(|(id, _)| id == session_id)?;
+        Some(self.session_cache.remove(ix).1)
+    }
+
+    /// Top a reopened cached view up from its last cursor: re-attach with the
+    /// reconnect procedure (`docs/01-transport.md` §3), which serves
+    /// `history.mode: "none"` and streams only the suffix. The view is
+    /// already on screen, so the suffix folds in behind it through the live
+    /// stream; no `view/page` is needed, and none would serve: a forward page
+    /// anchored at the cached head answers `notFound/missingAnchor`.
+    fn top_up(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else { return };
+        let Some(view) = self.active.clone() else { return };
+        let session_id = view.read(cx).session_id.clone();
+        let cursor = view.read(cx).last_cursor();
+        let topped = session_id.clone();
+        let work = move || {
+            client.session_resume(&SessionResumeParams {
+                command_id: new_command_id(),
+                session_id,
+                cursor,
+                exclude_items: Some(true),
+                history: None,
+            })
         };
-        self.pending_ready = false;
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        self.active = Some(view);
-        self.focus_composer = true;
-        self.send_scripted(window, cx);
-        self.run_steps(window, cx);
-        cx.notify();
+        self.wire_call(cx, work, move |this, result, cx| {
+            match result {
+                Ok(resumed) => {
+                    crate::log::trace_mark(&format!("resume-ack mode={:?}", resumed.history.mode));
+                    // Only when the topped-up view is still the open one; a
+                    // further switch parked it, and its own top-up owns it.
+                    // The streamed suffix is already folding through the live
+                    // stream; all that is left is the tail pin.
+                    let still_open = this
+                        .active
+                        .clone()
+                        .filter(|view| view.read(cx).session_id == topped);
+                    if let Some(view) = still_open {
+                        view.update(cx, |view, cx| {
+                            crate::log::trace_mark("HistoryReady");
+                            view.follow_tail(cx);
+                        });
+                    }
+                }
+                Err(error) => {
+                    crate::log::trace_mark("resume-ack-err");
+                    this.report(&error, cx);
+                }
+            }
+            cx.notify();
+        });
     }
 
     /// What a session cannot decide for itself.
@@ -378,12 +452,12 @@ impl Harness {
             }
             // The child's exit already reached `route`, which owns the reconnect.
             SessionEvent::Closed => {}
-            // The deferred switch's first backfill batch applied: mark it and
-            // let the next centre frame (which owns a `Window`) swap it in.
+            // The backfill's first page applied: pin the tail while later
+            // pages land. Anything but the open view is a parked chain
+            // warming the cache, and its own completion already pinned it.
             SessionEvent::HistoryReady => {
-                if self.pending_active.as_ref().is_some_and(|pending| *pending == view) {
-                    self.pending_ready = true;
-                    cx.notify();
+                if self.active.as_ref().is_some_and(|active| *active == view) {
+                    view.update(cx, |view, cx| view.follow_tail(cx));
                 }
             }
             SessionEvent::NewSession => self.new_session(cx),
@@ -395,9 +469,10 @@ impl Harness {
                 let (session_id, envelope) = (session_id.clone(), session.clone());
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
+                        // `open` swaps synchronously, so the fork view is the
+                        // active one by the time its envelope is seeded.
                         this.open(session_id, true, window, cx);
-                        let target = this.pending_active.clone().or_else(|| this.active.clone());
-                        if let Some(view) = target {
+                        if let Some(view) = this.active.clone() {
                             view.update(cx, |view, cx| view.seed_session(envelope, cx));
                         }
                         this.load_sessions(cx);
