@@ -396,6 +396,29 @@ impl SessionView {
         Some(flat.chars().take(119).collect::<String>() + "\u{2026}")
     }
 
+    /// The prompt behind the newest submission, first line only: the
+    /// sidebar's local row is titled from this on `turn/started`, before the
+    /// wire lists the session.
+    ///
+    /// The newest recorded submission first — at `turn/started` the server
+    /// has not echoed the `userMessage` yet, but `submit` already recorded
+    /// its text under a time-ordered (UUIDv7) command id — then the newest
+    /// folded user turn, which covers replays and restarts that recorded
+    /// nothing.
+    pub fn first_prompt_text(&self) -> Option<String> {
+        let sent = self.fold.side(&self.session_id)?.command_text.values().next_back().cloned();
+        let said = self.session()?.turns.iter().rev().find_map(|turn| match turn {
+            Turn::User { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = sent.or(said)?;
+        let first = text.lines().next()?.trim();
+        if first.is_empty() {
+            return None;
+        }
+        Some(first.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
     /// The text of the newest assistant text block, which is the plan reply.
     pub(super) fn last_assistant_text(&self) -> Option<String> {
         let session = self.session()?;

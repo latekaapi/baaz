@@ -1,0 +1,38 @@
+[
+  {
+    "sessionId": "synthetic-empty",
+    "session": {
+      "id": "synthetic-empty",
+      "agent": "muse",
+      "model": "muse-spark-test",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": []
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn:1",
+      "command_text": {},
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
+    }
+  }
+]

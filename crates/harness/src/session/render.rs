@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use std::path::Path;
 use aui_tokens::ActiveAui;
 
 impl SessionView {
@@ -493,32 +494,21 @@ impl SessionView {
         }
     }
 
-    /// Reveal a linked path in Finder (C5): resolve against the workspace,
+    /// Open a linked path in its default place (C5): a folder opens in
+    /// Finder, a file in its default app. Resolve against the workspace,
     /// reject escapes above it, toast when nothing is there.
     pub(super) fn reveal_workspace_path(&mut self, raw: &str, cx: &mut Context<Self>) {
         // A trailing `:line` is a viewer hint, not part of the path.
         let path_part = raw.split(':').next().unwrap_or(raw);
         let workspace = PathBuf::from(&self.workspace);
-        let candidate = workspace.join(path_part.trim_start_matches('/'));
-        // Reject escapes without touching the filesystem first: normalize
-        // `..` lexically and require the workspace prefix.
-        let mut normalized = PathBuf::new();
-        for component in candidate.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => normalized.push(other.as_os_str()),
+        match resolve_workspace_path(&workspace, raw) {
+            Err(_) => {
+                self.toast("Link", "That path escapes the session workspace.", cx);
             }
-        }
-        if !normalized.starts_with(&workspace) {
-            self.toast("Link", "That path escapes the session workspace.", cx);
-            return;
-        }
-        match std::fs::metadata(&normalized) {
-            Ok(_) => cx.reveal_path(&normalized),
-            Err(_) => self.toast("Link", format!("No such file: {path_part}"), cx),
+            Ok(path) => match std::fs::metadata(&path) {
+                Ok(_) => cx.open_with_system(&path),
+                Err(_) => self.toast("Link", format!("No such file: {path_part}"), cx),
+            },
         }
     }
 
@@ -860,7 +850,10 @@ impl SessionView {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
         } else if self.busy() {
             let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
-            let mut row = status_row("status", "Working\u{2026}")
+            // The reply arrived whole but the turn is still open: Muse is on
+            // the `reminderChild` tail (memory reminders), not stuck.
+            let finishing = self.reply_complete_for_running_turn();
+            let mut row = status_row("status", if finishing { "Finishing up\u{2026}" } else { "Working\u{2026}" })
                 .lead(StatusLead::Braille)
                 .shimmer(true)
                 .key_hint("esc", "to interrupt");
@@ -868,8 +861,14 @@ impl SessionView {
                 row = row.elapsed(transcript::elapsed(elapsed));
             }
             let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
-            if queued > 0 {
-                row = row.note(format!("{queued} queued"));
+            let note = match (finishing, queued) {
+                (true, 0) => Some("memory reminders".to_owned()),
+                (true, queued) => Some(format!("memory reminders · {queued} queued")),
+                (false, 0) => None,
+                (false, queued) => Some(format!("{queued} queued")),
+            };
+            if let Some(note) = note {
+                row = row.note(note);
             }
             row
         } else {
@@ -1366,5 +1365,100 @@ impl SessionView {
             | MenuKind::ViewOptions
             | MenuKind::Account => Vec::new(),
         }
+    }
+}
+
+/// Where a linked path failed to resolve: it escapes the workspace.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Escape {
+    /// The normalised path is not under the workspace.
+    OutsideWorkspace,
+}
+
+/// Resolve a markdown link target to a workspace path, without touching the
+/// filesystem: strip the trailing `:line` viewer hint, take an absolute path
+/// as is, join a relative one onto the workspace, normalise `..` lexically,
+/// and reject anything outside the workspace.
+pub(super) fn resolve_workspace_path(workspace: &Path, raw: &str) -> Result<PathBuf, Escape> {
+    let path_part = raw.split(':').next().unwrap_or(raw);
+    let candidate = if Path::new(path_part).is_absolute() {
+        PathBuf::from(path_part)
+    } else {
+        workspace.join(path_part.trim_start_matches('/'))
+    };
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(workspace) {
+        return Err(Escape::OutsideWorkspace);
+    }
+    Ok(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace() -> PathBuf {
+        PathBuf::from("/Users/someone/Projects/harness")
+    }
+
+    #[test]
+    fn an_absolute_path_inside_the_workspace_is_used_as_is() {
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "/Users/someone/Projects/harness/assets"),
+            Ok(PathBuf::from("/Users/someone/Projects/harness/assets"))
+        );
+    }
+
+    #[test]
+    fn a_relative_path_joins_onto_the_workspace() {
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "assets/logo.png"),
+            Ok(PathBuf::from("/Users/someone/Projects/harness/assets/logo.png"))
+        );
+    }
+
+    #[test]
+    fn an_absolute_path_outside_the_workspace_is_rejected() {
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "/etc/passwd"),
+            Err(Escape::OutsideWorkspace)
+        );
+    }
+
+    #[test]
+    fn dotdot_cannot_escape_the_workspace() {
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "../outside"),
+            Err(Escape::OutsideWorkspace)
+        );
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "assets/../../outside"),
+            Err(Escape::OutsideWorkspace)
+        );
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "assets/../src/main.rs"),
+            Ok(PathBuf::from("/Users/someone/Projects/harness/src/main.rs"))
+        );
+    }
+
+    #[test]
+    fn a_trailing_line_number_is_not_part_of_the_path() {
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "src/main.rs:12"),
+            Ok(PathBuf::from("/Users/someone/Projects/harness/src/main.rs"))
+        );
+        assert_eq!(
+            resolve_workspace_path(&workspace(), "/Users/someone/Projects/harness/src/main.rs:12"),
+            Ok(PathBuf::from("/Users/someone/Projects/harness/src/main.rs"))
+        );
     }
 }

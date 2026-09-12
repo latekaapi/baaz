@@ -60,6 +60,11 @@ pub struct SessionEntry {
     /// Whether anything but the fallback was found, which is what tells the
     /// application a `session/read` is worth making (finding F10).
     pub needs_title: bool,
+    /// Placed locally at `session/start`: the wire lists a session only
+    /// after its log flushes on `turn/completed`, so the window holds this
+    /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
+    /// its id, then the joined wire row replaces it.
+    pub local: bool,
 }
 
 impl SessionEntry {
@@ -110,6 +115,7 @@ impl SessionEntry {
             replayed: false,
             named: name.is_some(),
             needs_title: label.is_none(),
+            local: false,
         }
     }
 
@@ -134,6 +140,7 @@ impl SessionEntry {
             replayed: true,
             named: false,
             needs_title: false,
+            local: false,
         }
     }
 
@@ -178,6 +185,20 @@ impl SessionEntry {
         }
         row
     }
+}
+
+/// Merge a `session/list` reply with the rows the window placed locally.
+///
+/// A new session is listed only after its log flushes on `turn/completed`,
+/// so the window holds a local row meanwhile: locals whose id the reply
+/// does not contain survive (appended, still local), and a local whose id
+/// is listed is dropped — the joined wire row already replaced it. The
+/// visible list sorts newest-first downstream, so no order is promised here.
+pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) -> Vec<SessionEntry> {
+    let mut merged = wire;
+    let listed: std::collections::HashSet<String> = merged.iter().map(|entry| entry.id.clone()).collect();
+    merged.extend(existing.iter().filter(|entry| entry.local && !listed.contains(&entry.id)).cloned());
+    merged
 }
 
 /// The single "now" a grouping is built against.
@@ -418,7 +439,27 @@ mod tests {
             replayed: false,
             named: false,
             needs_title: false,
+            local: false,
         }
+    }
+
+    #[test]
+    fn a_local_row_survives_until_the_wire_lists_it() {
+        let mut local = entry("new");
+        local.local = true;
+        local.label = "Fix the parser".to_owned();
+        // Not listed yet: the local row survives, still local.
+        let merged = merge_session_list(Vec::new(), std::slice::from_ref(&local));
+        assert_eq!(merged, vec![local.clone()]);
+        // Listed now: the joined wire row replaces it, no longer local.
+        let mut wire = entry("new");
+        wire.label = "Fix the parser".to_owned();
+        let merged = merge_session_list(vec![wire.clone()], std::slice::from_ref(&local));
+        assert_eq!(merged, vec![wire]);
+        // A non-local row is never kept past the reply.
+        let gone = entry("old");
+        let merged = merge_session_list(Vec::new(), std::slice::from_ref(&gone));
+        assert!(merged.is_empty());
     }
 
     #[test]
