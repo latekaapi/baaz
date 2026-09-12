@@ -360,9 +360,10 @@ mod tests {
     /// `render_sidebar` itself needs a window, so this times the two pure
     /// halves it is made of — the visible filter-and-sort and the grouping
     /// that builds one `SessionSummary` per row — against the cached frame,
-    /// which is an `Rc` hand-back plus the one clone the library's
-    /// by-value `sidebar_view` still asks for. Numbers with `--nocapture`;
-    /// the assertion is only the ordering, so the test is not a timing flake.
+    /// which is two `Rc` hand-backs and nothing else now that `sidebar_view`
+    /// takes the grouping behind an `Rc` too (finding `performance-13`).
+    /// Numbers with `--nocapture`; the assertion is only the ordering, so the
+    /// test is not a timing flake.
     #[test]
     fn five_hundred_sidebar_rows_cost_less_from_the_cache() {
         const N: usize = 500;
@@ -388,7 +389,7 @@ mod tests {
         }
         let cold = cold.elapsed() / FRAMES as u32;
         // Warm: what a frame does now — the cached rows and the cached
-        // grouping, handed out behind `Rc`, cloned once for the library.
+        // grouping, both handed out behind `Rc` and neither of them cloned.
         let mut visible: Vec<SessionEntry> = entries.iter().filter(|e| !e.hidden).cloned().collect();
         visible.sort_by_key(|e| std::cmp::Reverse(e.updated));
         let visible = std::rc::Rc::new(visible);
@@ -396,7 +397,7 @@ mod tests {
         let warm = std::time::Instant::now();
         for _ in 0..FRAMES {
             std::hint::black_box(std::rc::Rc::clone(&visible));
-            std::hint::black_box(Grouping::clone(&grouping));
+            std::hint::black_box(std::rc::Rc::clone(&grouping));
         }
         let warm = warm.elapsed() / FRAMES as u32;
         eprintln!("sidebar-rows n={N} cold={cold:?}/frame warm={warm:?}/frame");

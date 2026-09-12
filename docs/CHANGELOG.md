@@ -1,5 +1,66 @@
 # Harness changelog
 
+## 2026-09-12 — Code review and performance pass (audit packages P0, E, A, B, C1, C2, D1, D2)
+
+A read-only audit first (`docs/audit/00-findings.md`: 85 unique findings, two HIGH), then
+eight packages in the order `docs/audit/01-plan.md` fixed: measurement before change,
+library before harness, mechanical before structural before performance. Every package was
+proved against **byte-identical captures** (47 replay and login captures under
+`HARNESS_DETERMINISTIC=1`, unchanged from start to finish) and the new `--bench`.
+
+- **P0** (`ddb9391`): `HARNESS_DETERMINISTIC=1` (one clock, animations at rest, reduce
+  motion) makes a capture reproducible to the byte; `--bench` streams a capture through the
+  fold at a cadence while sweeping the list and reports element, fold-apply and frame
+  percentiles, dropped frames, peak RSS and idle frames.
+- **E** (agentic-ui `audit-2026-09-12`): one memo for every per-frame parse — prose
+  markdown (−95 % on a hit), syntax runs (−67 %), ANSI (−44 %), selected text (−92 %); ids,
+  faces and caret measures no longer rebuilt per frame; a finished browser card asks for no
+  frames (120 → 0 per 2 s).
+- **A** (`60a029b`): the two HIGHs — `reindex` remaps cached slots after a turn removal
+  (updates no longer land on the wrong turn) and `dispatch` parks server requests during a
+  `view/gap` backfill — plus 21 mechanical fixes: visible late responses, counted decode
+  failures, typed `modelRouteUnserved`, unknown enum strings retained, one
+  `approval_state`, one `harness_log!`, named index failures, wider attachment sniffing.
+- **B** (`952f814`): the phase-era wire probes and TUI drivers and the billed
+  `harness-probe` binary removed; dead right-pane state, dead command availability and a
+  discarded retry-row format deleted; scripting-only verbs marked in one place.
+- **C1** (`8cfea89`): one `wire_call` helper at 37 sites; `steps.rs` with a test that the
+  verb table and its docs agree; `login.rs`. `app.rs` 4009 → 3267 lines.
+- **C2** (`f281024`): both entities split along their section seams (`app.rs` → 1402,
+  `session.rs` → 1178); a frame decides in `on_frame` before it draws; the transcript block
+  is a dispatch over per-card functions; `schema.rs` split by surface with one inventory
+  test; batch hides settle once; capture flags are a token, not process globals; library
+  card payloads borrowed and footer strings caller-owned.
+- **D1** (`dafb40d`): per-turn slot index (a shifted or removed turn touches one bucket);
+  events deserialised from a borrowed `Value`; render cache shares turns by `Rc` and
+  re-clones only the changed turn — element construction p90 174 → 79 µs, p99 242 → 99 µs
+  on the 300-turn stream; per-session maps pruned or capped; folds keep an MRU of eight;
+  gap backfill bounded and an aborted fill says so; `client/protocolError` is a card.
+- **D2** (`a0c140a`): pending approval recorded at cache sync; sidebar list, grouping,
+  title and search status cached on an epoch (500 rows: ~240 → ~60 µs per frame); palette
+  rows run by id; composer emptiness flag; image decode off the UI thread behind a
+  placeholder; screenshots encode off the UI thread; `--bench-open-turn`.
+
+- **E2** (agentic-ui `820e258`): `sidebar_view` borrows its grouping (`Rc<Grouping>`), so
+  the last per-frame sidebar cost at 500 rows goes from ~40 µs to nanoseconds; the library's
+  idle-frame suite now holds every streaming/working/settled clock gate.
+
+Numbers, `--bench`, debug build, before the pass → after (release in brackets):
+
+| capture | element p50/p90/p99 µs | fold-apply p50 µs | frame p50 ms | peak RSS MB | idle frames / 2 s |
+|---|---|---|---|---|---|
+| `synthetic-stress-300` | 5/154/239 → 6/85/123 (6/82/246) | 11 → 10 | 7 → 7 | 107 → 106 (102) | 0 → 0 |
+| `transcript-echo` | 9/36/65 → 12/19/32 (11/17/27) | 4 → 5 | 6 → 6 | 98 → 98 (93) | 0 → 0 |
+
+Frame time is gpui layout and paint and did not move; what moved is everything the
+harness and the library do before handing gpui the tree. Still open, recorded in
+`docs/audit/00-findings.md` and the package reports: `reconnect_after_login` stays until
+the owner's first billed turn after a Meta-account login (D25); the library's terminal
+and TUI cursors blink without a focus gate; the 1 Hz caret still samples at frame rate.
+
+Spend: zero model turns for the harness packages; the audit and P0 ran on Muse (the
+owner's API key), the rest on Claude subagents while the owner was away.
+
 ## 2026-09-11 — Sign-in over the wire: Meta account and API key
 
 What was wrong (one paragraph, see `docs/diagnosis/login.md`): the harness

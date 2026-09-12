@@ -42,3 +42,22 @@ construction p50 8 µs; nothing measures layout, paint, streaming or scroll yet.
 
 Every package's brief lists its findings by id; Muse reads the finding text from
 `docs/audit/*.md` rather than the brief repeating it.
+
+## Status (end of 2026-09-12)
+
+| package | landed |
+|---|---|
+| P0 | harness `ddb9391` |
+| E | agentic-ui `5208614`…`0a25187` |
+| A | harness `60a029b` |
+| B | harness `952f814` |
+| C1 | harness `8cfea89` |
+| C2 | harness `f281024` + agentic-ui `ab03d2d` |
+| D1 | harness `dafb40d` |
+| D2 | harness `a0c140a` |
+| E2 (library follow-up) | agentic-ui `820e258` + harness (this commit) |
+| F | this commit: gates both repos, 47/47 captures identical, bench table in `CHANGELOG.md` |
+
+agentic-ui branch `audit-2026-09-12` is stacked on `login-methods` on `improvements-2026-09-10`;
+none of the three is merged to the library's `main` — the owner merges. The harness on
+`main` builds against the checkout.
