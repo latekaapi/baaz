@@ -169,7 +169,13 @@ impl Harness {
                     .border_1()
                     .border_color(if focused { p.accent } else { p.line })
                     .bg(p.surface_1)
-                    .child(dense_field(&self.rename).whitespace_nowrap().overflow_x_hidden()),
+                    // The editor keeps its natural line box (`h_auto`): the
+                    // library's 20 px recipe stands its glyphs on the bottom
+                    // edge of a 22 px wrapper and clips their descenders. The
+                    // wrapper is the fixed box that keeps the row's height;
+                    // the editor centres in it and may overhang the border by
+                    // a pixel or two of line box, which draws nothing.
+                    .child(dense_field(&self.rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
             )
             .into_any_element()
     }
