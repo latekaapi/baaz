@@ -67,7 +67,7 @@ fields, construction, and the top of the frame.
 
 | module | owns |
 |---|---|
-| `app/lifecycle.rs` | reading the index, listing, starting, resuming and opening sessions, and the deferred swap that keeps a switch from flashing an empty transcript |
+| `app/lifecycle.rs` | reading the index, listing, starting, resuming and opening sessions, the immediate swap that answers a click on its own frame, and the MRU of parked views that makes reopening instant |
 | `app/list.rs` | what a person can do to a row: rename, pin, hide, archive, clear the empty ones, undo — and `set_overrides`, which settles a whole batch once |
 | `app/find.rs` | full-text search over sessions and created files: the palette's query, the off-thread re-query, the rows |
 | `sidebar_view.rs` | the sidebar column: nav block, session rows, empty states, rename field, footer, rail, and the two popovers anchored to the column |
@@ -88,8 +88,9 @@ backoff), `scripting.rs` (`--steps` for one session) and `render.rs`.
 
 One rule holds the frame together: **a frame decides before it draws.**
 `Harness::on_frame` is the pre-pass that does the window title, a resize left
-armed by a release the window never saw, the deferred session swap and the
-one-shot composer focus; `SessionView::sync_render_cache` and
+armed by a release the window never saw, and the one-shot composer focus
+(the session swap is synchronous inside `resume`/`open`, not deferred to a
+frame); `SessionView::sync_render_cache` and
 `sync_virtual_list` are the only places a transcript frame writes. Everything
 below them reads and composes. The one exception is documented where it stands:
 `--replay`'s kick starts a wall-clock-cadenced stream, so where in the frame it

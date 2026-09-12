@@ -361,11 +361,16 @@ pub struct Harness {
     list_cache: RefCell<ListCache>,
     index: HashMap<String, IndexEntry>,
     pub(crate) active: Option<Entity<SessionView>>,
-    /// A session switch paging history in: the view kept off-stage until its
-    /// first backfill batch applies, so no frame flashes empty (C2).
-    pending_active: Option<Entity<SessionView>>,
-    /// The pending view's backfill landed; the next centre frame swaps it in.
-    pending_ready: bool,
+    /// The session the UI is pointed at: the sidebar click's target, set the
+    /// moment `resume` runs. The centre swaps synchronously, so this usually
+    /// names the active view — but the row highlights and the header label
+    /// read it, never the view, so the click is acknowledged on its own frame.
+    pub(crate) pending_id: Option<String>,
+    /// Parked session views, most-recently-opened first: an MRU of eight.
+    /// Switching away parks the view (its event subscription dropped, its
+    /// fold, scroll position and draft kept); reopening shows it at once and
+    /// tops it up from its last cursor.
+    session_cache: Vec<(String, Entity<SessionView>)>,
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
@@ -475,8 +480,8 @@ impl Harness {
             list_cache: RefCell::new(ListCache::default()),
             index: HashMap::new(),
             active: None,
-            pending_active: None,
-            pending_ready: false,
+            pending_id: None,
+            session_cache: Vec::new(),
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
@@ -745,13 +750,12 @@ impl Harness {
     /// drag region wraps the whole header row, and buttons keep their clicks.
     fn render_centre_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let label = self
-            .active
-            .as_ref()
-            .and_then(|view| {
-                let id = view.read(cx).session_id.clone();
-                self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone())
-            })
+        // The click's target, from the list entry — never the view, so the
+        // header answers on the click's own frame, before any page arrives.
+        let target =
+            self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        let label = target
+            .and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()))
             .unwrap_or_else(|| "Harness".to_owned());
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -1077,7 +1081,7 @@ fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<
 impl Harness {
     /// Everything a frame changes before it draws anything: the window title,
     /// a resize left armed by a release the window never saw, the `--replay`
-    /// kick, the deferred session swap, and the one-shot composer focus.
+    /// kick, and the one-shot composer focus.
     ///
     /// These are lifecycle, not composition (findings `app-core-9` and
     /// `app-core-10`). Keeping them in one pre-pass is what lets `render` and
@@ -1120,11 +1124,6 @@ impl Harness {
         // and has no session behind it.
         if !matches!(self.auth, Auth::SignedIn(_)) {
             return;
-        }
-        // Deferred session switch (C2): the new view swaps in on its first
-        // backfill batch, so no frame ever shows the empty state mid-switch.
-        if self.pending_ready {
-            self.swap_pending_in(window, cx);
         }
         // A deterministic capture never takes keyboard focus: a focused
         // composer paints the textarea's blinking caret, which lands on a

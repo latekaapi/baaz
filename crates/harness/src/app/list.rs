@@ -123,6 +123,9 @@ impl Harness {
     /// toast, one Undo that restores the whole batch. One `/hide` is a
     /// batch of one; one "Clear empty" is a batch of everything it hid.
     pub(super) fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
+        // Hidden sessions are never cached: a parked view of one is dropped,
+        // and reopening (after Undo, or under "Show hidden") pages it afresh.
+        self.session_cache.retain(|(id, _)| !ids.contains(id));
         self.set_overrides(&ids, |meta| meta.hidden = true, cx);
         self.push_undo(
             UndoBatch::Hidden(ids),
@@ -227,6 +230,9 @@ impl Harness {
     /// place, or the empty state when nothing remains.
     pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
+        // Archived sessions are never cached: a parked view of one is
+        // dropped, and reopening (after Undo) pages it afresh.
+        self.session_cache.retain(|(id, _)| *id != session_id);
         self.set_override(&session_id, |meta| meta.archived = true, cx);
         if was_active {
             self.active = None;
