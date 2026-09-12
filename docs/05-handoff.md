@@ -11,7 +11,8 @@ Paste the block below into a new session opened in
 You are maintaining the Harness: a macOS gpui chat interface to Meta's Muse Code agent
 (`muse` CLI 1.0.3; `muse serve` = "MSP", JSON-RPC 2.0 as NDJSON over stdio), built on the
 `aui` library at /Users/latekaapi/Projects/agentic-ui (path dependencies; gpui-pre 0.3.3 +
-gpui-kit 0.6). Library changes go on agentic-ui branch `muse-support`, never `main`.
+gpui-kit 0.6). Library changes go on a new agentic-ui branch off `main` (everything
+through `transcript-2026-09-12` is merged), as their own commits; the owner merges.
 Prefix every shell command with
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
@@ -50,7 +51,12 @@ Do not touch ~/Projects/cockpit.
 The 2026-09-12 review and performance pass is recorded in `docs/audit/` (findings, plan,
 status) and its changelog entry; the regression method it established — byte-identical
 captures under `HARNESS_DETERMINISTIC=1` and `--bench` before/after — is the bar for
-every refactor since.
+every refactor since. The same day's five-fault pass (transcript design, scroll, open path,
+lights/header, reopen) is in `docs/diagnosis/transcript-pass-2026-09-12.md` and the
+changelog; `scripts/captures.sh <dir>` takes the 53-capture set (park the pointer outside
+the top-left 1440×900 first), `--bench-scroll wheel` is the scroll instrument, and
+`HARNESS_TRACE=1` prints a session switch's timeline. Library `main` carries the whole
+branch stack as of `b0b40bd`; the harness builds against the `main` checkout.
 
 `docs/07-architecture.md` has the map. The short version: `muse-client` is the
 wire, `muse-adapter` is the fold and has no gpui dependency at all, `harness` is

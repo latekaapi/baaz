@@ -56,7 +56,7 @@ Gates before every commit: `cargo build --workspace`, `cargo test --workspace`,
 
 ## Library changes
 
-Go in `/Users/latekaapi/Projects/agentic-ui` on a **new branch off `main`** (`muse-support`
+Go in `/Users/latekaapi/Projects/agentic-ui` on a **new branch off `main`** (the whole stack through `transcript-2026-09-12`
 is merged), as their own commits, under the library's gates: build, the all-features build
 (`--features aui-webview/wry,aui-terminal/pty,aui-terminal/tui`), test, clippy
 `-D warnings`, rustdoc `-D warnings`, `python3 scripts/api-doc.py`, and a gallery entry for
