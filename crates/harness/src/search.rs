@@ -101,6 +101,20 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body);
          CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind);",
     )?;
+    // Dedupe for `files_fts`, which cannot hold a unique index of its own:
+    // an FTS5 table has no constraints, so `(path, session_id)` used to be
+    // checked with a `SELECT` per record — a full-text scan each time
+    // (finding `support-4`). This ordinary table carries the key, and
+    // `INSERT OR IGNORE` on it both dedupes and says whether the row was new.
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
+    )?;
+    // An index written before this table existed still has its rows; seeding
+    // from them is what keeps the first run after an upgrade from recording
+    // every known file a second time.
+    connection.execute_batch(
+        "INSERT OR IGNORE INTO files_seen(path, session_id) SELECT path, session_id FROM files_fts;",
+    )?;
     Ok(connection)
 }
 
@@ -124,15 +138,20 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
 
 /// Record created files, ignoring ones already recorded.
 ///
-/// Deduplication is explicit (`SELECT` before `INSERT`): the same turn
-/// recorded twice (replay, reconnect) must not duplicate the row.
+/// The same turn recorded twice (a replay, a reconnect) must not duplicate
+/// the row. The key lives in `files_seen`, whose primary key does the
+/// deduplication in the insert itself: a row that was already there costs one
+/// index probe and writes nothing, instead of the full-text `SELECT` per
+/// record this used to run (finding `support-4`).
 pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(), rusqlite::Error> {
-    let mut exists =
-        connection.prepare("SELECT 1 FROM files_fts WHERE path = ?1 AND session_id = ?2 LIMIT 1")?;
+    let mut claim = connection
+        .prepare("INSERT OR IGNORE INTO files_seen(path, session_id) VALUES (?1, ?2)")?;
     let mut insert =
         connection.prepare("INSERT INTO files_fts(path, session_id, kind) VALUES (?1, ?2, ?3)")?;
     for record in records {
-        if exists.exists(params![record.path, record.session_id])? {
+        // `execute` returns the rows it changed: 0 means the key was already
+        // claimed, which is exactly "already recorded".
+        if claim.execute(params![record.path, record.session_id])? == 0 {
             continue;
         }
         insert.execute(params![record.path, record.session_id, record.kind])?;
@@ -424,6 +443,49 @@ mod tests {
         // Empty query is newest first.
         let recent = query_files(&connection, "", LIMIT);
         assert_eq!(recent.first().map(|hit| hit.path.as_str()), Some("docs/notes.md"));
+    }
+
+    #[test]
+    fn the_same_path_in_another_session_is_its_own_record() {
+        let connection = memory();
+        let record = |session: &str| FileRecord {
+            path: "src/main.rs".into(),
+            session_id: session.into(),
+            kind: "write".into(),
+        };
+        record_files(&connection, &[record("s1"), record("s2"), record("s1")]).expect("record");
+        // The key is `(path, session_id)`, so two sessions that wrote the
+        // same file are two rows and the repeat within a session is none.
+        assert_eq!(query_files(&connection, "main", LIMIT).len(), 2);
+    }
+
+    #[test]
+    fn an_index_written_before_the_dedupe_table_is_not_recorded_twice() {
+        let connection = memory();
+        // What an older build left behind: rows in `files_fts` and nothing in
+        // `files_seen`, which `open_at` seeds from on the next open.
+        connection.execute("DELETE FROM files_seen", []).expect("clear");
+        connection
+            .execute(
+                "INSERT INTO files_fts(path, session_id, kind) VALUES ('src/main.rs', 's1', 'write')",
+                [],
+            )
+            .expect("legacy row");
+        connection
+            .execute_batch(
+                "INSERT OR IGNORE INTO files_seen(path, session_id) SELECT path, session_id FROM files_fts;",
+            )
+            .expect("seed");
+        record_files(
+            &connection,
+            &[FileRecord {
+                path: "src/main.rs".into(),
+                session_id: "s1".into(),
+                kind: "write".into(),
+            }],
+        )
+        .expect("record");
+        assert_eq!(query_files(&connection, "main", LIMIT).len(), 1);
     }
 
     #[test]

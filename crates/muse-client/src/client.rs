@@ -42,6 +42,39 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 /// `view/page.limit` at 1000.
 const GAP_PAGE_LIMIT: u64 = 1000;
 
+/// How many `view/page` requests one backfill may make before giving up.
+///
+/// The loop used to be unbounded and could block up to [`REQUEST_TIMEOUT`]
+/// per page, so a server that kept handing back a `nextCursor` held a
+/// session's live events parked indefinitely (finding `client-adapter-7`).
+/// At [`GAP_PAGE_LIMIT`] events a page this is 64 000 events, far more than
+/// any retained window, and it is a bound rather than a policy: reaching it
+/// aborts the fill loudly.
+const GAP_MAX_PAGES: usize = 64;
+
+/// How many live events one session may park while its backfill runs.
+///
+/// Parking was unbounded, so a busy session behind a slow backfill grew a
+/// `Vec` with nothing to stop it (finding `client-adapter-7`). Past this the
+/// fill is abandoned, the parked events are released in order, and the app is
+/// told — a hole the reader can see beats memory it cannot.
+const GAP_MAX_BUFFERED: usize = 10_000;
+
+/// The synthesized notification a wire fault raises.
+///
+/// `read_loop` turns an unframable line, an id-less error and a response with
+/// no waiter into one of these. It carries a `message` and, when the fault is
+/// a response, its `id`; it has no `sessionId`, because a fault at the frame
+/// level belongs to no session — the app files it against the view that is
+/// open (finding `client-adapter-4`).
+pub const PROTOCOL_ERROR: &str = "client/protocolError";
+
+/// The synthesized notification an abandoned backfill raises.
+///
+/// Carries `sessionId` and a `reason`, so the fold can turn it into the row
+/// that says the transcript above may be missing events.
+pub const GAP_ABORTED: &str = "client/gapAborted";
+
 /// The environment variable that turns on a wire capture.
 ///
 /// Set it to a path and every line, both directions, is appended there in the
@@ -216,6 +249,13 @@ struct Pending {
 struct GapState {
     /// Sessions currently backfilling, with the events buffered meanwhile.
     buffering: HashMap<String, Vec<MuseEvent>>,
+    /// Sessions whose backfill was abandoned while its thread still runs: its
+    /// pages are dropped rather than spliced in behind live events that have
+    /// already gone through (finding `client-adapter-7`).
+    abandoned: HashSet<String>,
+    /// The live `muse-gapfill` threads, so [`MuseClient`] joins them on the
+    /// way out instead of leaving them detached.
+    fills: Vec<JoinHandle<()>>,
 }
 
 struct Inner {
@@ -289,11 +329,40 @@ impl Inner {
         if let Some(session) = session {
             let mut gap = self.gap.lock().expect("gap mutex");
             if let Some(buffer) = gap.buffering.get_mut(&session) {
-                buffer.push(event);
+                if buffer.len() < GAP_MAX_BUFFERED {
+                    buffer.push(event);
+                    return;
+                }
+                // The buffer is full: give up on the splice rather than grow
+                // (finding `client-adapter-7`). Everything parked goes out in
+                // order, this event behind it, and the fill thread's pages
+                // are dropped when it finishes.
+                let parked = gap.buffering.remove(&session).unwrap_or_default();
+                gap.abandoned.insert(session.clone());
+                drop(gap);
+                self.gap_aborted(
+                    &session,
+                    &format!("more than {GAP_MAX_BUFFERED} events arrived while backfilling"),
+                );
+                for parked in parked {
+                    let _ = self.events.send(parked);
+                }
+                let _ = self.events.send(event);
                 return;
             }
         }
         let _ = self.events.send(event);
+    }
+
+    /// Say out loud that a backfill gave up, so the `view/gap` row can stop
+    /// promising a transcript that is about to have a hole in it.
+    fn gap_aborted(&self, session_id: &str, reason: &str) {
+        let _ = self.events.send(MuseEvent::Notification {
+            method: GAP_ABORTED.into(),
+            params: serde_json::json!({ "sessionId": session_id, "reason": reason }),
+            cursor: None,
+            session_id: Some(session_id.to_owned()),
+        });
     }
 }
 
@@ -338,7 +407,11 @@ impl MuseClient {
             pending: Mutex::new(HashMap::new()),
             writes: Mutex::new(Some(writes_tx)),
             events: events_tx,
-            gap: Mutex::new(GapState { buffering: HashMap::new() }),
+            gap: Mutex::new(GapState {
+                buffering: HashMap::new(),
+                abandoned: HashSet::new(),
+                fills: Vec::new(),
+            }),
             closed: AtomicBool::new(false),
         });
         let child = Arc::new(Mutex::new(child));
@@ -410,6 +483,16 @@ impl MuseClient {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // A gap fill parks in `request_value`, which fails the moment
+        // `closed` is set and the child's death drains `pending`, so these
+        // return rather than outliving the client (finding
+        // `client-adapter-7`). Taken under the lock, joined outside it: the
+        // thread takes the same lock on its way out.
+        let fills: Vec<JoinHandle<()>> =
+            std::mem::take(&mut self.inner.gap.lock().expect("gap mutex").fills);
+        for handle in fills {
+            let _ = handle.join();
         }
     }
 
@@ -710,7 +793,7 @@ fn read_loop(inner: Arc<Inner>, child: Arc<Mutex<Child>>, stdout: ChildStdout) {
                 // A line we cannot frame is a protocol fault, not a reason to
                 // drop the connection silently: surface it and keep reading.
                 let _ = inner.events.send(MuseEvent::Notification {
-                    method: "client/protocolError".into(),
+                    method: PROTOCOL_ERROR.into(),
                     params: serde_json::json!({ "message": err.to_string() }),
                     cursor: None,
                     session_id: None,
@@ -743,7 +826,7 @@ fn handle_frame(inner: &Arc<Inner>, frame: Frame) {
                 // answered late" (finding `client-adapter-5`).
                 None => {
                     let _ = inner.events.send(MuseEvent::Notification {
-                        method: "client/protocolError".into(),
+                        method: PROTOCOL_ERROR.into(),
                         params: serde_json::json!({
                             "message": format!("response for unknown or timed-out request id {id}"),
                             "id": id,
@@ -764,7 +847,7 @@ fn handle_frame(inner: &Arc<Inner>, frame: Frame) {
                 // owns it, so it goes to the app as an event.
                 None => {
                     let _ = inner.events.send(MuseEvent::Notification {
-                        method: "client/protocolError".into(),
+                        method: PROTOCOL_ERROR.into(),
                         params: serde_json::to_value(&*error).unwrap_or(Value::Null),
                         cursor: None,
                         session_id: None,
@@ -802,14 +885,22 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
         }
         gap.buffering.insert(session_id.clone(), Vec::new());
     }
+    let tracker = Arc::clone(inner);
     let inner = Arc::clone(inner);
     // The page request cannot run on the reader thread: the reader is what
     // completes it.
-    let _ = std::thread::Builder::new().name("muse-gapfill".into()).spawn(move || {
+    let handle = std::thread::Builder::new().name("muse-gapfill".into()).spawn(move || {
         let mut filled: Vec<MuseEvent> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut cursor = after;
-        loop {
+        // Why the fill stopped, when it stopped early. `None` is a fill that
+        // reached the end of the range the way it is supposed to.
+        let mut aborted: Option<String> = None;
+        for page_number in 0..=GAP_MAX_PAGES {
+            if page_number == GAP_MAX_PAGES {
+                aborted = Some(format!("the backfill did not end within {GAP_MAX_PAGES} pages"));
+                break;
+            }
             let mut page = serde_json::Map::new();
             page.insert("sessionId".into(), Value::String(session_id.clone()));
             page.insert("limit".into(), Value::from(GAP_PAGE_LIMIT));
@@ -817,8 +908,16 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
             if let Some(cursor) = &cursor {
                 page.insert("cursor".into(), Value::String(cursor.clone()));
             }
-            let Ok(result) = inner.request_value("view/page", Some(Value::Object(page))) else {
-                break;
+            let result = match inner.request_value("view/page", Some(Value::Object(page))) {
+                Ok(result) => result,
+                Err(error) => {
+                    // Silent `break` was the old behaviour: the parked events
+                    // were released with nothing said, so a failed backfill
+                    // and a complete one looked the same (finding
+                    // `client-adapter-7`).
+                    aborted = Some(format!("view/page failed: {error}"));
+                    break;
+                }
             };
             let events = result.get("events").and_then(Value::as_array).cloned().unwrap_or_default();
             for event in &events {
@@ -841,13 +940,19 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
                 _ => break,
             }
         }
-        let buffered = inner
-            .gap
-            .lock()
-            .expect("gap mutex")
-            .buffering
-            .remove(&session_id)
-            .unwrap_or_default();
+        let buffered = {
+            let mut gap = inner.gap.lock().expect("gap mutex");
+            if gap.abandoned.remove(&session_id) {
+                // The parking was given up on while this ran: its events are
+                // already out, and splicing pages in behind them would put
+                // the transcript out of order.
+                return;
+            }
+            gap.buffering.remove(&session_id).unwrap_or_default()
+        };
+        if let Some(reason) = aborted {
+            inner.gap_aborted(&session_id, &reason);
+        }
         for event in filled {
             let _ = inner.events.send(event);
         }
@@ -870,4 +975,9 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
             let _ = inner.events.send(event);
         }
     });
+    // Tracked, not detached: `shutdown` joins these on the way out
+    // (finding `client-adapter-7`).
+    if let Ok(handle) = handle {
+        tracker.gap.lock().expect("gap mutex").fills.push(handle);
+    }
 }

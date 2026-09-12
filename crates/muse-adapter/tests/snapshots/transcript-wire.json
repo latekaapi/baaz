@@ -243,9 +243,7 @@
       "model": null,
       "approval_mode": "denyUnmatched",
       "last_cursor": "v:01a081ee-3995-7820-b7d4-53491ce72f8d:17",
-      "command_text": {
-        "01a081ee-70bb-719f-a35e-85cc42903110": "one"
-      },
+      "command_text": {},
       "restored_prompt": "one",
       "model_route_unserved": null,
       "decode_failures": 0

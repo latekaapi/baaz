@@ -19,6 +19,23 @@ impl SessionView {
             cx.notify();
             return;
         }
+        // A wire fault belongs to the connection, not to a session, so the
+        // transport raises it with no `sessionId` and the fold — which routes
+        // by session — dropped it (finding `client-adapter-4`). The view that
+        // is open is the one that has to show it, so it is filed here.
+        let event = match event {
+            MuseEvent::Notification { method, params, cursor, session_id: None }
+                if method == muse_client::PROTOCOL_ERROR =>
+            {
+                MuseEvent::Notification {
+                    method,
+                    params,
+                    cursor,
+                    session_id: Some(self.session_id.clone()),
+                }
+            }
+            other => other,
+        };
         let mut unqueued: Option<String> = None;
         if let MuseEvent::Notification { method, params, session_id, .. } = &event {
             if session_id.as_deref().is_some_and(|id| id != self.session_id) {

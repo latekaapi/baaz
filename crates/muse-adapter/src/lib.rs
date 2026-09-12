@@ -39,7 +39,8 @@
 pub mod failure;
 mod fold;
 mod side;
+mod slots;
 
 pub use failure::{humanize, Failure};
-pub use fold::MuseFold;
+pub use fold::{MuseFold, GAP_ABORT_PREFIX, SESSION_CACHE_LIMIT};
 pub use side::{QueuedTurn, SideState};

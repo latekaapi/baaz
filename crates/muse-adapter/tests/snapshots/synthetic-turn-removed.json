@@ -105,7 +105,6 @@
       "last_cursor": "v:syn:14",
       "command_text": {
         "t-syn-1": "one",
-        "t-syn-2": "two",
         "t-syn-3": "three"
       },
       "restored_prompt": "two",

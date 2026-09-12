@@ -10,38 +10,35 @@ use aui_protocol::{
 };
 use muse_client::schema::{self as msp, ApprovalMode};
 use muse_client::MuseEvent;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::side::{QueuedTurn, SideState};
-
-/// Where a Muse item's rendering lives in the folded session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Slot {
-    turn: usize,
-    block: usize,
-}
+use crate::slots::{Slot, Slots, TurnKey};
 
 /// One Muse session, folded.
 struct Folded {
     session: Session,
     side: SideState,
-    /// `itemId` → the block it renders as. Absent for items that render as no
-    /// block at all (a `userMessage`, which is a whole turn, and the
-    /// `request_user_input` tool call, which renders as its question).
-    items: HashMap<String, Slot>,
+    /// Every cached block position — items, approvals, questions, the todo
+    /// card and the goal card — grouped by the turn that hosts it, so an
+    /// insert shifts one turn's slots and a removal drops exactly that turn's
+    /// (finding `client-adapter-8`, [`crate::slots`]).
+    slots: Slots,
     /// `itemId` → highest revision applied. The apply rule is **replace iff
     /// higher**; `item/delta` never bumps a revision.
     revisions: HashMap<String, u32>,
-    /// `approvalId` → its card.
-    approvals: HashMap<String, Slot>,
-    /// `userInputId` → its question cards, one per question in the request.
-    inputs: HashMap<String, Vec<Slot>>,
-    /// The session's single todo card, once one exists.
-    todo: Option<Slot>,
-    /// The session's single goal card, once one exists.
-    goal: Option<Slot>,
-    /// MSP `turnId` → the index of the assistant turn that hosts its blocks.
-    assistant_turns: HashMap<String, usize>,
+    /// Turn handles, parallel to `session.turns`: index → the key minted for
+    /// the turn that sits there.
+    turn_keys: Vec<TurnKey>,
+    /// The other direction: key → its index in `session.turns`. A removal
+    /// rewrites this and nothing else, because a [`Slot`] names a key.
+    turn_index: HashMap<TurnKey, usize>,
+    /// The next handle to mint. Monotonic: a handle is never reused, so a
+    /// stale slot resolves to nothing rather than to another turn.
+    next_turn_key: u32,
+    /// MSP `turnId` → the handle of the assistant turn that hosts its blocks.
+    assistant_turns: HashMap<String, TurnKey>,
     /// The id of a `userMessage`'s `Turn::User` → the MSP turn it belongs to, so
     /// a retraction can take the right turn out.
     user_turns: HashMap<String, String>,
@@ -91,6 +88,10 @@ struct Folded {
     /// second time must say what it said the first time — and the two streams
     /// deliver these two facts in opposite orders.
     item_reasons: HashMap<String, String>,
+    /// The `commandId`s in `side.command_text`, oldest first — the order
+    /// [`COMMAND_TEXT_CAP`] evicts by. Not part of [`SideState`]: it is how
+    /// the cap is enforced, not a fact about the session.
+    command_order: Vec<String>,
     /// Generation counter for tool grouping: every decision-point event bumps
     /// it, so a run of consecutive tool calls only ever groups within one
     /// generation (presentation policy, `docs/01-transport.md`).
@@ -100,6 +101,17 @@ struct Folded {
     /// matches `group_gen` and it is still the turn's last block.
     open_groups: HashMap<String, OpenGroup>,
 }
+
+/// How many of a session's most recent submissions keep their composer text.
+///
+/// `command_text` answers one question — "what was this `commandId` sent
+/// with?" — and only two events ask it, `turn/retracted` and `turn/unqueued`,
+/// both of which can only name a submission that is still queued or running.
+/// Keeping every command a long-lived session ever sent was therefore a map
+/// that grew with the transcript and was read for none of it (finding
+/// `client-adapter-6`). This many most-recent commands is far past anything a
+/// queue holds and still bounded.
+const COMMAND_TEXT_CAP: usize = 256;
 
 /// The open end of one assistant turn's consecutive-tool-call run.
 #[derive(Clone, Copy, Debug)]
@@ -146,7 +158,21 @@ struct TurnUsage {
 pub struct MuseFold {
     sessions: BTreeMap<String, Folded>,
     last_touched: Option<String>,
+    /// Session ids in touch order, most recent last — what
+    /// [`SESSION_CACHE_LIMIT`] evicts by.
+    recent: Vec<String>,
 }
+
+/// How many sessions one fold keeps folded at a time.
+///
+/// A fold serves a whole `muse serve` connection and used to keep every
+/// session it had ever seen, so the process grew with each session opened
+/// (finding `performance-16`). In the harness a session view owns its fold
+/// and closing the view drops it, so this bound only ever binds a fold that
+/// really is multiplexing — a `session/fork`, or a capture that carries more
+/// than one session. The active session is always among those kept, because
+/// it is by definition the most recently touched.
+pub const SESSION_CACHE_LIMIT: usize = 8;
 
 impl MuseFold {
     /// An empty fold.
@@ -221,7 +247,7 @@ impl MuseFold {
     /// `commandId`, and the text never comes back. The app calls this the moment
     /// it sends a `turn/start` or `turn/steer`.
     pub fn record_command(&mut self, session_id: &str, command_id: &str, text: &str) {
-        self.folded(session_id).side.remember_command(command_id, text);
+        self.folded(session_id).remember_command(command_id, text);
     }
 
     /// Record that a `turn/start` was **queued** rather than started.
@@ -237,12 +263,11 @@ impl MuseFold {
         text: &str,
     ) {
         let folded = self.folded(session_id);
-        folded.side.remember_command(command_id, text);
+        folded.remember_command(command_id, text);
         if folded.side.queued_turn(turn_id).is_none() {
             folded.side.queued.push(QueuedTurn {
                 turn_id: turn_id.to_owned(),
                 command_id: command_id.to_owned(),
-                text: text.to_owned(),
             });
         }
     }
@@ -272,9 +297,10 @@ impl MuseFold {
     pub fn replace_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
         let folded = self.folded(session_id);
         folded.break_groups();
-        let Some(turn) = folded.session.turns.iter().position(|t| t.id() == id) else {
+        let Some(at) = folded.session.turns.iter().position(|t| t.id() == id) else {
             return Vec::new();
         };
+        let Some(&turn) = folded.turn_keys.get(at) else { return Vec::new() };
         folded.update_block(Slot { turn, block: 0 }, block)
     }
 
@@ -294,7 +320,7 @@ impl MuseFold {
     ) -> Vec<Delta> {
         let folded = self.folded(session_id);
         let request = folded.side.pending_approvals.remove(approval_id);
-        let Some(slot) = folded.approvals.get(approval_id).copied() else { return Vec::new() };
+        let Some(slot) = folded.slots.approval(approval_id) else { return Vec::new() };
         let Some(request) = request else { return Vec::new() };
         let (state, by) = match &resolution {
             Some(resolution) => {
@@ -317,8 +343,34 @@ impl MuseFold {
         folded.update_block(slot, block)
     }
 
+    /// Forget a session's folded state: its view is closed and nothing will
+    /// ask for its transcript again (finding `performance-16`).
+    ///
+    /// Idempotent, and safe to call for a session this fold never saw.
+    pub fn close_session(&mut self, session_id: &str) {
+        self.sessions.remove(session_id);
+        self.recent.retain(|id| id != session_id);
+        if self.last_touched.as_deref() == Some(session_id) {
+            self.last_touched = None;
+        }
+    }
+
+    /// Note a session as the most recently touched and evict past
+    /// [`SESSION_CACHE_LIMIT`].
+    fn touch(&mut self, session_id: &str) {
+        if self.recent.last().map(String::as_str) != Some(session_id) {
+            self.recent.retain(|id| id != session_id);
+            self.recent.push(session_id.to_owned());
+        }
+        while self.recent.len() > SESSION_CACHE_LIMIT {
+            let oldest = self.recent.remove(0);
+            self.sessions.remove(&oldest);
+        }
+    }
+
     fn folded(&mut self, session_id: &str) -> &mut Folded {
         self.last_touched = Some(session_id.to_owned());
+        self.touch(session_id);
         self.sessions
             .entry(session_id.to_owned())
             .or_insert_with(|| Folded::new(session_id))
@@ -340,6 +392,7 @@ impl MuseFold {
             return Vec::new();
         };
         self.last_touched = Some(session_id.clone());
+        self.touch(&session_id);
         let folded = self.sessions.entry(session_id.clone()).or_insert_with(|| Folded::new(&session_id));
         if let Some(cursor) = cursor {
             folded.side.last_cursor = cursor;
@@ -355,13 +408,13 @@ impl Folded {
         Self {
             session,
             side: SideState::default(),
-            items: HashMap::new(),
+            slots: Slots::default(),
             revisions: HashMap::new(),
-            approvals: HashMap::new(),
-            inputs: HashMap::new(),
-            todo: None,
-            goal: None,
+            turn_keys: Vec::new(),
+            turn_index: HashMap::new(),
+            next_turn_key: 0,
             assistant_turns: HashMap::new(),
+            command_order: Vec::new(),
             user_turns: HashMap::new(),
             usage: HashMap::new(),
             seen_requests: HashMap::new(),
@@ -374,6 +427,55 @@ impl Folded {
             mode_seen: false,
             current_seq: None,
             block_order: HashMap::new(),
+        }
+    }
+
+    /// Where a turn handle currently sits in `session.turns`, or `None` once
+    /// the turn has been removed.
+    fn turn_at(&self, turn: TurnKey) -> Option<usize> {
+        self.turn_index.get(&turn).copied()
+    }
+
+    /// The turn a slot points into, or `None` when its turn is gone.
+    fn turn_of(&self, slot: Slot) -> Option<&Turn> {
+        self.session.turns.get(self.turn_at(slot.turn)?)
+    }
+
+    /// Mint the handle for a turn just appended to `session.turns`.
+    fn mint_turn_key(&mut self) -> TurnKey {
+        let key = TurnKey(self.next_turn_key);
+        self.next_turn_key += 1;
+        self.turn_index.insert(key, self.turn_keys.len());
+        self.turn_keys.push(key);
+        key
+    }
+
+    /// Remember what a command was sent with, evicting past
+    /// [`COMMAND_TEXT_CAP`] so the map stays bounded.
+    fn remember_command(&mut self, command_id: &str, text: &str) {
+        if self.side.command_text.insert(command_id.to_owned(), text.to_owned()).is_none() {
+            self.command_order.push(command_id.to_owned());
+        }
+        while self.command_order.len() > COMMAND_TEXT_CAP {
+            // A submission still on the queue strip keeps its text whatever
+            // the cap says: the strip renders it, and Edit hands it back.
+            let Some(at) = self
+                .command_order
+                .iter()
+                .position(|id| !self.side.queued.iter().any(|q| &q.command_id == id))
+            else {
+                break;
+            };
+            let oldest = self.command_order.remove(at);
+            self.side.command_text.remove(&oldest);
+        }
+    }
+
+    /// Forget a command's text: its submission is gone from the transcript
+    /// and nothing can ask what it said any more.
+    fn forget_command(&mut self, command_id: &str) {
+        if self.side.command_text.remove(command_id).is_some() {
+            self.command_order.retain(|held| held != command_id);
         }
     }
 
@@ -411,6 +513,8 @@ impl Folded {
             "userInput/requested" => self.user_input_requested(params),
             "userInput/settled" => self.user_input_settled(params),
             "view/gap" => self.view_gap(params),
+            muse_client::GAP_ABORTED => self.gap_aborted(params),
+            muse_client::PROTOCOL_ERROR => self.protocol_error(params),
             _ => {
                 // An unhandled method is the same kind of blind spot as a
                 // decode failure: the fold produced nothing and nothing said
@@ -428,7 +532,7 @@ impl Folded {
             self.side.decode_failures += 1;
             return Vec::new();
         };
-        let Ok(session) = serde_json::from_value::<msp::Session>(session.clone()) else {
+        let Ok(session) = msp::Session::deserialize(session) else {
             self.side.decode_failures += 1;
             return Vec::new();
         };
@@ -466,7 +570,7 @@ impl Folded {
             self.side.decode_failures += 1;
             return Vec::new();
         };
-        let Ok(mode) = serde_json::from_value::<ApprovalMode>(mode.clone()) else {
+        let Ok(mode) = ApprovalMode::deserialize(mode) else {
             self.side.decode_failures += 1;
             return Vec::new();
         };
@@ -492,7 +596,7 @@ impl Folded {
         if let Some(model_id) = params.get("modelId").and_then(Value::as_str) {
             self.session.model = model_id.to_owned();
         }
-        self.side.model = serde_json::from_value(params.clone()).ok();
+        self.side.model = msp::EffectiveModel::deserialize(params).ok();
         Vec::new()
     }
 
@@ -502,18 +606,19 @@ impl Folded {
     /// standing selection does not change — so it is folded into side state
     /// as a marker instead of falling through the untyped-method catch-all.
     fn model_route_unserved(&mut self, params: &Value) -> Vec<Delta> {
-        self.side.model_route_unserved = serde_json::from_value(params.clone()).ok();
+        self.side.model_route_unserved =
+            msp::SessionModelRouteUnservedParams::deserialize(params).ok();
         Vec::new()
     }
 
     fn context_usage(&mut self, params: &Value) -> Vec<Delta> {
-        self.side.context = serde_json::from_value(params.clone()).ok();
+        self.side.context = msp::ContextUsage::deserialize(params).ok();
         Vec::new()
     }
 
     fn token_usage(&mut self, params: &Value) -> Vec<Delta> {
         if let Some(cumulative) = params.get("cumulative") {
-            if let Ok(cumulative) = serde_json::from_value(cumulative.clone()) {
+            if let Ok(cumulative) = msp::CumulativeTokenUsage::deserialize(cumulative) {
                 self.side.cumulative = cumulative;
             }
         }
@@ -545,7 +650,7 @@ impl Folded {
         self.break_groups();
         let items: Vec<msp::TodoItem> = params
             .get("items")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .and_then(|v| Vec::<msp::TodoItem>::deserialize(v).ok())
             .unwrap_or_default();
         self.set_todo(
             items
@@ -562,12 +667,15 @@ impl Folded {
     fn goal_changed(&mut self, params: &Value) -> Vec<Delta> {
         self.break_groups();
         let goal: Option<msp::Goal> =
-            params.get("goal").and_then(|v| serde_json::from_value(v.clone()).ok());
+            params.get("goal").and_then(|v| msp::Goal::deserialize(v).ok());
         self.side.goal = goal.clone();
         let Some(goal) = goal else {
             // An explicit `null` clears the goal; `null` never means unchanged.
-            return match self.goal.take() {
-                Some(slot) => self.remove_block(slot),
+            return match self.slots.goal() {
+                Some(slot) => {
+                    self.slots.set_goal(None);
+                    self.remove_block(slot)
+                }
                 None => Vec::new(),
             };
         };
@@ -578,7 +686,7 @@ impl Folded {
             current_work: goal.current_work.clone(),
             next_work: goal.next_work.clone(),
         };
-        match self.goal {
+        match self.slots.goal() {
             Some(slot) => self.update_block(slot, block),
             None => {
                 let mut deltas = Vec::new();
@@ -586,7 +694,7 @@ impl Folded {
                 let turn = self.standalone_turn(&id, &mut deltas);
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                self.goal = Some(slot);
+                self.slots.set_goal(Some(slot));
                 deltas
             }
         }
@@ -643,7 +751,8 @@ impl Folded {
         // The retry schedule, if any, is over once the turn reaches a terminal.
         self.side.retry = None;
 
-        let Some(&turn) = self.assistant_turns.get(&turn_id) else {
+        let Some(turn) = self.assistant_turns.get(&turn_id).copied().and_then(|key| self.turn_at(key))
+        else {
             return deltas;
         };
         let usage = self.usage.get(&turn_id).copied().unwrap_or_default();
@@ -657,6 +766,9 @@ impl Folded {
             // client-side view math and is 0.0 until a catalog supplies one.
             cost_usd: 0.0,
         };
+        // The running total existed to be read here, once: nothing after a
+        // turn's terminal asks what it cost (finding `client-adapter-6`).
+        self.usage.remove(&turn_id);
         let delta = Delta::TurnFinished { turn_id: self.session.turns[turn].id().to_owned(), meta };
         self.session.apply(delta.clone());
         deltas.push(delta);
@@ -680,10 +792,15 @@ impl Folded {
     /// `commandId`, hand the prompt back, and take the turn out of the
     /// transcript.
     fn restore_and_remove(&mut self, params: &Value) -> Vec<Delta> {
-        if let Some(command_id) = params.get("commandId").and_then(Value::as_str) {
-            if let Some(text) = self.side.command_text.get(command_id) {
+        if let Some(command_id) = params.get("commandId").and_then(Value::as_str).map(str::to_owned)
+        {
+            if let Some(text) = self.side.command_text.get(&command_id) {
                 self.side.restored_prompt = Some(text.clone());
             }
+            // The submission is leaving the transcript, and the prompt it
+            // carried has just been handed back: nothing will ask for it
+            // again (finding `client-adapter-6`).
+            self.forget_command(&command_id);
         }
         let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else {
             return Vec::new();
@@ -709,7 +826,7 @@ impl Folded {
 
     fn turn_retry_scheduled(&mut self, params: &Value) -> Vec<Delta> {
         let retry: Option<msp::TurnRetryScheduledParams> =
-            serde_json::from_value(params.clone()).ok();
+            msp::TurnRetryScheduledParams::deserialize(params).ok();
         self.side.retry = retry;
         // A scheduled retry is a **live** fact, not a transcript row: it is the
         // countdown above the composer, and the turn's own terminal replaces it.
@@ -726,6 +843,46 @@ impl Folded {
         )
     }
 
+    /// The backfill a `view/gap` promised gave up (finding `client-adapter-7`).
+    ///
+    /// The gap row above already said events were missed and named the cursor
+    /// it was filling to; this is the row that withdraws the promise, so the
+    /// reader is not left believing a hole was closed when it was not.
+    fn gap_aborted(&mut self, params: &Value) -> Vec<Delta> {
+        let reason = params.get("reason").and_then(Value::as_str).unwrap_or("the backfill stopped");
+        self.marker_turn(MarkerKind::ViewGap, format!("{GAP_ABORT_PREFIX}{reason}"))
+    }
+
+    /// A wire fault the transport could not attribute to a request
+    /// (finding `client-adapter-4`).
+    ///
+    /// `read_loop` synthesises `client/protocolError` for an unframable line,
+    /// an id-less error frame and a response with no waiter. All three used to
+    /// fall into the untyped-method catch-all and vanish. They are errors
+    /// about the connection rather than about a turn, so they land as an
+    /// error card in a turn of their own rather than inside whatever reply
+    /// happened to be last.
+    fn protocol_error(&mut self, params: &Value) -> Vec<Delta> {
+        let message = params
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("the server sent something this client could not read");
+        let mut deltas = Vec::new();
+        self.marker_seq += 1;
+        let id = format!("protocol-error:{}:{}", self.session.id, self.marker_seq);
+        let turn = self.standalone_turn(&id, &mut deltas);
+        let (added, _) = self.push_block(
+            turn,
+            Block::Error {
+                title: "Protocol error".to_owned(),
+                detail: message.to_owned(),
+                retryable: false,
+            },
+        );
+        deltas.extend(added);
+        deltas
+    }
+
     // -------------------------------------------------------------------- items
 
     fn item(&mut self, params: &Value, terminal: bool) -> Vec<Delta> {
@@ -733,7 +890,7 @@ impl Folded {
             self.side.decode_failures += 1;
             return Vec::new();
         };
-        let Ok(item) = serde_json::from_value::<msp::Item>(item.clone()) else {
+        let Ok(item) = msp::Item::deserialize(item) else {
             self.side.decode_failures += 1;
             return Vec::new();
         };
@@ -767,7 +924,8 @@ impl Folded {
             return Vec::new();
         }
         if let (Some(command_id), text) = (item.command_id.as_ref(), item.text.clone()) {
-            self.side.remember_command(command_id.clone(), text.unwrap_or_default());
+            let command_id = command_id.clone();
+            self.remember_command(&command_id, &text.unwrap_or_default());
         }
         let text = item
             .display_text
@@ -796,6 +954,9 @@ impl Folded {
         };
         let delta = Delta::TurnStarted { turn };
         self.session.apply(delta.clone());
+        // A user message is a whole turn of its own, appended here rather
+        // than through `ensure_assistant_turn`, so it mints its handle here.
+        self.mint_turn_key();
         if let Some(turn_id) = &item.turn_id {
             self.user_turns.insert(item.item_id.clone(), turn_id.clone());
         }
@@ -839,7 +1000,7 @@ impl Folded {
         if !groupable {
             self.break_groups();
         }
-        match self.items.get(&item.item_id).copied() {
+        match self.slots.item(&item.item_id) {
             Some(slot) => self.update_call(slot, item, block, groupable),
             None => {
                 let mut deltas = Vec::new();
@@ -855,7 +1016,7 @@ impl Folded {
                 if groupable {
                     self.note_open(turn, slot);
                 }
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 deltas
             }
         }
@@ -870,11 +1031,12 @@ impl Folded {
     }
 
     /// Record a freshly pushed groupable call as its turn's open run.
-    fn note_open(&mut self, turn: usize, slot: Slot) {
+    fn note_open(&mut self, turn: TurnKey, slot: Slot) {
         if slot.turn != turn {
             return;
         }
-        let turn_id = self.session.turns[turn].id().to_owned();
+        let Some(index) = self.turn_at(turn) else { return };
+        let turn_id = self.session.turns[index].id().to_owned();
         self.open_groups.insert(turn_id, OpenGroup { block: slot.block, gen: self.group_gen });
     }
 
@@ -883,11 +1045,12 @@ impl Folded {
     /// Returns `None` when the call stands alone: no open run, the run is no
     /// longer the turn's last block, or the call arrived out of log order
     /// (D6) and belongs where its sequence says rather than at the tail.
-    fn try_join(&mut self, turn: usize, item: &msp::Item, block: &Block) -> Option<Vec<Delta>> {
-        let turn_id = self.session.turns.get(turn)?.id().to_owned();
+    fn try_join(&mut self, turn: TurnKey, item: &msp::Item, block: &Block) -> Option<Vec<Delta>> {
+        let index = self.turn_at(turn)?;
+        let turn_id = self.session.turns.get(index)?.id().to_owned();
         let cursor =
             self.open_groups.get(&turn_id).copied().filter(|cursor| cursor.gen == self.group_gen)?;
-        let blocks = self.session.turns[turn].blocks();
+        let blocks = self.session.turns[index].blocks();
         if cursor.block + 1 != blocks.len() {
             self.open_groups.remove(&turn_id);
             return None;
@@ -903,7 +1066,7 @@ impl Folded {
                 let summary = group_summary(&calls);
                 let state = group_state(&calls);
                 let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 Some(deltas)
             }
             previous if is_groupable(&previous) => {
@@ -912,7 +1075,7 @@ impl Folded {
                 let summary = group_summary(&calls);
                 let state = group_state(&calls);
                 let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 Some(deltas)
             }
             _ => {
@@ -947,12 +1110,8 @@ impl Folded {
         block: Block,
         groupable: bool,
     ) -> Vec<Delta> {
-        let current = self
-            .session
-            .turns
-            .get(slot.turn)
-            .and_then(|turn| turn.blocks().get(slot.block))
-            .cloned();
+        let current =
+            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned();
         match current {
             Some(Block::ToolCall { id, .. }) if id == item.item_id => self.update_block(slot, block),
             Some(Block::ToolGroup { .. }) if !matches!(block, Block::ToolCall { .. }) => {
@@ -988,7 +1147,7 @@ impl Folded {
                     deltas.extend(fresh);
                     let (added, fresh_slot) = self.push_block(turn, block);
                     deltas.extend(added);
-                    self.items.insert(item.item_id.clone(), fresh_slot);
+                    self.slots.set_item(&item.item_id, fresh_slot);
                     deltas
                 }
             }
@@ -1008,40 +1167,40 @@ impl Folded {
     /// The cached slot no longer names this call's card: find the card again
     /// by id, or file the call as new. Slots are maintained on every
     /// mutation, so this path should stay cold.
+    ///
+    /// The item's own host turn is searched first and the whole transcript
+    /// only if that misses (finding `client-adapter-8`). Block ids are unique
+    /// across the session, so the narrow search finds the same card the wide
+    /// one would; the wide pass remains for a card that somehow sits outside
+    /// the turn the item names.
     fn relocate_call(&mut self, item: &msp::Item, block: Block, groupable: bool) -> Vec<Delta> {
-        enum Site {
-            Lone,
-            Grouped,
-        }
-        let mut hit: Option<(usize, usize, Site)> = None;
-        for (turn, _) in self.session.turns.iter().enumerate() {
-            for (index, existing) in self.session.turns[turn].blocks().iter().enumerate() {
-                match existing {
-                    Block::ToolCall { id, .. } if id == &item.item_id => {
-                        hit = Some((turn, index, Site::Lone));
-                    }
-                    Block::ToolGroup { calls, .. }
-                        if calls.iter().any(|call| call.id == item.item_id) =>
-                    {
-                        hit = Some((turn, index, Site::Grouped));
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let host = self.assistant_turns.get(&host_turn_id(item)).copied();
+        let hit = host
+            .and_then(|key| self.turn_at(key).map(|index| (key, index)))
+            .and_then(|(key, index)| {
+                find_call(self.session.turns[index].blocks(), &item.item_id)
+                    .map(|(block, site)| (key, index, block, site))
+            })
+            .or_else(|| {
+                self.session.turns.iter().enumerate().rev().find_map(|(index, turn)| {
+                    let key = *self.turn_keys.get(index)?;
+                    find_call(turn.blocks(), &item.item_id)
+                        .map(|(block, site)| (key, index, block, site))
+                })
+            });
         match hit {
-            Some((turn, index, Site::Lone)) => {
+            Some((turn, _, index, Site::Lone)) => {
                 let slot = Slot { turn, block: index };
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 self.update_block(slot, block)
             }
-            Some((turn, index, Site::Grouped)) => {
+            Some((turn, at_turn, index, Site::Grouped)) => {
                 let slot = Slot { turn, block: index };
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 if !groupable {
                     self.break_groups();
                 }
-                match (self.session.turns[turn].blocks()[index].clone(), block.as_tool_call()) {
+                match (self.session.turns[at_turn].blocks()[index].clone(), block.as_tool_call()) {
                     (Block::ToolGroup { mut calls, .. }, Some(call)) => {
                         if let Some(member) = calls.iter_mut().find(|call| call.id == item.item_id)
                         {
@@ -1068,7 +1227,7 @@ impl Folded {
                 if groupable {
                     self.note_open(turn, slot);
                 }
-                self.items.insert(item.item_id.clone(), slot);
+                self.slots.set_item(&item.item_id, slot);
                 deltas
             }
         }
@@ -1090,13 +1249,16 @@ impl Folded {
     /// not a todo card.
     fn set_todo(&mut self, items: Vec<TodoItem>) -> Vec<Delta> {
         if items.is_empty() {
-            return match self.todo.take() {
-                Some(slot) => self.remove_block(slot),
+            return match self.slots.todo() {
+                Some(slot) => {
+                    self.slots.set_todo(None);
+                    self.remove_block(slot)
+                }
                 None => Vec::new(),
             };
         }
         let block = Block::Todo { items };
-        match self.todo {
+        match self.slots.todo() {
             Some(slot) => self.update_block(slot, block),
             None => {
                 let mut deltas = Vec::new();
@@ -1104,7 +1266,7 @@ impl Folded {
                 let turn = self.standalone_turn(&id, &mut deltas);
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                self.todo = Some(slot);
+                self.slots.set_todo(Some(slot));
                 deltas
             }
         }
@@ -1115,12 +1277,8 @@ impl Folded {
     /// re-folds its whole group card. Returns the `BlockUpdated`, or nothing
     /// when the member has no shell body to append to.
     fn append_group_output(&mut self, slot: Slot, item_id: &str, text: &str) -> Vec<Delta> {
-        let Some(Block::ToolGroup { mut calls, summary, state }) = self
-            .session
-            .turns
-            .get(slot.turn)
-            .and_then(|turn| turn.blocks().get(slot.block))
-            .cloned()
+        let Some(Block::ToolGroup { mut calls, summary, state }) =
+            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned()
         else {
             return Vec::new();
         };
@@ -1213,34 +1371,40 @@ impl Folded {
         let Some(item_id) = params.get("itemId").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let Some(text) = params.get("delta").and_then(Value::as_str).map(str::to_owned) else {
+        // Borrowed, not copied: a chunk that turns out to belong to a grouped
+        // call, or to no live slot at all, used to pay for a `String` it then
+        // threw away (finding `client-adapter-8`).
+        let Some(text) = params.get("delta").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let Some(slot) = self.items.get(item_id).copied() else { return Vec::new() };
-        let Some(turn) = self.session.turns.get(slot.turn) else { return Vec::new() };
-        let turn_id = turn.id().to_owned();
+        let Some(slot) = self.slots.item(item_id) else { return Vec::new() };
+        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
         // `field` is a dotted path and **absent means `"text"`**.
         let field = params.get("field").and_then(Value::as_str).unwrap_or("text");
+        let target = turn.blocks().get(slot.block);
         // A grouped call's output re-folds its group card: the library's
         // `ToolOutputDelta` only addresses a lone `ToolCall`.
-        let grouped = self
-            .session
-            .turns
-            .get(slot.turn)
-            .and_then(|turn| turn.blocks().get(slot.block))
-            .is_some_and(|block| matches!(block, Block::ToolGroup { .. }));
+        let grouped = matches!(target, Some(Block::ToolGroup { .. }));
         if field == "output" && grouped {
-            return self.append_group_output(slot, item_id, &text);
+            return self.append_group_output(slot, item_id, text);
         }
-        let delta = match (field, turn.blocks().get(slot.block)) {
-            ("output", _) => Delta::ToolOutputDelta { turn_id, block_index: slot.block, text },
-            (_, Some(Block::Thinking { .. })) => {
-                Delta::ThinkingDelta { turn_id, block_index: slot.block, text }
-            }
-            (_, Some(Block::ToolCall { .. })) => {
-                Delta::ToolOutputDelta { turn_id, block_index: slot.block, text }
-            }
-            _ => Delta::TextDelta { turn_id, block_index: slot.block, text },
+        let turn_id = turn.id();
+        let delta = match (field, target) {
+            ("output", _) | (_, Some(Block::ToolCall { .. })) => Delta::ToolOutputDelta {
+                turn_id: turn_id.to_owned(),
+                block_index: slot.block,
+                text: text.to_owned(),
+            },
+            (_, Some(Block::Thinking { .. })) => Delta::ThinkingDelta {
+                turn_id: turn_id.to_owned(),
+                block_index: slot.block,
+                text: text.to_owned(),
+            },
+            _ => Delta::TextDelta {
+                turn_id: turn_id.to_owned(),
+                block_index: slot.block,
+                text: text.to_owned(),
+            },
         };
         if self.session.apply(delta.clone()) {
             vec![delta]
@@ -1252,7 +1416,7 @@ impl Folded {
     // ---------------------------------------------------------------- approvals
 
     fn approval_requested(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(request) = serde_json::from_value::<msp::ApprovalRequestParams>(params.clone())
+        let Ok(request) = msp::ApprovalRequestParams::deserialize(params)
         else {
             self.side.decode_failures += 1;
             return Vec::new();
@@ -1270,7 +1434,7 @@ impl Folded {
         let turn = self.ensure_assistant_turn(&request.turn_id, &mut deltas);
         let (added, slot) = self.push_block(turn, block);
         deltas.extend(added);
-        self.approvals.insert(request.approval_id.clone(), slot);
+        self.slots.set_approval(&request.approval_id, slot);
         deltas
     }
 
@@ -1279,24 +1443,24 @@ impl Folded {
         let Some(approval_id) = params.get("approvalId").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let Some(slot) = self.approvals.get(approval_id).copied() else { return Vec::new() };
+        let Some(slot) = self.slots.approval(approval_id) else { return Vec::new() };
         // The choices change between stages — re-render from the update, never
         // from a cached copy.
         let Some(request) = self.side.pending_approvals.get_mut(approval_id) else {
             return Vec::new();
         };
         if let Some(subject) = params.get("subject") {
-            if let Ok(subject) = serde_json::from_value(subject.clone()) {
+            if let Ok(subject) = msp::ApprovalSubject::deserialize(subject) {
                 request.subject = subject;
             }
         }
         if let Some(choices) = params.get("availableChoices") {
-            if let Ok(choices) = serde_json::from_value(choices.clone()) {
+            if let Ok(choices) = Vec::<msp::ApprovalChoice>::deserialize(choices) {
                 request.available_choices = choices;
             }
         }
         if let Some(current) = params.get("currentRequirementId") {
-            if let Ok(current) = serde_json::from_value(current.clone()) {
+            if let Ok(current) = msp::ApprovalRequirementRef::deserialize(current) {
                 request.current_requirement_id = current;
             }
         }
@@ -1306,16 +1470,19 @@ impl Folded {
     }
 
     fn approval_resolved(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(resolved) = serde_json::from_value::<msp::ApprovalResolvedParams>(params.clone())
+        let Ok(resolved) = msp::ApprovalResolvedParams::deserialize(params)
         else {
             self.side.decode_failures += 1;
             return Vec::new();
         };
         self.break_groups();
         let request = self.side.pending_approvals.remove(&resolved.approval_id);
-        let Some(slot) = self.approvals.get(&resolved.approval_id).copied() else {
+        let Some(slot) = self.slots.approval(&resolved.approval_id) else {
             return Vec::new();
         };
+        // The dedupe entry guarded the `approval/request` / `approval/requested`
+        // twins, which are long past by the time one resolves.
+        self.seen_requests.remove(&resolved.approval_id);
         let allowed = matches!(resolved.policy_result, msp::ApprovalPolicyResult::Allow);
         let by = resolved_by(&resolved.resolved_by);
         // F11. The subject's command is what was *asked about*, never the rule
@@ -1329,7 +1496,9 @@ impl Folded {
         let command_id = request
             .as_ref()
             .and_then(|r| r.tool_call_id.rsplit_once('_').map(|(_, id)| id.to_owned()));
-        let known = command_id.as_ref().and_then(|id| self.item_reasons.get(id).cloned());
+        // Taken, not read: the reason existed for exactly this moment, and
+        // the card it corrects is drawn below (finding `client-adapter-6`).
+        let known = command_id.as_ref().and_then(|id| self.item_reasons.remove(id));
         let rule = amendment
             .clone()
             .or_else(|| known.clone())
@@ -1376,7 +1545,7 @@ impl Folded {
         let Some(command_id) = item.command_id.as_deref() else { return Vec::new() };
         let Some(reason) = refusal(item) else { return Vec::new() };
         let Some(waiting) = self.awaiting_reason.remove(command_id) else { return Vec::new() };
-        let Some(slot) = self.approvals.get(&waiting.approval_id).copied() else { return Vec::new() };
+        let Some(slot) = self.slots.approval(&waiting.approval_id) else { return Vec::new() };
         let state = if waiting.allowed {
             ApprovalState::AutoAllowed { rule: reason }
         } else {
@@ -1389,7 +1558,7 @@ impl Folded {
     // --------------------------------------------------------------- user input
 
     fn user_input_requested(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(request) = serde_json::from_value::<msp::UserInputRequestParams>(params.clone())
+        let Ok(request) = msp::UserInputRequestParams::deserialize(params)
         else {
             self.side.decode_failures += 1;
             return Vec::new();
@@ -1410,21 +1579,22 @@ impl Folded {
             deltas.extend(added);
             slots.push(slot);
         }
-        self.inputs.insert(request.user_input_id.clone(), slots);
+        self.slots.set_inputs(&request.user_input_id, slots);
         deltas
     }
 
     fn user_input_settled(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(settled) = serde_json::from_value::<msp::UserInputSettledParams>(params.clone())
+        let Ok(settled) = msp::UserInputSettledParams::deserialize(params)
         else {
             self.side.decode_failures += 1;
             return Vec::new();
         };
         self.break_groups();
+        self.seen_requests.remove(&settled.user_input_id);
         let Some(request) = self.side.pending_inputs.remove(&settled.user_input_id) else {
             return Vec::new();
         };
-        let Some(slots) = self.inputs.get(&settled.user_input_id).cloned() else {
+        let Some(slots) = self.slots.inputs(&settled.user_input_id).map(<[Slot]>::to_vec) else {
             return Vec::new();
         };
         let mut deltas = Vec::new();
@@ -1440,9 +1610,9 @@ impl Folded {
 
     /// The assistant turn that hosts `turn_id`'s blocks, appending it if it does
     /// not exist yet.
-    fn ensure_assistant_turn(&mut self, turn_id: &str, deltas: &mut Vec<Delta>) -> usize {
-        if let Some(&index) = self.assistant_turns.get(turn_id) {
-            return index;
+    fn ensure_assistant_turn(&mut self, turn_id: &str, deltas: &mut Vec<Delta>) -> TurnKey {
+        if let Some(&key) = self.assistant_turns.get(turn_id) {
+            return key;
         }
         let delta = Delta::TurnStarted {
             turn: Turn::Assistant {
@@ -1453,9 +1623,9 @@ impl Folded {
         };
         self.session.apply(delta.clone());
         deltas.push(delta);
-        let index = self.session.turns.len() - 1;
-        self.assistant_turns.insert(turn_id.to_owned(), index);
-        index
+        let key = self.mint_turn_key();
+        self.assistant_turns.insert(turn_id.to_owned(), key);
+        key
     }
 
     /// Where an item's block goes.
@@ -1463,12 +1633,8 @@ impl Folded {
     /// A `userShell` item is the one kind outside a turn (`turnId: null`); it is
     /// filed under its own `commandId`, which is also what the approval it
     /// raises reports as its `turnId`.
-    fn item_host_turn(&mut self, item: &msp::Item, deltas: &mut Vec<Delta>) -> usize {
-        let turn_id = item
-            .turn_id
-            .clone()
-            .or_else(|| item.command_id.clone())
-            .unwrap_or_else(|| item.item_id.clone());
+    fn item_host_turn(&mut self, item: &msp::Item, deltas: &mut Vec<Delta>) -> TurnKey {
+        let turn_id = host_turn_id(item);
         self.ensure_assistant_turn(&turn_id, deltas)
     }
 
@@ -1480,7 +1646,7 @@ impl Folded {
     /// transcript in wire order: a marker lands where it happened instead of
     /// being appended to whatever reply happened to be last, which for a reply
     /// that already finished would put it after that turn's footer.
-    fn standalone_turn(&mut self, id: &str, deltas: &mut Vec<Delta>) -> usize {
+    fn standalone_turn(&mut self, id: &str, deltas: &mut Vec<Delta>) -> TurnKey {
         self.ensure_assistant_turn(id, deltas)
     }
 
@@ -1521,8 +1687,11 @@ impl Folded {
     /// an out-of-order arrival is expressed as an append plus the
     /// [`Delta::BlockUpdated`]s that rotate the tail. Every cached [`Slot`] past
     /// the insertion point shifts with it.
-    fn push_block(&mut self, turn: usize, block: Block) -> (Vec<Delta>, Slot) {
-        let turn_id = self.session.turns[turn].id().to_owned();
+    fn push_block(&mut self, turn: TurnKey, block: Block) -> (Vec<Delta>, Slot) {
+        let Some(at_turn) = self.turn_at(turn) else {
+            return (Vec::new(), Slot { turn, block: 0 });
+        };
+        let turn_id = self.session.turns[at_turn].id().to_owned();
         // An event with no sequence (a synthesised marker, a `session/*` fact)
         // belongs after everything already filed, which is what `u64::MAX` says.
         let order = self.current_seq.unwrap_or(u64::MAX);
@@ -1534,14 +1703,14 @@ impl Folded {
 
         let mut deltas = vec![Delta::BlockAdded { turn_id: turn_id.clone(), block: block.clone() }];
         self.session.apply(deltas[0].clone());
-        let last = self.session.turns[turn].blocks().len() - 1;
+        let last = self.session.turns[at_turn].blocks().len() - 1;
         if at == last {
             return (deltas, Slot { turn, block: at });
         }
 
         // Rotate `[at, last]` right by one: each old occupant moves down a slot
         // and the new block takes `at`.
-        let mut moved: Vec<Block> = self.session.turns[turn].blocks()[at..last].to_vec();
+        let mut moved: Vec<Block> = self.session.turns[at_turn].blocks()[at..last].to_vec();
         moved.insert(0, block);
         for (offset, block) in moved.into_iter().enumerate() {
             let delta = Delta::BlockUpdated {
@@ -1558,18 +1727,13 @@ impl Folded {
     }
 
     /// Every cached slot at or past `at` in `turn` moved down one.
-    fn shift_slots(&mut self, turn: usize, at: usize) {
-        let bump = |slot: &mut Slot| {
-            if slot.turn == turn && slot.block >= at {
-                slot.block += 1;
-            }
-        };
-        self.items.values_mut().for_each(bump);
-        self.approvals.values_mut().for_each(bump);
-        self.inputs.values_mut().flatten().for_each(bump);
-        self.todo.iter_mut().for_each(bump);
-        self.goal.iter_mut().for_each(bump);
-        if let Some(turn_id) = self.session.turns.get(turn).map(|turn| turn.id().to_owned()) {
+    ///
+    /// One turn's slots, not the transcript's: [`Slots`] keeps the per-turn
+    /// index that makes that possible (finding `client-adapter-8`).
+    fn shift_slots(&mut self, turn: TurnKey, at: usize) {
+        self.slots.shift(turn, at, 1);
+        let Some(index) = self.turn_at(turn) else { return };
+        if let Some(turn_id) = self.session.turns.get(index).map(|turn| turn.id().to_owned()) {
             if let Some(cursor) = self.open_groups.get_mut(&turn_id) {
                 if cursor.block >= at {
                     cursor.block += 1;
@@ -1579,7 +1743,7 @@ impl Folded {
     }
 
     fn update_block(&mut self, slot: Slot, block: Block) -> Vec<Delta> {
-        let Some(turn) = self.session.turns.get(slot.turn) else { return Vec::new() };
+        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
         let delta = Delta::BlockUpdated {
             turn_id: turn.id().to_owned(),
             block_index: slot.block,
@@ -1593,7 +1757,7 @@ impl Folded {
     }
 
     fn remove_block(&mut self, slot: Slot) -> Vec<Delta> {
-        let Some(turn) = self.session.turns.get(slot.turn) else { return Vec::new() };
+        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
         let turn_id = turn.id().to_owned();
         let delta = Delta::BlockRemoved { turn_id: turn_id.clone(), block_index: slot.block };
         if !self.session.apply(delta.clone()) {
@@ -1606,16 +1770,7 @@ impl Folded {
                 keys.remove(slot.block);
             }
         }
-        let unshift = |s: &mut Slot| {
-            if s.turn == slot.turn && s.block > slot.block {
-                s.block -= 1;
-            }
-        };
-        self.items.values_mut().for_each(unshift);
-        self.approvals.values_mut().for_each(unshift);
-        self.inputs.values_mut().flatten().for_each(unshift);
-        self.todo.iter_mut().for_each(unshift);
-        self.goal.iter_mut().for_each(unshift);
+        self.slots.shift(slot.turn, slot.block, -1);
         if self
             .open_groups
             .get(&turn_id)
@@ -1631,67 +1786,80 @@ impl Folded {
     }
 
     fn remove_turn(&mut self, turn_id: &str) -> Vec<Delta> {
-        // Captured before `apply` shifts every later turn down, so slots
-        // (which cache a raw turn *index*, not an id) can be translated from
-        // their old index to the turn id they actually meant.
-        let old_turns: Vec<String> = self.session.turns.iter().map(|turn| turn.id().to_owned()).collect();
+        // Read before `apply` takes the turn out: afterwards there is no way
+        // to tell which handle the removed turn held.
+        let Some(at) = self.session.turns.iter().position(|turn| turn.id() == turn_id) else {
+            return Vec::new();
+        };
         let delta = Delta::TurnRemoved { turn_id: turn_id.to_owned() };
         if !self.session.apply(delta.clone()) {
             return Vec::new();
         }
-        self.reindex(&old_turns);
+        self.reindex(at, turn_id);
         vec![delta]
     }
 
-    /// Turn indices shift when a turn is removed, so every cached slot is
-    /// remapped through the rebuilt id → position map (finding
-    /// `client-adapter-1`); a slot whose turn id no longer exists is dropped
-    /// rather than kept under its stale index.
-    fn reindex(&mut self, old_turns: &[String]) {
-        let positions: HashMap<String, usize> = self
-            .session
-            .turns
-            .iter()
-            .enumerate()
-            .map(|(index, turn)| (turn.id().to_owned(), index))
-            .collect();
-        self.open_groups.retain(|id, _| self.assistant_turns.contains_key(id));
-        self.assistant_turns.retain(|id, index| match positions.get(id) {
-            Some(&position) => {
-                *index = position;
-                true
-            }
-            None => false,
-        });
-        // Old raw index → new raw index, via the turn id it named before the
-        // removal. `None` means that turn is gone.
-        let remap = |old_index: usize| -> Option<usize> {
-            old_turns.get(old_index).and_then(|id| positions.get(id).copied())
-        };
-        let remap_slot = |slot: &mut Slot| match remap(slot.turn) {
-            Some(new_index) => {
-                slot.turn = new_index;
-                true
-            }
-            None => false,
-        };
-        self.items.retain(|_, slot| remap_slot(slot));
-        self.approvals.retain(|_, slot| remap_slot(slot));
-        self.inputs.retain(|_, slots| slots.iter_mut().all(&remap_slot));
-        if let Some(slot) = &mut self.todo {
-            if !remap_slot(slot) {
-                self.todo = None;
-            }
+    /// A turn was removed at `at`: every later turn slid down one index.
+    ///
+    /// Only the turns move. A [`Slot`] names its turn by a [`TurnKey`], which
+    /// an index shift does not change, so this is one pass over the turns and
+    /// none over the cached slots (findings `client-adapter-1`,
+    /// `client-adapter-8`). The removed turn's own slots are dropped rather
+    /// than left behind under a handle that resolves to nothing
+    /// (`client-adapter-6`).
+    fn reindex(&mut self, at: usize, turn_id: &str) {
+        let gone = self.turn_keys.remove(at);
+        self.turn_index.remove(&gone);
+        for (index, key) in self.turn_keys.iter().enumerate().skip(at) {
+            self.turn_index.insert(*key, index);
         }
-        if let Some(slot) = &mut self.goal {
-            if !remap_slot(slot) {
-                self.goal = None;
-            }
-        }
+        self.slots.drop_turn(gone);
+        self.assistant_turns.retain(|_, key| *key != gone);
+        self.open_groups.remove(turn_id);
         // A turn that is gone takes its block ordering with it, or a turn id
         // reused after a retraction would inherit the old turn's keys.
-        self.block_order.retain(|id, _| positions.contains_key(id));
+        self.block_order.remove(turn_id);
     }
+}
+
+/// What a `ViewGap` marker's text starts with when the row is the **abort**
+/// rather than the promise (finding `client-adapter-7`).
+///
+/// Both rows are `MarkerKind::ViewGap` — the library has one marker for "the
+/// transcript has a hole in it" and that is what both of these are — so the
+/// text carries which one it is, the way a `ForkedFrom` marker's text carries
+/// the session it came from. What follows the prefix is the reason.
+pub const GAP_ABORT_PREFIX: &str = "Backfill did not finish: ";
+
+/// Where a tool call's card was found by [`Folded::relocate_call`].
+enum Site {
+    /// A `Block::ToolCall` of its own.
+    Lone,
+    /// A member of a `Block::ToolGroup`.
+    Grouped,
+}
+
+/// The turn an item's blocks belong to.
+///
+/// A `userShell` item is the one kind outside a turn (`turnId: null`); it is
+/// filed under its own `commandId`, which is also what the approval it raises
+/// reports as its `turnId`.
+fn host_turn_id(item: &msp::Item) -> String {
+    item.turn_id
+        .clone()
+        .or_else(|| item.command_id.clone())
+        .unwrap_or_else(|| item.item_id.clone())
+}
+
+/// The last block of `blocks` that renders `item_id`'s tool call, and how.
+fn find_call(blocks: &[Block], item_id: &str) -> Option<(usize, Site)> {
+    blocks.iter().enumerate().rev().find_map(|(index, block)| match block {
+        Block::ToolCall { id, .. } if id == item_id => Some((index, Site::Lone)),
+        Block::ToolGroup { calls, .. } if calls.iter().any(|call| call.id == item_id) => {
+            Some((index, Site::Grouped))
+        }
+        _ => None,
+    })
 }
 
 /// A cancellation marker's text has no separate detail line the way a
@@ -2351,6 +2519,108 @@ fn answer_for(question: &msp::UserInputQuestion, settled: &msp::UserInputSettled
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn started(fold: &mut MuseFold, session_id: &str) {
+        fold.apply(MuseEvent::Notification {
+            method: "session/started".to_owned(),
+            params: serde_json::json!({ "session": { "sessionId": session_id } }),
+            cursor: None,
+            session_id: Some(session_id.to_owned()),
+        });
+    }
+
+    #[test]
+    fn a_fold_keeps_only_its_most_recent_sessions() {
+        let mut fold = MuseFold::new();
+        for index in 0..SESSION_CACHE_LIMIT + 3 {
+            started(&mut fold, &format!("s-{index}"));
+        }
+        let kept: Vec<&str> = fold.session_ids().collect();
+        assert_eq!(kept.len(), SESSION_CACHE_LIMIT, "the bound holds");
+        assert!(!kept.contains(&"s-0"), "the oldest session was evicted");
+        assert!(
+            kept.contains(&format!("s-{}", SESSION_CACHE_LIMIT + 2).as_str()),
+            "the session just touched is kept"
+        );
+    }
+
+    #[test]
+    fn a_re_touched_session_survives_the_bound() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "keep");
+        for index in 0..SESSION_CACHE_LIMIT {
+            started(&mut fold, &format!("s-{index}"));
+            started(&mut fold, "keep");
+        }
+        assert!(fold.session("keep").is_some(), "the active session is never the eviction");
+    }
+
+    #[test]
+    fn closing_a_session_drops_its_fold() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "a");
+        started(&mut fold, "b");
+        fold.close_session("a");
+        assert!(fold.session("a").is_none());
+        assert!(fold.session("b").is_some());
+        fold.close_session("a");
+    }
+
+    #[test]
+    fn a_removed_turn_takes_its_cached_slots_with_it() {
+        let mut fold = MuseFold::new();
+        let session = "s";
+        started(&mut fold, session);
+        let item = serde_json::json!({
+            "item": {
+                "itemId": "i-1",
+                "turnId": "t-1",
+                "kind": "toolCall",
+                "status": "completed",
+                "revision": 1,
+                "tool": "shell",
+                "commandText": "ls",
+            }
+        });
+        fold.apply(MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: item,
+            cursor: None,
+            session_id: Some(session.to_owned()),
+        });
+        assert_eq!(fold.sessions["s"].slots.len(), 1, "the tool card is cached");
+        fold.apply(MuseEvent::Notification {
+            method: "turn/retracted".to_owned(),
+            params: serde_json::json!({ "turnId": "t-1", "commandId": "c-1" }),
+            cursor: None,
+            session_id: Some(session.to_owned()),
+        });
+        assert_eq!(fold.sessions["s"].slots.len(), 0, "and goes with the turn");
+    }
+
+    #[test]
+    fn command_text_stops_at_its_cap() {
+        let mut fold = MuseFold::new();
+        for index in 0..COMMAND_TEXT_CAP + 10 {
+            fold.record_command("s", &format!("c-{index}"), "hello");
+        }
+        let side = fold.side("s").expect("session exists");
+        assert_eq!(side.command_text.len(), COMMAND_TEXT_CAP);
+        assert!(!side.command_text.contains_key("c-0"), "the oldest went first");
+        assert!(side.command_text.contains_key(&format!("c-{}", COMMAND_TEXT_CAP + 9)));
+    }
+
+    #[test]
+    fn a_queued_submission_keeps_its_text_past_the_cap() {
+        let mut fold = MuseFold::new();
+        fold.record_queued("s", "t-q", "c-q", "the queued prompt");
+        for index in 0..COMMAND_TEXT_CAP + 10 {
+            fold.record_command("s", &format!("c-{index}"), "hello");
+        }
+        let side = fold.side("s").expect("session exists");
+        let queued = side.queued_turn("t-q").expect("still queued");
+        assert_eq!(side.queued_text(queued), "the queued prompt");
+    }
 
     #[test]
     fn a_known_cancel_reason_becomes_its_sentence() {
