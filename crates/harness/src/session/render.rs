@@ -88,6 +88,7 @@ impl SessionView {
     /// frame draws one consistent snapshot rather than whatever the wire
     /// happened to have folded by the time a given row was built.
     pub(super) fn render_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        crate::log::trace_first_frame();
         let frame_start = std::time::Instant::now();
         self.sync_render_cache();
         if self.cached_turns.is_empty() {
@@ -113,9 +114,10 @@ impl SessionView {
 
     /// Nothing to show yet, and the two reasons are different.
     ///
-    /// Loading is not empty: while the first backfill batch is still on the
-    /// wire the old view stays up (C2, `Harness::open`), and when no old view
-    /// exists this neutral row stands in — never `empty_state`.
+    /// Loading is not empty: while the first backfill page is still on the
+    /// wire this neutral row stands in — never `empty_state`. The switch
+    /// itself is immediate, so this is what a fresh session shows on its
+    /// first frames.
     pub(super) fn empty_or_loading(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.loading_history {
             return Self::loading_row();
@@ -331,7 +333,7 @@ impl SessionView {
             .into_any_element()
     }
 
-    /// The neutral row while history is still paging in (C2): a spinner, and
+    /// The neutral row while history is still paging in: a spinner, and
     /// never the "New session" empty state.
     pub(super) fn loading_row() -> AnyElement {
         div()
