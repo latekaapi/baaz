@@ -9,10 +9,10 @@ Paste the block below into a new session opened in
 
 ```
 You are maintaining the Harness: a macOS gpui chat interface to Meta's Muse Code agent
-(`muse` CLI 1.0.3; `muse serve` = "MSP", JSON-RPC 2.0 as NDJSON over stdio), built on the
+(`muse` CLI 1.1.1; `muse serve` = "MSP", JSON-RPC 2.0 as NDJSON over stdio), built on the
 `aui` library at /Users/latekaapi/Projects/agentic-ui (path dependencies; gpui-pre 0.3.3 +
 gpui-kit 0.6). Library changes go on a new agentic-ui branch off `main` (everything
-through `transcript-2026-09-12` is merged), as their own commits; the owner merges.
+through `owner-followup-2026-09-13` is merged), as their own commits; the owner merges.
 Prefix every shell command with
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
@@ -47,6 +47,22 @@ Do not touch ~/Projects/cockpit.
 ---
 
 ## Where things are
+
+The next piece of work is **Projects** — one window over several workspaces — and
+`docs/09-handoff-improvements.md` §12 holds the brief for it: what the wire offers, what
+the harness already has, the decisions to take, and the order to build in. Start there.
+
+The 2026-09-13 owner round (fifteen faults, then four more the same evening) is in
+`docs/diagnosis/owner-round-2026-09-13.md` and the two newest changelog entries. Two rules
+it set: the transcript list is one item per **block** (`transcript::turn_rows` /
+`turn_row`; every row hinted until measured), and a turn's terminal settles the cards it
+left open (`muse-adapter` `settle_open_blocks`). Bench a real session before touching
+scroll: capture with `MUSE_CAPTURE=<file> harness --session <id> --screenshot …` (free), then
+`--bench <file> --bench-scroll wheel --bench-out out.json` and read `frame.series_us` with
+the stream frames and the wheel frames apart. Muse implements from a brief in
+`docs/briefs/` (`muse-owner-*.md` are the latest shapes); when a Muse run and you share a
+tree, it may `git checkout` a file it thinks is out of scope — re-check your own edits
+after it finishes.
 
 The 2026-09-12 review and performance pass is recorded in `docs/audit/` (findings, plan,
 status) and its changelog entry; the regression method it established — byte-identical

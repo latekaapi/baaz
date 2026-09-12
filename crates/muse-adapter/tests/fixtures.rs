@@ -811,7 +811,10 @@ fn consecutive_tool_calls_fold_into_verb_summarised_groups() {
         Block::Approval { tool, command, state, .. } => {
             assert_eq!(tool, "bash");
             assert_eq!(command, "cargo run -- --no-connect");
-            assert!(matches!(state, aui_protocol::ApprovalState::Approving));
+            // The fixture leaves the approval "approving" past its turn's
+            // end; the turn's terminal settles it (owner round 2026-09-13
+            // follow-up: a card must not spin under a finished reply).
+            assert!(matches!(state, aui_protocol::ApprovalState::AllowedOnce { .. }), "unsettled: {state:?}");
         }
         other => panic!("the approval did not break the run: {other:?}"),
     }

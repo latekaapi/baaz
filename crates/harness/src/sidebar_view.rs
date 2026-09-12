@@ -33,6 +33,10 @@ use crate::login::Auth;
 use crate::overlays::MenuKind;
 use crate::sidebar::SessionEntry;
 
+/// How many sessions the collapsed rail shows: enough to reach the ones a
+/// person switches between, few enough to stay a rail.
+const RAIL_SESSIONS: usize = 8;
+
 /// Actions of the Sessions caption's view menu, in row order.
 #[derive(Clone, Copy)]
 enum ViewAction {
@@ -267,8 +271,12 @@ impl Harness {
         footer.into_any_element()
     }
 
-    /// The collapsed rail: new-session and search cells, a separator, one dot
-    /// per running session mirroring the rows, and the account avatar.
+    /// The collapsed rail: new-session and search cells, a separator, then
+    /// the sessions a person reaches for from a rail — the open one and the
+    /// most recent of the visible list, each a tile bearing its initial with
+    /// the title as its tooltip, running ones pulsing — and the account
+    /// avatar. A rail of two glyphs and an empty column served nothing
+    /// (owner round 2026-09-13, follow-up).
     pub(crate) fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let active = self.active_id(cx);
         let mut items = vec![
@@ -276,11 +284,25 @@ impl Harness {
             RailItem::nav("search", IconName::Search),
             RailItem::separator(),
         ];
-        for entry in &self.sessions {
-            if entry.hidden || entry.archived || !entry.running {
-                continue;
+        // The visible list is already newest-first; pinned rows lead it so
+        // the rail keeps what the person keeps.
+        let visible = self.visible_sessions(cx);
+        let mut ordered: Vec<&SessionEntry> = visible.iter().filter(|e| e.pinned).collect();
+        ordered.extend(visible.iter().filter(|e| !e.pinned));
+        let mut shown: Vec<&SessionEntry> = ordered.into_iter().take(RAIL_SESSIONS).collect();
+        if let Some(open) = active.as_deref() {
+            if !shown.iter().any(|e| e.id == open) {
+                if let Some(entry) = visible.iter().find(|e| e.id == open) {
+                    shown.insert(0, entry);
+                }
             }
-            let mut cell = RailItem::session(entry.id.clone(), AgentState::Running).pulse();
+        }
+        for entry in shown {
+            let state = if entry.running { AgentState::Running } else { AgentState::Idle };
+            let mut cell = RailItem::session(entry.id.clone(), state).label(entry.label.clone());
+            if entry.running {
+                cell = cell.pulse();
+            }
             if active.as_deref() == Some(entry.id.as_str()) {
                 cell = cell.selected(true);
             }

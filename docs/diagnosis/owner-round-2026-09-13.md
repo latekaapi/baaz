@@ -24,6 +24,15 @@ it on free wire calls (`session/list`, `session/resume`, `view/page`, `--replay`
 | 14 | Cannot scroll inside the slash-command popup | The library menu stops the wheel unconditionally; the harness's scroll wrapper is its parent and never sees the event. | The menu is its own scroll container and stops propagation on the same element. | Muse | done |
 | 15 | "Is the transcript the same as the design system?" | Yes for the cards; the only composition faults found are 13 and the block gaps landed on 2026-09-12. | Covered by 13. | — | done |
 
+## Second look (same evening)
+
+| # | Fault | Diagnosis | Fix | Owner | Status |
+|---|---|---|---|---|---|
+| 16 | Spinners keep spinning after the task is done | The wire ended the turn with the bash call `inProgress`; Muse closed it in the next turn, 30 min later (`bash_input {terminate}`). Truthful, useless. | The fold settles a turn's open cards at its terminal. | Fable | done |
+| 17 | Slash menu: overlapping content, janky scroll | Fixed-height rows with wrapping names and descriptions; hover-driven `scroll_to_item` every frame. | One-line rows; keyboard-only scroll. | Fable · library | done |
+| 18 | Collapsed sidebar serves no purpose | Only running sessions, as dots. | Titled tiles for the open and recent sessions, tooltip, pulse. | Fable · library + harness | done |
+| 19 | Search palette too tall, cut on the right, floating field | No height bound; `flex_none` context; the field rendered above the card. | `query_slot`, bounded scrolling list, truncated context. | Fable · library + harness | done |
+
 ## Outcome
 
 - Scroll, measured (release, wheel phase of the real 808-event capture, frame intervals):

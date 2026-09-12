@@ -751,8 +751,11 @@ impl Folded {
         // The retry schedule, if any, is over once the turn reaches a terminal.
         self.side.retry = None;
 
-        let Some(turn) = self.assistant_turns.get(&turn_id).copied().and_then(|key| self.turn_at(key))
-        else {
+        let Some(key) = self.assistant_turns.get(&turn_id).copied() else {
+            return deltas;
+        };
+        deltas.extend(self.settle_open_blocks(key, terminal));
+        let Some(turn) = self.turn_at(key) else {
             return deltas;
         };
         let usage = self.usage.get(&turn_id).copied().unwrap_or_default();
@@ -772,6 +775,58 @@ impl Folded {
         let delta = Delta::TurnFinished { turn_id: self.session.turns[turn].id().to_owned(), meta };
         self.session.apply(delta.clone());
         deltas.push(delta);
+        deltas
+    }
+
+    /// A turn's terminal settles the cards it left open.
+    ///
+    /// The wire can end a turn with a tool call still `inProgress`: a shell
+    /// Muse keeps as a live session is only closed by a later turn's
+    /// `bash_input` (seen 30 minutes after the fact), and until then the
+    /// card spun and its approval read "Running" under a finished reply
+    /// (owner round 2026-09-13, follow-up). Nothing here is optimistic —
+    /// the turn's terminal is the server's word that no more work runs in
+    /// it — so a still-running call becomes done on a completed turn and
+    /// cancelled on a cancelled or failed one, and an approval still
+    /// "approving" reads as allowed once the turn is over.
+    fn settle_open_blocks(&mut self, key: TurnKey, terminal: &str) -> Vec<Delta> {
+        let Some(at_turn) = self.turn_at(key) else { return Vec::new() };
+        let settled_status = if terminal == "completed" { ToolStatus::Success } else { ToolStatus::Cancelled };
+        let blocks: Vec<Block> = match &self.session.turns[at_turn] {
+            Turn::Assistant { blocks, .. } => blocks.clone(),
+            Turn::User { .. } => return Vec::new(),
+        };
+        let mut deltas = Vec::new();
+        let open = |status: &ToolStatus| matches!(status, ToolStatus::Pending | ToolStatus::Running);
+        for (index, mut block) in blocks.into_iter().enumerate() {
+            let changed = match &mut block {
+                Block::ToolCall { status, .. } if open(status) => {
+                    *status = settled_status;
+                    true
+                }
+                Block::ToolGroup { calls, state, .. }
+                    if *state == ActivityState::Working || calls.iter().any(|call| open(&call.status)) =>
+                {
+                    for call in calls.iter_mut() {
+                        if open(&call.status) {
+                            call.status = settled_status;
+                        }
+                    }
+                    *state = if terminal == "completed" { ActivityState::Done } else { ActivityState::Failed };
+                    true
+                }
+                Block::Approval { state: state @ ApprovalState::Approving, .. } if terminal == "completed" => {
+                    // The exit code never reached the wire; the turn's own
+                    // terminal is the only outcome there is.
+                    *state = ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 };
+                    true
+                }
+                _ => false,
+            };
+            if changed {
+                deltas.extend(self.update_block(Slot { turn: key, block: index }, block));
+            }
+        }
         deltas
     }
 

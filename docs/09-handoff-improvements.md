@@ -12,9 +12,12 @@ maintenance version; read this one first when starting the improvements session.
 
 | repo | branch | head | note |
 |---|---|---|---|
-| `~/Projects/harness` | `main` | `ac6a20e` | the app; all five phases, docs, CI workflow, 68 screenshots, 10 captures |
-| `~/Projects/agentic-ui` | `main` | `e8538d1` | `muse-support` fast-forwarded into `main` on 2026-09-09; gates green on `main` |
-| `~/Projects/agentic-ui` | `muse-support` | `e8538d1` | identical to `main`; may be deleted or kept as the next feature branch |
+| `~/Projects/harness` | `main` | see `git log` (2026-09-13: owner round, follow-up) | the app; five phases, the improvements/audit/transcript passes, the owner round; `muse` CLI 1.1.1 |
+| `~/Projects/agentic-ui` | `main` | `b1850d5` | every branch through `owner-followup-2026-09-13` merged; gates green on `main` |
+
+(The table as first written on 2026-09-09 read `ac6a20e` / `e8538d1`; the sections below
+still describe that state where they name commits. Later passes are in `docs/CHANGELOG.md`
+and `docs/diagnosis/`; §12 is the next feature.)
 
 Neither repository has a git remote. The harness CI workflow
 (`.github/workflows/ci.yml`) checks out `latekaapi/agentic-ui` beside it and
@@ -300,3 +303,67 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH". Library
 a new agentic-ui branch off main. Gates before every commit as §9 lists. One lead per work
 package from a self-contained brief; the main session designs and reviews.
 ```
+
+## 12. Next: Projects — one window over several workspaces (brief for the next session)
+
+Today the harness is **one window, one workspace**: `--workspace` (or the launch directory)
+is canonicalized once, `session/list` is filtered to it, `session/start` names it, the `@`
+index walks it, and the sidebar is that workspace's sessions. The owner wants **Projects**:
+the app remembers the workspaces it has been opened on, shows them as first-class objects,
+and lets a person move between them without relaunching.
+
+**What the wire gives, already known.** `session/list { workspaceRoot }` matches the string
+exactly (canonicalize `/tmp` → `/private/tmp`); `session/start { workspaceRoot }` opens a
+session anywhere; one `muse serve` child multiplexes sessions across workspaces (the
+client is per process, not per workspace); `session/resume` re-attaches any listed
+session; the index (`~/.local/share/muse/session-index.db`, read-only) carries
+`workspace_root` per session. Skills and rules are per workspace (`muse skills list` runs
+in a directory). Nothing on the wire is a "project": it is the harness's own object.
+
+**What the harness already has.** The rail's `RailItem::nav("workspace", …)` slot and the
+library's `Sidebar` workspace switcher row (`aui::nav::sidebar` handles `"workspace"` in
+`on_action`) — both wired to nothing. `Harness::workspace()` is one string read everywhere
+a call needs it (`load_sessions`, `new_session`, `load_menu_sources`, the search index's
+`files_seen`, `files::walk`). The stores under `~/Library/Application Support/harness`
+(`sessions.json`, `history.json`, `layout.json`, `search.db`) are keyed by session id or
+global, not by workspace; `history.json` and `layout.json` would stay global,
+`sessions.json` already keys by session id and needs nothing.
+
+**Decisions to take (recommendations in brackets).**
+
+1. *What a project is.* [A canonical workspace path plus a display name (folder name by
+   default, renameable) and a colour/initial; stored in a new `projects.json` under the
+   harness's Application Support dir, most-recently-opened first; nothing on Muse's side.]
+2. *Switching.* [The sidebar header's workspace switcher (the library row already exists)
+   lists projects newest-first with "Open folder…" (an `NSOpenPanel` through gpui's
+   `prompt_for_paths`) at the bottom; ⌘⇧O opens it. Switching swaps `workspace()`, re-reads
+   `session/list`, re-walks the `@` index, reloads skills, and keeps the `muse serve` child.
+   The MRU of parked session views stays valid across projects because views are keyed by
+   session id.]
+3. *Sidebar shape.* [One project at a time, not all projects at once: the list stays the
+   current project's sessions, grouped as now; the project's name sits in the header. A
+   "recent across projects" section is a later step. The collapsed rail keeps its titled
+   session tiles for the current project.]
+4. *New session.* [Always in the current project; `session/start { workspaceRoot }` as now.]
+5. *Search.* [`search.db` grows a `workspace` column on `sessions_fts` (rebuild is already
+   a full rewrite); the palette searches the current project by default with a "all
+   projects" toggle later.]
+6. *Boot.* [`--workspace` still wins; without it the last-opened project; with none the
+   launch directory, which becomes the first project.]
+7. *Library.* [The switcher popover is the existing `view_menu` shape; a `ProjectRow` for
+   the picker (name, path, session count, last activity) is the one new component and needs
+   a gallery entry. No new colour or size.]
+
+**Build order.** (a) `projects.rs` store + canonicalize + tests; (b) `Harness::workspace()`
+becomes the current project and every call site is audited (grep `workspace()`); (c) the
+switcher UI on the existing rows; (d) `--steps project:<path>` and `projects` verbs so a
+screenshot is reproducible, plus captures in both themes; (e) search scoping; (f) docs
+(`02-app.md` §sidebar, `08-keymap.md`, changelog). Free throughout: `session/list` and
+`session/start` cost nothing; never send a turn to prove a switch.
+
+**Watch for.** `session/list` matches the string exactly — canonicalize on the way in and
+never compare uncanonicalized paths; a session opened in project A and listed while B is
+current must not show (filter on the session's own `workspace_root`, not the current
+one); the `@` walk is capped at 5 000 entries per project; the tier probe and login are
+global, not per project.
+
