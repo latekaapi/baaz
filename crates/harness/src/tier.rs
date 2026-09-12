@@ -443,8 +443,33 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
         eprintln!("tier probe: {} bytes read, {} after flattening, saw {seen:?}", text.len(), flat.len());
     }
 
-    tier.ok_or_else(|| "the /upgrade card did not answer in time".to_owned())
+    // Two failures, and they are not the same failure (finding `support-11`).
+    // A card that never drew is a probe that did not get an answer; a card
+    // that drew and did not parse is a card whose wording this build does not
+    // know, and the fix for that is in this file, not on the machine.
+    tier.ok_or_else(|| {
+        if flatten(&text).trim().is_empty() {
+            "the /upgrade card did not answer in time".to_owned()
+        } else {
+            "the /upgrade card was not recognised; this build's wording may be out of date".to_owned()
+        }
+    })
 }
+
+/// The literal sentences [`parse_card`] keys on.
+///
+/// Named constants rather than string literals inside the matcher so the
+/// wording is pinned in one place and a test can assert it (finding
+/// `support-11`): any TUI rewording lands in [`Tier::Unavailable`], which only
+/// warns, so the wording is a fact this build depends on and has to state.
+pub const CARD_SUBSCRIBED: &str = "subscribed to the";
+/// The pay-as-you-go sentences, lowercased, any one of which is a match.
+pub const CARD_PAY_AS_YOU_GO: [&str; 4] = [
+    "pay-as-you-go",
+    "pay as you go",
+    "subscriptions aren't currently available",
+    "subscriptions are not currently available",
+];
 
 /// What the card said, or `None` while it has not said it yet.
 ///
@@ -460,11 +485,7 @@ fn parse_card(raw: &str) -> Option<Tier> {
         });
     }
     let lower = text.to_lowercase();
-    if lower.contains("pay-as-you-go")
-        || lower.contains("pay as you go")
-        || lower.contains("subscriptions aren't currently available")
-        || lower.contains("subscriptions are not currently available")
-    {
+    if CARD_PAY_AS_YOU_GO.iter().any(|sentence| lower.contains(sentence)) {
         return Some(Tier::PayAsYouGo);
     }
     None
@@ -472,7 +493,7 @@ fn parse_card(raw: &str) -> Option<Tier> {
 
 /// `…subscribed to the Muse Code High Usage plan.` → `Muse Code High Usage`.
 fn plan_name(text: &str) -> Option<String> {
-    let start = text.find("subscribed to the")? + "subscribed to the".len();
+    let start = text.find(CARD_SUBSCRIBED)? + CARD_SUBSCRIBED.len();
     let rest = text[start..].trim_start();
     let end = rest.find(" plan")?;
     let name = rest[..end].trim().trim_matches('*').trim();
@@ -770,6 +791,37 @@ mod tests {
         assert_eq!(current_pct, Some(0));
         assert_eq!(weekly_pct, Some(2));
         assert_eq!(resets, vec!["Resets at 5:17 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+    }
+
+    /// The wording this build reads the card by, pinned (finding
+    /// `support-11`).
+    ///
+    /// `parse_card` matches these sentences literally and anything else falls
+    /// through to `Unavailable`, which only warns — so a `muse` that rewords
+    /// the card would silently stop reporting the plan. Changing either
+    /// constant has to fail here first.
+    #[test]
+    fn the_cards_wording_is_pinned() {
+        assert_eq!(CARD_SUBSCRIBED, "subscribed to the");
+        assert_eq!(
+            CARD_PAY_AS_YOU_GO,
+            [
+                "pay-as-you-go",
+                "pay as you go",
+                "subscriptions aren't currently available",
+                "subscriptions are not currently available",
+            ]
+        );
+        // Every one of them is lowercase, because the matcher lowercases the
+        // card before looking; a capital here would never match.
+        for sentence in CARD_PAY_AS_YOU_GO {
+            assert_eq!(sentence, sentence.to_lowercase());
+            assert_eq!(parse_card(&format!("Some heading. {sentence} today.")), Some(Tier::PayAsYouGo));
+        }
+        assert!(matches!(
+            parse_card(&format!("You are currently {CARD_SUBSCRIBED} Team plan.")),
+            Some(Tier::Subscription { .. })
+        ));
     }
 
     #[test]

@@ -206,6 +206,10 @@ pub struct Args {
     pub bench_frames: usize,
     /// `--bench-out <file.json>`: write the numbers as one JSON object.
     pub bench_out: Option<PathBuf>,
+    /// `--bench-open-turn`: stop the stream before the capture's last
+    /// `turn/completed`, so the idle window is measured with a turn still
+    /// running (finding `performance-13`).
+    pub bench_open_turn: bool,
 }
 
 fn parse_args() -> Args {
@@ -237,6 +241,7 @@ fn parse_args() -> Args {
         bench_scroll: bench::BenchScroll::Sweep,
         bench_frames: 600,
         bench_out: None,
+        bench_open_turn: false,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -343,6 +348,7 @@ fn parse_args() -> Args {
                 let value = args.next().unwrap_or_default();
                 out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
             }
+            "--bench-open-turn" => out.bench_open_turn = true,
             "--bench-out" => {
                 let value = args.next().unwrap_or_else(|| usage("--bench-out needs <file.json>"));
                 out.bench_out = Some(PathBuf::from(value));
@@ -399,7 +405,7 @@ fn usage(err: &str) -> ! {
          \x20              [--print-tier] [--approval-mode <mode>]\n\
          \x20              [--login <state>] [--login-steps <a;b;c>]\n\
          \x20              [--bench <capture.jsonl>] [--bench-cadence-ms <ms>] [--bench-scroll top|mid|tail|sweep]\n\
-         \x20              [--bench-frames <n>] [--bench-out <file.json>]\n\n\
+         \x20              [--bench-frames <n>] [--bench-open-turn] [--bench-out <file.json>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing.\n\n\
@@ -425,6 +431,7 @@ fn run_bench(args: Args) {
         scroll: args.bench_scroll,
         frames: args.bench_frames,
         out: args.bench_out.clone(),
+        open_turn: args.bench_open_turn,
     };
     let command = std::env::args().collect::<Vec<_>>().join(" ");
     let (workspace, provider) = (

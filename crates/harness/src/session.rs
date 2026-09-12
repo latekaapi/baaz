@@ -285,6 +285,12 @@ pub struct SessionView {
     cached_turns: Rc<Vec<Rc<Turn>>>,
     /// The truncated-output map for the cached turns (same refresh rule).
     cached_full_output: Rc<HashMap<String, FullOutput>>,
+    /// The newest approval still awaiting a decision, and its choices, found
+    /// while the refresh above already walks every block (finding
+    /// `performance-2`). Render used to reverse-scan the whole transcript and
+    /// clone the choices on every frame; now the scan runs once per fold
+    /// change and every reader borrows this.
+    cached_pending_approval: Option<(String, Vec<aui_protocol::ApprovalChoice>)>,
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
@@ -383,6 +389,15 @@ pub struct SessionView {
     dragging: bool,
     /// The `+` menu.
     plus_open: bool,
+    /// Whether the composer's draft trims to nothing.
+    ///
+    /// Maintained rather than read, because reading it meant copying the whole
+    /// draft out of the textarea on every frame only to ask whether it was
+    /// blank (finding `performance-8`). `InputEvent::Change` covers typing;
+    /// [`Self::note_draft`] covers the writes that set the value
+    /// programmatically, which emit no change event at all — the library's
+    /// `set_value` suppresses them on purpose.
+    draft_empty: bool,
     /// Where the composer is in this workspace's prompt history.
     history: history::Cursor,
     /// The `@` picker's last completed rank and what it was ranked for. The
@@ -473,6 +488,7 @@ impl SessionView {
             list_len: 0,
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: Rc::new(HashMap::new()),
+            cached_pending_approval: None,
             follow: true,
             text_selections: Rc::new(HashMap::new()),
             last_tick_secs: None,
@@ -510,6 +526,7 @@ impl SessionView {
             file_seq: 0,
             dragging: false,
             plus_open: false,
+            draft_empty: true,
             history: history::Cursor::new(Vec::new()),
             workspace_key,
             mention_cache: Vec::new(),
@@ -588,9 +605,20 @@ impl SessionView {
         self.running.is_some() || self.submitting
     }
 
-    /// Whether the composer is empty, which is what Escape branches on.
-    pub fn draft_is_empty(&self, cx: &gpui::App) -> bool {
-        self.composer.read(cx).value().trim().is_empty()
+    /// Whether the composer is empty, which is what Escape branches on — and
+    /// what the send button is enabled by, once a frame (finding
+    /// `performance-8`).
+    pub fn draft_is_empty(&self, _cx: &gpui::App) -> bool {
+        self.draft_empty
+    }
+
+    /// Re-read the draft's emptiness after something wrote it.
+    ///
+    /// The one place [`Self::draft_empty`] is computed. Every caller either
+    /// handled an `InputEvent::Change` or just called `set_value`, which
+    /// raises no event of its own.
+    pub(crate) fn note_draft(&mut self, cx: &gpui::App) {
+        self.draft_empty = self.composer.read(cx).value().trim().is_empty();
     }
 
     /// Whether a card field (an approval's feedback, a question's
@@ -762,6 +790,7 @@ impl SessionView {
             state.set_value(text, window, cx);
             state.set_cursor_position(position, window, cx);
         });
+        self.note_draft(cx);
     }
 
     /// Move the keyboard to the composer.

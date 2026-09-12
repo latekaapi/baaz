@@ -108,7 +108,7 @@ impl Harness {
     pub(crate) fn search_rows(&self, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
         let mut rows = Vec::new();
         if self.search_query.read(cx).value().trim().is_empty() {
-            for entry in self.visible_sessions(cx).into_iter().take(PALETTE_ROWS) {
+            for entry in self.visible_sessions(cx).iter().take(PALETTE_ROWS) {
                 rows.push((
                     format!("s:{}", entry.id).into(),
                     entry.label.clone().into(),

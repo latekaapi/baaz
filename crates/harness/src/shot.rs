@@ -76,6 +76,31 @@ async fn settle(cx: &gpui::AsyncApp, delay: Duration) {
     }
 }
 
+/// Downsample to logical pixels, encode and write, off the UI thread.
+///
+/// Split out of [`capture_and_quit`] because all three used to run inside the
+/// `cx.update` that rendered the window, blocking the UI thread for the
+/// length of a Lanczos3 resize plus a PNG encode (finding `performance-15`).
+fn write_capture(
+    image: image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    scale: f32,
+    path: &std::path::Path,
+) -> anyhow::Result<(u32, u32)> {
+    let (w, h) = (image.width(), image.height());
+    let target_w = (w as f32 / scale).round() as u32;
+    let target_h = (h as f32 / scale).round() as u32;
+    let image = if (target_w, target_h) != (w, h) {
+        image::imageops::resize(&image, target_w, target_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    image.save(path)?;
+    Ok((target_w, target_h))
+}
+
 /// Waits for the first frames, captures the window and exits the process.
 ///
 /// `await_steps` is set whenever `--steps` or `--login-steps` were given, and
@@ -133,28 +158,26 @@ pub fn capture_and_quit(
             // first frames got — polled, for the same starvation reason.
             settle(cx, delay).await;
         }
-        let result = cx.update(|cx| {
+        // Only the render stays on the UI thread; the Lanczos3 downsample,
+        // the PNG encode and the write go to the background executor
+        // (finding `performance-15`). They are the expensive two thirds of a
+        // capture and none of them needs the window.
+        let rendered = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();
                 let image = window.render_to_image()?;
-                let (w, h) = (image.width(), image.height());
-                let target_w = (w as f32 / scale).round() as u32;
-                let target_h = (h as f32 / scale).round() as u32;
-                let image = if (target_w, target_h) != (w, h) {
-                    image::imageops::resize(&image, target_w, target_h, image::imageops::FilterType::Lanczos3)
-                } else {
-                    image
-                };
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                image.save(&path)?;
-                anyhow::Ok((target_w, target_h))
+                anyhow::Ok((image, scale))
             })
         });
+        let result = match rendered {
+            Ok(Ok((image, scale))) => {
+                let path = path.clone();
+                cx.background_executor().spawn(async move { write_capture(image, scale, &path) }).await
+            }
+            Ok(Err(err)) | Err(err) => Err(err),
+        };
         match result {
-            Ok(Ok((w, h))) => println!("wrote {} ({w}\u{d7}{h})", path.display()),
-            Ok(Err(err)) => eprintln!("screenshot failed: {err:#}"),
+            Ok((w, h)) => println!("wrote {} ({w}\u{d7}{h})", path.display()),
             Err(err) => eprintln!("screenshot failed: {err:#}"),
         }
         // The billing probe may still be driving the `muse` TUI on a

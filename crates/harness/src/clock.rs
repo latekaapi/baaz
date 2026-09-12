@@ -60,7 +60,7 @@ fn frozen_local() -> DateTime<Local> {
 ///
 /// Callers that label data (the sidebar) do not use this directly: they take
 /// the newest timestamp in the data as "now" (see
-/// [`crate::sidebar::grouping`]), so the newest row reads "now" however old
+/// [`crate::sidebar::grouping_now`]), so the newest row reads "now" however old
 /// the fixture is. This is the fallback for rows with no data behind them.
 pub fn now_local() -> DateTime<Local> {
     if deterministic() {

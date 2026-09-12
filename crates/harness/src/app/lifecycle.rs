@@ -31,6 +31,7 @@ impl Harness {
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
             if let Ok(list) = result {
+                this.invalidate_list();
                 this.sessions = list
                     .sessions
                     .iter()
@@ -120,18 +121,21 @@ impl Harness {
     /// `hidden`: list hidden sessions anyway.
     pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) {
         self.show_hidden = !self.show_hidden;
+        self.invalidate_list();
         cx.notify();
     }
 
     /// `empty`: list sessions with no turns anyway.
     pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) {
         self.show_empty = !self.show_empty;
+        self.invalidate_list();
         cx.notify();
     }
 
     /// `show-archived`: list archived sessions anyway.
     pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) {
         self.show_archived = !self.show_archived;
+        self.invalidate_list();
         cx.notify();
     }
 
@@ -165,6 +169,7 @@ impl Harness {
     ///
     /// The same precedence [`SessionEntry::join`] documents, in one place.
     pub(super) fn rejoin(&mut self) {
+        self.invalidate_list();
         for entry in &mut self.sessions {
             let meta = self.overrides.get(&entry.id);
             let index = self.index.get(&entry.id);
@@ -444,6 +449,7 @@ impl Harness {
             }
             SessionEvent::ToggleEmpty => {
                 self.show_empty = !self.show_empty;
+                self.invalidate_list();
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),

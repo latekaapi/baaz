@@ -19,7 +19,14 @@ impl SessionView {
         if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
             return;
         }
+        // An image still being read has no bytes to send (finding
+        // `performance-14`). The send button is already down; this is the
+        // keyboard's path to the same refusal, and the draft stays put.
+        if self.attachments_pending() {
+            return;
+        }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
+        self.note_draft(cx);
         // `!` is the shell escape hatch (research §1.12): a command, not a turn,
         // outside any turn, and still subject to the approval policy.
         if let Some(command) = text.strip_prefix('!') {
@@ -145,6 +152,7 @@ impl SessionView {
             return;
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
+        self.note_draft(cx);
         self.steer_text(text, cx);
     }
 

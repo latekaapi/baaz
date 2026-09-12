@@ -249,6 +249,12 @@ pub(crate) const LOGIN_VERBS: &[LoginVerb] = &[
     LoginVerb { verb: "wait", run: |_, _, _, _| true },
 ];
 
+/// How often a scripted `image:` step asks whether the background decode has
+/// landed, and how many times before it gives up (finding `performance-14`).
+const ATTACH_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+/// 100 × 20 ms = two seconds, which is far past any image under the 10 MB cap.
+const ATTACH_WAIT_POLLS: usize = 100;
+
 /// One `--steps` item, tried against the window's verbs.
 ///
 /// Returns whether it was one of them; anything else goes on to
@@ -311,6 +317,22 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             if ran.is_err() {
                 capture.set_steps_running(false);
                 return;
+            }
+            // `image:` hands its read and decode to the background executor
+            // (finding `performance-14`), so the step is not done when the
+            // call returns — it is done when the chip stops being a
+            // placeholder. Bounded, so a file that never decodes cannot hang
+            // a scripted capture.
+            for _ in 0..ATTACH_WAIT_POLLS {
+                let pending = this
+                    .read_with(cx, |this, cx| {
+                        this.active.as_ref().is_some_and(|view| view.read(cx).attachments_pending())
+                    })
+                    .unwrap_or(false);
+                if !pending {
+                    break;
+                }
+                cx.background_executor().timer(ATTACH_POLL).await;
             }
         }
         capture.set_steps_running(false);

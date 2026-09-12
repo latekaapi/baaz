@@ -64,6 +64,33 @@ pub struct BenchOptions {
     pub frames: usize,
     /// Where to write the JSON row, if any.
     pub out: Option<PathBuf>,
+    /// Leave the capture's last turn running: the stream stops before its
+    /// `turn/completed`, so the idle window is measured against a transcript
+    /// that is still streaming rather than a settled one (finding
+    /// `performance-13`). A settled transcript must request no frames at all;
+    /// an open turn must request the frames its elapsed row needs — one a
+    /// second — and no more.
+    pub open_turn: bool,
+}
+
+/// The events to stream, cut before the last `turn/completed` when the run
+/// asked for an open turn.
+///
+/// The cut is what leaves the view "Working…" with a live ticker: the 1 Hz
+/// elapsed row is the only clock that should still be asking for frames, so
+/// `bench-idle` under this flag is that clock's own count and anything above
+/// it is a clock that failed to gate itself.
+fn cut_for_open_turn(events: Vec<MuseEvent>, open_turn: bool) -> Vec<MuseEvent> {
+    if !open_turn {
+        return events;
+    }
+    let last_completed = events.iter().rposition(|event| {
+        matches!(event, MuseEvent::Notification { method, .. } if method == "turn/completed")
+    });
+    match last_completed {
+        Some(at) => events.into_iter().take(at).collect(),
+        None => events,
+    }
 }
 
 /// The bench window's root: one replayed session view, rendered whole every
@@ -170,6 +197,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
             _ => None,
         })
         .unwrap_or_else(|| "bench".to_owned());
+    let events = cut_for_open_turn(events, opts.open_turn);
     root.update(cx, |root, cx| {
         root.view.update(cx, |view, cx| view.begin_bench_replay(session_id, sent, cx));
     });
@@ -277,7 +305,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         );
         println!("bench-frames frames={frames} fps={fps:.1} dropped={dropped} stream_secs={stream_secs:.1}");
         println!("bench-rss peak_mb={rss_mb:.1}");
-        println!("bench-idle frames_2s={idle_frames}");
+        println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
         if let Some(path) = opts.out.as_ref() {
             let row = serde_json::json!({
                 "command": command,
@@ -310,6 +338,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                 "dropped": dropped,
                 "stream_secs": stream_secs,
                 "idle_frames_2s": idle_frames,
+                "idle_open_turn": opts.open_turn,
                 "rss_peak_mb": rss_mb,
             });
             match serde_json::to_string_pretty(&row)

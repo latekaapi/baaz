@@ -66,7 +66,12 @@ impl Harness {
     pub(crate) fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let visible = self.visible_sessions(cx);
         let empty = self.render_sidebar_empty(&visible, cx);
-        let grouping = sidebar::grouping(&visible);
+        // Both come from the window's cache: built once per change and once
+        // per minute, not once per frame (findings `performance-5`,
+        // `support-2`). The library takes the grouping by value, so the frame
+        // still pays one clone of the built rows — see the report's
+        // library-side note.
+        let grouping = sidebar::Grouping::clone(&self.sidebar_grouping(cx));
         let selected = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             this.resume(id.to_string(), window, cx);

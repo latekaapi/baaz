@@ -386,7 +386,12 @@ least `--bench-frames` frames (default 600), then prints one line per metric
 is the interval between consecutive paints while frames are requested, and
 `bench-frames` reports `frames fps dropped`, dropped meaning past 16.7 ms) —
 plus `bench-rss` (peak RSS) and `bench-idle`: the frames a settled
-transcript requests over the next 2 s, which must be none. `--bench-out
+transcript requests over the next 2 s, which must be none.
+`--bench-open-turn` stops the stream before the capture's last
+`turn/completed` instead, so the same window is measured with a turn
+still running: the only clock that may still ask for frames is the 1 Hz
+elapsed row, so `bench-idle frames_2s` must be 2 and never more
+(finding `performance-13`). `--bench-out
 <file.json>` writes the same numbers plus the command, the capture, the
 build profile and the git short hash, for tracking across runs. `--bench`
 implies `HARNESS_FRAME_STATS` (read once, so disabled builds pay one relaxed

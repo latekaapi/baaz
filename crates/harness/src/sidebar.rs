@@ -11,7 +11,9 @@
 
 use aui_icons::Provider;
 use aui_tokens::AgentState;
-use aui::nav::{DateGroup, Grouping, SessionSummary};
+pub use aui::nav::Grouping;
+
+use aui::nav::{DateGroup, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
@@ -116,7 +118,7 @@ impl SessionEntry {
     /// It is labelled by the file rather than by the index, because a replayed
     /// session is not one this host ever ran and the index has nothing to say
     /// about it. The timestamp is the deterministic clock, so two runs label
-    /// the row the same way (see [`grouping`]).
+    /// the row the same way (see [`grouping_now`]).
     pub fn replayed(session_id: &str, capture: &std::path::Path) -> Self {
         let label = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
         Self {
@@ -178,23 +180,27 @@ impl SessionEntry {
     }
 }
 
-/// Group the entries by calendar day, newest first, into the date view.
+/// The single "now" a grouping is built against.
 ///
-/// One clock per frame: the caller hands the entries in and this reads "now"
-/// once. Under `HARNESS_DETERMINISTIC=1` "now" is the newest `updated` in the
-/// data, so the newest row reads "now" however old the fixture is and two
-/// runs group and label identically.
-pub fn grouping(entries: &[SessionEntry]) -> Grouping {
-    let now = if crate::clock::deterministic() {
+/// Under `HARNESS_DETERMINISTIC=1` it is the newest `updated` in the data, so
+/// the newest row reads "now" however old the fixture is and two runs group
+/// and label identically.
+///
+/// One clock per grouping, never one per row (findings `performance-6`,
+/// `support-3`), and the window keys its grouping cache on the minute of it
+/// (finding `support-2`), which is the finest thing an elapsed tag says.
+pub fn grouping_now(entries: &[SessionEntry]) -> DateTime<Local> {
+    if crate::clock::deterministic() {
         entries.iter().map(|e| e.updated).max().unwrap_or_else(crate::clock::now_local)
     } else {
         Local::now()
-    };
-    grouping_at(entries, now)
+    }
 }
 
-/// [`grouping`] against an explicit clock, so tests can pin it.
-fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
+/// Group the entries by calendar day, newest first, against an explicit
+/// clock, so tests can pin it and the window's cache can hand back the clock
+/// it keyed on. [`grouping_now`] is the clock a frame uses.
+pub fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
     let mut sorted: Vec<&SessionEntry> = entries.iter().collect();
     sorted.sort_by_key(|e| std::cmp::Reverse(e.updated));
     let mut groups: Vec<DateGroup> = Vec::new();
@@ -346,6 +352,55 @@ mod tests {
         let first = grouping_at(&entries, now);
         let second = grouping_at(&entries, now);
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
+    }
+
+    /// What a sidebar frame used to cost at five hundred sessions, and what
+    /// it costs now (findings `performance-5`, `support-2`).
+    ///
+    /// `render_sidebar` itself needs a window, so this times the two pure
+    /// halves it is made of — the visible filter-and-sort and the grouping
+    /// that builds one `SessionSummary` per row — against the cached frame,
+    /// which is an `Rc` hand-back plus the one clone the library's
+    /// by-value `sidebar_view` still asks for. Numbers with `--nocapture`;
+    /// the assertion is only the ordering, so the test is not a timing flake.
+    #[test]
+    fn five_hundred_sidebar_rows_cost_less_from_the_cache() {
+        const N: usize = 500;
+        const FRAMES: usize = 20;
+        let now = Local::now();
+        let entries: Vec<SessionEntry> = (0..N)
+            .map(|i| {
+                let mut e = entry(&format!("s{i}"));
+                e.label = format!("session number {i}");
+                e.description = format!("did something to file {i}");
+                e.turns = (i % 7) as u64;
+                e.updated = now - chrono::Duration::minutes(i as i64 * 7);
+                e
+            })
+            .collect();
+        // Cold: what every frame did before — clone-and-sort the visible
+        // list, then group it, building every row.
+        let cold = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            let mut visible: Vec<SessionEntry> = entries.iter().filter(|e| !e.hidden).cloned().collect();
+            visible.sort_by_key(|e| std::cmp::Reverse(e.updated));
+            std::hint::black_box(grouping_at(&visible, now));
+        }
+        let cold = cold.elapsed() / FRAMES as u32;
+        // Warm: what a frame does now — the cached rows and the cached
+        // grouping, handed out behind `Rc`, cloned once for the library.
+        let mut visible: Vec<SessionEntry> = entries.iter().filter(|e| !e.hidden).cloned().collect();
+        visible.sort_by_key(|e| std::cmp::Reverse(e.updated));
+        let visible = std::rc::Rc::new(visible);
+        let grouping = std::rc::Rc::new(grouping_at(&visible, now));
+        let warm = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            std::hint::black_box(std::rc::Rc::clone(&visible));
+            std::hint::black_box(Grouping::clone(&grouping));
+        }
+        let warm = warm.elapsed() / FRAMES as u32;
+        eprintln!("sidebar-rows n={N} cold={cold:?}/frame warm={warm:?}/frame");
+        assert!(warm < cold, "cached frame ({warm:?}) must cost less than the rebuild ({cold:?})");
     }
 
     fn entry(id: &str) -> SessionEntry {
