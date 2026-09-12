@@ -154,10 +154,16 @@ struct WheelStep {
     clamped: bool,
 }
 
+/// The shortest row the list can hold: a one-line marker or footer. A wheel
+/// event may legitimately cross this many rows of that height.
+const MIN_ROW_PX: f32 = 24.0;
+
 /// Rows one wheel event may legitimately cross before the step counts as a
-/// jump: the event's travel at the first-fill height hint, plus slack.
+/// jump: the event's travel over one-line rows, plus slack. Rows are blocks
+/// (`session::ROW_HEIGHT_HINT` is the typical one), so a 120 px event can
+/// honestly cross several; a jump is the H2 teleport, tens of rows at once.
 fn expected_rows(dy: f32) -> usize {
-    (dy.abs() / session::TURN_HEIGHT_HINT).ceil() as usize + 3
+    (dy.abs() / MIN_ROW_PX).ceil() as usize + 3
 }
 
 /// Classify one sampled wheel step. A nonzero pixel step always moves the
@@ -458,6 +464,11 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
             .windows(2)
             .map(|pair| pair[1].duration_since(pair[0]).as_micros() / 1000)
             .collect();
+        // The intervals in frame order, for `--bench-out`: the percentiles say
+        // how bad the tail is, the series says *when* — during the stream,
+        // or on the frames a wheel phase brings new rows into measurement.
+        let gaps_series_us: Vec<u128> =
+            times.windows(2).map(|pair| pair[1].duration_since(pair[0]).as_micros()).collect();
         gaps_ms.sort_unstable();
         let dropped = times
             .windows(2)
@@ -574,6 +585,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                     "p90_ms": percentile(&gaps_ms, 0.9),
                     "p99_ms": percentile(&gaps_ms, 0.99),
                     "max_ms": gaps_ms.last().copied().unwrap_or(0),
+                    "series_us": gaps_series_us,
                 },
                 "frames": frames,
                 "fps": fps,

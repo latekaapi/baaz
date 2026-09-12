@@ -312,11 +312,28 @@ fn silent_footer_row(meta: &TurnMeta, count: u64, cx: &mut App) -> AnyElement {
     footer.into_any_element()
 }
 
-/// Render one turn: the person's bubble, or every block of an assistant reply.
+/// How many transcript rows a turn occupies: one for the person's bubble;
+/// one per block of an assistant reply, plus the harness's own footer row
+/// on a silent turn.
+///
+/// The virtual list is one item per **row**, not per turn (see
+/// `SessionView::sync_virtual_list`): a real turn can run to hundreds of
+/// blocks, and a list item is laid out whole every frame it is visible, so
+/// per-turn items made a frame cost what the biggest visible turn cost.
+pub fn turn_rows(turn: &Turn) -> usize {
+    match turn {
+        Turn::User { .. } => 1,
+        Turn::Assistant { blocks, .. } => blocks.len() + usize::from(silent_reasoning(turn).is_some()),
+    }
+}
+
+/// Render one row of a turn — see [`turn_rows`] for what a row is.
 ///
 /// `settled` is false only for the newest turn, so history does not replay the
-/// reveal animation when the window opens or a session is resumed.
-pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+/// reveal animation when the window opens or a session is resumed. A `row`
+/// past [`turn_rows`] renders nothing, so a list that is one frame ahead of
+/// its cache never panics.
+pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &mut Window, cx: &mut App) -> AnyElement {
     // A turn can bill reasoning tokens and emit no reasoning item at all
     // (improvement candidate 3 in docs/09-handoff-improvements.md §8). On a
     // silent turn this row *is* the footer — the library's cells with the
@@ -325,6 +342,9 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
     let silent = silent_reasoning(turn);
     match turn {
         Turn::User { id, text, .. } => {
+            if row != 0 {
+                return div().into_any_element();
+            }
             let mut turn = user_turn(SharedString::from(id.clone()), text.clone()).actions_bottom(true);
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
@@ -346,27 +366,25 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
                 turn = turn
                     .on_action(move |action, window, cx| act(turn_id.clone(), body.clone(), action, window, cx));
             }
-            vec![div().w_full().flex().justify_end().child(turn).into_any_element()]
+            div().w_full().flex().justify_end().child(turn).into_any_element()
         }
         Turn::Assistant { id, blocks, meta } => {
             let last = blocks.len().saturating_sub(1);
             // A silent turn gets the harness's own footer row, so its blocks
             // carry no library footer.
             let library_meta = if silent.is_some() { None } else { Some(meta) };
-            let mut rows: Vec<AnyElement> = blocks
-                .iter()
-                .enumerate()
-                .map(|(index, b)| {
-                    let key = block_key(id, index);
-                    let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), index, settled, window, cx);
-                    let body = block(&key, id, b, index == last, library_meta, folds, cx);
+            match blocks.get(row) {
+                Some(b) => {
+                    let key = block_key(id, row);
+                    let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), row, settled, window, cx);
+                    let body = block(&key, id, b, row == last, library_meta, folds, cx);
                     div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
-                })
-                .collect();
-            if let Some(count) = silent {
-                rows.push(silent_footer_row(meta, count, cx));
+                }
+                None => match silent {
+                    Some(count) if row == blocks.len() => silent_footer_row(meta, count, cx),
+                    _ => div().into_any_element(),
+                },
             }
-            rows
         }
     }
 }
@@ -985,6 +1003,17 @@ mod tests {
             silent_reasoning(&assistant(vec![thinking_block(), text_block()], 419)),
             None
         );
+    }
+
+    /// One list row per block, plus the silent footer, plus the bubble: the
+    /// virtual list's item count is the sum of these over the cached turns.
+    #[test]
+    fn rows_are_blocks_and_the_silent_footer() {
+        let user = Turn::User { id: "u".to_owned(), text: "hi".to_owned(), attachments: vec![], mentions: vec![] };
+        assert_eq!(turn_rows(&user), 1);
+        assert_eq!(turn_rows(&assistant(vec![text_block(), text_block(), text_block()], 0)), 3);
+        // Reasoning tokens with no reasoning block: the footer row is added.
+        assert_eq!(turn_rows(&assistant(vec![text_block()], 419)), 2);
     }
 
     #[test]

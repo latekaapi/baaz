@@ -125,12 +125,11 @@ pub const TRANSCRIPT_CONTEXT: &str = "HarnessTranscript";
 /// never the composer, a card field or the rename field.
 pub const TRANSCRIPT_COPY_KEYS: &str =
     "HarnessTranscript && !HarnessComposer && !field && !HarnessRename";
-/// The height hint a fresh transcript row carries before it is measured: a
-/// typical settled turn. Unmeasured rows without a hint count as 0 px in the
-/// list's sum tree, so one upward wheel event clamps at the head and
-/// teleports there (H2); with the hint the scrollbar and the wheel map onto
-/// roughly the right rows until measurement replaces it.
-pub(crate) const TURN_HEIGHT_HINT: f32 = 120.0;
+/// The height hint an unmeasured transcript **row** carries: a typical block
+/// (a tool card, a short paragraph). The list is one item per block, not per
+/// turn, so the hint is a block's, and the error on any one row is small
+/// enough that a flick over unmeasured rows lands where it should.
+pub(crate) const ROW_HEIGHT_HINT: f32 = 72.0;
 /// The gap the caret popovers leave above the composer, matching the
 /// library's own `.pop{margin-bottom:8px}`.
 const POPOVER_GAP: f32 = 8.0;
@@ -295,6 +294,24 @@ pub struct SessionView {
     /// gated by the `follow` flag each fold change sets.
     list_state: ListState,
     list_len: usize,
+    /// The list's rows: `(turn index, row within the turn)` for every row of
+    /// every cached turn, rebuilt with the render cache. One item per
+    /// **row** — a block, a bubble, a silent footer — never per turn: a
+    /// visible list item is laid out whole every frame, and a real turn can
+    /// run to hundreds of blocks (owner round 2026-09-13, item 2).
+    rows: Rc<Vec<(usize, usize)>>,
+    /// Per cached turn, `(turn id, row count)`, so the next sync can find the
+    /// first turn whose rows changed and splice from there, keeping the rows
+    /// above it measured.
+    row_counts: Vec<(String, usize)>,
+    /// The list's last laid-out width. gpui forgets every row height, hints
+    /// included, when the width changes; the frame after a change re-hints
+    /// (`note_list_width`).
+    list_width: Option<f32>,
+    /// Set when the width changed: the next sync re-hints the rows.
+    rehint: bool,
+    /// The `(turn id, row count)` list the virtual list was last synced to.
+    synced_counts: Vec<(String, usize)>,
     /// What `render_transcript` reads every frame (C1): one snapshot shared
     /// by steady-state frames, refreshed only when the fold changes (length
     /// drift or `follow`), so per-frame cost stays bounded as the transcript
@@ -510,6 +527,11 @@ impl SessionView {
                 px(crate::WINDOW_H),
             ),
             list_len: 0,
+            rows: Rc::new(Vec::new()),
+            row_counts: Vec::new(),
+            list_width: None,
+            rehint: false,
+            synced_counts: Vec::new(),
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: Rc::new(HashMap::new()),
             cached_pending_approval: None,
@@ -807,7 +829,9 @@ impl SessionView {
     /// 1 = tail) without touching the pointer, for `--bench --bench-scroll`.
     pub fn bench_scroll_to(&mut self, frac: f32, cx: &mut Context<Self>) {
         self.follow = false;
-        let len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
+        // Rows, not turns: the list is one item per block. The cache may be
+        // a frame behind the fold; the row count is what the list holds now.
+        let len = self.list_len;
         let ix = ((len.saturating_sub(1) as f32) * frac.clamp(0.0, 1.0)) as usize;
         self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
         cx.notify();
@@ -946,6 +970,14 @@ pub(crate) fn parse_replay_file(path: &std::path::Path) -> Result<ParsedReplay, 
         }
         let Some(body) = line.strip_prefix("<-- ") else { continue };
         match muse_client::frame::parse_line(body) {
+            // A `view/page` result carries its events whole (`result.events`,
+            // each a `{method, params}`); a capture of a real open path is
+            // mostly one of those, so they are unpacked into the notifications
+            // they would have been on a live stream. Without this a captured
+            // session replayed as nothing.
+            Ok(Some(muse_client::frame::Frame::Response { result, .. })) => {
+                events.extend(page_result_events(&result));
+            }
             Ok(Some(frame)) => {
                 if let Some(event) = MuseEvent::from_frame(frame) {
                     events.push(event);
@@ -956,6 +988,20 @@ pub(crate) fn parse_replay_file(path: &std::path::Path) -> Result<ParsedReplay, 
         }
     }
     Ok((events, sent))
+}
+
+/// The notifications a `view/page` result holds, in page order; nothing for
+/// any other result.
+fn page_result_events(result: &serde_json::Value) -> Vec<MuseEvent> {
+    let Some(events) = result.get("events").and_then(|v| v.as_array()) else { return Vec::new() };
+    events
+        .iter()
+        .filter_map(|event| {
+            let method = event.get("method")?.as_str()?.to_owned();
+            let params = event.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            MuseEvent::from_frame(muse_client::frame::Frame::Notification { method, params })
+        })
+        .collect()
 }
 
 fn submitted_text(line: &str) -> Option<(String, String)> {
@@ -1237,7 +1283,7 @@ mod tests {
         // First-fill hint (H2): what an unmeasured row counts as before
         // layout measures it. Kept as a named constant so the assumption
         // stays visible.
-        assert_eq!(TURN_HEIGHT_HINT, 120.0);
+        assert_eq!(ROW_HEIGHT_HINT, 72.0);
     }
 
     #[test]
@@ -1256,10 +1302,36 @@ mod tests {
         bare.scroll_by(px(-120.0));
         assert_eq!(bare.logical_scroll_top().item_ix, 592);
         let hinted = ListState::new(0, ListAlignment::Top, px(crate::WINDOW_H));
-        hinted.reset_with_uniform_height(592, px(TURN_HEIGHT_HINT));
+        hinted.reset_with_uniform_height(592, px(ROW_HEIGHT_HINT));
         hinted.scroll_to_end();
         hinted.scroll_by(px(-120.0));
-        assert_eq!(hinted.logical_scroll_top().item_ix, 591);
+        // 120 px over 72 px rows: two rows up from the past-end anchor.
+        let climbed = (120.0 / ROW_HEIGHT_HINT).ceil() as usize;
+        assert_eq!(hinted.logical_scroll_top().item_ix, 592 - climbed);
+    }
+
+    /// The owner-round fix (2026-09-13, item 2): rows appended after the
+    /// first fill — a history page — used to arrive with no hint, so the
+    /// H2 stack came back on any session longer than one page. Re-hinting
+    /// keeps measured heights (they become their own hints) and gives the
+    /// new rows the row hint, and the tail pin survives it.
+    #[test]
+    fn appended_rows_are_hinted_and_the_tail_survives() {
+        let list = ListState::new(0, ListAlignment::Top, px(crate::WINDOW_H));
+        list.reset_with_uniform_height(10, px(ROW_HEIGHT_HINT));
+        list.splice(10..10, 1000);
+        list.scroll_to_end();
+        // Unhinted: the sum tree above the tail is 10 hinted rows tall, so a
+        // flick of 3 000 px lands at the head.
+        list.scroll_by(px(-3000.0));
+        assert_eq!(list.logical_scroll_top().item_ix, 0);
+        // Re-hinted (what `rehint_rows` does): the same flick climbs about
+        // 3000 / ROW_HEIGHT_HINT rows from the tail.
+        list.reset_with_uniform_height(1010, px(ROW_HEIGHT_HINT));
+        list.scroll_to_end();
+        list.scroll_by(px(-3000.0));
+        let expected = 1010 - (3000.0 / ROW_HEIGHT_HINT).ceil() as usize;
+        assert!((expected.saturating_sub(1)..=expected + 1).contains(&list.logical_scroll_top().item_ix));
     }
 
     #[test]
