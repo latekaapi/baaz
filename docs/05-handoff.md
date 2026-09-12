@@ -47,6 +47,11 @@ Do not touch ~/Projects/cockpit.
 
 ## Where things are
 
+The 2026-09-12 review and performance pass is recorded in `docs/audit/` (findings, plan,
+status) and its changelog entry; the regression method it established — byte-identical
+captures under `HARNESS_DETERMINISTIC=1` and `--bench` before/after — is the bar for
+every refactor since.
+
 `docs/07-architecture.md` has the map. The short version: `muse-client` is the
 wire, `muse-adapter` is the fold and has no gpui dependency at all, `harness` is
 the window. Two entities own state (`Harness`, `SessionView`) and one owns
