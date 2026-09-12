@@ -373,8 +373,23 @@ scrolls the list to the bottom, but only for a reader who was already within a
 few dozen pixels of it.
 
 The transcript list is virtualized (2026-09-10): `render_transcript` renders a
-gpui `list()` with a persistent top-aligned `ListState`, one item per turn,
-instead of building every cell every frame. Top, so a short transcript starts
+gpui `list()` with a persistent top-aligned `ListState`, one item per **row**
+— a block of an assistant turn, a user bubble, or the silent-reasoning
+footer (`transcript::turn_rows` / `turn_row`) — instead of building every
+cell every frame. Per row rather than per turn since the owner round of
+2026-09-13: gpui lays a visible list item out whole every frame, and a real
+turn runs to hundreds of blocks, so per-turn items cost a frame whatever the
+biggest visible turn cost. Every row carries a height hint (`ROW_HEIGHT_HINT`)
+until it is measured: on the first fill, again after each history page lands
+(`rehint_rows`: measured rows keep their heights as hints, the scroll position
+is put back, and one frame of wheel events is dropped, which is the price of
+gpui's `reset`), and again on the frame after the list's width changed
+(`note_list_width`, fed by the wrapper's `on_children_prepainted`), because
+gpui forgets every height and hint on a width change. An unhinted row counts
+as 0 px in the list's sum tree, and a flick over a stack of them lands on the
+head (H2). A change in one turn's row count splices from that turn's first
+row (`sync_virtual_list` diffs the per-turn `(id, rows)` list), so the rows
+above stay measured. Top, so a short transcript starts
 at the top instead of leaving a void above it; tail-follow is the `follow`
 flag (`scroll_to_end` when the reader was at the tail), never the alignment.
 The list wrapper carries the pre-virtualised container's own gutters
@@ -396,8 +411,10 @@ and unchanged turns are never re-parsed (the library memoises markdown).
 
 ### Measuring
 
-`harness --bench <capture.jsonl>` streams the capture's `<--` lines through
-the fold on a timer at `--bench-cadence-ms` (default 4, so streaming cost is
+`harness --bench <capture.jsonl>` streams the capture's `<--` lines — a
+`view/page` result's `events` unpacked into the notifications they stand
+for, so a `MUSE_CAPTURE` of a real open path benches as the live stream
+would — through the fold on a timer at `--bench-cadence-ms` (default 4, so streaming cost is
 real) while driving the transcript `ListState` programmatically:
 `--bench-scroll top` pins the first turn, `mid` re-centres, `tail` follows
 the tail, `sweep` (the default) runs top→tail→top over the stream. It runs at
@@ -405,7 +422,9 @@ least `--bench-frames` frames (default 600), then prints one line per metric
 — `bench-element`, `bench-apply` and `bench-frame` with `n p50 p90 p99 max`
 (element construction is the existing `render_transcript` timer; frame time
 is the interval between consecutive paints while frames are requested, and
-`bench-frames` reports `frames fps dropped`, dropped meaning past 16.7 ms) —
+`bench-frames` reports `frames fps dropped`, dropped meaning past 16.7 ms;
+`--bench-out` also carries the intervals in frame order as `frame.series_us`,
+so the stream's frames and a wheel phase's can be told apart) —
 plus `bench-rss` (peak RSS) and `bench-idle`: the frames a settled
 transcript requests over the next 2 s, which must be none.
 `--bench-scroll wheel` is the scroll-jank instrument rather than a frame
@@ -419,7 +438,8 @@ while the stream lands and never exercise the wheel's pixel-delta path
 through the sum tree's heights, which is where the jank lived. `wheel`
 prints one `bench-scroll` line (`events frames jumps stalls clamped` plus
 the `item_ix` after each phase: `jumps` counts frames where `item_ix` moved
-across more rows than the event's travel at the height hint explains, `stalls` frames where an event left the position unchanged
+across more rows than the event's travel over one-line rows explains (the
+H2 teleport is tens of rows at once), `stalls` frames where an event left the position unchanged
 short of a scroll limit, `clamped` frames where the event ran into the head
 or the tail limit instead — correct end-of-list behaviour, so `stalls +
 clamped` is every no-move frame) and carries the same numbers in

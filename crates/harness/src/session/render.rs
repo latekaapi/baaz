@@ -95,7 +95,7 @@ impl SessionView {
             return self.empty_or_loading(window, cx);
         }
         let folds = self.fold_intents(window, cx);
-        let element = self.transcript_list(folds);
+        let element = self.transcript_list(folds, cx);
         record_frame_stats(frame_start.elapsed());
         let _ = window;
         element
@@ -244,40 +244,92 @@ impl SessionView {
         }
     }
 
-    /// Bring the virtual list's row count in step with the cache.
+    /// Bring the virtual list in step with the cache.
     ///
-    /// The first fill hints every row at [`TURN_HEIGHT_HINT`], so a wheel
-    /// flick maps onto roughly the right rows before anything is measured
-    /// (H2); the splice is the changed range only, so visible rows keep
-    /// their measurements and the tail stays pinned (C1); a pure append
-    /// (the streaming case) measures the new tail and nothing else. The tail
-    /// is followed only when the reader was already at it — tail-follow,
-    /// owned by the list element itself.
-    pub(super) fn sync_virtual_list(&mut self, count: usize) {
-        if count != self.list_len {
+    /// One item per row (a block, a bubble, a silent footer), never per
+    /// turn: gpui lays a visible item out whole every frame, and a real turn
+    /// can run to hundreds of blocks, so per-turn items cost a frame what
+    /// the biggest visible turn cost — 8 ms p90 on a real session, past a
+    /// 120 Hz budget (owner round 2026-09-13, item 2).
+    ///
+    /// Heights: an unmeasured row with no hint counts as 0 px in the list's
+    /// sum tree, so an upward flick over such rows clamps at the head and
+    /// teleports there (H2). Every row therefore carries a hint until it is
+    /// measured — on the first fill, after every history page (the
+    /// 2026-09-12 fix hinted the first fill only), and again after gpui
+    /// forgot every height on a width change. The splice is the changed
+    /// range only: the rows above the first turn whose row count changed
+    /// keep their measurements. A pure append (a streaming block) measures
+    /// the new tail and nothing else; a page landing during the backfill
+    /// re-hints instead, because a thousand events of unhinted rows above a
+    /// tail-pinned reader is exactly the H2 stack.
+    pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)]) {
+        let count: usize = counts.iter().map(|(_, n)| n).sum();
+        let changed = count != self.list_len || counts != self.synced_counts.as_slice();
+        if changed {
             let old = self.list_len;
+            // The first row of the first turn whose `(id, rows)` differs from
+            // what the list was last synced to; everything before it is
+            // unchanged and stays measured.
+            let same = counts
+                .iter()
+                .zip(self.synced_counts.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let from: usize = counts.iter().take(same).map(|(_, n)| n).sum();
             self.list_len = count;
-            if old == 0 {
-                self.list_state.reset_with_uniform_height(count, px(TURN_HEIGHT_HINT));
-            } else if count > old {
-                self.list_state.splice(old..old, count - old);
+            self.synced_counts = counts.to_vec();
+            if old == 0 || self.loading_history {
+                self.rehint_rows(count);
             } else {
-                self.list_state.splice(0..old, count);
+                self.list_state.splice(from..old, count - from);
             }
+        } else if std::mem::take(&mut self.rehint) {
+            self.rehint_rows(count);
         }
         if std::mem::take(&mut self.follow) && self.list_state.is_scrolled_to_end().unwrap_or(true) {
             self.list_state.scroll_to_end();
         }
     }
 
+    /// Give every unmeasured row a hint, keeping measured heights (they
+    /// become their own hints) and the scroll position. `reset` drops the
+    /// scroll position and the wheel events until the next paint, so the
+    /// position is put back by hand; one frame of dropped wheel events is the
+    /// price, paid only on a page landing or a width change.
+    fn rehint_rows(&mut self, count: usize) {
+        let at_end = self.list_state.is_scrolled_to_end().unwrap_or(true);
+        let top = self.list_state.logical_scroll_top();
+        self.list_state.reset_with_uniform_height(count, px(ROW_HEIGHT_HINT));
+        if at_end {
+            self.list_state.scroll_to_end();
+        } else if top.item_ix < count {
+            self.list_state.scroll_to(top);
+        }
+    }
+
+    /// The list's laid-out width, reported once per frame from the wrapper's
+    /// prepaint. A change means gpui has just dropped every row height and
+    /// hint; the next sync re-hints.
+    pub(super) fn note_list_width(&mut self, width: f32) {
+        if self.list_width.is_some_and(|last| (last - width).abs() > 0.5) {
+            self.rehint = true;
+        }
+        self.list_width = Some(width);
+    }
+
     /// The virtualised list itself, built from the cache and nothing else.
-    pub(super) fn transcript_list(&mut self, folds: Folds) -> AnyElement {
-        let count = self.cached_turns.len();
-        self.sync_virtual_list(count);
-        let last = count.saturating_sub(1);
-        // `Rc` clone: O(1). Only visible rows are built below.
+    pub(super) fn transcript_list(&mut self, folds: Folds, cx: &mut Context<Self>) -> AnyElement {
+        let counts = std::mem::take(&mut self.row_counts);
+        self.sync_virtual_list(&counts);
+        self.row_counts = counts;
+        let last_turn = self.cached_turns.len().saturating_sub(1);
+        let last_row = self.rows.len().saturating_sub(1);
+        // `Rc` clones: O(1). Only visible rows are built below.
         let turns = self.cached_turns.clone();
+        let rows = self.rows.clone();
         let folds = Rc::new(folds);
+        let width_report = cx.entity().downgrade();
         // The wrapper is a flex column so the virtual list's own
         //  resolves to the leftover centre height; without it the
         // list lays out at zero height and paints nothing. It carries
@@ -304,27 +356,38 @@ impl SessionView {
                     .flex_col()
                     .max_w(px(TRANSCRIPT_MEASURE))
                     .mx_auto()
+                    // The list's width, for the re-hint after a change.
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        if let Some(first) = bounds.first() {
+                            let width = f32::from(first.size.width);
+                            let _ = width_report.update(cx, |view, _| view.note_list_width(width));
+                        }
+                    })
                     .child(
                         list(self.list_state.clone(), move |ix, window, cx| {
-                            // One item per turn: only visible rows are built and laid
-                            // out per frame, so per-frame cost stays bounded as the
-                            // transcript grows (C1). Turn bodies still come from
-                            // blocks exactly as before. The 8 px gap between a turn's
-                            // blocks is the design's `.grp2{gap:8px}`; the 16 px below
-                            // each row is the transcript column's `.tr{gap:16px}`.
-                            let mut row = v_flex().w_full().gap(px(scale::SP_3)).pb(px(scale::SP_5));
+                            // One item per row of a turn: only visible rows are
+                            // built and laid out per frame, so per-frame cost
+                            // stays bounded by what is on screen, not by the
+                            // size of the turns on screen. The 8 px gap between
+                            // a turn's blocks is the design's `.grp2{gap:8px}`;
+                            // the 16 px below each turn's last row is the
+                            // transcript column's `.tr{gap:16px}`.
+                            let Some(&(turn_ix, row)) = rows.get(ix) else {
+                                return div().into_any_element();
+                            };
+                            let Some(turn) = turns.get(turn_ix) else {
+                                return div().into_any_element();
+                            };
+                            let last_of_turn = ix == last_row || rows.get(ix + 1).is_some_and(|(t, _)| *t != turn_ix);
+                            let mut item = div().w_full().pb(px(if last_of_turn { scale::SP_5 } else { scale::SP_3 }));
                             if ix == 0 {
-                                row = row.pt(px(TRANSCRIPT_PAD_TOP));
+                                item = item.pt(px(TRANSCRIPT_PAD_TOP));
                             }
                             // Under the deterministic flag every turn draws settled:
                             // the newest turn's reveal (fade + rise) never lands on
                             // the same frame twice.
-                            let settled = ix != last || crate::clock::deterministic();
-                            match turns.get(ix) {
-                                Some(turn) => row.children(transcript::turn(turn, settled, &folds, window, cx)),
-                                None => row,
-                            }
-                            .into_any_element()
+                            let settled = turn_ix != last_turn || crate::clock::deterministic();
+                            item.child(transcript::turn_row(turn, row, settled, &folds, window, cx)).into_any_element()
                         })
                         .flex_1()
                         .into_any_element(),
@@ -369,6 +432,17 @@ impl SessionView {
                 .collect();
             self.cached_turns = Rc::new(turns);
         }
+        // The list's rows, one per block, and the per-turn counts the next
+        // `sync_virtual_list` diffs against.
+        let mut rows = Vec::with_capacity(self.rows.len());
+        let mut row_counts = Vec::with_capacity(self.cached_turns.len());
+        for (turn_ix, turn) in self.cached_turns.iter().enumerate() {
+            let n = transcript::turn_rows(turn);
+            rows.extend((0..n).map(|row| (turn_ix, row)));
+            row_counts.push((turn.id().to_owned(), n));
+        }
+        self.rows = Rc::new(rows);
+        self.row_counts = row_counts;
         let mut full_output = HashMap::new();
         // The newest pending approval falls out of the same walk (finding
         // `performance-2`): forward order, keeping the last hit, is the same

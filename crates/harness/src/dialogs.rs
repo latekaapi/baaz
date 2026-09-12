@@ -422,7 +422,15 @@ impl Harness {
         };
         // The archive target stays on the dialog until its own button runs:
         // closing it any other way drops the target with it.
-        let secondary = if danger { "Cancel" } else { "Dismiss" };
+        // A dialog whose primary already dismisses it carries no second
+        // button: "Dismiss  Dismiss" was the owner's screenshot. The danger
+        // dialog keeps Cancel beside Archive; the others keep Dismiss beside
+        // Reconnect / Sign in / Done.
+        let secondary = match (danger, action) {
+            (true, _) => Some("Cancel"),
+            (false, DialogAction::Dismiss) => None,
+            (false, _) => Some("Dismiss"),
+        };
         let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
             if action == DialogAction::Archive {
                 this.confirm_archive_dialog(window, cx);
@@ -450,12 +458,15 @@ impl Harness {
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
         // A deterministic capture draws the dialog settled rather than rising
         // in: the enter presence never lands on the same frame twice.
-        let card = dialog("dialog", title)
+        let mut card = dialog("dialog", title)
             .kind(kind)
             .body(detail)
             .danger(danger)
-            .secondary(secondary)
-            .primary(primary_label)
+            .primary(primary_label);
+        if let Some(secondary) = secondary {
+            card = card.secondary(secondary);
+        }
+        let card = card
             .on_primary(move |w, cx| primary(&(), w, cx))
             .on_secondary(move |w, cx| close(&(), w, cx))
             .on_dismiss(move |w, cx| dismiss(&(), w, cx));

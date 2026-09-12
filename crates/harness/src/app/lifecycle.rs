@@ -394,7 +394,7 @@ impl Harness {
                 history: None,
             })
         };
-        self.wire_call(cx, work, move |this, result, cx| {
+        self.wire_call_in(cx, work, move |this, result, window, cx| {
             match result {
                 Ok(resumed) => {
                     crate::log::trace_mark(&format!("resume-ack mode={:?}", resumed.history.mode));
@@ -411,6 +411,21 @@ impl Harness {
                             crate::log::trace_mark("HistoryReady");
                             view.follow_tail(cx);
                         });
+                    }
+                }
+                // The server no longer knows the cached cursor (`-32011
+                // notFound`, "unknown cursor anchor"): the parked view is
+                // stale, not the person's problem. Drop it and open the
+                // session afresh — the loading row, then the pages — instead
+                // of a dialog.
+                Err(error) if error.kind() == Some(&muse_client::schema::ErrorKind::NotFound) => {
+                    crate::log::trace_mark("resume-ack-stale");
+                    crate::harness_log!("cached view of {topped} is stale ({error}); reopening");
+                    let still_open = this.active.as_ref().is_some_and(|view| view.read(cx).session_id == topped);
+                    if still_open {
+                        this.open(topped.clone(), true, window, cx);
+                        // `open` parked the stale view; it must not come back.
+                        this.session_cache.retain(|(id, _)| *id != topped);
                     }
                 }
                 Err(error) => {

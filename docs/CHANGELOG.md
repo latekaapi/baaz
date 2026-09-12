@@ -1,5 +1,35 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round: fifteen faults from three notes and nine screenshots
+
+Diagnosed first (`docs/diagnosis/owner-round-2026-09-13.md`, every item with its cause and
+owner), then fixed in three lanes: Fable directly for the pin, the dialog, the stale cursor
+and the scroll; Muse from `docs/briefs/muse-owner-lib.md` (agentic-ui
+`owner-round-2026-09-13`) and `docs/briefs/muse-owner-harness.md` (worktree
+`../harness-wt-owner`, same branch name), merged and audited here. No model turn from the
+harness; the reproductions ran on `session/list`, `session/resume`, `view/page`,
+`--replay` and `--bench`.
+
+- **Pin was slow (item 1).** Not the store, not the index: the library row's tray buttons
+  let the click bubble to the row's `on_select`, so a pin also re-opened the session
+  (loading row, `view/page`). The tray stops propagation now (library `session_row.rs`).
+- **Trackpad scroll (item 2).** Measured on a real 808-event capture, wheel phase, release:
+  frame p50 4.7 → 1.2 ms, p90 5.4 → 1.9 ms, p99 8.4 → 6.8 ms, max 30.6 → 8.4 ms, frames
+  past a 120 Hz budget 14 → 1. Cause: one list item per turn, and gpui lays a visible item
+  out whole every frame. The list is one item per **row** now (`transcript::turn_rows` /
+  `turn_row`: a block, a bubble, or the silent footer), every row carries a hint until
+  measured — first fill, after every history page (the 2026-09-12 hint covered the first
+  fill only), and after a width change (gpui drops every hint then) — and a row-count
+  change in one turn splices from that turn only. `--bench` unpacks `view/page` results, so
+  a `MUSE_CAPTURE` of a real open path benches; `--bench-out` carries the frame series;
+  the jump threshold is per one-line row. The 53 deterministic captures are visually
+  unchanged (18 differ by sub-pixel anti-aliasing on one icon row; read side by side).
+  The trackpad's physics were never the fault: macOS supplies the momentum and gpui
+  passes precise deltas through. Still for the owner: the feel on the real trackpad.
+- **Two Dismiss buttons (item 4).** A dismiss-only dialog has one button.
+- **`-32011 unknown cursor anchor` (item 5).** A cached view topped up from a cursor the
+  server forgot (`notFound`) is dropped and the session reopened afresh; no dialog.
+
 ## 2026-09-12 — The five owner-visible faults (transcript design, scroll, open path, lights/header, reopen)
 
 Diagnosed first (`docs/diagnosis/transcript-pass-2026-09-12.md`), then fixed library-first:
