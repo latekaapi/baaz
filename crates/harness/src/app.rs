@@ -23,11 +23,20 @@
 //!
 //! # What lives elsewhere
 //!
-//! [`Harness`] keeps the fields, but three of its concerns have their own
-//! modules and reach back in through one call per seam:
+//! [`Harness`] keeps the fields, boot, connect, route and `render`, but most
+//! of its concerns have their own modules and reach back in through one call
+//! per seam:
 //!
 //! * [`crate::login`] — the login screen, the `account/*` lane, the device
 //!   and API-key flows, sign-out, and `render_login`.
+//! * [`crate::sidebar_view`] — the sidebar column: nav block, session rows,
+//!   the empty states, the rename field, the footer, the rail, and the two
+//!   popovers anchored to the column.
+//! * [`crate::dialogs`] — what floats over the window: the modal, the
+//!   palette, the toast stack and the header's overflow menu.
+//! * [`crate::billing`] — the tier probe's lifecycle and the banner it hands
+//!   to the open session.
+//! * [`crate::resize`] — the sidebar divider's drag.
 //! * [`crate::steps`] — `--steps` and `--login-steps`: the verb tables, the
 //!   parser and the two runners.
 //! * [`crate::wire`] — background call, then update.
@@ -38,15 +47,14 @@ use std::sync::Arc;
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
 use aui::feedback::{banner, BannerKind, BannerRun};
-use aui::keys::{Cancel, Confirm, FocusNext, FocusPrev, SelectNext, SelectPrev, TogglePalette, ToggleSidebar};
-use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_search, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
-use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
+use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
+use aui::overlay::DialogKind;
 use aui::shell::{
-    RESIZE_HANDLE_W, SIDEBAR_WIDTH, app_shell, clamp_sidebar_width, drag_capture_overlay,
+    RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
 };
 use aui_icons::{provider_mark, IconName, Provider};
-use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, AuiTheme};
+use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
@@ -54,7 +62,6 @@ use gpui::{
     SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::{
     AccountStateKind, SessionListParams, SessionResumeParams, SessionStartParams,
@@ -65,14 +72,16 @@ use crate::auth::Identity;
 use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
-use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Overlays, Palette, PaletteKind};
-use crate::session::{SessionEvent, SessionView, TierBanner};
-use crate::tier::{self, Tier};
+use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
+use crate::resize::ResizeDrag;
+use crate::shot::CaptureToken;
+use crate::session::{SessionEvent, SessionHost, SessionView};
+use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
 use crate::sidebar::{self, SessionEntry};
 use crate::search::{FileHit, SessionHit};
 use crate::wire::WireCall;
-use crate::{files, layout, skills, Args};
+use crate::{layout, Args};
 
 actions!(
     harness,
@@ -146,7 +155,7 @@ actions!(
 
 /// The key context the sidebar's inline rename field wears, so Enter commits
 /// the name instead of reaching the composer's send.
-const RENAME_CONTEXT: &str = "HarnessRename";
+pub(crate) const RENAME_CONTEXT: &str = "HarnessRename";
 
 /// The context the composer holder wears, so Enter reaches [`SendTurn`] instead
 /// of the textarea. Shift+Enter matches no binding and falls through to the
@@ -161,24 +170,24 @@ const RENAME_CONTEXT: &str = "HarnessRename";
 const COMPOSER_CONTEXT: &str = "HarnessComposer";
 
 /// The toast stack's own width, the library's `.toast{width:320px}`.
-const TOAST_W: f32 = 320.0;
+pub(crate) const TOAST_W: f32 = 320.0;
 /// Where the stack hangs from: under the window header, at the right edge.
 /// The stack lays its toasts out **downward** from its own box, so it is
 /// anchored by its top; hanging it off the bottom would draw the newest toast
 /// off the end of the window.
-const TOAST_TOP: f32 = 56.0;
+pub(crate) const TOAST_TOP: f32 = 56.0;
 /// How much room the fanned stack is given before it would clip.
-const TOAST_STACK_H: f32 = 260.0;
+pub(crate) const TOAST_STACK_H: f32 = 260.0;
 /// How long the "Session hidden" toast's Undo stays honest.
 const UNDO_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
 /// How far below the window's top edge the palette hangs, and how dark the
 /// ground behind it goes. The library's `palette_scrim` is a design-card block
 /// of a fixed height; a window overlay places itself.
-const PALETTE_TOP: f32 = 96.0;
-const PALETTE_SCRIM: f32 = 0.4;
+pub(crate) const PALETTE_TOP: f32 = 96.0;
+pub(crate) const PALETTE_SCRIM: f32 = 0.4;
 /// How many rows the palette lists. The sidebar's search is the way through a
 /// longer list; this is the way back to something recent.
-const PALETTE_ROWS: usize = 12;
+pub(crate) const PALETTE_ROWS: usize = 12;
 /// How many sessions one refresh will spend a `session/read` on. A workspace
 /// with two hundred untitled sessions should not open two hundred reads on the
 /// first frame; the rest are picked up by the next refresh.
@@ -301,6 +310,10 @@ pub fn set_menus(cx: &mut App) {
     ]);
 }
 
+mod find;
+mod lifecycle;
+mod list;
+
 /// The connection's own state, which is what the reconnect banner reads.
 pub(crate) enum Wire {
     /// Spawning `muse serve` and shaking hands.
@@ -320,23 +333,6 @@ pub(crate) enum Wire {
 enum UndoBatch {
     Hidden(Vec<String>),
     Archived(Vec<String>),
-}
-
-/// Actions of the header's overflow menu, in row order.
-#[derive(Clone, Copy)]
-enum OverflowAction {
-    Rename,
-    Fork,
-    Archive,
-}
-
-/// Actions of the Sessions caption's view menu, in row order.
-#[derive(Clone, Copy)]
-enum ViewAction {
-    ToggleEmpty,
-    ToggleHidden,
-    ClearEmpty,
-    ToggleArchived,
 }
 
 /// The whole application.
@@ -359,32 +355,22 @@ pub struct Harness {
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
     pub(crate) overlays: Entity<Overlays>,
-    sidebar_open: bool,
-    /// The sidebar divider's current x, in window pixels. Local state until
-    /// the drag settles, then `layout.json` (see [`crate::layout`]).
-    sidebar_width: f32,
-    /// A resize drag is in flight: the shell skips its layout spring so the
-    /// divider tracks the pointer, and the capture overlay owns every move.
-    resizing: bool,
-    /// The pointer x where the drag started, in window pixels.
-    grab_x: f32,
-    /// [`Self::sidebar_width`] when the drag started: every move measures
-    /// from here, so a stalled frame can never compound an error.
-    start_w: f32,
-    /// How far the width has travelled this drag, in pixels. A release with
-    /// no travel shortly after the previous one is a double-click, which
-    /// resets to the default: the handle reports positions only, never the
-    /// click count, so quick taps are the only double-click signal it gives.
-    drag_moved: f32,
-    /// When the last drag ended, for the double-click reset above.
-    last_release: Option<std::time::Instant>,
+    pub(crate) sidebar_open: bool,
+    /// The sidebar divider's width and whatever drag is in flight over it
+    /// (see [`crate::resize`]).
+    pub(crate) resize: ResizeDrag,
+    /// The two flags a `--screenshot` wait reads out of this window (see
+    /// [`crate::shot::CaptureToken`]). Handed to every session view this
+    /// window opens and to `capture_and_quit`, so a second window would wait
+    /// on its own.
+    pub(crate) capture: CaptureToken,
     /// Whether `initialize` granted `userShell`. Requested in `conn::connect`;
     /// a server that did not grant it disables the `!` path with a banner
     /// rather than letting the command fail on the wire.
     user_shell: bool,
     focus_root: FocusHandle,
-    focus_dialog: FocusHandle,
-    focus_palette: FocusHandle,
+    pub(crate) focus_dialog: FocusHandle,
+    pub(crate) focus_palette: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
     focus_composer: bool,
     /// What the billing probe said, or `None` while it has not said it yet
@@ -392,21 +378,21 @@ pub struct Harness {
     /// [`Tier::Unavailable`], never `None`.
     pub(crate) tier: Option<Tier>,
     /// A probe is in flight; a second one is not started on top of it.
-    tier_probing: bool,
+    pub(crate) tier_probing: bool,
     /// The harness's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
     overrides: sessions::Overrides,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
-    show_hidden: bool,
+    pub(crate) show_hidden: bool,
     /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
-    show_empty: bool,
+    pub(crate) show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
-    show_archived: bool,
+    pub(crate) show_archived: bool,
     /// The search palette's query field. The card's own query row shows the
     /// result count; typing here re-queries `search.db` off the UI thread.
     /// There is no sidebar quick-filter: ⌘⇧F and the sidebar search icon open
     /// only this palette, so the two can never be open together.
-    search_query: Entity<TextareaState>,
+    pub(crate) search_query: Entity<TextareaState>,
     /// Full-text session hits for the open search palette, latest query only.
     search_sessions: Vec<SessionHit>,
     /// Created-file hits for the open search palette, latest query only.
@@ -414,8 +400,8 @@ pub struct Harness {
     /// Monotonic id for palette queries; only the latest result is applied.
     search_epoch: u64,
     /// The session whose row is being renamed in place, and the field doing it.
-    renaming: Option<String>,
-    rename: Entity<TextareaState>,
+    pub(crate) renaming: Option<String>,
+    pub(crate) rename: Entity<TextareaState>,
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
@@ -428,7 +414,7 @@ pub struct Harness {
     window_title: Option<String>,
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
     /// accepted the bill this morning should be asked again tomorrow.
-    send_anyway: bool,
+    pub(crate) send_anyway: bool,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -441,7 +427,7 @@ impl WireCall for Harness {
 
 impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
-    pub fn new(args: Args, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(args: Args, capture: CaptureToken, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // The rename field is one visual line: soft wrap off, so a long name
         // scrolls under the caret instead of spilling a second line.
         let rename = cx.new(|cx| {
@@ -468,12 +454,8 @@ impl Harness {
             pending_ready: false,
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
-            sidebar_width: restored,
-            resizing: false,
-            grab_x: 0.0,
-            start_w: restored,
-            drag_moved: 0.0,
-            last_release: None,
+            resize: ResizeDrag::restored(restored),
+            capture,
             user_shell: true,
             focus_root: cx.focus_handle(),
             focus_dialog: cx.focus_handle(),
@@ -665,7 +647,7 @@ impl Harness {
     /// The reconnect procedure: respawn, `initialize`, then `session/resume`
     /// from the last observed cursor, which serves `history.mode: "none"` and
     /// streams only the suffix.
-    fn reconnect(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
         let program = self.args.program.clone();
         let resume = self
@@ -712,1321 +694,20 @@ impl Harness {
 
     // ---------------------------------------------------------- billing tier
 
-    /// Find out what this login is entitled to (Phase 5 A1,
-    /// `docs/06-billing.md`).
-    ///
-    /// The cache answers the ordinary boot; a probe only runs when `auth.json`
-    /// has changed since the cached answer was taken, or when `force` says the
-    /// person asked. **A probe that fails never stops the app**: it becomes
-    /// [`Tier::Unavailable`], which draws a quiet banner and blocks nothing.
-    pub(crate) fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
-        // `--tier` fakes the probe for a screenshot, and nothing else.
-        if let Some(faked) = self.args.tier.clone() {
-            self.tier = Some(faked);
-            self.push_tier(cx);
-            return;
-        }
-        if !force {
-            if let Some(cached) = tier::cached() {
-                self.tier = Some(cached);
-                self.push_tier(cx);
-                return;
-            }
-        }
-        if self.tier_probing {
-            return;
-        }
-        self.tier_probing = true;
-        let program = self.args.program.clone();
-        self.wire_call(cx, move || tier::probe(&program), |this, result, cx| {
-            this.tier_probing = false;
-            // The reason is the module's own words, never the terminal's.
-            let tier = result.unwrap_or_else(Tier::Unavailable);
-            tier::remember(&tier);
-            this.tier = Some(tier);
-            this.push_tier(cx);
-            cx.notify();
-        });
-    }
-
-    /// The banner the open session should be drawing, given the tier and
-    /// whether "Send anyway" has been pressed.
-    fn tier_banner(&self) -> Option<TierBanner> {
-        match self.tier.as_ref()? {
-            Tier::Subscription { .. } => None,
-            Tier::PayAsYouGo => Some(TierBanner {
-                text: "This login is on pay-as-you-go: every turn bills API usage. \
-                       Sign out and back in after subscribing, or send anyway."
-                    .to_owned(),
-                blocking: !self.send_anyway,
-            }),
-            Tier::Unavailable(_) => Some(TierBanner {
-                text: "Muse did not say which plan this login is on, so the harness cannot tell \
-                       whether turns bill API usage."
-                    .to_owned(),
-                blocking: false,
-            }),
-        }
-    }
-
-    /// Hand the current banner to whatever session is open.
-    pub(crate) fn push_tier(&mut self, cx: &mut Context<Self>) {
-        let banner = self.tier_banner();
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.set_tier_banner(banner, cx));
-        }
-        cx.notify();
-    }
-
-    // -------------------------------------------------------------- sessions
-
-    /// Read the local index once at boot; it is a cache, not a source of truth.
-    fn load_index(&mut self, cx: &mut Context<Self>) {
-        self.wire_call(cx, index::read, |this, index, cx| {
-            this.index = index;
-            this.rejoin();
-            this.rebuild_search_index(cx);
-            cx.notify();
-        });
-    }
-
-    /// `session/list`, filtered to this window's workspace.
-    pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let workspace = self.workspace();
-        let work = move || {
-            client.session_list(&SessionListParams {
-                workspace_root: Some(workspace),
-                ..Default::default()
-            })
-        };
-        self.wire_call_in(cx, work, |this, result, window, cx| {
-            if let Ok(list) = result {
-                this.sessions = list
-                    .sessions
-                    .iter()
-                    .map(|s| {
-                        SessionEntry::join(s, this.index.get(&s.session_id), this.overrides.get(&s.session_id))
-                    })
-                    .collect();
-                this.derive_titles(cx);
-            }
-            this.open_boot_session(window, cx);
-            cx.notify();
-        });
-    }
-
-    /// `--session <id>` (or `latest`): open one session at boot, once the list
-    /// has arrived. Consumed, so a later refresh does not re-open it.
-    fn open_boot_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(wanted) = self.args.session.take() else {
-            // A scripted turn or a scripted capture with no session named needs
-            // somewhere to go.
-            if (self.args.send.is_some() || !self.args.steps.is_empty()) && self.active.is_none() {
-                self.new_session(cx);
-            }
-            return;
-        };
-        let id = if wanted == "latest" {
-            // The list arrives `updatedAt` descending, and the sidebar sorts on
-            // the same field, so the newest row is the head of the grouping.
-            self.sessions.iter().filter(|e| !e.hidden).max_by_key(|e| e.updated).map(|e| e.id.clone())
-        } else {
-            Some(wanted)
-        };
-        if let Some(id) = id {
-            self.resume(id, window, cx);
-        }
-    }
-
-    /// `--send <text>`: one scripted turn, once a session is open. The hook a
-    /// screenshot of a live turn needs; it goes through the same `send` a key
-    /// press does, never straight into the fold.
-    fn send_scripted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.args.send.take() else { return };
-        let Some(view) = self.active.clone() else { return };
-        view.update(cx, |view, cx| {
-            view.set_draft(text, window, cx);
-            view.send(window, cx);
-        });
-    }
-
-    /// `--steps`: drive the open session from the command line so a screenshot
-    /// is reproducible. Consumed, so a later refresh does not replay them.
-    /// The verbs, and the loop that runs them, are [`crate::steps`].
-    fn run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
-        crate::steps::run_steps(self, cx);
-    }
-
-    /// `--steps`, taken out of the arguments so a later refresh does not
-    /// replay them.
-    pub(crate) fn take_steps(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.args.steps)
-    }
-
-    // One handler per `--steps` verb that belongs to the window rather than to
-    // a session and needs more than a single existing call. The verb table
-    // that reaches them is [`crate::steps`].
-
-    /// `search:<query>`: open the search palette, optionally on a query.
-    pub(crate) fn step_search(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_search(window, cx);
-        if !rest.is_empty() {
-            self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-        }
-    }
-
-    /// `rename:<name>`: open the active row's inline field, optionally filled.
-    pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-        if let Some(session_id) = session_id {
-            self.start_rename(session_id, window, cx);
-            if !rest.is_empty() {
-                self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
-            }
-        }
-    }
-
-    /// `hidden`: list hidden sessions anyway.
-    pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) {
-        self.show_hidden = !self.show_hidden;
-        cx.notify();
-    }
-
-    /// `empty`: list sessions with no turns anyway.
-    pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) {
-        self.show_empty = !self.show_empty;
-        cx.notify();
-    }
-
-    /// `show-archived`: list archived sessions anyway.
-    pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) {
-        self.show_archived = !self.show_archived;
-        cx.notify();
-    }
-
-    /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
-    /// clamped and settled exactly like a released drag, minus the pointer.
-    pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
-        if let Ok(width) = rest.parse::<f32>() {
-            self.sidebar_width = clamp_sidebar_width(width);
-            self.resizing = false;
-            self.persist_width();
-        }
-        cx.notify();
-    }
-
-    /// `pin`: pin or unpin the active session.
-    pub(crate) fn step_pin(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.active_id(cx) {
-            self.toggle_pin(session_id, cx);
-        }
-    }
-
-    /// `archive`: raise the active session's archive confirmation.
-    pub(crate) fn step_archive(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.active_id(cx) {
-            self.open_archive_dialog(session_id, cx);
-        }
-    }
-
-    /// Re-label the rows after the index arrives (it usually beats the wire,
-    /// but the order is not guaranteed) or after an override changed.
-    ///
-    /// The same precedence [`SessionEntry::join`] documents, in one place.
-    fn rejoin(&mut self) {
-        for entry in &mut self.sessions {
-            let meta = self.overrides.get(&entry.id);
-            let index = self.index.get(&entry.id);
-            let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let label = name.or_else(|| index.and_then(IndexEntry::label)).or(derived);
-            // Same rule as [`SessionEntry::join`]: a user-given name always
-            // earns the first prompt below it, any other label only when it
-            // does not already say it.
-            let user_named = name.is_some()
-                || index
-                    .and_then(|i| i.session_name.as_deref())
-                    .map(str::trim)
-                    .is_some_and(|s| !s.is_empty());
-            let text = label.unwrap_or(crate::sidebar::UNNAMED);
-            entry.needs_title = label.is_none();
-            // A replayed capture names its own row by file, and no source
-            // speaks for it: keep that label rather than blanking it to the
-            // fallback on every override write.
-            match label {
-                Some(label) => entry.label = label.to_owned(),
-                None if !entry.replayed => entry.label = crate::sidebar::UNNAMED.to_owned(),
-                None => {}
-            }
-            entry.hidden = meta.is_some_and(|m| m.hidden);
-            entry.pinned = meta.is_some_and(|m| m.pinned);
-            entry.archived = meta.is_some_and(|m| m.archived);
-            entry.description = sidebar::describe(meta, index, text, user_named);
-            entry.named = name.is_some();
-        }
-    }
-
-    /// `session/start` in this workspace, on the configured provider.
-    ///
-    /// A new session is also the moment to re-walk the workspace: files come
-    /// and go while the window is open, and the `@` picker should not offer a
-    /// path that was deleted an hour ago.
-    fn new_session(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        self.load_menu_sources(cx);
-        let (workspace, provider) = (self.workspace(), self.args.provider.clone());
-        // `session/start` is the only surface that declares a session's policy
-        // up front; `session/setApprovalMode` afterwards is a different thing,
-        // and on this server it does not reach `promptUnmatched`.
-        let approval_mode = self.args.approval_mode.clone();
-        let work = move || {
-            client.session_start(&SessionStartParams {
-                command_id: new_command_id(),
-                workspace_root: Some(workspace),
-                provider_id: Some(provider),
-                approval_mode,
-                ..Default::default()
-            })
-        };
-        self.wire_call_in(cx, work, |this, result, window, cx| match result {
-            Ok(started) => {
-                this.open(started.session.session_id.clone(), false, window, cx);
-                // The result carries the session object `session/started`
-                // would have carried, and it is the only place a mode set
-                // at start-up is reported: `session/start` with an
-                // `approvalMode` raises no `session/approvalModeChanged`,
-                // so a session started under one mode drew the chip of
-                // another until this was folded.
-                if let Some(view) = this.active.clone() {
-                    if let Ok(envelope) = serde_json::to_value(&started.session) {
-                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                    }
-                }
-                this.load_sessions(cx);
-            }
-            Err(error) => this.report(&error, cx),
-        });
-    }
-
-    /// `session/resume`, then page the whole transcript in.
-    fn resume(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        // A hidden session is never loaded. Hiding is a decision about this
-        // window's list, and a list that still opened what it refuses to show
-        // would be a list that means nothing. Archived sessions are the same.
-        if self.overrides.get(&session_id).is_some_and(|m| m.hidden) && !self.show_hidden {
-            return;
-        }
-        if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
-            return;
-        }
-        let Some(client) = self.client.clone() else { return };
-        self.open(session_id.clone(), true, window, cx);
-        let work = move || {
-            client.session_resume(&SessionResumeParams {
-                command_id: new_command_id(),
-                session_id,
-                // History comes through `view/page`, which is the contiguous,
-                // ordered, bounded path; resume just attaches.
-                exclude_items: Some(true),
-                cursor: None,
-                history: None,
-            })
-        };
-        self.wire_call(cx, work, |this, result, cx| {
-            if let Err(error) = result {
-                // A failed switch keeps the old view (C2): only a boot
-                // open with nothing behind it clears the centre pane.
-                if this.pending_active.take().is_some() {
-                    this.pending_ready = false;
-                } else {
-                    this.active = None;
-                }
-                this.report(&error, cx);
-            }
-            cx.notify();
-        });
-    }
-
-    /// Put a session in the centre pane and subscribe to what it needs help
-    /// with.
-    fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let (provider, workspace) = (self.args.provider.clone(), self.workspace());
-        let overlays = self.overlays.clone();
-        let view = cx.new(|cx| SessionView::new(session_id, Some(client), provider, workspace, overlays, window, cx));
-        view.update(cx, |view, cx| view.load_history(cx));
-        // A switch that pages history in does not swap synchronously: the
-        // old view keeps rendering until the new view's first backfill batch
-        // applies (C2), so no frame flashes the "New session" screen.
-        // Backfill failure keeps the old view and reports (see `resume`).
-        if backfill && self.active.is_some() {
-            view.update(cx, |view, cx| view.backfill(cx));
-            let titles: HashMap<String, String> =
-                self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-            let tier_banner = self.tier_banner();
-            view.update(cx, |view, cx| {
-                view.set_context(titles, self.user_shell);
-                view.set_at_rest(self.still());
-                view.set_tier_banner(tier_banner, cx);
-            });
-            self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-            self.pending_active = Some(view);
-            self.pending_ready = false;
-            cx.notify();
-            return;
-        }
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        if backfill {
-            view.update(cx, |view, cx| view.backfill(cx));
-        }
-        let titles: HashMap<String, String> =
-            self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-        let tier_banner = self.tier_banner();
-        view.update(cx, |view, cx| {
-            view.set_context(titles, self.user_shell);
-            view.set_at_rest(self.still());
-            view.set_tier_banner(tier_banner, cx);
-        });
-        self.active = Some(view);
-        self.focus_composer = true;
-        self.send_scripted(window, cx);
-        self.run_steps(window, cx);
-        cx.notify();
-    }
-
-    /// Swap the deferred session view in once its backfill landed (C2).
-    fn swap_pending_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.pending_active.take() else {
-            self.pending_ready = false;
-            return;
-        };
-        self.pending_ready = false;
-        self.subscriptions.clear();
-        self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        self.active = Some(view);
-        self.focus_composer = true;
-        self.send_scripted(window, cx);
-        self.run_steps(window, cx);
-        cx.notify();
-    }
-
-    /// What a session cannot decide for itself.
-    fn on_session_event(
-        &mut self,
-        view: Entity<SessionView>,
-        event: &SessionEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            SessionEvent::Dialog { title, detail } => {
-                self.set_dialog(cx, Dialog {
-                    title: title.clone(),
-                    detail: detail.clone(),
-                    kind: DialogKind::Error,
-                    primary: "Dismiss",
-                    action: DialogAction::Dismiss,
-                    archive_target: None,
-                });
-            }
-            SessionEvent::SignedOut { message } => {
-                self.set_dialog(cx, Dialog {
-                    title: "Signed out of Muse".into(),
-                    detail: format!("Muse refused the turn: {message}"),
-                    kind: DialogKind::Warning,
-                    primary: "Sign in",
-                    action: DialogAction::SignIn,
-                    archive_target: None,
-                });
-            }
-            // The child's exit already reached `route`, which owns the reconnect.
-            SessionEvent::Closed => {}
-            // The deferred switch's first backfill batch applied: mark it and
-            // let the next centre frame (which owns a `Window`) swap it in.
-            SessionEvent::HistoryReady => {
-                if self.pending_active.as_ref().is_some_and(|pending| *pending == view) {
-                    self.pending_ready = true;
-                    cx.notify();
-                }
-            }
-            SessionEvent::NewSession => self.new_session(cx),
-            // The fork result is a resume envelope for the **new** session, so
-            // it is already attached: opening it and paging it in is all that
-            // is left, and the sidebar re-reads itself because there is now one
-            // more session in this workspace.
-            SessionEvent::Forked { session_id, session } => {
-                let (session_id, envelope) = (session_id.clone(), session.clone());
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.open(session_id, true, window, cx);
-                        let target = this.pending_active.clone().or_else(|| this.active.clone());
-                        if let Some(view) = target {
-                            view.update(cx, |view, cx| view.seed_session(envelope, cx));
-                        }
-                        this.load_sessions(cx);
-                    });
-                }));
-            }
-            SessionEvent::Logout => self.logout(cx),
-            SessionEvent::Status { detail } => {
-                // What the login is entitled to belongs at the top of
-                // `/status` and `/usage`: it is the first thing that decides
-                // what the next turn costs.
-                let plan = self.tier.as_ref().map(Tier::status_lines).unwrap_or_else(|| "Plan: probing\u{2026}".to_owned());
-                self.set_dialog(cx, Dialog {
-                    title: "Session status".into(),
-                    detail: format!("{plan}\n\n{detail}"),
-                    kind: DialogKind::Info,
-                    primary: "Done",
-                    action: DialogAction::Dismiss,
-                    archive_target: None,
-                });
-                // `/usage` is a person asking; take the reading again behind
-                // the dialog rather than serving a cache they just doubted.
-                self.probe_tier(true, cx);
-            }
-            SessionEvent::TierOverride => {
-                self.send_anyway = true;
-                self.push_tier(cx);
-            }
-            SessionEvent::TierRecheck => self.probe_tier(true, cx),
-            SessionEvent::Rename { name } => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.rename_session(session_id, name.clone(), cx);
-                }
-            }
-            SessionEvent::RenameStart => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.tasks.push(cx.spawn(async move |this, cx| {
-                        let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
-                    }));
-                }
-            }
-            SessionEvent::Hide => {
-                if let Some(view) = self.active.clone() {
-                    let session_id = view.read(cx).session_id.clone();
-                    self.hide_session(session_id, cx);
-                }
-            }
-            SessionEvent::ToggleEmpty => {
-                self.show_empty = !self.show_empty;
-            }
-            SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
-            SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
-            SessionEvent::Search => {
-                self.tasks.push(cx.spawn(async move |this, cx| {
-                    let _ = this.update_in(cx, |this, window, cx| this.open_search(window, cx));
-                }));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Put a modal up. Only one at a time, which is what makes Escape's order
-    /// (menu, then modal) a single rule.
-    pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
-        self.overlays.update(cx, |overlays, _| overlays.dialog = Some(dialog));
-        cx.notify();
-    }
-
-    fn close_dialog(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.dialog = None);
-        cx.notify();
-    }
-
-    /// The two lists the `/` and `@` menus are built from, walked once at boot
-    /// on the background executor and re-walked when a new session starts.
-    ///
-    /// Neither is on the wire: skills reach MSP only as `toolCall` items, and
-    /// a mention is plain text inside the prompt (research §1.5).
-    fn load_menu_sources(&mut self, cx: &mut Context<Self>) {
-        let program = self.args.program.clone();
-        let root = self.args.workspace.clone();
-        let work = move || (skills::list(&program), files::walk(&root));
-        self.wire_call(cx, work, |this, (skills, files), cx| {
-            if files.truncated {
-                crate::harness_log!(
-                    "@ mention index stopped at {} files; some workspace files are not mentionable",
-                    files::CAP
-                );
-            }
-            this.overlays.update(cx, |overlays, _| {
-                overlays.skills = skills;
-                overlays.files = files.entries;
-                overlays.files_truncated = files.truncated;
-            });
-            cx.notify();
-        });
-    }
-
-    /// A failed command that the application, rather than a session, issued.
-    fn report(&mut self, error: &MuseError, cx: &mut Context<Self>) {
-        let title = conn::title(error);
-        let dialog = Dialog {
-            title,
-            detail: error.to_string(),
-            kind: DialogKind::Error,
-            primary: match conn::severity(error) {
-                Severity::Dialog => "Reconnect",
-                Severity::Banner => "Dismiss",
-            },
-            action: match conn::severity(error) {
-                Severity::Dialog => DialogAction::Reconnect,
-                Severity::Banner => DialogAction::Dismiss,
-            },
-            archive_target: None,
-        };
-        self.set_dialog(cx, dialog);
-    }
-
-    // ---------------------------------------------- session operations (A2)
-
-    /// Change one session's override and write the store.
-    ///
-    /// The write is synchronous, and deliberately: it is a few hundred bytes,
-    /// it happens on a gesture rather than in a loop, and a background write
-    /// can lose a rename to a window that closed a moment later — which is the
-    /// one outcome a store exists to prevent.
-    fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
-        let meta = self.overrides.entry(session_id.to_owned()).or_default();
-        edit(meta);
-        self.rejoin();
-        sessions::write(&self.overrides);
-        self.rebuild_search_index(cx);
-        cx.notify();
-    }
-
-    /// `/name`, and the row's inline field: rename the active session.
-    fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
-        let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-        self.set_override(&session_id, |meta| meta.name = name, cx);
-        self.renaming = None;
-    }
-
-    /// Open the inline field on a row, seeded with what the row says now.
-    fn start_rename(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .overrides
-            .get(&session_id)
-            .and_then(|m| m.name.clone())
-            .or_else(|| self.sessions.iter().find(|e| e.id == session_id).map(|e| e.label.clone()))
-            .unwrap_or_default();
-        self.rename.update(cx, |state, cx| state.set_value(current, window, cx));
-        self.renaming = Some(session_id);
-        window.focus(&self.rename.focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    /// Commit whatever is in the rename field.
-    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.renaming.clone() else { return };
-        let text = self.rename.read(cx).value().to_string();
-        self.rename_session(session_id, Some(text), cx);
-        self.focus_composer = true;
-        let _ = window;
-    }
-
-    /// `/hide` and the row's eye: take a session out of the list, with a way
-    /// back for eight seconds.
-    ///
-    /// A hidden session is never loaded — the row is gone and so is the
-    /// transcript — so the active one is closed when it is the one hidden.
-    fn hide_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id) {
-            self.active = None;
-        }
-        self.hide_batch(
-            vec![session_id],
-            "Session hidden".to_owned(),
-            "It is still on disk; Muse keeps its own list.",
-            cx,
-        );
-    }
-
-    /// Hide a batch of sessions with a way back for eight seconds: one
-    /// toast, one Undo that restores the whole batch. One `/hide` is a
-    /// batch of one; one "Clear empty" is a batch of everything it hid.
-    fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
-        for session_id in &ids {
-            self.set_override(session_id, |meta| meta.hidden = true, cx);
-        }
-        self.push_undo(
-            UndoBatch::Hidden(ids),
-            title,
-            detail.to_owned(),
-            cx,
-        );
-        cx.notify();
-    }
-
-    /// One toast with one Undo for one undoable batch, and a timer that takes
-    /// both away together, so a press after the toast has gone does nothing.
-    fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
-        let toast =
-            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, &detail, "Undo"));
-        let undo = batch.clone();
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(UNDO_WINDOW).await;
-            let _ = this.update(cx, |this, cx| {
-                this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
-                this.undo_stack.retain(|batch| *batch != undo);
-                cx.notify();
-            });
-        }));
-        self.undo_stack.push(batch);
-        cx.notify();
-    }
-
-    /// The toast's Undo: put the newest batch back — one hidden row, one
-    /// "Clear empty" whole, or one archived session.
-    fn undo_newest(&mut self, cx: &mut Context<Self>) {
-        let Some(batch) = self.undo_stack.pop() else { return };
-        match batch {
-            UndoBatch::Hidden(ids) => {
-                for session_id in ids {
-                    self.set_override(&session_id, |meta| meta.hidden = false, cx);
-                }
-            }
-            UndoBatch::Archived(ids) => {
-                for session_id in ids {
-                    self.set_override(&session_id, |meta| meta.archived = false, cx);
-                }
-            }
-        }
-    }
-
-    /// "Clear empty": hide every session with no turns, with a way back for
-    /// eight seconds. Rows already hidden — and archived rows, which Clear
-    /// must never sweep — stay out of the batch, so Undo restores exactly
-    /// what this hid and nothing it did not.
-    fn clear_empty(&mut self, cx: &mut Context<Self>) {
-        let active = self.active_id(cx);
-        let cleared: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|entry| !entry.hidden && !entry.archived && entry.is_empty(active.as_deref()))
-            .map(|entry| entry.id.clone())
-            .collect();
-        if cleared.is_empty() {
-            return;
-        }
-        let n = cleared.len();
-        self.hide_batch(
-            cleared,
-            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
-            "They are still on disk; Muse keeps its own list.",
-            cx,
-        );
-    }
-
-    /// Pin or unpin a session. Purely local: the list regroups around it
-    /// and the store keeps it.
-    fn toggle_pin(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.set_override(&session_id, |meta| meta.pinned = !meta.pinned, cx);
-    }
-
-    /// Ask before archiving: a danger dialog carrying its target, so only its
-    /// own Archive button can confirm it.
-    fn open_archive_dialog(&mut self, session_id: String, cx: &mut Context<Self>) {
-        let label = self
-            .sessions
-            .iter()
-            .find(|e| e.id == session_id)
-            .map(|e| e.label.clone())
-            .unwrap_or_else(|| sidebar::UNNAMED.to_owned());
-        self.set_dialog(cx, Dialog {
-            title: format!("Archive \"{label}\"?"),
-            detail: "Archived sessions stay on disk and can be shown from the Sessions menu.".into(),
-            kind: DialogKind::Warning,
-            primary: "Archive",
-            action: DialogAction::Archive,
-            archive_target: Some(session_id),
-        });
-    }
-
-    /// The archive dialog's Archive button, or the `archive-confirm` step.
-    pub(crate) fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
-            (d.action == DialogAction::Archive).then(|| d.archive_target.clone()).flatten()
-        });
-        let Some(session_id) = target else { return };
-        self.close_dialog(cx);
-        self.archive_session(session_id, Some(window), cx);
-    }
-
-    /// Archive a session out of the list, with a way back for eight seconds.
-    ///
-    /// An archived session is never loaded, so the active one closes when it
-    /// is the one archived: the newest remaining visible session opens in its
-    /// place, or the empty state when nothing remains.
-    fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
-        self.set_override(&session_id, |meta| meta.archived = true, cx);
-        if was_active {
-            self.active = None;
-        }
-        self.push_undo(
-            UndoBatch::Archived(vec![session_id]),
-            "Session archived".to_owned(),
-            "It is still on disk; show it again from the Sessions menu.".to_owned(),
-            cx,
-        );
-        // The newest remaining visible session opens in place of the archived
-        // one; with no window (a step, not a click) the empty state stays
-        // until the person picks a session.
-        if was_active {
-            if let Some(window) = window {
-                let next = self.visible_sessions(cx).into_iter().next().map(|e| e.id.clone());
-                if self.client.is_some() {
-                    if let Some(id) = next {
-                        self.resume(id, window, cx);
-                    }
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    /// Put a session back in the list (the Archive tray action on an archived
-    /// row, or the toast's Undo through [`Self::undo_newest`]).
-    fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.set_override(&session_id, |meta| meta.archived = false, cx);
-    }
-
-    /// A turn completed in this app: leave the first line of its last
-    /// assistant text on the sidebar row. Free — the fold is in memory — and
-    /// skipped when nothing new arrived, so the store is not rewritten on
-    /// every completion.
-    fn record_last_summary(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let (session_id, summary) = (view.read(cx).session_id.clone(), view.read(cx).last_summary_text());
-        let Some(summary) = summary else { return };
-        if self.overrides.get(&session_id).and_then(|m| m.last_summary.as_deref()) == Some(summary.as_str()) {
-            return;
-        }
-        self.set_override(&session_id, |meta| meta.last_summary = Some(summary), cx);
-    }
-
-    /// The open session's id, which the empty filter never applies to: a
-    /// session just created has no turns yet and must stay visible.
-    fn active_id(&self, cx: &gpui::App) -> Option<String> {
-        self.active.as_ref().map(|a| a.read(cx).session_id.clone())
-    }
-
-    /// The rows the sidebar should draw: hidden ones out unless asked for,
-    /// archived ones out unless asked for, sessions with no turns out unless
-    /// asked for. Text search lives in the search palette (⌘⇧F), never in a
-    /// sidebar field, so no needle applies here. The open session is always
-    /// drawn.
-    fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
-        let active = self.active_id(cx);
-        let mut rows: Vec<SessionEntry> = self
-            .sessions
-            .iter()
-            .filter(|entry| self.show_hidden || !entry.hidden)
-            .filter(|entry| self.show_archived || !entry.archived)
-            .filter(|entry| {
-                // An archived row shown on request is explicitly asked for;
-                // the empty filter must not swallow it back.
-                (self.show_archived && entry.archived)
-                    || self.show_empty
-                    || !entry.is_empty(active.as_deref())
-            })
-            .cloned()
-            .collect();
-        // Newest first. The sidebar's grouping sorts for itself; the palette
-        // takes the head of this list, so the order has to be right here.
-        rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        rows
-    }
-
-    /// F10. A session with no title anywhere: read its head and take the first
-    /// `userShell` command as the row's name.
-    ///
-    /// `session/read` makes no model call, and the answer is cached in the
-    /// store, so this costs one read per session, once, ever. It is also
-    /// allowed to come back with nothing: the server decides what history it
-    /// serves, and a session no host has loaded can serve none. A row that
-    /// still has no title after this is honestly [`crate::sidebar::UNNAMED`].
-    fn derive_titles(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
-        let wanted: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|entry| entry.needs_title && !self.titled.contains(&entry.id))
-            .map(|entry| entry.id.clone())
-            .take(MAX_TITLE_READS)
-            .collect();
-        if wanted.is_empty() {
-            return;
-        }
-        self.titled.extend(wanted.iter().cloned());
-        let work = move || {
-            wanted
-                .into_iter()
-                .map(|session_id| {
-                    let read = client.session_read(&muse_client::schema::SessionReadParams {
-                        session_id: session_id.clone(),
-                        exclude_items: Some(false),
-                    });
-                    if let Err(error) = &read {
-                        crate::harness_log!("session/read for a title failed: {error}");
-                    }
-                    let title = read.ok().and_then(|read| first_shell_command(&read));
-                    (session_id, title)
-                })
-                .collect::<Vec<_>>()
-        };
-        self.wire_call(cx, work, |this, derived, cx| {
-            for (session_id, title) in derived {
-                let Some(title) = title else { continue };
-                this.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
-            }
-        });
-    }
-
-    /// F10. The open session's transcript may name it when nothing else does.
-    ///
-    /// Free — the fold is in memory — and the one path that reaches a session
-    /// whose history the server will not serve to a `session/read`.
-    fn title_from_transcript(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let session_id = view.read(cx).session_id.clone();
-        // The row may not be in the list yet — `session/list` is a round-trip
-        // and the transcript is already here — so the question is not "does the
-        // row need a title" but "does this session have one".
-        let has_title = self.overrides.get(&session_id).is_some_and(|m| m.name.is_some() || m.derived_title.is_some())
-            || self.index.get(&session_id).and_then(IndexEntry::label).is_some();
-        if has_title {
-            return;
-        }
-        let Some(title) = view.read(cx).first_shell_title() else { return };
-        self.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
-    }
-
-    /// Open the palette on one list.
-    pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
-        let already = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == kind);
-        self.overlays.update(cx, |overlays, _| {
-            overlays.palette = if already { None } else { Some(Palette { kind, selected: 0 }) };
-        });
-        cx.notify();
-    }
-
-    /// Open the full-text search palette and put the keyboard in its query.
-    ///
-    /// Reached from the sidebar search icon, Cmd+Shift+F and `/search`; the
-    /// empty query lists recent sessions and recently created files, so the
-    /// sidebar's quick-filter is still one keypress away.
-    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| {
-            overlays.palette = Some(Palette { kind: PaletteKind::Search, selected: 0 });
-        });
-        self.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        self.search_sessions.clear();
-        self.search_files.clear();
-        self.refresh_search(cx);
-        window.focus(&self.search_query.focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    /// Re-query `search.db` off the UI thread, latest keystroke wins.
-    ///
-    /// A no-op unless the search palette is open: typing anywhere else must
-    /// not touch the disk.
-    fn refresh_search(&mut self, cx: &mut Context<Self>) {
-        if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
-            return;
-        }
-        self.search_epoch += 1;
-        let epoch = self.search_epoch;
-        let query = self.search_query.read(cx).value().to_string();
-        let work = move || match crate::search::open() {
-            Ok(connection) => (
-                crate::search::query_sessions(&connection, &query, crate::search::LIMIT),
-                crate::search::query_files(&connection, &query, crate::search::LIMIT),
-            ),
-            Err(_) => (Vec::new(), Vec::new()),
-        };
-        self.wire_call(cx, work, move |this: &mut Self, (sessions, files), cx| {
-            if this.search_epoch != epoch {
-                return;
-            }
-            this.search_sessions = sessions;
-            this.search_files = files;
-            // The selection may point past the new list.
-            this.overlays.update(cx, |overlays, _| {
-                if let Some(palette) = overlays.palette.as_mut() {
-                    palette.selected = 0;
-                }
-            });
-            cx.notify();
-        });
-    }
-
-    /// Rebuild the session half of `search.db` off the UI thread.
-    ///
-    /// Runs at boot and after each index refresh; the files half is never
-    /// touched here, so recorded files survive a rebuild. When the rebuild
-    /// lands while the palette is open, the open query runs again against
-    /// the fresh index.
-    fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
-        let rows: Vec<crate::search::SessionRow> = self
-            .index
-            .iter()
-            .map(|(session_id, entry)| {
-                let meta = self.overrides.get(session_id);
-                let name =
-                    meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-                let derived = meta
-                    .and_then(|m| m.derived_title.as_deref())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty());
-                let label =
-                    name.or_else(|| entry.label()).or(derived).unwrap_or(crate::sidebar::UNNAMED);
-                crate::search::SessionRow {
-                    session_id: session_id.clone(),
-                    label: label.to_owned(),
-                    title: entry.title.clone(),
-                    first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
-                    body: entry.search_text.clone(),
-                }
-            })
-            .collect();
-        let work = move || {
-            let mut connection = match crate::search::open() {
-                Ok(connection) => connection,
-                Err(_) => return,
-            };
-            let _ = crate::search::rebuild_sessions(&mut connection, &rows);
-        };
-        self.wire_call(cx, work, |this: &mut Self, (), cx| {
-            this.refresh_search(cx);
-        });
-    }
-
-    /// The search palette's rows: session hits, then file hits, in the order
-    /// the palette draws them so the keyboard and the click agree.
-    ///
-    /// Each id carries its section (`s:<session>` or `f:<session>:<path>`).
-    /// An empty query is recent sessions from the sidebar order plus recently
-    /// recorded files.
-    fn search_rows(&self, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
-        let mut rows = Vec::new();
-        if self.search_query.read(cx).value().trim().is_empty() {
-            for entry in self.visible_sessions(cx).into_iter().take(PALETTE_ROWS) {
-                rows.push((
-                    format!("s:{}", entry.id).into(),
-                    entry.label.clone().into(),
-                    SharedString::from("recent"),
-                ));
-            }
-        } else {
-            for hit in &self.search_sessions {
-                let detail =
-                    if hit.snippet.is_empty() { SharedString::from("match") } else { hit.snippet.clone().into() };
-                rows.push((format!("s:{}", hit.session_id).into(), hit.label.clone().into(), detail));
-            }
-        }
-        for hit in &self.search_files {
-            let label = self
-                .sessions
-                .iter()
-                .find(|entry| entry.id == hit.session_id)
-                .map(|entry| entry.label.clone())
-                .unwrap_or_else(|| "created file".to_owned());
-            rows.push((format!("f:{}:{}", hit.session_id, hit.path).into(), hit.path.clone().into(), label.into()));
-        }
-        rows
-    }
-
-    /// The palette's rows, in the order it draws them, so the keyboard and the
-    /// click agree about what row 3 is.
-    fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
-        match kind {
-            PaletteKind::Commands => Command::ALL
-                .into_iter()
-                .map(|c| (c.slash().into(), c.slash().into(), c.description().into()))
-                .collect(),
-            PaletteKind::Resume => self
-                .visible_sessions(cx)
-                .into_iter()
-                // Newest first, and only as many as the palette can show: a
-                // list taller than the window is a list with a hidden bottom.
-                .take(PALETTE_ROWS)
-                .map(|entry| {
-                    let meta: SharedString =
-                        if entry.turns > 0 { format!("{} turns", entry.turns).into() } else { "no turns".into() };
-                    (entry.id.clone().into(), entry.label.clone().into(), meta)
-                })
-                .collect(),
-            PaletteKind::Search => self.search_rows(cx),
-            // The active session's completed turns, newest first; the rows
-            // come from the view because the window does not keep a transcript.
-            PaletteKind::Fork => self
-                .active
-                .as_ref()
-                .map(|view| view.read(cx).fork_turns())
-                .unwrap_or_default()
-                .into_iter()
-                .take(PALETTE_ROWS)
-                .map(|(id, label, detail)| (id.into(), label.into(), detail.into()))
-                .collect(),
-        }
-    }
-
-    /// Run the palette's selected row.
-    fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((kind, selected)) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected)) else {
-            return;
-        };
-        let rows = self.palette_rows(kind, cx);
-        let Some((id, _, _)) = rows.get(selected).cloned() else { return };
-        self.overlays.update(cx, |overlays, _| overlays.palette = None);
-        match kind {
-            PaletteKind::Search => {
-                if let Some(session_id) = id.strip_prefix("s:") {
-                    self.resume(session_id.to_owned(), window, cx);
-                } else if let Some(rest) = id.strip_prefix("f:") {
-                    self.reveal_created(rest, cx);
-                }
-            }
-            PaletteKind::Resume => self.resume(id.to_string(), window, cx),
-            PaletteKind::Fork => {
-                self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));
-            }
-            PaletteKind::Commands => {
-                if let Some(command) = Command::parse(&id) {
-                    self.with_session(cx, |view, cx| view.run_command(command, window, cx));
-                }
-            }
-        }
-        cx.notify();
-    }
-
     // ---------------------------------------------------------------- render
 
     /// Whether this window draws settled rather than entering: a
     /// `--screenshot` run, or a deterministic capture
     /// (`HARNESS_DETERMINISTIC=1`), which is always a static composition even
     /// without a screenshot on the end.
-    fn still(&self) -> bool {
+    pub(crate) fn still(&self) -> bool {
         self.args.screenshot.is_some() || crate::clock::deterministic()
     }
 
-    /// Open a header/footer menu, replacing whatever is open. Clicking its
-    /// own button again closes it.
-    pub(crate) fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
-        let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
-        self.overlays.update(cx, |overlays, _| {
-            overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };
-        });
+    /// The sidebar's collapse toggle: the rail is the column at zero width.
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
         cx.notify();
-    }
-
-    /// The two rows above the Sessions caption: New session, and Automations
-    /// behind a Soon tag until it has somewhere to go.
-    fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
-        let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
-        let automations = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.overlays.update(cx, |overlays, _| {
-                overlays.toast("Automations", "Automations are not wired up yet.");
-            });
-            cx.notify();
-        });
-        v_flex()
-            .w_full()
-            .flex_none()
-            .px(px(scale::SP_2))
-            .pt(px(scale::SP_2))
-            .child(nav_item("nav-new", IconName::Plus, "New session").on_click(new_session))
-            .child(nav_item("nav-automations", IconName::Zap, "Automations").count("Soon").on_click(automations))
-            .into_any_element()
-    }
-
-    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let visible = self.visible_sessions(cx);
-        let empty = self.render_sidebar_empty(&visible, cx);
-        let grouping = sidebar::grouping(&visible);
-        let selected = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-        let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-            this.resume(id.to_string(), window, cx);
-        });
-        let act = cx.listener(|this: &mut Self, (id, action): &(SharedString, RowAction), window, cx| {
-            match action {
-                RowAction::Rename => this.start_rename(id.to_string(), window, cx),
-                RowAction::Pin => this.toggle_pin(id.to_string(), cx),
-                // The tray carries one archive affordance: on a listed session
-                // it asks first, on an archived one it puts it straight back.
-                RowAction::Archive => {
-                    let archived =
-                        this.sessions.iter().find(|e| e.id == id.as_ref()).is_some_and(|e| e.archived);
-                    if archived {
-                        this.unarchive_session(id.to_string(), cx);
-                    } else {
-                        this.open_archive_dialog(id.to_string(), cx);
-                    }
-                }
-                _ => {}
-            }
-        });
-        // The sliders icon toggles the view menu like every other popover.
-        let open_view = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.open_menu(MenuKind::ViewOptions, cx);
-        });
-        let mut view = sidebar_view("sessions", grouping)
-            .caption("Sessions")
-            .on_view_options(move |w, cx| open_view(&(), w, cx))
-            .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
-            .on_select(move |id, w, cx| select(id, w, cx))
-            .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
-        if let Some(renaming) = self.renaming.clone() {
-            view = view.editing(renaming, self.rename_field(window, cx));
-        }
-        if let Some(selected) = selected {
-            view = view.selected(selected);
-        }
-        // No quick-filter field: ⌘⇧F and the sidebar search icon open the
-        // full-text search palette instead, so the two can never share the
-        // sidebar.
-        v_flex()
-            .size_full()
-            .child(self.render_nav_block(cx))
-            .child(
-                div()
-                    .id("sessions-scroll")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .child(view)
-                    .children(empty),
-            )
-            .child(self.render_footer(cx))
-            .into_any_element()
-    }
-
-    /// The field the row being renamed holds: the library's dense recipe —
-    /// a borderless, chromeless single line at the row-title size, with the
-    /// 1 px focus border on the wrapper instead of the component. The wrapper
-    /// is a flex row centring its child, and its height is whatever the
-    /// editor's own line-height makes it: the old fixed 22 px box cropped the
-    /// glyphs at the top. Clipping is horizontal only, so a long name scrolls
-    /// under the caret instead of spilling a second line, and the row keeps
-    /// its own height while a rename is open, so siblings never move. The
-    /// commit path is unchanged. The same element serves the sidebar row and
-    /// the header title.
-    fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let focused = self.rename.focus_handle(cx).is_focused(window);
-        div()
-            .w_full()
-            .key_context(RENAME_CONTEXT)
-            .on_action(cx.listener(|this, _: &ConfirmRename, window, cx| this.commit_rename(window, cx)))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .overflow_x_hidden()
-                    .px(px(6.0))
-                    .rounded(px(scale::R_SM))
-                    .border_1()
-                    .border_color(if focused { p.accent } else { p.line })
-                    .bg(p.surface_1)
-                    .child(dense_field(&self.rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
-            )
-            .into_any_element()
-    }
-
-    /// What the list says when it has nothing to show, and why (spec §5).
-    fn render_sidebar_empty(&self, visible: &[SessionEntry], cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !visible.is_empty() {
-            return None;
-        }
-        let p = cx.aui().colors;
-        let active = self.active_id(cx);
-        // What each filter alone is keeping out, past the other one: the
-        // empty text names its own toggle rather than borrowing hidden's.
-        // (There is no sidebar text filter — search lives in the palette —
-        // so no "no match" state exists here.)
-        let hidden_only = !self.show_hidden && self.sessions.iter().any(|e| e.hidden);
-        let empty_only = !self.show_empty
-            && self
-                .sessions
-                .iter()
-                .any(|e| (self.show_hidden || !e.hidden) && e.is_empty(active.as_deref()));
-        let (title, detail) = match (hidden_only, empty_only) {
-            (true, _) => {
-                ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.")
-            }
-            (false, true) => {
-                ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} in the Sessions menu above.")
-            }
-            (false, false) => ("No sessions yet", "\u{2318}N starts one."),
-        };
-        Some(
-            v_flex()
-                .w_full()
-                .px(px(scale::SP_5))
-                .py(px(scale::SP_6))
-                .gap(px(scale::SP_2))
-                .child(div().ui(scale::FS_12).medium().text_color(p.ink_2).child(title))
-                .child(div().ui(scale::FS_11).text_color(p.ink_4).child(detail))
-                .into_any_element(),
-        )
-    }
-
-    /// "Signed in as", in the library's shape: avatar, name, the email it is
-    /// really reporting, the plan row, and the provider usage meter with the
-    /// chevron. The whole footer opens the account menu — Sign out lives
-    /// there now, and the list-management toggles live in the Sessions menu.
-    fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Auth::SignedIn(identity) = &self.auth else {
-            return div().into_any_element();
-        };
-        let account = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.open_menu(MenuKind::Account, cx);
-        });
-        let mut footer = sidebar_footer("account", identity.initial(), identity.footer_name())
-            .on_click(move |e, w, cx| account(e, w, cx));
-        if !identity.email.is_empty() {
-            footer = footer.detail(identity.email.clone());
-        }
-        // The third row: what this login is entitled to. Warning-tinted for
-        // anything that is not a plan in force, because that is the case where
-        // the next turn costs money nobody expected. The key lanes say so
-        // without a probe: a stored key or `META_API_KEY` is pay-as-you-go by
-        // construction.
-        let meter = self.tier.as_ref().and_then(|tier| tier.weekly_fraction());
-        // `--tier` fakes the probe it names: the footer reads the faked tier
-        // like any other probe answer, even on the key lanes.
-        if self.args.tier.is_some() {
-            if let Some(tier) = &self.tier {
-                footer = footer.plan(tier.footer_label(), tier.is_warning());
-            }
-        } else if identity.is_api_key() {
-            footer = footer.plan("Pay-as-you-go · API key", true);
-        } else if let Some(tier) = &self.tier {
-            footer = footer.plan(tier.footer_label(), tier.is_warning());
-        }
-        // The meter is the weekly fraction the probe already reports; with no
-        // reading there is no meter. Either way the chevron stands, so the
-        // account menu stays discoverable — the row's own click opens it too.
-        if let Some(fraction) = meter {
-            footer = footer.meter(Provider::Muse, fraction);
-        } else {
-            footer = footer.trailing(
-                icon_button("account-chevron", IconName::ChevronDown)
-                    .ghost()
-                    .size(ButtonSize::Xs)
-                    .icon_size(px(12.0)),
-            );
-        }
-        footer.into_any_element()
     }
 
     /// The centre header: the active session's label ("Harness" with nothing
@@ -2111,213 +792,6 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The collapsed rail: new-session and search cells, a separator, one dot
-    /// per running session mirroring the rows, and the account avatar.
-    fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.active_id(cx);
-        let mut items = vec![
-            RailItem::nav("new", IconName::Plus),
-            RailItem::nav("search", IconName::Search),
-            RailItem::separator(),
-        ];
-        for entry in &self.sessions {
-            if entry.hidden || entry.archived || !entry.running {
-                continue;
-            }
-            let mut cell = RailItem::session(entry.id.clone(), AgentState::Running).pulse();
-            if active.as_deref() == Some(entry.id.as_str()) {
-                cell = cell.selected(true);
-            }
-            items.push(cell);
-        }
-        let mut rail = rail("rail", items).flat(true);
-        if let Auth::SignedIn(identity) = &self.auth {
-            rail = rail.avatar(identity.initial());
-        }
-        let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-            this.resume(id.to_string(), window, cx);
-        });
-        let action = cx.listener(|this: &mut Self, name: &str, window, cx| match name {
-            "new" => this.new_session(cx),
-            // Task E has landed: the rail cell opens the full-text search
-            // palette, like the header search icon and ⌘⇧F.
-            "search" => this.open_search(window, cx),
-            "account" => this.open_menu(MenuKind::Account, cx),
-            _ => {}
-        });
-        rail
-            .on_select(move |id, w, cx| select(id, w, cx))
-            .on_action(move |name, w, cx| action(name, w, cx))
-            .into_any_element()
-    }
-
-    /// The header's overflow menu, anchored under the "…" button: Rename swaps
-    /// the title for the dense inline field, Fork opens the fork picker, and
-    /// Archive asks first through the archive dialog.
-    fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
-            return None;
-        }
-        let rows = vec![
-            MenuRow::Toggle { label: "Rename".into(), checked: false },
-            MenuRow::Toggle { label: "Fork".into(), checked: false },
-            MenuRow::Toggle { label: "Archive".into(), checked: false },
-        ];
-        let actions = [OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
-        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            let action = actions.get(*index).copied();
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
-            match action {
-                Some(OverflowAction::Rename) => {
-                    if let Some(session_id) = this.active_id(cx) {
-                        this.sidebar_open = true;
-                        this.start_rename(session_id, window, cx);
-                    } else {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Nothing to rename", "No session is open.");
-                        });
-                    }
-                    cx.notify();
-                }
-                Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
-                Some(OverflowAction::Archive) => {
-                    if let Some(session_id) = this.active_id(cx) {
-                        this.open_archive_dialog(session_id, cx);
-                    } else {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Nothing to archive", "No session is open.");
-                        });
-                        cx.notify();
-                    }
-                }
-                None => {}
-            }
-        });
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .top(px(48.0))
-                    .right(px(8.0))
-                    .child(view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
-            )
-            .into_any_element(),
-        )
-    }
-
-    /// The Sessions caption's view menu: where list management lives now that
-    /// the footer is the library's account row again.
-    fn render_view_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
-            return None;
-        }
-        let active = self.active_id(cx);
-        let hidden = self.sessions.iter().filter(|e| e.hidden).count();
-        let empty = self.sessions.iter().filter(|e| !e.archived && e.is_empty(active.as_deref())).count();
-        let archived = self.sessions.iter().filter(|e| e.archived).count();
-        let mut rows: Vec<MenuRow> = Vec::new();
-        let mut actions: Vec<Option<ViewAction>> = Vec::new();
-        // Either toggle only appears once it has something to show: an
-        // affordance for an empty set is a question nobody asked.
-        if empty > 0 || self.show_empty {
-            let label = if self.show_empty {
-                "Hide empty".to_owned()
-            } else {
-                format!("Show empty ({empty})")
-            };
-            rows.push(MenuRow::Toggle { label: label.into(), checked: self.show_empty });
-            actions.push(Some(ViewAction::ToggleEmpty));
-        }
-        if hidden > 0 || self.show_hidden {
-            let label = if self.show_hidden {
-                "Hide hidden".to_owned()
-            } else {
-                format!("Show hidden ({hidden})")
-            };
-            rows.push(MenuRow::Toggle { label: label.into(), checked: self.show_hidden });
-            actions.push(Some(ViewAction::ToggleHidden));
-        }
-        if empty > 0 {
-            rows.push(MenuRow::Toggle { label: "Clear empty".into(), checked: false });
-            actions.push(Some(ViewAction::ClearEmpty));
-        }
-        if !rows.is_empty() {
-            rows.push(MenuRow::Separator);
-            actions.push(None);
-        }
-        let archived_label = if self.show_archived {
-            "Hide archived".to_owned()
-        } else {
-            format!("Show archived ({archived})")
-        };
-        rows.push(MenuRow::Toggle { label: archived_label.into(), checked: self.show_archived });
-        actions.push(Some(ViewAction::ToggleArchived));
-        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
-            match actions.get(*index).copied().flatten() {
-                // Toggles keep the menu open, so the check is seen to change.
-                Some(ViewAction::ToggleEmpty) => {
-                    this.show_empty = !this.show_empty;
-                    cx.notify();
-                }
-                Some(ViewAction::ToggleHidden) => {
-                    this.show_hidden = !this.show_hidden;
-                    cx.notify();
-                }
-                Some(ViewAction::ToggleArchived) => {
-                    this.show_archived = !this.show_archived;
-                    cx.notify();
-                }
-                Some(ViewAction::ClearEmpty) => {
-                    this.overlays.update(cx, |overlays, _| overlays.menu = None);
-                    this.clear_empty(cx);
-                }
-                None => {}
-            }
-        });
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .top(px(140.0))
-                    .left(px(12.0))
-                    .child(view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
-            )
-            .into_any_element(),
-        )
-    }
-
-    /// The footer's account menu: Sign out, and nothing else. The environment
-    /// lane names itself: `META_API_KEY` survives a sign-out, so the row says
-    /// where the credential really comes from (D28).
-    fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).is_open(MenuKind::Account) {
-            return None;
-        }
-        let label = match &self.auth {
-            Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
-                "Sign out (set by META_API_KEY)"
-            }
-            _ => "Sign out",
-        };
-        let rows = vec![MenuRow::Toggle { label: label.into(), checked: false }];
-        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
-            if *index == 0 {
-                this.overlays.update(cx, |overlays, _| overlays.menu = None);
-                this.logout(cx);
-            }
-        });
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .bottom(px(100.0))
-                    .left(px(12.0))
-                    .child(view_menu("account", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
-            )
-            .into_any_element(),
-        )
-    }
-
     /// The reconnect banner, above everything in the centre column.
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (kind, text) = match &self.wire {
@@ -2344,10 +818,12 @@ impl Harness {
         let at_rest = self.still();
         let (provider, workspace) = (self.args.provider.clone(), self.workspace());
         let overlays = self.overlays.clone();
+        let capture = self.capture.clone();
         // The capture names its own session; this id is a placeholder the view
         // replaces the moment the first line is folded.
         let view = cx.new(|cx| {
-            let mut view = SessionView::new("replay".to_owned(), None, provider, workspace, overlays, window, cx);
+            let host = SessionHost { provider_id: provider, workspace, overlays, capture };
+            let mut view = SessionView::new("replay".to_owned(), None, host, window, cx);
             view.set_at_rest(at_rest);
             view.load_replay(&path, cx);
             view.load_history(cx);
@@ -2368,23 +844,15 @@ impl Harness {
     }
 
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The one write left in the render tree, and it only ever fires on a
+        // `--replay` window's first frame: `open_replay` starts a stream
+        // cadenced on the wall clock, so where in the frame it runs decides
+        // where in that stream a fixed-delay capture lands. Everything else a
+        // frame changes is in [`Self::on_frame`].
         self.open_replay(window, cx);
-        // Deferred session switch (C2): the new view swaps in on its first
-        // backfill batch, so no frame ever shows the empty state mid-switch.
-        if self.pending_ready {
-            self.swap_pending_in(window, cx);
-        }
         let banner = self.render_wire_banner(cx);
         let body = match self.active.clone() {
-            Some(view) => {
-                // A deterministic capture never takes keyboard focus: a
-                // focused composer paints the textarea's blinking caret,
-                // which lands on a different phase every run.
-                if std::mem::take(&mut self.focus_composer) && !crate::clock::deterministic() {
-                    view.update(cx, |view, cx| view.focus_composer(window, cx));
-                }
-                view.update(cx, |view, cx| view.render_centre(window, cx))
-            }
+            Some(view) => view.update(cx, |view, cx| view.render_centre(window, cx)),
             None => self.render_no_session(cx),
         };
         v_flex()
@@ -2475,14 +943,6 @@ impl Harness {
         }
     }
 
-    /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
-    fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let rows = view.read(cx).menu_rows(cx);
-        self.overlays.update(cx, |overlays, _| overlays.move_selection(delta, rows));
-        cx.notify();
-    }
-
     /// ⌘V. An image on the clipboard becomes an attachment; anything else is
     /// the textarea's own paste, which is re-dispatched rather than reimplemented.
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2521,7 +981,7 @@ impl Harness {
     /// `rest` is `<session_id>:<workspace-relative path>`. A path that no
     /// longer exists is a toast, not a reveal of whatever happens to sit at
     /// the workspace root.
-    fn reveal_created(&mut self, rest: &str, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_created(&mut self, rest: &str, cx: &mut Context<Self>) {
         let Some((_, path)) = rest.split_once(':') else { return };
         let full = self.args.workspace.join(path);
         if !full.is_file() {
@@ -2536,7 +996,7 @@ impl Harness {
 
     /// The search card's status line: what the query found, or what an
     /// empty query offers.
-    fn search_status(&self, cx: &gpui::App) -> String {
+    pub(crate) fn search_status(&self, cx: &gpui::App) -> String {
         if self.search_query.read(cx).value().trim().is_empty() {
             return "Search sessions and created files".to_owned();
         }
@@ -2554,252 +1014,6 @@ impl Harness {
         parts.join(" \u{00b7} ")
     }
 
-    /// The search palette's query field, above the card. The card's own query
-    /// row is display-only, so the palette needs a real field to type in;
-    /// clearing it returns to the empty state (recents).
-    fn render_search_input(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
-            return None;
-        }
-        let query = self.search_query.read(cx).value().to_string();
-        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        });
-        Some(
-            sidebar_search("palette-search", Textarea::new(&self.search_query).text_size(aui_tokens::scaled(scale::FS_12)))
-                .clearable(!query.is_empty())
-                .on_clear(clear)
-                .into_any_element(),
-        )
-    }
-
-    /// ⌘K and `/resume`: the command palette, over everything.
-    ///
-    /// The same primitive for both lists, because they are the same gesture —
-    /// a list, an arrow key and a return — and a second picker would be a
-    /// second set of keys to learn.
-    fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (kind, selected) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected))?;
-        let rows = self.palette_rows(kind, cx);
-        // The card's own query row mirrors the query for the picking lists;
-        // the search palette edits through its own field above the card, so
-        // the card's row carries the result count instead.
-        let (query, placeholder, sections) = match kind {
-            PaletteKind::Commands => (
-                SharedString::from(""),
-                SharedString::from("Every command in this build"),
-                vec![PaletteSection::new(
-                    "Commands",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Slash)),
-                )],
-            ),
-            PaletteKind::Resume => (
-                SharedString::from(""),
-                SharedString::from("Resume a session in this workspace"),
-                vec![PaletteSection::new(
-                    "Sessions",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Clock)),
-                )],
-            ),
-            PaletteKind::Fork => (
-                SharedString::from(""),
-                SharedString::from("Pick a completed turn to branch from"),
-                vec![PaletteSection::new(
-                    "Fork from",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Git)),
-                )],
-            ),
-            PaletteKind::Search => {
-                let (sessions, files): (Vec<_>, Vec<_>) =
-                    rows.iter().partition(|(id, _, _)| id.starts_with("s:"));
-                // The row's own match emphasis covers the label only — the
-                // library paints `matched` ranges on the label and the
-                // context (the snippet) stays muted mono. Primary text is
-                // the sidebar label either way; the snippet is display-only.
-                let query = self.search_query.read(cx).value().to_string();
-                let mut sections = Vec::new();
-                if !sessions.is_empty() {
-                    sections.push(PaletteSection::new(
-                        "Sessions",
-                        palette_items_ref_matching(&sessions, PaletteIcon::Glyph(IconName::Clock), &query),
-                    ));
-                }
-                if !files.is_empty() {
-                    sections.push(PaletteSection::new(
-                        "Files",
-                        palette_items_ref_matching(&files, PaletteIcon::Glyph(IconName::File), &query),
-                    ));
-                }
-                (SharedString::from(""), self.search_status(cx).into(), sections)
-            }
-        };
-        let select = cx.listener(move |this: &mut Self, id: &SharedString, window, cx| {
-            let index = this.palette_rows(kind, cx).iter().position(|(row, _, _)| row == id);
-            if let Some(index) = index {
-                this.overlays.update(cx, |overlays, _| {
-                    if let Some(palette) = overlays.palette.as_mut() {
-                        palette.selected = index;
-                    }
-                });
-                this.confirm_palette(window, cx);
-            }
-        });
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.palette = None);
-            cx.notify();
-        });
-        let count = rows.len();
-        // A scripted screenshot is a static composition, not an opening: the
-        // card's enter presence (fade + rise) never settles inside a capture,
-        // so screenshots draw the palette at rest — opaque, one surface.
-        // Live opens keep the rise.
-        let mut card = command_palette("palette", query, sections, selected)
-            .placeholder(placeholder)
-            .on_select(move |id, w, cx| select(id, w, cx))
-            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        if self.still() {
-            card = card.at_rest();
-        }
-        Some(
-            popover_layer(
-                div()
-                    .key_context(aui::keys::MENU_CONTEXT)
-                    .track_focus(&self.focus_palette)
-                    .on_action(cx.listener(move |this, _: &SelectNext, _, cx| {
-                        this.overlays.update(cx, |o, _| o.move_palette(1, count));
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(move |this, _: &SelectPrev, _, cx| {
-                        this.overlays.update(cx, |o, _| o.move_palette(-1, count));
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(|this, _: &Confirm, window, cx| this.confirm_palette(window, cx)))
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.palette = None);
-                        cx.notify();
-                    }))
-                    .absolute()
-                    .inset_0()
-                    .bg(gpui::black().opacity(PALETTE_SCRIM))
-                    // A press on the dimmed ground closes it, which is the
-                    // gesture every overlay in this window already answers to.
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.palette = None);
-                        cx.notify();
-                    }))
-                    .child(
-                        gpui_kit::base::h_flex()
-                            .w_full()
-                            .justify_center()
-                            .pt(px(PALETTE_TOP))
-                            .child(
-                                v_flex()
-                                    // The search field is the sidebar list's
-                                    // box and carries its side margins;
-                                    // centring the column lands the field's
-                                    // visible box exactly on the card's, so
-                                    // the two read as one surface.
-                                    .items_center()
-                                    .children(self.render_search_input(cx))
-                                    .child(card),
-                            ),
-                    ),
-            )
-            .into_any_element(),
-        )
-    }
-
-    fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Read the modal out whole before anything asks `cx` for a listener:
-        // the entity's borrow and `cx.listener` cannot be alive at once.
-        let (title, detail, kind, primary_label, action, danger) = {
-            let modal = self.overlays.read(cx).dialog.as_ref()?;
-            let danger = modal.action == DialogAction::Archive;
-            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, danger)
-        };
-        // The archive target stays on the dialog until its own button runs:
-        // closing it any other way drops the target with it.
-        let secondary = if danger { "Cancel" } else { "Dismiss" };
-        let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
-            if action == DialogAction::Archive {
-                this.confirm_archive_dialog(window, cx);
-                return;
-            }
-            this.close_dialog(cx);
-            match action {
-                DialogAction::Dismiss => {}
-                DialogAction::Reconnect => {
-                    this.wire = Wire::Reconnecting;
-                    this.reconnect(cx);
-                }
-                DialogAction::SignIn => {
-                    this.auth = Auth::SignedOut;
-                    this.active = None;
-                    this.login.reset_to_choose();
-                }
-                DialogAction::Archive => {}
-            }
-            cx.notify();
-        });
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
-        // gets its own rather than sharing the secondary button's.
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        // A deterministic capture draws the dialog settled rather than rising
-        // in: the enter presence never lands on the same frame twice.
-        let card = dialog("dialog", title)
-            .kind(kind)
-            .body(detail)
-            .danger(danger)
-            .secondary(secondary)
-            .primary(primary_label)
-            .on_primary(move |w, cx| primary(&(), w, cx))
-            .on_secondary(move |w, cx| close(&(), w, cx))
-            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .key_context(aui::keys::MENU_CONTEXT)
-                    .track_focus(&self.focus_dialog)
-                    .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
-                    .child(card),
-            )
-            .into_any_element(),
-        )
-    }
-}
-
-/// One palette section's rows under one icon.
-fn palette_items(
-    rows: &[(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon, label.clone()).context(detail.clone())).collect()
-}
-
-/// [`palette_items`] over partitioned row references, which is what the search
-/// palette's two sections are built from.
-fn palette_items_ref(
-    rows: &[&(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon, (*label).clone()).context((*detail).clone())).collect()
-}
-
-/// [`palette_items_ref`] with the query's first hit in each label emphasised
-/// through the row's own `matched` ranges. An empty query emphasises nothing.
-fn palette_items_ref_matching(
-    rows: &[&(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-    needle: &str,
-) -> Vec<PaletteItem> {
-    palette_items_ref(rows, icon)
-        .into_iter()
-        .map(|item| if needle.trim().is_empty() { item } else { item.matching(needle) })
-        .collect()
 }
 
 /// F10. The first `userShell` command in a session's history, as a row title.
@@ -2819,8 +1033,23 @@ fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<
         .find_map(|item| item.command_text.as_deref().and_then(crate::sessions::shell_title))
 }
 
-impl Render for Harness {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Harness {
+    /// Everything a frame changes before it draws anything: the window title,
+    /// a resize left armed by a release the window never saw, the `--replay`
+    /// kick, the deferred session swap, and the one-shot composer focus.
+    ///
+    /// These are lifecycle, not composition (findings `app-core-9` and
+    /// `app-core-10`). Keeping them in one pre-pass is what lets `render` and
+    /// every `render_*` below it read state and build elements without ever
+    /// writing, so what a frame shows is decided before the first element is
+    /// made rather than part-way down the tree.
+    ///
+    /// One kick stays out of it: `--replay`'s (see
+    /// [`Self::render_centre`]). It starts a wall-clock-cadenced stream, so
+    /// moving it above the sidebar's composition moves the whole replay
+    /// forward by however long that composition takes, and the reference
+    /// captures are taken at a fixed delay into that stream.
+    fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The window's title is the session's, so a person with three harness
         // windows open can tell them apart in Mission Control.
         let title = self.window_title(cx);
@@ -2831,10 +1060,34 @@ impl Render for Harness {
         // A release outside the window never reaches the overlay: a drag that
         // is still armed while the window is inactive is over, settled where
         // it stands. One write, on the transition; the frame renders clean.
-        if self.resizing && !window.is_window_active() {
-            self.resizing = false;
-            self.persist_width();
+        if self.resize.active && !window.is_window_active() {
+            self.resize.active = false;
+            self.resize.persist();
         }
+        // The shell's lifecycle only: the login screen owns the whole window
+        // and has no session behind it.
+        if !matches!(self.auth, Auth::SignedIn(_)) {
+            return;
+        }
+        // Deferred session switch (C2): the new view swaps in on its first
+        // backfill batch, so no frame ever shows the empty state mid-switch.
+        if self.pending_ready {
+            self.swap_pending_in(window, cx);
+        }
+        // A deterministic capture never takes keyboard focus: a focused
+        // composer paints the textarea's blinking caret, which lands on a
+        // different phase every run.
+        if std::mem::take(&mut self.focus_composer) && !crate::clock::deterministic() {
+            if let Some(view) = self.active.clone() {
+                view.update(cx, |view, cx| view.focus_composer(window, cx));
+            }
+        }
+    }
+}
+
+impl Render for Harness {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
@@ -2844,8 +1097,8 @@ impl Render for Harness {
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
             let shell = app_shell("shell")
-                .sidebar_width(px(self.sidebar_width))
-                .resizing(self.resizing)
+                .sidebar_width(px(self.resize.width))
+                .resizing(self.resize.active)
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
                 .right_open(false)
@@ -2879,7 +1132,7 @@ impl Render for Harness {
                         .absolute()
                         .top(px(0.0))
                         .bottom(px(0.0))
-                        .left(px(self.sidebar_width - RESIZE_HANDLE_W / 2.0))
+                        .left(px(self.resize.width - RESIZE_HANDLE_W / 2.0))
                         .child(
                             resize_handle("sidebar-resize")
                                 .on_drag_start(move |x, _, cx| {
@@ -2903,7 +1156,7 @@ impl Render for Harness {
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
-        let capture: Option<AnyElement> = self.resizing.then(|| {
+        let capture: Option<AnyElement> = self.resize.active.then(|| {
             let travel = cx.entity().downgrade();
             let release = cx.entity().downgrade();
             drag_capture_overlay("resize-capture")
@@ -2974,9 +1227,6 @@ impl Render for Harness {
     }
 }
 
-/// Two taps with no travel count as a double-click: the handle reports
-/// positions only, never the click count, so recency is the reset signal.
-const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 /// Where Help → Harness Documentation looks for the docs folder: beside the
 /// working directory first, then three ancestors above the executable
 /// (`target/debug/harness` is three levels below the repo root: the exe
@@ -3010,77 +1260,6 @@ fn find_docs_dir(
 }
 
 impl Harness {
-    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        cx.notify();
-    }
-
-    /// The divider's settled x, for `layout.json`. Small and synchronous like
-    /// the sessions store: one pretty object, best-effort.
-    fn persist_width(&self) {
-        layout::write(&layout::Layout { sidebar_width: Some(self.sidebar_width) });
-    }
-
-    /// The press on the resize strip: arm the drag from the grab point.
-    fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        self.resizing = true;
-        self.grab_x = x;
-        self.start_w = self.sidebar_width;
-        self.drag_moved = 0.0;
-        cx.notify();
-    }
-
-    /// A move with the button held: the divider follows from where the drag
-    /// started, clamped, with no spring between it and the pointer.
-    fn drag_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        if !self.resizing {
-            return;
-        }
-        let width = layout::drag_width(self.start_w, self.grab_x, x);
-        self.drag_moved = self.drag_moved.max((width - self.start_w).abs());
-        self.sidebar_width = width;
-        cx.notify();
-    }
-
-    /// The release, wherever it lands: disarm, settle, persist. A release
-    /// with no travel shortly after the previous one is the handle's
-    /// double-click, which resets to the default width instead of keeping a
-    /// tap that moved nothing.
-    fn end_resize(&mut self, cx: &mut Context<Self>) {
-        if !self.resizing {
-            return;
-        }
-        self.resizing = false;
-        let now = std::time::Instant::now();
-        if self.drag_moved < 2.0
-            && self.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW)
-        {
-            self.sidebar_width = SIDEBAR_WIDTH;
-            self.last_release = None;
-        } else {
-            self.last_release = Some(now);
-        }
-        self.persist_width();
-        cx.notify();
-    }
-
-    /// Harness → About Harness.
-    fn show_about(&mut self, cx: &mut Context<Self>) {
-        self.set_dialog(
-            cx,
-            Dialog {
-                title: "About Harness".into(),
-                detail: format!(
-                    "Harness {} \u{2014} a macOS chat interface to Muse Code.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
-                    env!("CARGO_PKG_VERSION")
-                ),
-                kind: DialogKind::Info,
-                primary: "OK",
-                action: DialogAction::Dismiss,
-                archive_target: None,
-            },
-        );
-    }
 
     /// Help → Harness Documentation: the docs folder in Finder.
     ///
@@ -3103,50 +1282,6 @@ impl Harness {
     /// ⌘⇧M / ⌘⇧E / ⌘⇧P: the same toggle the chip's own click does.
     fn open_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         self.with_session(cx, |view, cx| view.toggle_picker(kind, cx));
-    }
-
-    /// The toast stack, bottom right. Toasts here are informational — a
-    /// compaction that did nothing, a command a later phase brings — so they
-    /// carry no action, only a close.
-    fn render_toasts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let toasts = self.overlays.read(cx).toasts.clone();
-        if toasts.is_empty() {
-            return None;
-        }
-        let newest = toasts.last().map(|t| t.id.to_string()).unwrap_or_default();
-        let dismissed = newest.clone();
-        let close = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismissed));
-            cx.notify();
-        });
-        // One action exists, and it is Undo — one hidden row, one "Clear
-        // empty" batch, or one archived session, whichever the newest toast
-        // was for.
-        let act = cx.listener(move |this: &mut Self, _: &(), _, cx| {
-            this.undo_newest(cx);
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&newest));
-            cx.notify();
-        });
-        // A deterministic capture draws the stack settled: toasts slide in,
-        // which never lands on the same frame twice.
-        let stack = aui::feedback::toast_stack("toasts", toasts);
-        let stack = if crate::clock::deterministic() { stack.at_rest() } else { stack };
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .right(px(scale::SP_5))
-                    .top(px(TOAST_TOP))
-                    .w(px(TOAST_W))
-                    .h(px(TOAST_STACK_H))
-                    .child(
-                        stack
-                            .on_action(move |_, window, cx| act(&(), window, cx))
-                            .on_close(move |window, cx| close(&(), window, cx)),
-                    ),
-            )
-            .into_any_element(),
-        )
     }
 
     /// ⌃C, and Escape on an empty composer: stop and retract.

@@ -11,34 +11,56 @@ use std::{path::PathBuf, time::Duration};
 use gpui::{App, WindowHandle};
 use gpui_kit::component::Root;
 
-/// Whether the open session is showing a pending approval right now.
+/// The two facts a `--screenshot` wait needs out of the window it is capturing.
 ///
-/// A flag rather than a callback because the capture runs outside the entity
-/// tree: [`capture_and_quit`] holds a `WindowHandle`, not the session. The
-/// session sets it on every frame it renders.
-static PENDING_APPROVAL: AtomicBool = AtomicBool::new(false);
+/// A token rather than a callback because the capture runs outside the entity
+/// tree: [`capture_and_quit`] holds a `WindowHandle`, not the session. A token
+/// rather than a pair of process globals because a second window would then
+/// corrupt the first one's wait (finding `support-16`): [`crate::app::Harness`]
+/// owns one, hands the same one to every session view it opens, and `main`
+/// hands the same one to [`capture_and_quit`], so each window waits on its own
+/// flags.
+#[derive(Clone, Default)]
+pub struct CaptureToken(std::sync::Arc<Flags>);
 
-/// Whether a `--steps` list is still running.
-///
-/// A scripted capture used to race its own script: the delay is measured from
-/// the first frame, and a step list containing a `wait:` outlives it, so the
-/// PNG showed the window before the steps that were the point of taking it.
-static STEPS_RUNNING: AtomicBool = AtomicBool::new(false);
+#[derive(Default)]
+pub struct Flags {
+    /// Whether the open session is showing a pending approval right now. The
+    /// session sets it on every frame it renders.
+    pending_approval: AtomicBool,
+    /// Whether a `--steps` list is still running.
+    ///
+    /// A scripted capture used to race its own script: the delay is measured
+    /// from the first frame, and a step list containing a `wait:` outlives it,
+    /// so the PNG showed the window before the steps that were the point of
+    /// taking it.
+    steps_running: AtomicBool,
+}
+
+impl CaptureToken {
+    /// Called by the session view each frame: is a card waiting on the person?
+    pub fn set_pending_approval(&self, pending: bool) {
+        self.0.pending_approval.store(pending, Ordering::Relaxed);
+    }
+
+    fn pending_approval(&self) -> bool {
+        self.0.pending_approval.load(Ordering::Relaxed)
+    }
+
+    /// Called by the application around its `--steps` and `--login-steps` loops.
+    pub fn set_steps_running(&self, running: bool) {
+        self.0.steps_running.store(running, Ordering::Relaxed);
+    }
+
+    fn steps_running(&self) -> bool {
+        self.0.steps_running.load(Ordering::Relaxed)
+    }
+}
 
 /// How long a capture that is waiting for an approval will wait.
 const APPROVAL_CEILING: Duration = Duration::from_secs(15);
 /// How often it looks.
 const POLL: Duration = Duration::from_millis(100);
-
-/// Called by the session view each frame: is a card waiting on the person?
-pub fn set_pending_approval(pending: bool) {
-    PENDING_APPROVAL.store(pending, Ordering::Relaxed);
-}
-
-/// Called by the application around its `--steps` and `--login-steps` loops.
-pub fn set_steps_running(running: bool) {
-    STEPS_RUNNING.store(running, Ordering::Relaxed);
-}
 
 /// Sleep `delay` as a loop of [`POLL`] timers so the foreground executor
 /// keeps draining background completions while the deadline runs down.
@@ -78,6 +100,7 @@ pub fn capture_and_quit(
     delay: Duration,
     await_steps: bool,
     await_approval: bool,
+    capture: CaptureToken,
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
@@ -87,20 +110,20 @@ pub fn capture_and_quit(
             let deadline = std::time::Instant::now() + APPROVAL_CEILING;
             // The flag is only raised once the session is open, so the wait is
             // for "the steps have run", not "the steps are not running yet".
-            while !STEPS_RUNNING.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            while !capture.steps_running() && std::time::Instant::now() < deadline {
                 cx.background_executor().timer(POLL).await;
             }
-            while STEPS_RUNNING.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            while capture.steps_running() && std::time::Instant::now() < deadline {
                 cx.background_executor().timer(POLL).await;
             }
             waited = true;
         }
         if await_approval {
             let deadline = std::time::Instant::now() + APPROVAL_CEILING;
-            while !PENDING_APPROVAL.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            while !capture.pending_approval() && std::time::Instant::now() < deadline {
                 cx.background_executor().timer(POLL).await;
             }
-            if !PENDING_APPROVAL.load(Ordering::Relaxed) {
+            if !capture.pending_approval() {
                 eprintln!("harness: no approval arrived in {APPROVAL_CEILING:?}; capturing anyway");
             }
             waited = true;

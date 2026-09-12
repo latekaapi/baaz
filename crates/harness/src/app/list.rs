@@ -1,0 +1,354 @@
+//! What a person can do to a row: rename, pin, hide, archive, clear the
+//! empty ones, and undo any of it.
+//!
+//! Every one of these is a local override written to the harness's own store
+//! (`docs/03-composer.md` §5); Muse's storage is read-only, so a name or a
+//! hidden flag never reaches the wire.
+//!
+//! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
+
+use super::*;
+
+impl Harness {
+    // ---------------------------------------------- session operations (A2)
+
+    /// Change one session's override and write the store.
+    ///
+    /// The write is synchronous, and deliberately: it is a few hundred bytes,
+    /// it happens on a gesture rather than in a loop, and a background write
+    /// can lose a rename to a window that closed a moment later — which is the
+    /// one outcome a store exists to prevent.
+    pub(super) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
+        edit(self.overrides.entry(session_id.to_owned()).or_default());
+        self.settle_overrides(cx);
+    }
+
+    /// The same edit applied to a batch of sessions, settled once.
+    ///
+    /// Hiding forty empty sessions one at a time rejoined the whole list,
+    /// rewrote `sessions.json` and rebuilt the search index forty times over
+    /// (finding `support-7`); the visible result was identical and the work
+    /// was quadratic in the batch. The edit still runs per row, because that
+    /// is what an override is; everything downstream of it runs once.
+    pub(super) fn set_overrides(
+        &mut self,
+        ids: &[String],
+        mut edit: impl FnMut(&mut SessionMeta),
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        for session_id in ids {
+            edit(self.overrides.entry(session_id.clone()).or_default());
+        }
+        self.settle_overrides(cx);
+    }
+
+    /// What every override edit costs once it is made: the rows rejoin, the
+    /// store is written, and the search index is rebuilt around the change.
+    fn settle_overrides(&mut self, cx: &mut Context<Self>) {
+        self.rejoin();
+        sessions::write(&self.overrides);
+        self.rebuild_search_index(cx);
+        cx.notify();
+    }
+
+    /// `/name`, and the row's inline field: rename the active session.
+    pub(super) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
+        let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+        self.set_override(&session_id, |meta| meta.name = name, cx);
+        self.renaming = None;
+    }
+
+    /// Open the inline field on a row, seeded with what the row says now.
+    pub(crate) fn start_rename(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .overrides
+            .get(&session_id)
+            .and_then(|m| m.name.clone())
+            .or_else(|| self.sessions.iter().find(|e| e.id == session_id).map(|e| e.label.clone()))
+            .unwrap_or_default();
+        self.rename.update(cx, |state, cx| state.set_value(current, window, cx));
+        self.renaming = Some(session_id);
+        window.focus(&self.rename.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Commit whatever is in the rename field.
+    pub(crate) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.renaming.clone() else { return };
+        let text = self.rename.read(cx).value().to_string();
+        self.rename_session(session_id, Some(text), cx);
+        self.focus_composer = true;
+        let _ = window;
+    }
+
+    /// `/hide` and the row's eye: take a session out of the list, with a way
+    /// back for eight seconds.
+    ///
+    /// A hidden session is never loaded — the row is gone and so is the
+    /// transcript — so the active one is closed when it is the one hidden.
+    pub(super) fn hide_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id) {
+            self.active = None;
+        }
+        self.hide_batch(
+            vec![session_id],
+            "Session hidden".to_owned(),
+            "It is still on disk; Muse keeps its own list.",
+            cx,
+        );
+    }
+
+    /// Hide a batch of sessions with a way back for eight seconds: one
+    /// toast, one Undo that restores the whole batch. One `/hide` is a
+    /// batch of one; one "Clear empty" is a batch of everything it hid.
+    pub(super) fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
+        self.set_overrides(&ids, |meta| meta.hidden = true, cx);
+        self.push_undo(
+            UndoBatch::Hidden(ids),
+            title,
+            detail.to_owned(),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// One toast with one Undo for one undoable batch, and a timer that takes
+    /// both away together, so a press after the toast has gone does nothing.
+    pub(super) fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
+        let toast =
+            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, &detail, "Undo"));
+        let undo = batch.clone();
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UNDO_WINDOW).await;
+            let _ = this.update(cx, |this, cx| {
+                this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
+                this.undo_stack.retain(|batch| *batch != undo);
+                cx.notify();
+            });
+        }));
+        self.undo_stack.push(batch);
+        cx.notify();
+    }
+
+    /// The toast's Undo: put the newest batch back — one hidden row, one
+    /// "Clear empty" whole, or one archived session.
+    pub(crate) fn undo_newest(&mut self, cx: &mut Context<Self>) {
+        let Some(batch) = self.undo_stack.pop() else { return };
+        match batch {
+            UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
+            UndoBatch::Archived(ids) => self.set_overrides(&ids, |meta| meta.archived = false, cx),
+        }
+    }
+
+    /// "Clear empty": hide every session with no turns, with a way back for
+    /// eight seconds. Rows already hidden — and archived rows, which Clear
+    /// must never sweep — stay out of the batch, so Undo restores exactly
+    /// what this hid and nothing it did not.
+    pub(crate) fn clear_empty(&mut self, cx: &mut Context<Self>) {
+        let active = self.active_id(cx);
+        let cleared: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| !entry.hidden && !entry.archived && entry.is_empty(active.as_deref()))
+            .map(|entry| entry.id.clone())
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        let n = cleared.len();
+        self.hide_batch(
+            cleared,
+            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
+            "They are still on disk; Muse keeps its own list.",
+            cx,
+        );
+    }
+
+    /// Pin or unpin a session. Purely local: the list regroups around it
+    /// and the store keeps it.
+    pub(crate) fn toggle_pin(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.set_override(&session_id, |meta| meta.pinned = !meta.pinned, cx);
+    }
+
+    /// Ask before archiving: a danger dialog carrying its target, so only its
+    /// own Archive button can confirm it.
+    pub(crate) fn open_archive_dialog(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let label = self
+            .sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| sidebar::UNNAMED.to_owned());
+        self.set_dialog(cx, Dialog {
+            title: format!("Archive \"{label}\"?"),
+            detail: "Archived sessions stay on disk and can be shown from the Sessions menu.".into(),
+            kind: DialogKind::Warning,
+            primary: "Archive",
+            action: DialogAction::Archive,
+            archive_target: Some(session_id),
+        });
+    }
+
+    /// The archive dialog's Archive button, or the `archive-confirm` step.
+    pub(crate) fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+            (d.action == DialogAction::Archive).then(|| d.archive_target.clone()).flatten()
+        });
+        let Some(session_id) = target else { return };
+        self.close_dialog(cx);
+        self.archive_session(session_id, Some(window), cx);
+    }
+
+    /// Archive a session out of the list, with a way back for eight seconds.
+    ///
+    /// An archived session is never loaded, so the active one closes when it
+    /// is the one archived: the newest remaining visible session opens in its
+    /// place, or the empty state when nothing remains.
+    pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
+        self.set_override(&session_id, |meta| meta.archived = true, cx);
+        if was_active {
+            self.active = None;
+        }
+        self.push_undo(
+            UndoBatch::Archived(vec![session_id]),
+            "Session archived".to_owned(),
+            "It is still on disk; show it again from the Sessions menu.".to_owned(),
+            cx,
+        );
+        // The newest remaining visible session opens in place of the archived
+        // one; with no window (a step, not a click) the empty state stays
+        // until the person picks a session.
+        if was_active {
+            if let Some(window) = window {
+                let next = self.visible_sessions(cx).into_iter().next().map(|e| e.id.clone());
+                if self.client.is_some() {
+                    if let Some(id) = next {
+                        self.resume(id, window, cx);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Put a session back in the list (the Archive tray action on an archived
+    /// row, or the toast's Undo through [`Self::undo_newest`]).
+    pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.set_override(&session_id, |meta| meta.archived = false, cx);
+    }
+
+    /// A turn completed in this app: leave the first line of its last
+    /// assistant text on the sidebar row. Free — the fold is in memory — and
+    /// skipped when nothing new arrived, so the store is not rewritten on
+    /// every completion.
+    pub(super) fn record_last_summary(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let (session_id, summary) = (view.read(cx).session_id.clone(), view.read(cx).last_summary_text());
+        let Some(summary) = summary else { return };
+        if self.overrides.get(&session_id).and_then(|m| m.last_summary.as_deref()) == Some(summary.as_str()) {
+            return;
+        }
+        self.set_override(&session_id, |meta| meta.last_summary = Some(summary), cx);
+    }
+
+    /// The open session's id, which the empty filter never applies to: a
+    /// session just created has no turns yet and must stay visible.
+    pub(crate) fn active_id(&self, cx: &gpui::App) -> Option<String> {
+        self.active.as_ref().map(|a| a.read(cx).session_id.clone())
+    }
+
+    /// The rows the sidebar should draw: hidden ones out unless asked for,
+    /// archived ones out unless asked for, sessions with no turns out unless
+    /// asked for. Text search lives in the search palette (⌘⇧F), never in a
+    /// sidebar field, so no needle applies here. The open session is always
+    /// drawn.
+    pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
+        let active = self.active_id(cx);
+        let mut rows: Vec<SessionEntry> = self
+            .sessions
+            .iter()
+            .filter(|entry| self.show_hidden || !entry.hidden)
+            .filter(|entry| self.show_archived || !entry.archived)
+            .filter(|entry| {
+                // An archived row shown on request is explicitly asked for;
+                // the empty filter must not swallow it back.
+                (self.show_archived && entry.archived)
+                    || self.show_empty
+                    || !entry.is_empty(active.as_deref())
+            })
+            .cloned()
+            .collect();
+        // Newest first. The sidebar's grouping sorts for itself; the palette
+        // takes the head of this list, so the order has to be right here.
+        rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
+        rows
+    }
+
+    /// F10. A session with no title anywhere: read its head and take the first
+    /// `userShell` command as the row's name.
+    ///
+    /// `session/read` makes no model call, and the answer is cached in the
+    /// store, so this costs one read per session, once, ever. It is also
+    /// allowed to come back with nothing: the server decides what history it
+    /// serves, and a session no host has loaded can serve none. A row that
+    /// still has no title after this is honestly [`crate::sidebar::UNNAMED`].
+    pub(super) fn derive_titles(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else { return };
+        let wanted: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.needs_title && !self.titled.contains(&entry.id))
+            .map(|entry| entry.id.clone())
+            .take(MAX_TITLE_READS)
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        self.titled.extend(wanted.iter().cloned());
+        let work = move || {
+            wanted
+                .into_iter()
+                .map(|session_id| {
+                    let read = client.session_read(&muse_client::schema::SessionReadParams {
+                        session_id: session_id.clone(),
+                        exclude_items: Some(false),
+                    });
+                    if let Err(error) = &read {
+                        crate::harness_log!("session/read for a title failed: {error}");
+                    }
+                    let title = read.ok().and_then(|read| first_shell_command(&read));
+                    (session_id, title)
+                })
+                .collect::<Vec<_>>()
+        };
+        self.wire_call(cx, work, |this, derived, cx| {
+            for (session_id, title) in derived {
+                let Some(title) = title else { continue };
+                this.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
+            }
+        });
+    }
+
+    /// F10. The open session's transcript may name it when nothing else does.
+    ///
+    /// Free — the fold is in memory — and the one path that reaches a session
+    /// whose history the server will not serve to a `session/read`.
+    pub(super) fn title_from_transcript(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let session_id = view.read(cx).session_id.clone();
+        // The row may not be in the list yet — `session/list` is a round-trip
+        // and the transcript is already here — so the question is not "does the
+        // row need a title" but "does this session have one".
+        let has_title = self.overrides.get(&session_id).is_some_and(|m| m.name.is_some() || m.derived_title.is_some())
+            || self.index.get(&session_id).and_then(IndexEntry::label).is_some();
+        if has_title {
+            return;
+        }
+        let Some(title) = view.read(cx).first_shell_title() else { return };
+        self.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
+    }
+}

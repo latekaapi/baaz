@@ -294,7 +294,8 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     if steps.is_empty() {
         return;
     }
-    crate::shot::set_steps_running(true);
+    let capture = this.capture.clone();
+    capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
             if let Some(ms) = step.strip_prefix("wait:") {
@@ -308,11 +309,11 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                 }
             });
             if ran.is_err() {
-                crate::shot::set_steps_running(false);
+                capture.set_steps_running(false);
                 return;
             }
         }
-        crate::shot::set_steps_running(false);
+        capture.set_steps_running(false);
     });
     this.wire_tasks().push(task);
 }
@@ -327,7 +328,8 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     if steps.is_empty() {
         return;
     }
-    crate::shot::set_steps_running(true);
+    let capture = this.capture.clone();
+    capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
             if let Some(ms) = step.strip_prefix("wait:") {
@@ -340,12 +342,12 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             match ran {
                 Ok(true) => {}
                 _ => {
-                    crate::shot::set_steps_running(false);
+                    capture.set_steps_running(false);
                     return;
                 }
             }
         }
-        crate::shot::set_steps_running(false);
+        capture.set_steps_running(false);
     });
     this.wire_tasks().push(task);
 }

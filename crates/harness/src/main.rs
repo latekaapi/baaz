@@ -39,8 +39,10 @@ mod app;
 mod attachments;
 mod auth;
 mod bench;
+mod billing;
 mod clock;
 mod conn;
+mod dialogs;
 mod files;
 mod full_output;
 mod history;
@@ -51,11 +53,13 @@ mod log;
 mod login;
 mod overlays;
 mod plan;
+mod resize;
 mod search;
 mod session;
 mod sessions;
 mod shot;
 mod sidebar;
+mod sidebar_view;
 mod skills;
 mod steps;
 mod store;
@@ -537,11 +541,16 @@ fn main() {
             }),
             ..TitleBar::window_options()
         };
+        // One token per window: the capture's waits are this window's, not the
+        // process's (finding `support-16`).
+        let capture = shot::CaptureToken::default();
         let handle = cx
-            .open_window(options, |window, cx| {
-                let view = cx.new(|cx| app::Harness::new(args.clone(), window, cx));
+            .open_window(options, {
+                let capture = capture.clone();
+                move |window, cx| {
+                let view = cx.new(|cx| app::Harness::new(args.clone(), capture.clone(), window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
-            })
+            }})
             .expect("open the harness window");
         // Closing the window — or quitting the app — with a tier probe still
         // driving the `muse` TUI would orphan it, the way quitting
@@ -563,7 +572,7 @@ fn main() {
         })
         .detach();
         match screenshot {
-            Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, cx),
+            Some(path) => shot::capture_and_quit(handle, path, delay, await_steps, await_approval, capture, cx),
             None => cx.activate(true),
         }
     });

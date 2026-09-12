@@ -90,16 +90,37 @@ Three, as spec §2.3 asks for.
 |---|---|---|
 | `Harness` | `src/app.rs` | the `MuseClient`, the auth state and the login flow, the session list, the active session, the dialog, the shell |
 | `SessionView` | `src/session.rs` | one Muse session: its `MuseFold`, the composer draft, the scroll position, which cards are folded, the running turn |
-| — | | the `Overlays` entity the spec names is, in this phase, one `Option<Dialog>` field on `Harness`: there is one modal, no palette, no menus and no toasts yet. It becomes its own entity when Phase 3 adds the menus. |
+| `Overlays` | `src/overlays.rs` | state only: the modal, the open menu and its selection, the palette, the toasts, and the two lists the menus are built from |
+
+Each entity keeps its **fields** in the file above and its methods next door,
+one sibling module per section seam (C1 and C2, 2026-09-12). `docs/07-architecture.md` §2 is
+the full map; the short version:
+
+| file | owns |
+|---|---|
+| `src/app/lifecycle.rs` | the index, the list, and starting / resuming / opening a session |
+| `src/app/list.rs` | rename, pin, hide, archive, clear-empty, undo |
+| `src/app/find.rs` | the full-text search palette's query and rows |
+| `src/sidebar_view.rs` | the sidebar column and the two popovers anchored to it |
+| `src/dialogs.rs` | the modal, the palette, the toasts, the overflow menu |
+| `src/billing.rs` | the tier probe's lifecycle and its banner |
+| `src/resize.rs` | the sidebar divider's drag |
+| `src/login.rs`, `src/steps.rs`, `src/wire.rs` | login, scripting, call-then-update |
+| `src/session/*.rs` | one seam each: `events`, `commands`, `composer`, `approvals`, `questions`, `shell`, `clocks`, `scripting`, `render` |
 
 Everything else is a pure function. `src/transcript.rs` turns a `Turn` or a
-`Block` into elements; `src/sidebar.rs` turns the session list into the
-library's date grouping; `src/conn.rs` classifies errors; `src/auth.rs` and
-`src/index.rs` are I/O with no UI in them at all.
+`Block` into elements — one `*_card` function per block kind, with `block` as
+the dispatch; `src/sidebar.rs` turns the session list into the library's date
+grouping; `src/conn.rs` classifies errors; `src/auth.rs` and `src/index.rs` are
+I/O with no UI in them at all.
 
-Rendering is a pure function of state each frame: the view reads
-`MuseFold::session` and `MuseFold::side` and rebuilds the transcript. Nothing is
-cached between frames except the scroll position and the fold set.
+Rendering is a pure function of state each frame, and a frame decides before it
+draws: `Harness::on_frame` is the one pre-pass that writes (window title, a
+resize left armed, the deferred session swap, the one-shot composer focus), and
+`SessionView::sync_render_cache` / `sync_virtual_list` are the only writes in a
+transcript frame. Everything below them reads the cache — never the live fold —
+so one frame draws one consistent snapshot. Nothing is cached between frames
+except the scroll position, the fold set and that snapshot.
 
 ---
 
