@@ -2,6 +2,8 @@
 # Deterministic capture set: every replay fixture × both themes, plus the
 # login screens. Byte-identical run to run under HARNESS_DETERMINISTIC=1
 # (docs/02-app.md), so `cmp` between two runs is the regression proof.
+# Park the pointer outside the top-left 1440x900 first: a capture renders
+# there, and a hovered card (a code block's toolbar, a row) leaks into it.
 #   scripts/captures.sh <out-dir> [harness-binary]
 set -e
 out="${1:?out dir}"; bin="${2:-./target/debug/harness}"

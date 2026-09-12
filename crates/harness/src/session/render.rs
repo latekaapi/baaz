@@ -333,19 +333,12 @@ impl SessionView {
             .into_any_element()
     }
 
-    /// The neutral row while history is still paging in: a spinner, and
-    /// never the "New session" empty state.
+    /// The centre while history is still paging in: an empty pane that
+    /// keeps its height, so the composer stays docked and the status row
+    /// above it ("Loading history…", `render_status`) is the one indicator.
+    /// Never the "New session" empty state.
     pub(super) fn loading_row() -> AnyElement {
-        div()
-            .w_full()
-            .pt(px(TRANSCRIPT_PAD_TOP))
-            .px(px(TRANSCRIPT_PAD_X))
-            .child(centred(
-                status_row("transcript-loading", "Loading history\u{2026}")
-                    .lead(StatusLead::Spinner)
-                    .shimmer(true),
-            ))
-            .into_any_element()
+        div().w_full().flex_1().min_h(px(0.0)).into_any_element()
     }
 
     /// Re-snapshot what `render_transcript` reads every frame: the turn list
