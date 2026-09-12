@@ -1,5 +1,31 @@
 # Harness changelog
 
+## 2026-09-13 — Owner follow-up: settled cards, one-line menu rows, a palette that holds its field, a rail worth collapsing to
+
+Four faults from the owner's second look, diagnosed on the wire and fixed the same evening
+(library `b1850d5` on agentic-ui `owner-followup-2026-09-13`, merged to `main`).
+
+- **Spinners under a finished reply.** The wire ended the turn with the bash call still
+  `inProgress` — Muse keeps a live shell session open, and only the next turn's
+  `bash_input {terminate}` closed it, thirty minutes later — so the card spun and its
+  approval read "Running" under a completed reply. The fold now settles a turn's open
+  cards at its terminal (`settle_open_blocks`): running calls become done on a completed
+  turn and cancelled on a cancelled or failed one, an approval still "approving" reads as
+  allowed. Not optimistic: the terminal is the server's word that no more work runs in
+  that turn. The `synthetic-toolgroup` snapshot changed for exactly that approval.
+- **Slash menu rows overlapping, janky scroll.** Rows were fixed-height while long skill
+  names folded and descriptions wrapped inside them; and the menu scrolled the *hovered*
+  row into view every frame, fighting the wheel. Names never wrap, descriptions truncate to
+  one line, and only the keyboard selection scrolls the list.
+- **Collapsed sidebar empty.** The rail showed running sessions only, as bare dots. It shows
+  the open session and the eight most recent visible ones (pinned first) as tiles bearing
+  their initial, the state dot in the corner, the title as a tooltip; running ones pulse.
+- **Search palette.** The query field floated above the card in its own box, the list ran to
+  the window's edge, and file snippets ran past the right edge. The library palette takes
+  the harness's editor in its query row (`query_slot`), bounds the list to 320 px and
+  scrolls it, and truncates the context column.
+
+
 ## 2026-09-13 — Owner round: fifteen faults from three notes and nine screenshots
 
 Diagnosed first (`docs/diagnosis/owner-round-2026-09-13.md`, every item with its cause and

@@ -15,14 +15,13 @@
 //! enter presence never lands on the same frame twice.
 
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
-use aui::nav::{sidebar_search, view_menu, MenuRow};
+use aui::nav::{view_menu, MenuRow};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui_icons::IconName;
 use aui_tokens::scale;
 use gpui::{
     div, prelude::*, px, AnyElement, Context, SharedString, Window,
 };
-use gpui_kit::base::v_flex;
 use gpui_kit::component::input::Textarea;
 
 use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP, TOAST_STACK_H, TOAST_TOP, TOAST_W};
@@ -262,23 +261,18 @@ impl Harness {
         cx.notify();
     }
 
-    /// The search palette's query field, above the card. The card's own query
-    /// row is display-only, so the palette needs a real field to type in;
-    /// clearing it returns to the empty state (recents).
-    fn render_search_input(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
-            return None;
-        }
-        let query = self.search_query.read(cx).value().to_string();
-        let clear = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            this.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        });
-        Some(
-            sidebar_search("palette-search", Textarea::new(&self.search_query).text_size(aui_tokens::scaled(scale::FS_12)))
-                .clearable(!query.is_empty())
-                .on_clear(clear)
-                .into_any_element(),
-        )
+    /// The search palette's query editor, drawn inside the card's own query
+    /// row through the library's slot: one surface, the field where the
+    /// placeholder would be, no chrome of its own. Clearing it returns to
+    /// the empty state (recents).
+    fn search_query_editor(&self) -> AnyElement {
+        Textarea::new(&self.search_query)
+            .appearance(false)
+            .bordered(false)
+            .text_size(aui_tokens::scaled(scale::FS_14))
+            .h_auto()
+            .whitespace_nowrap()
+            .into_any_element()
     }
 
     /// ⌘K and `/resume`: the command palette, over everything.
@@ -360,6 +354,9 @@ impl Harness {
             .placeholder(placeholder)
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_dismiss(move |w, cx| dismiss(&(), w, cx));
+        if kind == PaletteKind::Search {
+            card = card.query_slot(self.search_query_editor());
+        }
         if self.still() {
             card = card.at_rest();
         }
@@ -395,17 +392,7 @@ impl Harness {
                             .w_full()
                             .justify_center()
                             .pt(px(PALETTE_TOP))
-                            .child(
-                                v_flex()
-                                    // The search field is the sidebar list's
-                                    // box and carries its side margins;
-                                    // centring the column lands the field's
-                                    // visible box exactly on the card's, so
-                                    // the two read as one surface.
-                                    .items_center()
-                                    .children(self.render_search_input(cx))
-                                    .child(card),
-                            ),
+                            .child(card),
                     ),
             )
             .into_any_element(),
