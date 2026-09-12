@@ -18,7 +18,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext as _, Context, Entity, IntoElement, Render, Window, WindowHandle};
+use gpui::{
+    point, px, App, AppContext as _, AsyncApp, Context, Entity, IntoElement, ListOffset,
+    PlatformInput, Render, ScrollDelta, ScrollWheelEvent, Window, WindowHandle,
+};
 use gpui_kit::component::Root;
 
 use crate::session::{self, SessionView};
@@ -36,6 +39,10 @@ pub enum BenchScroll {
     /// Top → tail → top over the run.
     #[default]
     Sweep,
+    /// Real wheel events at the transcript centre, after the stream lands
+    /// (the scroll-jank instrument: `sweep` drives `scroll_to` and never
+    /// exercises `ListState::scroll`).
+    Wheel,
 }
 
 impl BenchScroll {
@@ -46,6 +53,7 @@ impl BenchScroll {
             "mid" => Some(Self::Mid),
             "tail" => Some(Self::Tail),
             "sweep" => Some(Self::Sweep),
+            "wheel" => Some(Self::Wheel),
             _ => None,
         }
     }
@@ -91,6 +99,174 @@ fn cut_for_open_turn(events: Vec<MuseEvent>, open_turn: bool) -> Vec<MuseEvent> 
         Some(at) => events.into_iter().take(at).collect(),
         None => events,
     }
+}
+
+/// The wheel instrument's phases: (name, vertical px per event, event
+/// count). Positive climbs toward the head, negative descends toward the
+/// tail — gpui subtracts the wheel delta from the pixel scroll top, so a
+/// `+120 px` event moves the view up by 120 px.
+///
+/// (a) is a flick up from the tail; (b) comes back down past it; (c) is a
+/// slow trackpad climb and (d) its exact mirror, so (d) must end where (c)
+/// started without ever clamping.
+pub(crate) const WHEEL_PHASES: [(char, f32, usize); 4] = [
+    ('a', 600.0, 6),
+    ('b', -40.0, 90),
+    ('c', 20.0, 300),
+    ('d', -20.0, 300),
+];
+
+/// How long one wheel event waits for its frame before giving up on it.
+const WHEEL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// Frames to let the tail settle before the first wheel phase.
+const WHEEL_SETTLE_FRAMES: usize = 3;
+
+/// One wheel phase's outcome, for the `bench-scroll` line.
+#[derive(Debug, Default)]
+struct WheelPhaseStats {
+    /// `a`..=`d`, in [`WHEEL_PHASES`] order.
+    name: char,
+    /// Events dispatched in this phase.
+    events: usize,
+    /// Frames observed while they landed.
+    frames: usize,
+    /// Frames where `item_ix` moved across more rows than the event's
+    /// travel explains (a teleport).
+    jumps: usize,
+    /// Frames where an event was dispatched and the position did not move
+    /// short of a scroll limit (the jank: mid-list rubber-band stalls).
+    stalls: usize,
+    /// Frames where the position did not move because the event ran into
+    /// the head (`item_ix` 0) or the tail (`is_scrolled_to_end`) limit —
+    /// correct end-of-list behaviour, not jank. `stalls + clamped` is every
+    /// no-move frame.
+    clamped: usize,
+    /// `item_ix` when the phase ended.
+    end_ix: usize,
+}
+
+/// How one wheel event's frame reads: teleported, stalled short of a limit,
+/// clamped at one, or moved.
+#[derive(Debug, PartialEq, Eq)]
+struct WheelStep {
+    jumped: bool,
+    stalled: bool,
+    clamped: bool,
+}
+
+/// Rows one wheel event may legitimately cross before the step counts as a
+/// jump: the event's travel at the first-fill height hint, plus slack.
+fn expected_rows(dy: f32) -> usize {
+    (dy.abs() / session::TURN_HEIGHT_HINT).ceil() as usize + 3
+}
+
+/// Classify one sampled wheel step. A nonzero pixel step always moves the
+/// offset mid-list, so a no-move frame is either pinned at a scroll limit
+/// (up against the head, down against the tail) or a genuine stall; a move
+/// across more rows than the delta explains is a teleport.
+fn classify_wheel_step(dy: f32, pre: ListOffset, post: ListOffset, at_end: bool) -> WheelStep {
+    if post.item_ix != pre.item_ix || post.offset_in_item != pre.offset_in_item {
+        return WheelStep {
+            jumped: post.item_ix.abs_diff(pre.item_ix) > expected_rows(dy),
+            stalled: false,
+            clamped: false,
+        };
+    }
+    let clamped = if dy > 0.0 {
+        post.item_ix == 0 && post.offset_in_item == px(0.0)
+    } else {
+        at_end
+    };
+    WheelStep {
+        jumped: false,
+        stalled: !clamped,
+        clamped,
+    }
+}
+
+/// Wait until `render_transcript` has painted past `since`, so one wheel
+/// event earns one sampled frame. Returns the frames seen (0 on timeout —
+/// the caller counts the event stalled and moves on).
+async fn wait_for_frame(cx: &mut AsyncApp, since: u64) -> usize {
+    let deadline = Instant::now() + WHEEL_FRAME_TIMEOUT;
+    loop {
+        let now = session::frame_sample_count();
+        if now > since {
+            return (now - since) as usize;
+        }
+        if Instant::now() >= deadline {
+            return 0;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(5))
+            .await;
+    }
+}
+
+/// The wheel instrument: pin the tail, then dispatch real `ScrollWheelEvent`s
+/// at the window centre — where the transcript is — one per frame, sampling
+/// the list's `logical_scroll_top` after each.
+///
+/// Real events matter because `sweep` drives `scroll_to(ListOffset)` and
+/// never touches `ListState::scroll`, the pixel-delta path a person's wheel
+/// takes through the sum tree's heights.
+async fn drive_wheel(
+    handle: &WindowHandle<Root>,
+    view: &Entity<SessionView>,
+    cx: &mut AsyncApp,
+) -> (usize, Vec<WheelPhaseStats>) {
+    let top = |cx: &mut AsyncApp| -> (ListOffset, bool) {
+        cx.update(|cx| (view.read(cx).bench_list_top(), view.read(cx).bench_list_end()))
+    };
+    // Pin the tail first — the anchor every phase starts from — then let
+    // layout settle so the first phase starts from a realized tail. The
+    // pin is unconditional: with zero settle frames the flick lands on the
+    // same frame as the jump, before layout measures anything there.
+    cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_tail(cx)));
+    let mut tail_ix = top(cx).0.item_ix;
+    for _ in 0..WHEEL_SETTLE_FRAMES {
+        let since = session::frame_sample_count();
+        cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_tail(cx)));
+        wait_for_frame(cx, since).await;
+        tail_ix = top(cx).0.item_ix;
+    }
+    let mut phases = Vec::with_capacity(WHEEL_PHASES.len());
+    for (name, dy, count) in WHEEL_PHASES {
+        let mut stats = WheelPhaseStats {
+            name,
+            ..WheelPhaseStats::default()
+        };
+        for _ in 0..count {
+            let before = session::frame_sample_count();
+            let pre = top(cx).0;
+            let dispatched = handle
+                .update(cx, |_, window, cx| {
+                    let size = window.bounds().size;
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: point(size.width * 0.5, size.height * 0.5),
+                            delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .is_ok();
+            if !dispatched {
+                break;
+            }
+            stats.events += 1;
+            stats.frames += wait_for_frame(cx, before).await;
+            let (post, at_end) = top(cx);
+            let step = classify_wheel_step(dy, pre, post, at_end);
+            stats.jumps += step.jumped as usize;
+            stats.stalls += step.stalled as usize;
+            stats.clamped += step.clamped as usize;
+            stats.end_ix = post.item_ix;
+        }
+        phases.push(stats);
+    }
+    (tail_ix, phases)
 }
 
 /// The bench window's root: one replayed session view, rendered whole every
@@ -211,7 +387,10 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         // The stream: one fold-apply per cadence tick, so streaming cost is
         // real, with the list driven per the scroll mode on the same update.
         let mut apply_us: Vec<u128> = Vec::with_capacity(total);
-        if opts.scroll == BenchScroll::Top {
+        // `wheel` streams head-pinned too: an opened session arrives whole
+        // and is scrolled to its tail with everything above unmeasured,
+        // which is the state the instrument has to start its flick from.
+        if matches!(opts.scroll, BenchScroll::Top | BenchScroll::Wheel) {
             cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_to(0.0, cx)));
         }
         for (index, event) in events.into_iter().enumerate() {
@@ -226,6 +405,11 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                         BenchScroll::Mid => view.bench_scroll_to(0.5, cx),
                         BenchScroll::Tail => view.bench_scroll_tail(cx),
                         BenchScroll::Sweep => view.bench_scroll_to(frac, cx),
+                        // Wheel stays head-pinned through the stream (the
+                        // first fill's `follow` would otherwise pull it to
+                        // the tail and measure every row on the way) and is
+                        // driven by real events after it, below.
+                        BenchScroll::Wheel => view.bench_scroll_to(0.0, cx),
                     }
                     micros
                 })
@@ -233,19 +417,27 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
             apply_us.push(micros);
             cx.background_executor().timer(opts.cadence).await;
         }
+        // The wheel instrument runs after the stream, below, and its phases
+        // are the frames — about 700 of them — so it skips this sweep.
+        let mut wheel_stats: Option<(usize, Vec<WheelPhaseStats>)> = None;
+        if opts.scroll == BenchScroll::Wheel {
+            wheel_stats = Some(drive_wheel(&_window, &view, cx).await);
+        }
         // The frames: a small capture streams in milliseconds, so keep
         // sweeping until the asked frame count renders. Every scroll update
         // notifies, so every pass earns natural frames — nothing here forces
         // demand the app did not ask for. Bounded, so a frame-less
         // environment still reports what it saw.
-        let mut extra = 0usize;
-        while session::frame_sample_count() < start_samples + opts.frames as u64
-            && extra < opts.frames * 2 + 200
-        {
-            extra += 1;
-            let frac = sweep_frac(extra % 200, 200);
-            cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_to(frac, cx)));
-            cx.background_executor().timer(opts.cadence).await;
+        if opts.scroll != BenchScroll::Wheel {
+            let mut extra = 0usize;
+            while session::frame_sample_count() < start_samples + opts.frames as u64
+                && extra < opts.frames * 2 + 200
+            {
+                extra += 1;
+                let frac = sweep_frac(extra % 200, 200);
+                cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_to(frac, cx)));
+                cx.background_executor().timer(opts.cadence).await;
+            }
         }
         let stream_secs = run_start.elapsed().as_secs_f64();
         // The idle assertion: a settled transcript must request no frames.
@@ -306,6 +498,56 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         println!("bench-frames frames={frames} fps={fps:.1} dropped={dropped} stream_secs={stream_secs:.1}");
         println!("bench-rss peak_mb={rss_mb:.1}");
         println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
+        let scroll_json = match wheel_stats.as_ref() {
+            Some((tail_ix, phases)) => {
+                let events: usize = phases.iter().map(|p| p.events).sum();
+                let frames: usize = phases.iter().map(|p| p.frames).sum();
+                let jumps: usize = phases.iter().map(|p| p.jumps).sum();
+                let stalls: usize = phases.iter().map(|p| p.stalls).sum();
+                let clamped: usize = phases.iter().map(|p| p.clamped).sum();
+                let ix = |i: usize| phases.get(i).map(|p| p.end_ix).unwrap_or(0);
+                let jump = |i: usize| phases.get(i).map(|p| p.jumps).unwrap_or(0);
+                let stall = |i: usize| phases.get(i).map(|p| p.stalls).unwrap_or(0);
+                let clamp = |i: usize| phases.get(i).map(|p| p.clamped).unwrap_or(0);
+                println!(
+                    "bench-scroll events={events} frames={frames} jumps={jumps} stalls={stalls} clamped={clamped} tail_ix={tail_ix} a_ix={} b_ix={} c_ix={} d_ix={} a_jumps={} a_stalls={} a_clamped={} b_jumps={} b_stalls={} b_clamped={} c_jumps={} c_stalls={} c_clamped={} d_jumps={} d_stalls={} d_clamped={}",
+                    ix(0),
+                    ix(1),
+                    ix(2),
+                    ix(3),
+                    jump(0),
+                    stall(0),
+                    clamp(0),
+                    jump(1),
+                    stall(1),
+                    clamp(1),
+                    jump(2),
+                    stall(2),
+                    clamp(2),
+                    jump(3),
+                    stall(3),
+                    clamp(3),
+                );
+                serde_json::json!({
+                    "events": events,
+                    "frames": frames,
+                    "jumps": jumps,
+                    "stalls": stalls,
+                    "clamped": clamped,
+                    "tail_ix": tail_ix,
+                    "phases": phases.iter().map(|p| serde_json::json!({
+                        "name": p.name,
+                        "events": p.events,
+                        "frames": p.frames,
+                        "jumps": p.jumps,
+                        "stalls": p.stalls,
+                        "clamped": p.clamped,
+                        "end_ix": p.end_ix,
+                    })).collect::<Vec<_>>(),
+                })
+            }
+            None => serde_json::Value::Null,
+        };
         if let Some(path) = opts.out.as_ref() {
             let row = serde_json::json!({
                 "command": command,
@@ -339,6 +581,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                 "stream_secs": stream_secs,
                 "idle_frames_2s": idle_frames,
                 "idle_open_turn": opts.open_turn,
+                "scroll": scroll_json,
                 "rss_peak_mb": rss_mb,
             });
             match serde_json::to_string_pretty(&row)
@@ -386,6 +629,87 @@ mod tests {
         assert_eq!(BenchScroll::parse("mid"), Some(BenchScroll::Mid));
         assert_eq!(BenchScroll::parse("tail"), Some(BenchScroll::Tail));
         assert_eq!(BenchScroll::parse("sweep"), Some(BenchScroll::Sweep));
+        assert_eq!(BenchScroll::parse("wheel"), Some(BenchScroll::Wheel));
         assert_eq!(BenchScroll::parse("sideways"), None);
+    }
+
+    #[test]
+    fn the_wheel_phases_cover_flick_down_and_trackpad() {
+        let events: usize = WHEEL_PHASES.iter().map(|(_, _, count)| count).sum();
+        assert_eq!(events, 6 + 90 + 300 + 300);
+        // (a) is a real flick: each event travels several rows, which is
+        // what exposes zero-height unmeasured rows.
+        assert_eq!(WHEEL_PHASES[0], ('a', 600.0, 6));
+        // (c) and (d) mirror each other, so a healthy run returns (d) to the
+        // tail without ever stalling mid-list.
+        let net_c_d: f32 = WHEEL_PHASES[2..]
+            .iter()
+            .map(|(_, dy, count)| dy * *count as f32)
+            .sum();
+        assert_eq!(net_c_d, 0.0);
+    }
+
+    #[test]
+    fn wheel_steps_split_jank_from_end_of_list() {
+        use gpui::ListOffset;
+        let at = |ix: usize, off: f32| ListOffset {
+            item_ix: ix,
+            offset_in_item: px(off),
+        };
+        // A smooth climb is none of the three.
+        assert_eq!(
+            classify_wheel_step(120.0, at(591, 0.0), at(590, 0.0), false),
+            WheelStep {
+                jumped: false,
+                stalled: false,
+                clamped: false,
+            }
+        );
+        // A teleport jumps.
+        assert_eq!(
+            classify_wheel_step(120.0, at(592, 0.0), at(2, 0.0), false),
+            WheelStep {
+                jumped: true,
+                stalled: false,
+                clamped: false,
+            }
+        );
+        // A no-move mid-list stalls.
+        assert_eq!(
+            classify_wheel_step(-40.0, at(300, 10.0), at(300, 10.0), false),
+            WheelStep {
+                jumped: false,
+                stalled: true,
+                clamped: false,
+            }
+        );
+        // A no-move against the head clamps.
+        assert_eq!(
+            classify_wheel_step(20.0, at(0, 0.0), at(0, 0.0), false),
+            WheelStep {
+                jumped: false,
+                stalled: false,
+                clamped: true,
+            }
+        );
+        // A no-move against the tail clamps, even with an offset.
+        assert_eq!(
+            classify_wheel_step(-20.0, at(590, 4.0), at(590, 4.0), true),
+            WheelStep {
+                jumped: false,
+                stalled: false,
+                clamped: true,
+            }
+        );
+        // Unknown tail state (unmeasured, unscrollable) follows the app's
+        // own follow logic and counts as the tail limit.
+        assert_eq!(
+            classify_wheel_step(-20.0, at(0, 0.0), at(0, 0.0), true),
+            WheelStep {
+                jumped: false,
+                stalled: false,
+                clamped: true,
+            }
+        );
     }
 }
