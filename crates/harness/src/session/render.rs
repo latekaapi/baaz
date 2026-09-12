@@ -221,17 +221,19 @@ impl SessionView {
 
     /// Bring the virtual list's row count in step with the cache.
     ///
-    /// The splice is the changed range only, so visible rows keep their
-    /// measurements and the tail stays pinned (C1); a pure append (the
-    /// streaming case) measures the new tail and nothing else. The tail is
-    /// followed only when the reader was already at it — the TAIL_SLACK
-    /// semantics, owned by the list element itself.
+    /// The first fill hints every row at [`TURN_HEIGHT_HINT`], so a wheel
+    /// flick maps onto roughly the right rows before anything is measured
+    /// (H2); the splice is the changed range only, so visible rows keep
+    /// their measurements and the tail stays pinned (C1); a pure append
+    /// (the streaming case) measures the new tail and nothing else. The tail
+    /// is followed only when the reader was already at it — tail-follow,
+    /// owned by the list element itself.
     pub(super) fn sync_virtual_list(&mut self, count: usize) {
         if count != self.list_len {
             let old = self.list_len;
             self.list_len = count;
             if old == 0 {
-                self.list_state.reset(count);
+                self.list_state.reset_with_uniform_height(count, px(TURN_HEIGHT_HINT));
             } else if count > old {
                 self.list_state.splice(old..old, count - old);
             } else {

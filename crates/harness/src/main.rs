@@ -76,7 +76,11 @@ use gpui_kit::component::{Root, TitleBar};
 
 /// The window the spec asks for.
 const WINDOW_W: f32 = 1440.0;
-const WINDOW_H: f32 = 900.0;
+/// The window height, and the transcript list's overdraw: a viewport's worth
+/// of rows stay measured past the visible edge, so a wheel flick never
+/// outruns measured rows into zero-height territory (see `SessionView`'s
+/// list construction).
+pub(crate) const WINDOW_H: f32 = 900.0;
 const WINDOW_MIN_W: f32 = 900.0;
 const WINDOW_MIN_H: f32 = 600.0;
 /// How long a `--screenshot` render waits for fonts, layout and the first
@@ -200,7 +204,10 @@ pub struct Args {
     pub bench: Option<PathBuf>,
     /// `--bench-cadence-ms <ms>`: the delay between streamed events.
     pub bench_cadence: Duration,
-    /// `--bench-scroll top|mid|tail|sweep`: how the list is driven.
+    /// `--bench-scroll top|mid|tail|sweep|wheel`: how the list is driven.
+    /// `wheel` dispatches real `ScrollWheelEvent`s at the transcript centre
+    /// after the stream lands (the scroll-jank instrument); the rest drive
+    /// `scroll_to` while the stream lands. See `docs/02-app.md` §6.
     pub bench_scroll: bench::BenchScroll,
     /// `--bench-frames <n>`: the minimum frames to observe before stopping.
     pub bench_frames: usize,
@@ -341,8 +348,8 @@ fn parse_args() -> Args {
             }
             "--bench-scroll" => {
                 let value = args.next().unwrap_or_default();
-                out.bench_scroll =
-                    bench::BenchScroll::parse(&value).unwrap_or_else(|| usage("--bench-scroll takes top|mid|tail|sweep"));
+                out.bench_scroll = bench::BenchScroll::parse(&value)
+                    .unwrap_or_else(|| usage("--bench-scroll takes top|mid|tail|sweep|wheel"));
             }
             "--bench-frames" => {
                 let value = args.next().unwrap_or_default();
@@ -404,7 +411,7 @@ fn usage(err: &str) -> ! {
          \x20              [--replay <capture.jsonl>] [--tier subscription|payg|unknown]\n\
          \x20              [--print-tier] [--approval-mode <mode>]\n\
          \x20              [--login <state>] [--login-steps <a;b;c>]\n\
-         \x20              [--bench <capture.jsonl>] [--bench-cadence-ms <ms>] [--bench-scroll top|mid|tail|sweep]\n\
+         \x20              [--bench <capture.jsonl>] [--bench-cadence-ms <ms>] [--bench-scroll top|mid|tail|sweep|wheel]\n\
          \x20              [--bench-frames <n>] [--bench-open-turn] [--bench-out <file.json>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
