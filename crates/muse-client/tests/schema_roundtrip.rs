@@ -32,6 +32,24 @@ const UNTYPED_METHODS: &[&str] = &[
     "account/logout",
 ];
 
+/// The lane whose **results** msp.d.ts leaves shapeless.
+///
+/// The subagent calls (SS3.16) have typed params — [`SubagentInputParams`] and
+/// friends — but the published declarations give their results no interface,
+/// and the harness issues none of these calls, so there is nothing to model
+/// and nothing to verify against. Typing them from guesswork would be worse
+/// than saying so here.
+const RESULTS_NOT_MODELLED: &[&str] = &[
+    "subagent/sendMessage",
+    "subagent/followupTask",
+    "subagent/interrupt",
+    "subagent/stop",
+    "subagent/resume",
+    "subagent/reopen",
+    "subagent/close",
+    "subagent/readResult",
+];
+
 fn fixture_files() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(FIXTURE_DIR)
         .expect("fixture directory")
@@ -44,7 +62,12 @@ fn fixture_files() -> Vec<PathBuf> {
 }
 
 /// Deserialize `raw` into `T`, re-serialize, and require the JSON to be unchanged.
-fn roundtrip<T: DeserializeOwned + Serialize>(what: &str, raw: &Value) {
+///
+/// `None` checks nothing and asserts nothing: it is the *inventory* call, which
+/// only needs the dispatch arm below to exist and name a type. See
+/// [`every_published_method_has_a_dispatch_arm`].
+fn roundtrip<T: DeserializeOwned + Serialize>(what: &str, raw: Option<&Value>) {
+    let Some(raw) = raw else { return };
     let typed: T = serde_json::from_value(raw.clone())
         .unwrap_or_else(|e| panic!("{what}: deserialize failed: {e}\n  json: {raw}"));
     let back = serde_json::to_value(&typed).unwrap_or_else(|e| panic!("{what}: serialize: {e}"));
@@ -55,7 +78,7 @@ fn roundtrip<T: DeserializeOwned + Serialize>(what: &str, raw: &Value) {
 }
 
 /// `params` of a client→server request, by method name.
-fn roundtrip_request_params(method: &str, params: &Value) -> bool {
+fn roundtrip_request_params(method: &str, params: Option<&Value>) -> bool {
     let w = &format!("--> {method} params");
     match method {
         "initialize" => roundtrip::<InitializeParams>(w, params),
@@ -99,7 +122,7 @@ fn roundtrip_request_params(method: &str, params: &Value) -> bool {
 }
 
 /// `result` of a client→server request, by the method the request used.
-fn roundtrip_result(method: &str, result: &Value) -> bool {
+fn roundtrip_result(method: &str, result: Option<&Value>) -> bool {
     let w = &format!("<-- {method} result");
     match method {
         "initialize" => roundtrip::<InitializeResult>(w, result),
@@ -136,7 +159,7 @@ fn roundtrip_result(method: &str, result: &Value) -> bool {
 }
 
 /// `params` of a server→client notification or request, by method name.
-fn roundtrip_server_params(method: &str, params: &Value) -> bool {
+fn roundtrip_server_params(method: &str, params: Option<&Value>) -> bool {
     let w = &format!("<-- {method} params");
     match method {
         "session/started" => roundtrip::<SessionStartedParams>(w, params),
@@ -232,9 +255,9 @@ fn every_recorded_frame_round_trips() {
                 if let Some(id) = frame.get("id") {
                     // A request: remember it so its response can be typed.
                     pending.insert((outbound, id.to_string()), method.to_owned());
-                    roundtrip::<Request>(&format!("{at} request frame"), &frame);
+                    roundtrip::<Request>(&format!("{at} request frame"), Some(&frame));
                 } else {
-                    roundtrip::<Notification>(&format!("{at} notification frame"), &frame);
+                    roundtrip::<Notification>(&format!("{at} notification frame"), Some(&frame));
                 }
 
                 if outbound
@@ -254,9 +277,9 @@ fn every_recorded_frame_round_trips() {
                     continue;
                 }
                 let handled = if outbound {
-                    roundtrip_request_params(method, &params)
+                    roundtrip_request_params(method, Some(&params))
                 } else {
-                    roundtrip_server_params(method, &params)
+                    roundtrip_server_params(method, Some(&params))
                 };
                 if handled {
                     typed += 1;
@@ -267,18 +290,18 @@ fn every_recorded_frame_round_trips() {
                     );
                 }
             } else if let Some(result) = frame.get("result") {
-                roundtrip::<SuccessResponse>(&format!("{at} success frame"), &frame);
+                roundtrip::<SuccessResponse>(&format!("{at} success frame"), Some(&frame));
                 let id = frame.get("id").expect("response carries an id").to_string();
                 let method = pending
                     .get(&(!outbound, id))
                     .unwrap_or_else(|| panic!("{at}: response with no matching request"));
                 assert!(
-                    roundtrip_result(method, result),
+                    roundtrip_result(method, Some(result)),
                     "{at}: no dispatch entry for {method} result"
                 );
                 typed += 1;
             } else if frame.get("error").is_some() {
-                roundtrip::<ErrorResponse>(&format!("{at} error frame"), &frame);
+                roundtrip::<ErrorResponse>(&format!("{at} error frame"), Some(&frame));
                 typed += 1;
             } else {
                 panic!("{at}: frame is neither request, notification, result nor error");
@@ -425,36 +448,36 @@ fn login_start_params_debug_redacts_the_key() {
 fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
     roundtrip::<ViewSubscribeParams>(
         "view/subscribe params",
-        &serde_json::json!({"sessionId": "s1", "after": "v:s1:9"}),
+        Some(&serde_json::json!({"sessionId": "s1", "after": "v:s1:9"})),
     );
     roundtrip::<ViewSubscribeResult>(
         "view/subscribe result",
-        &serde_json::json!({"viewCursor": "v:s1:9"}),
+        Some(&serde_json::json!({"viewCursor": "v:s1:9"})),
     );
     roundtrip::<ItemReadOutputParams>(
         "item/readOutput params",
-        &serde_json::json!({
+        Some(&serde_json::json!({
             "sessionId": "s1",
             "itemId": "i-1",
             "outputRef": "out-1",
             "offsetBytes": 0,
             "lengthBytes": 4096,
-        }),
+        })),
     );
     roundtrip::<ItemReadOutputResult>(
         "item/readOutput result",
-        &serde_json::json!({
+        Some(&serde_json::json!({
             "content": "hello",
             "byteLen": 5,
             "offsetBytes": 0,
             "eof": true,
             "encoding": "utf8",
             "mediaType": "text/plain",
-        }),
+        })),
     );
     roundtrip::<SessionModelRouteUnservedParams>(
         "session/modelRouteUnserved params",
-        &serde_json::json!({
+        Some(&serde_json::json!({
             "sessionId": "s1",
             "commandId": "c1",
             "installedProviderId": "meta",
@@ -466,7 +489,7 @@ fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
                 "last": {"id": "e1", "sequence": 1},
             },
             "viewCursor": "v:s1:1",
-        }),
+        })),
     );
 }
 
@@ -478,4 +501,49 @@ fn index_constants_match_the_published_schema() {
     assert!(SCHEMA_FINGERPRINT.starts_with("sha256:"));
     // `session/started` is emitted by the binary but absent from the published index.
     assert!(!MSP_NOTIFICATIONS.contains(&"session/started"));
+}
+
+/// One inventory, three tables: every published method and notification must
+/// be named by the dispatch arms above (finding `client-adapter-16`).
+///
+/// Adding a wire method used to mean remembering four places — the type,
+/// [`MSP_METHODS`], and the three matches here — and nothing said when one was
+/// forgotten. [`MSP_METHODS`] and [`MSP_NOTIFICATIONS`] are the index, so this
+/// walks them and asks each table whether it has an arm; the arm is reached
+/// with no payload, so it proves only that the method is *named* and typed,
+/// which is exactly what the captures cannot prove for a method they do not
+/// happen to contain.
+///
+/// [`UNTYPED_METHODS`] and [`RESULTS_NOT_MODELLED`] are the two deliberate
+/// exception lists, and the three server→client frames are named here because
+/// the published index does not carry them (see [`muse_client::schema`]).
+#[test]
+fn every_published_method_has_a_dispatch_arm() {
+    for method in MSP_METHODS {
+        if !UNTYPED_METHODS.contains(method) {
+            assert!(
+                roundtrip_request_params(method, None),
+                "{method}: no params arm in roundtrip_request_params"
+            );
+        }
+        if !RESULTS_NOT_MODELLED.contains(method) {
+            assert!(roundtrip_result(method, None), "{method}: no result arm in roundtrip_result");
+        }
+    }
+    for method in MSP_NOTIFICATIONS {
+        if UNTYPED_METHODS.contains(method) {
+            continue;
+        }
+        assert!(
+            roundtrip_server_params(method, None),
+            "{method}: no params arm in roundtrip_server_params"
+        );
+    }
+    // Emitted by the binary, absent from the published index.
+    for method in ["session/started", "approval/request", "userInput/request"] {
+        assert!(
+            roundtrip_server_params(method, None),
+            "{method}: no params arm in roundtrip_server_params"
+        );
+    }
 }

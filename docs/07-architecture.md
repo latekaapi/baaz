@@ -27,13 +27,15 @@ here is already described somewhere else in more detail; this is the map.
                                     │ aui_protocol::{Session, Delta}
                     ┌───────────────▼──────────────────────────┐
                     │ harness (gpui)                           │
-                    │   app.rs      the window, sessions, shell│
-                    │   session.rs  one open session           │
+                    │   app.rs + app/  the window and the shell│
+                    │   session.rs + session/  one session     │
                     │   login.rs    the login screen, account/*│
                     │   steps.rs    --steps / --login-steps    │
                     │   wire.rs     call, then update          │
-                    │   + tier, store, sessions, index,        │
-                    │     overlays, transcript, sidebar, shot  │
+                    │   + tier, billing, store, sessions,      │
+                    │     index, overlays, transcript,         │
+                    │     sidebar, sidebar_view, dialogs,      │
+                    │     resize, shot                         │
                     └──────────────────────────────────────────┘
                                     │
                               aui, aui-protocol, aui-motion,
@@ -52,17 +54,46 @@ Two gpui entities own state, and a third owns everything that floats.
 | entity | file | owns |
 |---|---|---|
 | `Harness` | `app.rs` | the one `MuseClient`, the wire account state and the login flow, the session list, the billing tier, the sidebar's search and rename fields, the active session |
+| `SessionView` | `session.rs` | one Muse session: its `MuseFold`, the composer draft, the scroll position, the folded cards, the running turn, the pending questions' clocks |
+| `Overlays` | `overlays.rs` | **state only**: the modal, the open menu and its selection, the palette, the toasts, and the two lists the menus are built from |
 
-Three of `Harness`'s concerns keep their fields there but live in their own
-modules, each reached through one call per seam (C1, 2026-09-12):
+Both entities keep **all** their fields in their own file and nothing else. The
+methods live next door, split along the section seams the two files already had
+(C1 and C2, 2026-09-12): a sibling module is one `impl` block and its own types,
+reached through one call per seam, and `app.rs` / `session.rs` keep only the
+fields, construction, and the top of the frame.
+
+`Harness`'s seams:
 
 | module | owns |
 |---|---|
+| `app/lifecycle.rs` | reading the index, listing, starting, resuming and opening sessions, and the deferred swap that keeps a switch from flashing an empty transcript |
+| `app/list.rs` | what a person can do to a row: rename, pin, hide, archive, clear the empty ones, undo — and `set_overrides`, which settles a whole batch once |
+| `app/find.rs` | full-text search over sessions and created files: the palette's query, the off-thread re-query, the rows |
+| `sidebar_view.rs` | the sidebar column: nav block, session rows, empty states, rename field, footer, rail, and the two popovers anchored to the column |
+| `dialogs.rs` | what floats over the window: the modal, the palette, the toast stack, the header's overflow menu |
+| `billing.rs` | the tier probe's lifecycle and the banner it hands to the open session |
+| `resize.rs` | `ResizeDrag`: the sidebar divider's width and whatever drag is in flight over it |
 | `login.rs` | the login screen's state, the `account/*` notifications, the device-code and API-key flows, sign-out, and `render_login` (`docs/diagnosis/login.md` §4, D22–D28) |
 | `steps.rs` | the whole scripting surface: one parser, one verb table per scope (window, session, login), the two runners, and the cost notes |
 | `wire.rs` | `WireCall`: run a blocking request on the background executor, then return through `update` / `update_in` — the shape every wire call in the app has |
-| `SessionView` | `session.rs` | one Muse session: its `MuseFold`, the composer draft, the scroll position, the folded cards, the running turn, the pending questions' clocks |
-| `Overlays` | `overlays.rs` | **state only**: the modal, the open menu and its selection, the palette, the toasts, and the two lists the menus are built from |
+
+`SessionView`'s seams, all under `session/`: `events.rs` (fold one wire event,
+react to the few that are more than transcript), `commands.rs` (send, steer,
+interrupt, the slash commands, plan mode), `composer.rs` (the `/`, `@`, model,
+effort and mode menus, prompt history, images), `approvals.rs` (decisions, the
+full output a settled shell card fetches, retry), `questions.rs`, `shell.rs`
+(`session/userShell` and `session/fork`), `clocks.rs` (the countdown and the
+backoff), `scripting.rs` (`--steps` for one session) and `render.rs`.
+
+One rule holds the frame together: **a frame decides before it draws.**
+`Harness::on_frame` is the pre-pass that does the window title, a resize left
+armed by a release the window never saw, the deferred session swap and the
+one-shot composer focus; `SessionView::sync_render_cache` and
+`sync_virtual_list` are the only places a transcript frame writes. Everything
+below them reads and composes. The one exception is documented where it stands:
+`--replay`'s kick starts a wall-clock-cadenced stream, so where in the frame it
+runs decides where in that stream a fixed-delay capture lands.
 
 `Overlays` holds no elements. The dialog, the palette and the toast stack are
 rendered by `Harness`; the composer's chip menus and caret popovers are rendered

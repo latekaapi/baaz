@@ -77,8 +77,13 @@ impl BenchRoot {
     /// the capture's session id and sent prompts before the first event
     /// (see [`run`]): the view starts on a placeholder.
     pub fn new(workspace: String, provider: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let overlays = cx.new(|_| crate::overlays::Overlays::default());
-        let view = cx.new(|cx| SessionView::new("bench".to_owned(), None, provider, workspace, overlays, window, cx));
+        let host = crate::session::SessionHost {
+            provider_id: provider,
+            workspace,
+            overlays: cx.new(|_| crate::overlays::Overlays::default()),
+            capture: crate::shot::CaptureToken::default(),
+        };
+        let view = cx.new(|cx| SessionView::new("bench".to_owned(), None, host, window, cx));
         Self { view }
     }
 }

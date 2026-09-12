@@ -23,7 +23,10 @@ use aui::transcript::{
     tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, QuestionOutcome, TextSelection,
     ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
-use aui_protocol::{Answer, Block, MarkerKind, ThinkingState, ToolBody, ToolCall, Turn, TurnMeta};
+use aui_protocol::{
+    ActivityState, Answer, Block, MarkerKind, PlanSection, PlanState, Step, ThinkingState, ToolBody,
+    ToolCall, Turn, TurnMeta,
+};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
@@ -323,7 +326,7 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
             }
             // The turn's own held selection, if any (C8b): every turn gets
             // only its own, because cell keys repeat across turns.
-            turn = turn.selection(folds.text_selections.get(id).cloned());
+            turn = turn.selection(folds.text_selections.get(id));
             if let Some(on_change) = &folds.selection_change {
                 let on_change = on_change.clone();
                 let (turn_id, source) = (id.clone(), text.clone());
@@ -379,215 +382,27 @@ fn block(
     cx: &mut App,
 ) -> AnyElement {
     let id = ElementId::from(SharedString::from(key.to_owned()));
-    let toggle = {
-        let toggle = folds.toggle.clone();
-        let key = key.to_owned();
-        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| toggle(key.clone(), window, cx)
-    };
     match block {
-        Block::Text { text, streaming } => {
-            // Pin has no meaning on a turn — it lives on sidebar sessions —
-            // so the row keeps copy, retry and fork only.
-            let mut turn = assistant_turn(id, text.clone())
-                .actions(&[
-                    AssistantTurnAction::Copy,
-                    AssistantTurnAction::Retry,
-                    AssistantTurnAction::Fork,
-                ])
-                .streaming(*streaming)
-                .actions_bottom(last);
-            // A finished turn signs off with its footer; a running one has no
-            // final numbers to show yet, and neither has a turn the server
-            // measured nothing for. A silent turn carries no library footer —
-            // `meta` is `None` there — because the harness draws its own row.
-            if let Some(meta) = meta {
-                if last && !*streaming && meta != &TurnMeta::default() {
-                    turn = turn.meta(meta.clone());
-                }
-            }
-            if let Some(on_link) = &folds.link {
-                let on_link = on_link.clone();
-                turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
-            }
-            // The turn's own held selection, if any (C8b). Sibling text
-            // blocks share the turn id, so a selection over one block's
-            // `p0` also tints the other's — the library scopes keys to the
-            // markdown view, and a turn holds several. The source that
-            // travels back with an intent is still exactly this block's
-            // text, so ⌘C copies what was dragged.
-            turn = turn.selection(folds.text_selections.get(turn_id).cloned());
-            if let Some(on_change) = &folds.selection_change {
-                let on_change = on_change.clone();
-                let (owner, source) = (turn_id.to_owned(), text.clone());
-                turn = turn.on_selection_change(move |next, window, cx| {
-                    on_change(owner.clone(), source.clone(), next, window, cx);
-                });
-            }
-            // The row belongs to the message, so only the closing block
-            // carries it.
-            if last {
-                if let Some(act) = &folds.assistant_action {
-                    let act = act.clone();
-                    let turn_id = turn_id.to_owned();
-                    turn = turn
-                        .on_action(move |action, window, cx| act(turn_id.clone(), action, window, cx));
-                }
-            }
-            turn.into_any_element()
-        }
+        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, folds),
         Block::Thinking { text, elapsed_ms, summary, state } => {
-            let done = *state == ThinkingState::Done;
-            let mut card = thinking_block(id, text.clone(), elapsed(*elapsed_ms), *state)
-                // A live trace stays open; a finished one collapses to its
-                // summary until the person asks for it.
-                .expanded(folds.open(key, !done))
-                .on_toggle(toggle);
-            if let Some(summary) = summary {
-                card = card.summary(summary.clone());
-            }
-            card.into_any_element()
+            thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
         }
         Block::Activity { steps, summary, elapsed_ms, state } => {
-            activity_group(id, steps.clone(), summary.clone(), elapsed(*elapsed_ms), *state)
-                .open(folds.open(key, false))
-                .on_toggle(toggle)
-                .into_any_element()
+            activity_card(id, key, steps, summary, *elapsed_ms, *state, folds)
         }
-        Block::ToolCall { .. } => {
-            let Some(call) = block.as_tool_call() else {
-                return generic_item_card(id, "tool", "done", String::new()).into_any_element();
-            };
-            tool_call_card(key, id, &call, folds)
-        }
-        // A grouped run renders through the library's group card (C8): the
-        // header toggles the group, and the open group renders every call as
-        // the full card the lone `Block::ToolCall` would have shown — same
-        // toggles, same full-output fetches, keyed stably per call.
-        Block::ToolGroup { .. } => {
-            let Some(data) = ToolGroupData::from_block(block) else {
-                return generic_item_card(id, "tool", "done", String::new()).into_any_element();
-            };
-            let mut group = tool_group(id, data.clone(), folds.open(key, false));
-            for (index, _) in data.calls.iter().enumerate() {
-                group = group.call_open(index, folds.open(&format!("{key}:{index}"), true));
-            }
-            if let Some(handler) = &folds.tool_group {
-                let handler = handler.clone();
-                let key = key.to_owned();
-                group = group
-                    .on_intent(move |intent, window, cx| handler(key.clone(), intent, window, cx));
-            }
-            group.into_any_element()
-        }
-        Block::Approval { id: approval_id, tool, command, reason, cwd, capabilities, scope, state, rule, choices, stages, current_stage, badges, feedback, resolved_by } => {
-            let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
-                .title(APPROVAL_TITLE)
-                .reason(reason.clone())
-                .cwd(cwd.clone())
-                .capabilities(capabilities.clone())
-                .scope(*scope)
-                .rule(rule.clone().unwrap_or_default())
-                .choices(choices.clone())
-                .stages(stages.clone(), *current_stage)
-                .badges(*badges)
-                .resolved_by(*resolved_by);
-            if folds.at_rest {
-                card = card.at_rest();
-            }
-            if let Some(feedback) = feedback {
-                card = card.feedback(feedback.clone());
-            }
-            let Some(cards) = &folds.cards else { return card.into_any_element() };
-            let open_here = cards.feedback_open.as_ref().filter(|(a, _)| a == approval_id);
-            if let Some((_, choice_id)) = open_here {
-                card = card.feedback_open(Some(choice_id.clone())).feedback_text(cards.feedback_text.clone());
-                if let Some(slot) = cards.feedback_slot.borrow_mut().take() {
-                    card = card.feedback_slot(slot);
-                }
-            }
-            let choose = cards.choose.clone();
-            let toggle_feedback = cards.feedback_toggle.clone();
-            let (a, b) = (approval_id.clone(), approval_id.clone());
-            card.on_choose(move |choice_id, feedback, window, cx| choose(a.clone(), choice_id, feedback, window, cx))
-                .on_feedback_toggle(move |choice_id, window, cx| toggle_feedback(b.clone(), choice_id, window, cx))
-                .into_any_element()
-        }
-        Block::Question { id: question_id, header, prompt, subtitle, options, multi, allow_other, answer, timeout_ms } => {
-            if let Some(answer) = answer {
-                return settled_row(id, options, answer);
-            }
-            let mut card = question_card(id, prompt.clone(), options.clone())
-                .header(header.clone())
-                .subtitle(subtitle.clone())
-                .multi(*multi)
-                .allow_other(*allow_other);
-            // The deadline is the block's, so the pill is drawn whether or not
-            // anything is wired up to answer; the *countdown* below needs the
-            // app's clock and replaces it.
-            if let Some(total) = timeout_ms {
-                card = card.timeout(*total, *total);
-            }
-            let Some(cards) = &folds.cards else { return card.into_any_element() };
-            if let Some(selected) = cards.selections.get(question_id) {
-                card = card.selected(selected.clone());
-            }
-            if let Some(open) = cards.previews.get(question_id) {
-                card = card.previews_open(open.clone());
-            }
-            // The card draws the pill; the clock is the app's, because MSP sends
-            // a duration and never a deadline.
-            if let Some((remaining, total)) = cards.countdowns.get(question_id) {
-                card = card.timeout(*remaining, *total);
-            }
-            if cards.clarify_open.as_deref() == Some(question_id.as_str()) {
-                card = card.clarify_open(true);
-                if let Some(slot) = cards.clarify_slot.borrow_mut().take() {
-                    card = card.clarify_slot(slot);
-                }
-            }
-            let (select, answer, skip, clarify, preview) =
-                (cards.select.clone(), cards.answer.clone(), cards.skip.clone(), cards.clarify.clone(), cards.toggle_preview.clone());
-            let ids = std::iter::repeat_n(question_id.clone(), 5).collect::<Vec<_>>();
-            card.on_select({
-                let id = ids[0].clone();
-                move |index, window, cx| select(id.clone(), index, window, cx)
-            })
-            .on_toggle_preview({
-                let id = ids[1].clone();
-                move |index, window, cx| preview(id.clone(), index, window, cx)
-            })
-            .on_answer({
-                let id = ids[2].clone();
-                move |_, window, cx| answer(id.clone(), window, cx)
-            })
-            .on_skip({
-                let id = ids[3].clone();
-                move |_, window, cx| skip(id.clone(), window, cx)
-            })
-            .on_clarify({
-                let id = ids[4].clone();
-                move |_, window, cx| clarify(id.clone(), window, cx)
-            })
-            .into_any_element()
-        }
+        Block::ToolCall { .. } => match block.as_tool_call() {
+            Some(call) => tool_call_card(key, id, &call, folds),
+            None => generic_item_card(id, "tool", "done", String::new()).into_any_element(),
+        },
+        Block::ToolGroup { .. } => tool_group_card(id, key, block, folds),
+        Block::Approval { .. } => approval_block_card(id, block, folds),
+        Block::Question { .. } => question_block_card(id, block, folds),
         Block::Plan { id: plan_id, items, sections, state } => {
-            let mut card = plan_card(id, items.clone()).sections(sections.clone()).state(*state);
-            if let Some(handler) = folds.plan.clone() {
-                let act = |action: PlanAction| {
-                    let handler = handler.clone();
-                    let plan_id = plan_id.clone();
-                    move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                        handler(plan_id.clone(), action, window, cx)
-                    }
-                };
-                card = card
-                    .on_accept(act(PlanAction::Accept))
-                    .on_edit(act(PlanAction::Refine))
-                    .on_reject(act(PlanAction::Reject));
-            }
-            card.into_any_element()
+            plan_block_card(id, plan_id, items, sections, *state, folds)
         }
-        Block::Todo { items } => todo_list(id, items.clone()).open(folds.open(key, true)).on_toggle(toggle).into_any_element(),
+        Block::Todo { items } => {
+            todo_list(id, items.clone()).open(folds.open(key, true)).on_toggle(fold_toggle(key, folds)).into_any_element()
+        }
         Block::Summary { title, files, checks, duration_ms, cost_usd } => {
             summary_card(id, title.clone(), format!("{} · ${cost_usd:.2}", elapsed(*duration_ms)))
                 .files(files.clone())
@@ -595,30 +410,10 @@ fn block(
                 .into_any_element()
         }
         Block::Error { title, detail, retryable } => {
-            let mut card = error_card(id, title.clone(), detail.clone());
-            // The retry resends the failed turn's own input, so it is only
-            // offered when the app still has that text: a button that would
-            // send an empty prompt is worse than no button.
-            if *retryable {
-                if let Some(cards) = &folds.cards {
-                    if cards.retryable_turns.contains(turn_id) {
-                        let retry = cards.retry.clone();
-                        let turn_id = turn_id.to_owned();
-                        card = card.on_retry(move |_, window, cx| retry(turn_id.clone(), window, cx));
-                    }
-                }
-            }
-            card.into_any_element()
+            error_block_card(id, turn_id, title, detail, *retryable, folds)
         }
         Block::Goal { objective, status, percent_complete, current_work, next_work } => {
-            let mut card = goal_card(id, objective.clone(), status.clone()).percent(*percent_complete);
-            if let Some(work) = current_work {
-                card = card.current_work(work.clone());
-            }
-            if let Some(work) = next_work {
-                card = card.next_work(work.clone());
-            }
-            card.into_any_element()
+            goal_block_card(id, objective, status, *percent_complete, current_work.as_deref(), next_work.as_deref())
         }
         // MSP's item kinds are an open set and mandate exactly this fallback:
         // the kind, the status and the server's own one-line text.
@@ -627,6 +422,332 @@ fn block(
         }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
     }
+}
+
+/// The fold toggle every collapsible card hangs off: one click, one key.
+fn fold_toggle(key: &str, folds: &Folds) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+    let toggle = folds.toggle.clone();
+    let key = key.to_owned();
+    move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| toggle(key.clone(), window, cx)
+}
+
+/// The reply itself, and on the closing block the turn's footer and actions.
+///
+/// A finished turn signs off with its footer; a running one has no final
+/// numbers to show yet, and neither has a turn the server measured nothing
+/// for. A silent turn carries no library footer — `meta` is `None` there —
+/// because the harness draws its own row.
+fn text_card(
+    id: ElementId,
+    turn_id: &str,
+    text: &str,
+    streaming: bool,
+    last: bool,
+    meta: Option<&TurnMeta>,
+    folds: &Folds,
+) -> AnyElement {
+    // Pin has no meaning on a turn — it lives on sidebar sessions — so the
+    // row keeps copy, retry and fork only.
+    let mut turn = assistant_turn(id, text.to_owned())
+        .actions(&[AssistantTurnAction::Copy, AssistantTurnAction::Retry, AssistantTurnAction::Fork])
+        .streaming(streaming)
+        .actions_bottom(last);
+    if let Some(meta) = meta {
+        if last && !streaming && meta != &TurnMeta::default() {
+            turn = turn.meta(meta.clone());
+        }
+    }
+    if let Some(on_link) = &folds.link {
+        let on_link = on_link.clone();
+        turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
+    }
+    // The turn's own held selection, if any (C8b). Sibling text blocks share
+    // the turn id, so a selection over one block's `p0` also tints the
+    // other's — the library scopes keys to the markdown view, and a turn
+    // holds several. The source that travels back with an intent is still
+    // exactly this block's text, so ⌘C copies what was dragged.
+    turn = turn.selection(folds.text_selections.get(turn_id));
+    if let Some(on_change) = &folds.selection_change {
+        let on_change = on_change.clone();
+        let (owner, source) = (turn_id.to_owned(), text.to_owned());
+        turn = turn.on_selection_change(move |next, window, cx| {
+            on_change(owner.clone(), source.clone(), next, window, cx);
+        });
+    }
+    // The row belongs to the message, so only the closing block carries it.
+    if last {
+        if let Some(act) = &folds.assistant_action {
+            let act = act.clone();
+            let turn_id = turn_id.to_owned();
+            turn = turn.on_action(move |action, window, cx| act(turn_id.clone(), action, window, cx));
+        }
+    }
+    turn.into_any_element()
+}
+
+/// The reasoning trace: a live one stays open, a finished one collapses to
+/// its summary until the person asks for it.
+fn thinking_card(
+    id: ElementId,
+    key: &str,
+    text: &str,
+    elapsed_ms: u64,
+    summary: Option<&str>,
+    state: ThinkingState,
+    folds: &Folds,
+) -> AnyElement {
+    let done = state == ThinkingState::Done;
+    let mut card = thinking_block(id, text.to_owned(), elapsed(elapsed_ms), state)
+        .expanded(folds.open(key, !done))
+        .on_toggle(fold_toggle(key, folds));
+    if let Some(summary) = summary {
+        card = card.summary(summary.to_owned());
+    }
+    card.into_any_element()
+}
+
+/// A run of small steps, folded to one line by default.
+fn activity_card(
+    id: ElementId,
+    key: &str,
+    steps: &[Step],
+    summary: &str,
+    elapsed_ms: u64,
+    state: ActivityState,
+    folds: &Folds,
+) -> AnyElement {
+    activity_group(id, steps.to_vec(), summary.to_owned(), elapsed(elapsed_ms), state)
+        .open(folds.open(key, false))
+        .on_toggle(fold_toggle(key, folds))
+        .into_any_element()
+}
+
+/// A grouped run through the library's group card (C8): the header toggles
+/// the group, and the open group renders every call as the full card the lone
+/// `Block::ToolCall` would have shown — same toggles, same full-output
+/// fetches, keyed stably per call.
+fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> AnyElement {
+    let Some(data) = ToolGroupData::from_block(block) else {
+        return generic_item_card(id, "tool", "done", String::new()).into_any_element();
+    };
+    let mut group = tool_group(id, &data, folds.open(key, false));
+    for (index, _) in data.calls.iter().enumerate() {
+        group = group.call_open(index, folds.open(&format!("{key}:{index}"), true));
+    }
+    if let Some(handler) = &folds.tool_group {
+        let handler = handler.clone();
+        let key = key.to_owned();
+        group = group.on_intent(move |intent, window, cx| handler(key.clone(), intent, window, cx));
+    }
+    group.into_any_element()
+}
+
+/// One approval, with whatever the app has decided about it: the open
+/// feedback field, its text, and the two intents the card raises.
+fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement {
+    let Block::Approval {
+        id: approval_id,
+        tool,
+        command,
+        reason,
+        cwd,
+        capabilities,
+        scope,
+        state,
+        rule,
+        choices,
+        stages,
+        current_stage,
+        badges,
+        feedback,
+        resolved_by,
+    } = block
+    else {
+        return div().into_any_element();
+    };
+    let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
+        .title(APPROVAL_TITLE)
+        .reason(reason.clone())
+        .cwd(cwd.clone())
+        .capabilities(capabilities.clone())
+        .scope(*scope)
+        .rule(rule.clone().unwrap_or_default())
+        .choices(choices.clone())
+        .stages(stages.clone(), *current_stage)
+        .badges(*badges)
+        .resolved_by(*resolved_by);
+    if folds.at_rest {
+        card = card.at_rest();
+    }
+    if let Some(feedback) = feedback {
+        card = card.feedback(feedback.clone());
+    }
+    let Some(cards) = &folds.cards else { return card.into_any_element() };
+    let open_here = cards.feedback_open.as_ref().filter(|(a, _)| a == approval_id);
+    if let Some((_, choice_id)) = open_here {
+        card = card.feedback_open(Some(choice_id.clone())).feedback_text(cards.feedback_text.clone());
+        if let Some(slot) = cards.feedback_slot.borrow_mut().take() {
+            card = card.feedback_slot(slot);
+        }
+    }
+    let choose = cards.choose.clone();
+    let toggle_feedback = cards.feedback_toggle.clone();
+    let (a, b) = (approval_id.clone(), approval_id.clone());
+    card.on_choose(move |choice_id, feedback, window, cx| choose(a.clone(), choice_id, feedback, window, cx))
+        .on_feedback_toggle(move |choice_id, window, cx| toggle_feedback(b.clone(), choice_id, window, cx))
+        .into_any_element()
+}
+
+/// One question. An answered one is a settled row rather than a card.
+fn question_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement {
+    let Block::Question {
+        id: question_id,
+        header,
+        prompt,
+        subtitle,
+        options,
+        multi,
+        allow_other,
+        answer,
+        timeout_ms,
+    } = block
+    else {
+        return div().into_any_element();
+    };
+    if let Some(answer) = answer {
+        return settled_row(id, options, answer);
+    }
+    let mut card = question_card(id, prompt.clone(), options)
+        .header(header.clone())
+        .subtitle(subtitle.clone())
+        .multi(*multi)
+        .allow_other(*allow_other);
+    // The deadline is the block's, so the pill is drawn whether or not
+    // anything is wired up to answer; the *countdown* below needs the app's
+    // clock and replaces it.
+    if let Some(total) = timeout_ms {
+        card = card.timeout(*total, *total);
+    }
+    let Some(cards) = &folds.cards else { return card.into_any_element() };
+    if let Some(selected) = cards.selections.get(question_id) {
+        card = card.selected(selected.clone());
+    }
+    if let Some(open) = cards.previews.get(question_id) {
+        card = card.previews_open(open.clone());
+    }
+    // The card draws the pill; the clock is the app's, because MSP sends a
+    // duration and never a deadline.
+    if let Some((remaining, total)) = cards.countdowns.get(question_id) {
+        card = card.timeout(*remaining, *total);
+    }
+    if cards.clarify_open.as_deref() == Some(question_id.as_str()) {
+        card = card.clarify_open(true);
+        if let Some(slot) = cards.clarify_slot.borrow_mut().take() {
+            card = card.clarify_slot(slot);
+        }
+    }
+    let (select, answer, skip, clarify, preview) = (
+        cards.select.clone(),
+        cards.answer.clone(),
+        cards.skip.clone(),
+        cards.clarify.clone(),
+        cards.toggle_preview.clone(),
+    );
+    let ids = std::iter::repeat_n(question_id.clone(), 5).collect::<Vec<_>>();
+    card.on_select({
+        let id = ids[0].clone();
+        move |index, window, cx| select(id.clone(), index, window, cx)
+    })
+    .on_toggle_preview({
+        let id = ids[1].clone();
+        move |index, window, cx| preview(id.clone(), index, window, cx)
+    })
+    .on_answer({
+        let id = ids[2].clone();
+        move |_, window, cx| answer(id.clone(), window, cx)
+    })
+    .on_skip({
+        let id = ids[3].clone();
+        move |_, window, cx| skip(id.clone(), window, cx)
+    })
+    .on_clarify({
+        let id = ids[4].clone();
+        move |_, window, cx| clarify(id.clone(), window, cx)
+    })
+    .into_any_element()
+}
+
+/// A plan, with its three decisions when something is wired up to take them.
+fn plan_block_card(
+    id: ElementId,
+    plan_id: &str,
+    items: &[String],
+    sections: &[PlanSection],
+    state: PlanState,
+    folds: &Folds,
+) -> AnyElement {
+    // The fold stores plan steps as `String`; the card wants `SharedString`,
+    // so this is the one conversion left, and it is the caller's now rather
+    // than the component's (finding `library-hotpaths-8`).
+    let items: Vec<SharedString> = items.iter().map(|item| SharedString::from(item.clone())).collect();
+    let mut card = plan_card(id, &items).sections(sections.to_vec()).state(state);
+    if let Some(handler) = folds.plan.clone() {
+        let act = |action: PlanAction| {
+            let handler = handler.clone();
+            let plan_id = plan_id.to_owned();
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                handler(plan_id.clone(), action, window, cx)
+            }
+        };
+        card = card
+            .on_accept(act(PlanAction::Accept))
+            .on_edit(act(PlanAction::Refine))
+            .on_reject(act(PlanAction::Reject));
+    }
+    card.into_any_element()
+}
+
+/// A failed turn. The retry resends the failed turn's own input, so it is
+/// only offered when the app still has that text: a button that would send an
+/// empty prompt is worse than no button.
+fn error_block_card(
+    id: ElementId,
+    turn_id: &str,
+    title: &str,
+    detail: &str,
+    retryable: bool,
+    folds: &Folds,
+) -> AnyElement {
+    let mut card = error_card(id, title.to_owned(), detail.to_owned());
+    if retryable {
+        if let Some(cards) = &folds.cards {
+            if cards.retryable_turns.contains(turn_id) {
+                let retry = cards.retry.clone();
+                let turn_id = turn_id.to_owned();
+                card = card.on_retry(move |_, window, cx| retry(turn_id.clone(), window, cx));
+            }
+        }
+    }
+    card.into_any_element()
+}
+
+/// The long-running objective, with whatever work it has named.
+fn goal_block_card(
+    id: ElementId,
+    objective: &str,
+    status: &str,
+    percent_complete: Option<f32>,
+    current_work: Option<&str>,
+    next_work: Option<&str>,
+) -> AnyElement {
+    let mut card = goal_card(id, objective.to_owned(), status.to_owned()).percent(percent_complete);
+    if let Some(work) = current_work {
+        card = card.current_work(work.to_owned());
+    }
+    if let Some(work) = next_work {
+        card = card.next_work(work.to_owned());
+    }
+    card.into_any_element()
 }
 
 /// One tool invocation as its card: the body the lone `Block::ToolCall` would
@@ -748,7 +869,7 @@ fn id_group(id: &str) -> String {
 /// `12.4 s`, `1 m 12 s` — the library's own formatting, so every duration in
 /// the app reads the same.
 pub fn elapsed(ms: u64) -> SharedString {
-    SharedString::from(aui::transcript::format_duration(ms))
+    aui::transcript::format_duration(ms)
 }
 
 /// The empty transcript: what a brand-new session shows before the first turn.
