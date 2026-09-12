@@ -72,7 +72,10 @@ impl Harness {
         // (finding `performance-13`), so the frame hands the cached one
         // straight over and clones nothing.
         let grouping = self.sidebar_grouping(cx);
-        let selected = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
+        // The click's target first: the row highlights on the click's own
+        // frame, before the new view (or any page) exists.
+        let selected =
+            self.pending_id.clone().or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()));
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             this.resume(id.to_string(), window, cx);
         });

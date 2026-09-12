@@ -2639,4 +2639,38 @@ mod tests {
         assert_eq!(text.chars().count(), CANCEL_REASON_CAP + 1, "cap plus the ellipsis mark");
         assert!(text.ends_with('…'));
     }
+
+    #[test]
+    fn a_repeated_backfill_item_folds_to_nothing() {
+        // A top-up page overlaps the live suffix it was paged past, so the
+        // same `item/completed` can arrive twice. The revision rule makes the
+        // second fold a no-op rather than a duplicate card.
+        let mut fold = MuseFold::new();
+        let session = "s";
+        started(&mut fold, session);
+        let event = || MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: serde_json::json!({
+                "item": {
+                    "itemId": "i-1",
+                    "turnId": "t-1",
+                    "kind": "toolCall",
+                    "status": "completed",
+                    "revision": 1,
+                    "tool": "shell",
+                    "commandText": "ls",
+                }
+            }),
+            cursor: Some("v:s:1".to_owned()),
+            session_id: Some(session.to_owned()),
+        };
+        assert!(!fold.apply(event()).is_empty(), "the first fold draws the card");
+        let turns = fold.session(session).map(|s| s.turns.len()).unwrap_or(0);
+        assert!(fold.apply(event()).is_empty(), "the repeat folds to nothing");
+        assert_eq!(
+            fold.session(session).map(|s| s.turns.len()).unwrap_or(0),
+            turns,
+            "and adds no second turn"
+        );
+    }
 }

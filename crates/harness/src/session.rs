@@ -70,6 +70,7 @@ use muse_client::schema::{
     TurnInterruptParams, TurnStartDisposition, TurnStartParams, TurnStartResult, TurnSteerParams,
     TurnUnqueueParams, UserInputAnswer, UserInputAnswerParams, UserInputCancelParams,
     UserInputClarification, UserInputClarifyParams, UserInputSelectionMode, ViewPageParams,
+    UnframedViewNotification,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
@@ -95,6 +96,10 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(3);
 /// `view/page` takes 1–1000; the transport uses the ceiling and so does the
 /// history backfill.
 const PAGE_LIMIT: u32 = 1000;
+/// The first backfill page's limit. The trace says page 1 of a 13 MB session
+/// (790 events) fetches in ~3 ms and folds in ~11 ms, so a smaller first
+/// page would buy nothing: every page, first included, runs at the ceiling.
+const FIRST_PAGE_LIMIT: u32 = PAGE_LIMIT;
 /// The transcript's own padding, matching the assistant screen's `.tr`.
 const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
 /// The transcript measure: the design bounds the transcript column to
@@ -216,9 +221,8 @@ pub enum SessionEvent {
     /// `/fork` with nothing named: open the turn picker over the session's
     /// completed assistant turns.
     ForkPicker,
-    /// The deferred switch's first backfill batch applied: the application
-    /// may now swap the pending view in (C2 — no empty-state flash between
-    /// sessions).
+    /// The backfill's first page applied: the application pins the tail while
+    /// later pages land. The view is already on screen; this swaps nothing.
     HistoryReady,
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
     /// for the rest of this app run.
@@ -691,6 +695,22 @@ impl SessionView {
         self.at_rest = at_rest;
     }
 
+    /// Whether this view folds a capture file rather than a live session.
+    /// Replayed views are never parked in the session cache: their transcript
+    /// is the file, and reopening re-reads it.
+    pub fn is_replay(&self) -> bool {
+        self.replay
+    }
+
+    /// Pin the tail after history landed. The application calls this on
+    /// [`SessionEvent::HistoryReady`], which the backfill emits after its
+    /// first page — not at the end — so later pages keep arriving under a
+    /// pinned tail.
+    pub fn follow_tail(&mut self, cx: &mut Context<Self>) {
+        self.follow = true;
+        cx.notify();
+    }
+
     /// Fold a session envelope the app was handed as a **result**.
     ///
     /// `session/start`, `session/resume` and `session/fork` all return the
@@ -1125,34 +1145,25 @@ pub(crate) fn take_frame_times() -> Vec<std::time::Instant> {
     times.lock().map(|mut times| std::mem::take(&mut *times)).unwrap_or_default()
 }
 
-fn page_all(client: &MuseClient, session_id: &str) -> Vec<MuseEvent> {
-    let mut out = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let params = ViewPageParams {
-            session_id: session_id.to_owned(),
-            limit: PAGE_LIMIT,
-            cursor: cursor.clone(),
-            direction: None,
-            anchor: None,
-        };
-        let Ok(page) = client.view_page(&params) else { return out };
-        let empty = page.events.is_empty();
-        for event in page.events {
-            let Ok(params) = serde_json::to_value(&event.params) else { continue };
+/// One `view/page` result as foldable wire events, in page order.
+///
+/// Events whose params do not serialize are dropped, exactly as the old
+/// whole-transcript backfill did: a page element the schema cannot carry is
+/// a transport concern, not a transcript hole.
+pub(crate) fn page_events(session_id: &str, events: &[UnframedViewNotification]) -> Vec<MuseEvent> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let params = serde_json::to_value(&event.params).ok()?;
             let event_cursor = params.get("viewCursor").and_then(|v| v.as_str()).map(str::to_owned);
-            out.push(MuseEvent::Notification {
-                method: event.method,
+            Some(MuseEvent::Notification {
+                method: event.method.clone(),
                 params,
                 cursor: event_cursor,
                 session_id: Some(session_id.to_owned()),
-            });
-        }
-        match page.next_cursor {
-            Some(next) if !empty => cursor = Some(next),
-            _ => return out,
-        }
-    }
+            })
+        })
+        .collect()
 }
 
 /// The `/fork` picker's row label: the first line of the user prompt that
@@ -1277,5 +1288,37 @@ mod tests {
         assert_eq!(compact_count(1_000_000), "1.0M");
         assert_eq!(compact_count(200_000), "200k");
         assert_eq!(compact_count(512), "512");
+    }
+
+    #[test]
+    fn a_page_maps_to_foldable_events_in_order() {
+        use muse_client::schema::{
+            RecordPosition, SourceRange, StreamRef, UnframedViewNotificationParams,
+        };
+        let element = |cursor: &str| UnframedViewNotification {
+            method: "item/completed".to_owned(),
+            params: UnframedViewNotificationParams {
+                session_id: "s".to_owned(),
+                source_range: SourceRange {
+                    first: RecordPosition { id: "r".to_owned(), sequence: 1 },
+                    last: RecordPosition { id: "r".to_owned(), sequence: 1 },
+                    stream: StreamRef { id: "run".to_owned(), kind: "run".to_owned() },
+                },
+                view_cursor: cursor.to_owned(),
+                extra: serde_json::Map::new(),
+            },
+        };
+        let events = page_events("s", &[element("v:s:1"), element("v:s:2")]);
+        assert_eq!(events.len(), 2, "one wire event per page element");
+        for (event, cursor) in events.iter().zip(["v:s:1", "v:s:2"]) {
+            match event {
+                MuseEvent::Notification { method, session_id, cursor: at, .. } => {
+                    assert_eq!(method, "item/completed");
+                    assert_eq!(session_id.as_deref(), Some("s"));
+                    assert_eq!(at.as_deref(), Some(cursor), "the fold's reconnect cursor survives");
+                }
+                other => panic!("a page element is a notification, got {other:?}"),
+            }
+        }
     }
 }
