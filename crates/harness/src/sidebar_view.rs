@@ -125,6 +125,11 @@ impl Harness {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
+                    // Tracked so the Sessions view menu can anchor under the
+                    // caption's sliders icon (the caption scrolls with this
+                    // list); observing changes nothing about the scrolling
+                    // itself.
+                    .track_scroll(&self.sessions_scroll)
                     .child(view)
                     .children(empty),
             )
@@ -135,9 +140,11 @@ impl Harness {
     /// The field the row being renamed holds: the library's dense recipe —
     /// a borderless, chromeless single line at the row-title size, with the
     /// 1 px focus border on the wrapper instead of the component. The wrapper
-    /// is a flex row centring its child, and its height is whatever the
-    /// editor's own line-height makes it: the old fixed 22 px box cropped the
-    /// glyphs at the top. Clipping is horizontal only, so a long name scrolls
+    /// is a flex row centring its child, fixed to the 22 px box the module
+    /// docs in `aui::nav::session_row` prescribe (20 px of field in 4 px of
+    /// row padding is exactly the 30 px row): the editor's own line box plus
+    /// its internal padding used to stand taller, so the row grew and the
+    /// list below jumped. Clipping is horizontal only, so a long name scrolls
     /// under the caret instead of spilling a second line, and the row keeps
     /// its own height while a rename is open, so siblings never move. The
     /// commit path is unchanged. The same element serves the sidebar row and
@@ -152,15 +159,17 @@ impl Harness {
             .child(
                 div()
                     .w_full()
+                    .h(px(22.0))
                     .flex()
                     .items_center()
                     .overflow_x_hidden()
+                    .py(px(0.0))
                     .px(px(6.0))
                     .rounded(px(scale::R_SM))
                     .border_1()
                     .border_color(if focused { p.accent } else { p.line })
                     .bg(p.surface_1)
-                    .child(dense_field(&self.rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
+                    .child(dense_field(&self.rename).whitespace_nowrap().overflow_x_hidden()),
             )
             .into_any_element()
     }
@@ -294,6 +303,16 @@ impl Harness {
 
     /// The Sessions caption's view menu: where list management lives now that
     /// the footer is the library's account row again.
+    ///
+    /// Anchored under the caption's sliders icon, right edge aligned to the
+    /// sidebar's content edge. The caption row is the scroll content's first
+    /// child — an 8 px top margin (`scale::SP_3`, the library row's default)
+    /// and 28 px tall, the icon at its right end under 12 px of row padding
+    /// (both read out of `aui::nav::parts`, which keeps them private) — plus
+    /// a 4 px gap under it. The tracked scroll handle reports the viewport
+    /// and its offset in window coordinates every prepaint, so the menu
+    /// follows the sidebar's width and the list's scroll; before the first
+    /// prepaint it keeps the old fixed seat.
     pub(crate) fn render_view_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
             return None;
@@ -361,13 +380,43 @@ impl Harness {
                 None => {}
             }
         });
+        // Caption geometry the library keeps private (`aui::nav::parts`):
+        // 28 px row, 12 px horizontal padding, 4 px gap under the menu. The
+        // menu itself is a fixed 250 px (`aui::nav::view_menu`, private
+        // `MENU_W`): right-align it to the caption's right edge, clamped
+        // into the window so a sidebar narrower than the menu never clips
+        // its left side.
+        const CAPTION_H: f32 = 28.0;
+        const CAPTION_PAD_X: f32 = 12.0;
+        const MENU_GAP: f32 = 4.0;
+        const MENU_W: f32 = 250.0;
+        let viewport = self.sessions_scroll.bounds();
+        let placed: Option<(f32, f32)> = if f32::from(viewport.size.width) > 0.0 {
+            // The view is the scroll content's first child; the caption sits
+            // at its head under the row's top margin.
+            let content_top = f32::from(
+                self.sessions_scroll
+                    .bounds_for_item(0)
+                    .map(|bounds| bounds.origin.y)
+                    .unwrap_or(viewport.origin.y),
+            );
+            let top = (content_top - f32::from(self.sessions_scroll.offset().y) + scale::SP_3 + CAPTION_H
+                + MENU_GAP)
+                .max(f32::from(viewport.origin.y) + MENU_GAP);
+            let right_edge = f32::from(viewport.origin.x) + f32::from(viewport.size.width) - CAPTION_PAD_X;
+            let left = (right_edge - MENU_W).max(8.0);
+            Some((top, left))
+        } else {
+            None
+        };
+        let mut pop = div().absolute();
+        pop = match placed {
+            Some((top, left)) => pop.top(px(top)).left(px(left)),
+            None => pop.top(px(140.0)).left(px(12.0)),
+        };
         Some(
             popover_layer(
-                div()
-                    .absolute()
-                    .top(px(140.0))
-                    .left(px(12.0))
-                    .child(view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+                pop.child(view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
             )
             .into_any_element(),
         )

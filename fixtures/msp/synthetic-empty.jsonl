@@ -1,0 +1,11 @@
+# synthetic-empty.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# A session that started and never turned: the first wire line a real capture
+# carries (`session/started`), sanitised, and nothing after it. Replaying it
+# shows the empty state — what `SessionView` draws with no turns. Every `<-- `
+# line below is synthetic. Paths and ids are sanitised (`/tmp/synthetic`,
+# generated UUIDs): nothing here names a real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-empty", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-empty/session.jsonl", "activeTurnId": null}}}

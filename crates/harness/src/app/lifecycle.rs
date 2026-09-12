@@ -36,13 +36,16 @@ impl Harness {
         self.wire_call_in(cx, work, |this, result, window, cx| {
             if let Ok(list) = result {
                 this.invalidate_list();
-                this.sessions = list
+                let wire: Vec<SessionEntry> = list
                     .sessions
                     .iter()
                     .map(|s| {
                         SessionEntry::join(s, this.index.get(&s.session_id), this.overrides.get(&s.session_id))
                     })
                     .collect();
+                // Local rows whose id the reply does not contain survive;
+                // a local whose id is listed is replaced by its wire row.
+                this.sessions = sidebar::merge_session_list(wire, &this.sessions);
                 this.derive_titles(cx);
             }
             this.open_boot_session(window, cx);
@@ -175,6 +178,24 @@ impl Harness {
     pub(super) fn rejoin(&mut self) {
         self.invalidate_list();
         for entry in &mut self.sessions {
+            if entry.local {
+                // A local row predates the wire list: no index or store
+                // source speaks for it, so its label ("New session", or the
+                // first prompt set on `turn/started`) stands until the wire
+                // lists it. Only an explicit rename overrides it; the flags
+                // still follow the store, so pin and hide work meanwhile.
+                let meta = self.overrides.get(&entry.id);
+                entry.hidden = meta.is_some_and(|m| m.hidden);
+                entry.pinned = meta.is_some_and(|m| m.pinned);
+                entry.archived = meta.is_some_and(|m| m.archived);
+                if let Some(name) =
+                    meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty())
+                {
+                    entry.label = name.to_owned();
+                    entry.named = true;
+                }
+                continue;
+            }
             let meta = self.overrides.get(&entry.id);
             let index = self.index.get(&entry.id);
             let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
@@ -242,6 +263,16 @@ impl Harness {
                         view.update(cx, |view, cx| view.seed_session(envelope, cx));
                     }
                 }
+                // The wire lists a session only after its log flushes on
+                // `turn/completed`, so its row appears at once as a local
+                // one — labelled "New session" until the first
+                // `turn/started` titles it from the prompt — and the next
+                // `load_sessions` keeps it until the wire lists its id.
+                let mut local = SessionEntry::join(&started.session, None, None);
+                local.local = true;
+                this.sessions.retain(|entry| entry.id != local.id);
+                this.sessions.push(local);
+                this.invalidate_list();
                 this.load_sessions(cx);
             }
             Err(error) => this.report(&error, cx),

@@ -241,7 +241,10 @@ The rows are the library's `SessionSummary`, grouped by **calendar day** —
 Today / Yesterday / This week / This month / Earlier — and rendered by
 `nav::sidebar_view` in its date grouping, with a **Pinned** group first
 whenever a session is pinned (the library partitions `pinned` rows out of the
-date buckets itself).
+date buckets itself). A session just started is listed by the wire only after
+its log flushes on `turn/completed`, so its row appears at once as a local one
+("New session", titled from the first prompt on `turn/started`) and the next
+`session/list` keeps it until the wire lists its id.
 
 Every row carries one muted second line: `last_summary` when a turn completed
 in this app, else the index's first prompt — but only when the row's label is
@@ -471,9 +474,9 @@ turns through the library's `AssistantTurn::actions(..)` (it lives on sidebar
 sessions, whose rows keep the Pin action). User: Copy, Edit (text into the
 composer draft), Resend. Wire actions are live-only: in a replayed capture
 they answer with a toast.
-Markdown links click through: URLs open in the browser, workspace paths reveal
-in Finder (escapes above the workspace are rejected with a toast, missing
-paths toast). `Block::ToolGroup` renders through the library `tool_group`,
+Markdown links click through: URLs open in the browser, workspace paths open in
+their default place — folders in Finder, files in their default app (escapes
+above the workspace are rejected with a toast, missing paths toast). `Block::ToolGroup` renders through the library `tool_group`,
 its open state in `Folds` keyed by the group's fold key. The transcript holds
 one `TextSelection` per turn (keyed by turn id with its markdown source):
 dragging or word/paragraph-picking in a turn highlights it through the turn's
@@ -498,7 +501,12 @@ is `turn/interrupt { retract: true }`; when the retraction lands, the fold hands
 the prompt back through `take_restored_prompt` and it goes into the composer.
 
 The status row while a turn runs is "Working…" with the elapsed time and the
-`esc to interrupt` hint, plus the queued count when there is one.
+`esc to interrupt` hint, plus the queued count when there is one. Once the
+running turn's reply has fully arrived but the turn is still open — Muse runs
+`reminderChild` items (memory reminders) for 30–70 s after the `agentMessage`
+before `turn/completed` — the row reads "Finishing up…" instead, with the same
+clock and hint and a "memory reminders" note, so the quiet tail does not read
+as stuck.
 
 The model, effort, mode and context chips render the **server's** current values,
 read back out of `SideState`; their menus arrived in Phase 3
