@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness — where things stand (2026-09-12)</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #5c5c5c;
+  --line: #e2e2e2;
+  --card: #f6f6f6;
+  --pill-owner-bg: #0b5fff;
+  --pill-owner-fg: #ffffff;
+  --pill-later-bg: #e8e8e8;
+  --pill-later-fg: #333333;
+  --code-bg: #f0f0f0;
+  --link: #0b5fff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616;
+    --fg: #e8e8e8;
+    --muted: #a8a8a8;
+    --line: #333333;
+    --card: #202020;
+    --pill-owner-bg: #5b8cff;
+    --pill-owner-fg: #0a0a0a;
+    --pill-later-bg: #333333;
+    --pill-later-fg: #d8d8d8;
+    --code-bg: #262626;
+    --link: #7aa5ff;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  line-height: 1.65;
+}
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+h1 { font-size: 1.5rem; line-height: 1.3; margin: 0 0 0.25rem; }
+h2 { font-size: 1.15rem; margin: 2rem 0 0.5rem; }
+p, li { font-size: 1rem; }
+.sub { color: var(--muted); margin-top: 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; font-size: 0.9rem; }
+th, td { border: 1px solid var(--line); padding: 0.4rem 0.55rem; text-align: left; vertical-align: top; }
+th { background: var(--card); }
+.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  word-break: break-all;
+}
+pre {
+  background: var(--code-bg);
+  padding: 0.75rem 0.9rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.85rem;
+}
+pre code { background: none; padding: 0; word-break: normal; }
+ul.check { list-style: none; padding-left: 0; }
+ul.check > li {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.6rem;
+}
+.pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.1em 0.7em;
+  margin-right: 0.4em;
+  vertical-align: baseline;
+}
+.pill.owner { background: var(--pill-owner-bg); color: var(--pill-owner-fg); }
+.pill.later { background: var(--pill-later-bg); color: var(--pill-later-fg); }
+.gloss { color: var(--muted); }
+footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Harness — where things stand</h1>
+<p class="sub">2026-09-12 · plain-words status for the owner · 5 sections</p>
+
+<h2>1. Where things stand</h2>
+<p>The chat app is finished and signed in two ways now, after a fix that moved
+sign-in onto the server's own account channel. A full review and speed pass then
+landed across nine packages with every screen proved pixel-identical before and
+after. Three things are left that only you can do: approve the Meta sign-in once,
+merge the library branches, and set the API-key budget.</p>
+
+<h2>2. Done</h2>
+<p><strong>Sign-in rework (2026-09-11).</strong> The old sign-in read the wrong
+output of the wrong program, so the card sat on “Starting sign-in…” forever. Now
+there is one screen with two ways in: <em>Continue with Meta account</em> (a code
+appears in the app, you approve it in the browser — the subscription lane) and
+<em>Use an API key</em> (paste a key into a masked field that is wiped on submit —
+the pay-as-you-go lane). The API-key way was tested end to end from a signed-out
+machine, including a real reply from the model (“OK”). The Meta way reached the
+browser step three times, but each code expired before anyone approved it, so that
+half still waits on you.</p>
+<p><strong>Review and speed pass (2026-09-12).</strong> A read-only audit found 85
+issues (two serious: updates landing on the wrong turn after a removal, and
+requests sent during a history backfill), then nine packages fixed them in order:
+measure first, library before app, simple fixes before structural ones. What you
+gain: fewer bugs, smaller files (<code>app.rs</code> went from 4009 to 1402
+lines), and faster drawing. Every package was proved against 47 byte-identical
+screen captures, so nothing visible changed.</p>
+<p>Speed numbers (debug build, before → after, on a 300-turn stress capture):</p>
+<table>
+<tr><th>What</th><th class="num">Before → after</th><th>What it means</th></tr>
+<tr><td>Element build, slowest 10%</td><td class="num">154 → 85 µs</td><td><span class="gloss">“Element construction” is the work the app does per frame before drawing.</span></td></tr>
+<tr><td>Element build, slowest 1%</td><td class="num">239 → 123 µs</td><td><span class="gloss">Worst-case stutter while scrolling a long chat is roughly halved.</span></td></tr>
+<tr><td>Whole frame</td><td class="num">7 → 7 ms</td><td><span class="gloss">“Frame” is the whole draw; layout and paint dominate and did not move.</span></td></tr>
+<tr><td>Idle frames per 2 s</td><td class="num">0 → 0</td><td><span class="gloss">“Idle frames” are frames drawn while nothing changes, which should be zero — and a finished card now asks for none (was 120).</span></td></tr>
+</table>
+
+<h2>3. Pending, and who owns it</h2>
+<ul class="check">
+<li><span class="pill owner">Owner</span>Approve the Meta-account sign-in once in
+the browser — a code appears in the app and lives about 10 minutes — then send
+one short message, so the app’s first turn after that login is confirmed and the
+last legacy fallback (the old reconnect-after-login) can be deleted.</li>
+<li><span class="pill owner">Owner</span>Merge the library branch stack
+<code>improvements-2026-09-10</code> → <code>login-methods</code> →
+<code>audit-2026-09-12</code> into the library’s <code>main</code>. The app builds
+against the checkout so nothing is broken meanwhile, but the work is not on
+<code>main</code> yet.</li>
+<li><span class="pill owner">Owner</span>Decide the API-key budget going forward.
+The audit’s implementation ran on your key at your instruction — that is all this
+says on the matter.</li>
+<li><span class="pill later">Later</span>Two library polish items left open: the
+terminal/TUI cursor blinks even when the window is not focused (there is no focus
+gate), and the text caret re-measures every frame instead of once a second.</li>
+<li><span class="pill later">Later</span>The automations slice: the Automations
+sidebar entry is still a “Soon” placeholder that answers with a toast.</li>
+</ul>
+
+<h2>4. How to check it yourself</h2>
+<pre><code>cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl --theme dark</code></pre>
+<p>Opens the app replaying a saved approval chat in the dark theme — no server, no
+cost — so you can see the finished product as it looked live.</p>
+<pre><code>cargo run -p harness -- --no-connect --login choose --screenshot /tmp/login.png</code></pre>
+<p>Boots the sign-in chooser offline and saves a screenshot to
+<code>/tmp/login.png</code> — open it to see the two sign-in ways.</p>
+<pre><code>./target/debug/harness --bench fixtures/msp/synthetic-stress-300.jsonl</code></pre>
+<p>Streams a 300-turn synthetic chat through the app and prints timing numbers
+(build first with <code>cargo build -p harness</code>) — expect element, fold and
+frame percentiles plus idle-frame and memory figures like the table above.</p>
+
+<h2>5. Receipts</h2>
+<table>
+<tr><th>Package</th><th>What</th><th>Commit</th></tr>
+<tr><td>Sign-in</td><td>Meta account + API key over the wire (harness)</td><td class="num">9a86482</td></tr>
+<tr><td>Sign-in</td><td>Two-method login screen (library, incl. fix-up)</td><td class="num">2e56405</td></tr>
+<tr><td>P0</td><td>Deterministic captures + <code>--bench</code></td><td class="num">ddb9391</td></tr>
+<tr><td>E</td><td>Library hot paths (library)</td><td class="num">5208614…0a25187</td></tr>
+<tr><td>A</td><td>Mechanical fixes + the two serious bugs</td><td class="num">60a029b</td></tr>
+<tr><td>B</td><td>Dead and legacy code removed</td><td class="num">952f814</td></tr>
+<tr><td>C1</td><td>Structure, part 1 (wire helper, steps, login)</td><td class="num">8cfea89</td></tr>
+<tr><td>C2</td><td>Structure, part 2 (harness + library)</td><td class="num">f281024 + ab03d2d</td></tr>
+<tr><td>D1</td><td>Speed: adapter and wire</td><td class="num">dafb40d</td></tr>
+<tr><td>D2</td><td>Speed: rendering</td><td class="num">a0c140a</td></tr>
+<tr><td>E2</td><td>Library follow-up: sidebar borrowing (library)</td><td class="num">820e258</td></tr>
+<tr><td>F</td><td>Gates, 47/47 captures identical, bench table</td><td class="num">b6ef808</td></tr>
+</table>
+
+<footer>Sources: changelog entries of 2026-09-11/12, audit plan status table,
+login test log, handoff notes. No model turn was started to produce this page.</footer>
+
+</main>
+</body>
+</html>
