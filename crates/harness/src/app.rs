@@ -41,7 +41,9 @@
 //!   parser and the two runners.
 //! * [`crate::wire`] — background call, then update.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use aui::composer::composer_state_rows;
@@ -78,6 +80,7 @@ use crate::shot::CaptureToken;
 use crate::session::{SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
+use crate::app::list::ListCache;
 use crate::sidebar::{self, SessionEntry};
 use crate::search::{FileHit, SessionHit};
 use crate::wire::WireCall;
@@ -335,6 +338,10 @@ enum UndoBatch {
     Archived(Vec<String>),
 }
 
+/// What decides the search card's status line: whether the query is blank,
+/// and how many sessions and files came back (finding `performance-9`).
+type SearchStatusKey = (bool, usize, usize);
+
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
@@ -344,6 +351,14 @@ pub struct Harness {
     pub(crate) login: Login,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
+    /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
+    /// and the palette read out of [`Harness::sessions`] changed: the rows
+    /// themselves, the overrides that relabel them, the index, or the
+    /// show-hidden/empty/archived flags. It is the key [`Harness::list_cache`]
+    /// is validated against (findings `performance-5`, `support-2`).
+    list_epoch: u64,
+    /// One sorted visible list and one grouping per change, not per frame.
+    list_cache: RefCell<ListCache>,
     index: HashMap<String, IndexEntry>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// A session switch paging history in: the view kept off-stage until its
@@ -412,6 +427,14 @@ pub struct Harness {
     undo_stack: Vec<UndoBatch>,
     /// The title last given to the window, so it is only set when it changed.
     window_title: Option<String>,
+    /// The `(list_epoch, active session id)` that title was built for, so the
+    /// scan and the `format!` behind it run on a change rather than on every
+    /// frame (finding `performance-9`).
+    window_title_key: Option<(u64, Option<String>)>,
+    /// The search card's status line and the three facts it is made of:
+    /// whether the query is blank and the two result counts (finding
+    /// `performance-9`). Only ever read while the search palette is open.
+    search_status: RefCell<Option<(SearchStatusKey, SharedString)>>,
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
     /// accepted the bill this morning should be asked again tomorrow.
     pub(crate) send_anyway: bool,
@@ -448,6 +471,8 @@ impl Harness {
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
             sessions: Vec::new(),
+            list_epoch: 0,
+            list_cache: RefCell::new(ListCache::default()),
             index: HashMap::new(),
             active: None,
             pending_active: None,
@@ -476,6 +501,8 @@ impl Harness {
             titled: std::collections::HashSet::new(),
             undo_stack: Vec::new(),
             window_title: None,
+            window_title_key: None,
+            search_status: RefCell::new(None),
             send_anyway: false,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
@@ -832,6 +859,7 @@ impl Harness {
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
+        self.invalidate_list();
         // A replayed window has no wire, but the search palette still needs
         // the host's session index: read it (read-only) and rebuild `search.db`
         // so `--steps search:<query>` screenshots show session hits.
@@ -996,22 +1024,35 @@ impl Harness {
 
     /// The search card's status line: what the query found, or what an
     /// empty query offers.
-    pub(crate) fn search_status(&self, cx: &gpui::App) -> String {
-        if self.search_query.read(cx).value().trim().is_empty() {
-            return "Search sessions and created files".to_owned();
+    /// Three facts decide it — whether the query is blank and how many
+    /// sessions and files came back — so it is built when one of them changes
+    /// and not on every frame the palette is open (finding `performance-9`).
+    pub(crate) fn search_status(&self, cx: &gpui::App) -> SharedString {
+        let blank = self.search_query.read(cx).value().trim().is_empty();
+        let key = (blank, self.search_sessions.len(), self.search_files.len());
+        let mut cache = self.search_status.borrow_mut();
+        if let Some((cached, status)) = cache.as_ref() {
+            if *cached == key {
+                return status.clone();
+            }
         }
-        let (sessions, files) = (self.search_sessions.len(), self.search_files.len());
-        if sessions + files == 0 {
-            return "No matches".to_owned();
-        }
-        let mut parts = Vec::new();
-        if sessions > 0 {
-            parts.push(format!("{sessions} session{}", if sessions == 1 { "" } else { "s" }));
-        }
-        if files > 0 {
-            parts.push(format!("{files} file{}", if files == 1 { "" } else { "s" }));
-        }
-        parts.join(" \u{00b7} ")
+        let (_, sessions, files) = key;
+        let status: SharedString = if blank {
+            "Search sessions and created files".into()
+        } else if sessions + files == 0 {
+            "No matches".into()
+        } else {
+            let mut parts = Vec::new();
+            if sessions > 0 {
+                parts.push(format!("{sessions} session{}", if sessions == 1 { "" } else { "s" }));
+            }
+            if files > 0 {
+                parts.push(format!("{files} file{}", if files == 1 { "" } else { "s" }));
+            }
+            parts.join(" \u{00b7} ").into()
+        };
+        *cache = Some((key, status.clone()));
+        status
     }
 
 }
@@ -1051,11 +1092,22 @@ impl Harness {
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The window's title is the session's, so a person with three harness
-        // windows open can tell them apart in Mission Control.
-        let title = self.window_title(cx);
-        if self.window_title.as_deref() != Some(title.as_str()) {
-            window.set_window_title(&title);
-            self.window_title = Some(title);
+        // windows open can tell them apart in Mission Control. It is built
+        // only when the list or the open session changed: the scan and the
+        // `format!` behind it have no business in a steady-state frame
+        // (finding `performance-9`).
+        let stale = {
+            let active = self.active.as_ref().map(|a| a.read(cx).session_id.as_str());
+            self.window_title_key.as_ref().map(|(epoch, id)| (*epoch, id.as_deref()))
+                != Some((self.list_epoch, active))
+        };
+        if stale {
+            let title = self.window_title(cx);
+            if self.window_title.as_deref() != Some(title.as_str()) {
+                window.set_window_title(&title);
+                self.window_title = Some(title);
+            }
+            self.window_title_key = Some((self.list_epoch, self.active_id(cx)));
         }
         // A release outside the window never reaches the overlay: a drag that
         // is still armed while the window is inactive is over, settled where

@@ -9,6 +9,24 @@
 
 use super::*;
 
+/// What the sidebar and the palette read out of the session list, held from
+/// one change to the next instead of rebuilt per caller per frame
+/// (findings `performance-5`, `support-2`, `performance-7`).
+///
+/// Validity is two keys, not a timestamp: `key` is the list epoch plus the
+/// open session's id (the empty filter never hides the open session, so a
+/// switch changes the rows), and the grouping carries the minute it labelled
+/// its rows against.
+#[derive(Default)]
+pub(crate) struct ListCache {
+    /// The `(list_epoch, active session id)` `visible` was built for.
+    key: Option<(u64, Option<String>)>,
+    /// The sorted visible rows for that key.
+    visible: Rc<Vec<SessionEntry>>,
+    /// The grouping of those rows, and the minute its elapsed tags read.
+    grouping: Option<(i64, Rc<sidebar::Grouping>)>,
+}
+
 impl Harness {
     // ---------------------------------------------- session operations (A2)
 
@@ -224,7 +242,7 @@ impl Harness {
         // until the person picks a session.
         if was_active {
             if let Some(window) = window {
-                let next = self.visible_sessions(cx).into_iter().next().map(|e| e.id.clone());
+                let next = self.visible_sessions(cx).first().map(|e| e.id.clone());
                 if self.client.is_some() {
                     if let Some(id) = next {
                         self.resume(id, window, cx);
@@ -266,8 +284,16 @@ impl Harness {
     /// asked for. Text search lives in the search palette (⌘⇧F), never in a
     /// sidebar field, so no needle applies here. The open session is always
     /// drawn.
-    pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Vec<SessionEntry> {
+    /// Cached: the clone and the sort run once per change, not once per
+    /// caller per frame (finding `performance-5`). `render_sidebar`, the
+    /// sidebar's empty states, the Resume palette and the search rows all read
+    /// the same `Rc`; [`Self::invalidate_list`] is what drops it.
+    pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
         let active = self.active_id(cx);
+        let mut cache = self.list_cache.borrow_mut();
+        if cache.key.as_ref().is_some_and(|(epoch, id)| *epoch == self.list_epoch && *id == active) {
+            return Rc::clone(&cache.visible);
+        }
         let mut rows: Vec<SessionEntry> = self
             .sessions
             .iter()
@@ -285,7 +311,43 @@ impl Harness {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        rows
+        cache.key = Some((self.list_epoch, active));
+        cache.visible = Rc::new(rows);
+        cache.grouping = None;
+        Rc::clone(&cache.visible)
+    }
+
+    /// The sidebar's grouping for this frame, built once per change and once
+    /// per minute (findings `performance-5`, `performance-6`, `support-2`).
+    ///
+    /// Per minute because that is the finest thing a row's elapsed tag says —
+    /// `now`, `14m`, `2h`, `3d` — so a cached grouping can only go stale when
+    /// the minute turns. Under `HARNESS_DETERMINISTIC=1` "now" comes from the
+    /// data rather than the clock, so the key is constant and a capture is
+    /// identical run to run.
+    pub(crate) fn sidebar_grouping(&self, cx: &gpui::App) -> Rc<sidebar::Grouping> {
+        let visible = self.visible_sessions(cx);
+        let now = sidebar::grouping_now(&visible);
+        let minute = now.timestamp().div_euclid(60);
+        let mut cache = self.list_cache.borrow_mut();
+        if let Some((cached, grouping)) = cache.grouping.as_ref() {
+            if *cached == minute {
+                return Rc::clone(grouping);
+            }
+        }
+        let grouping = Rc::new(sidebar::grouping_at(&visible, now));
+        cache.grouping = Some((minute, Rc::clone(&grouping)));
+        grouping
+    }
+
+    /// Drop the cached visible list and grouping: something they are derived
+    /// from changed.
+    ///
+    /// Called from the four places that can change it — the `session/list`
+    /// reply, [`Self::rejoin`] (which every override edit and the index read
+    /// go through), the three view toggles, and the replay's single row.
+    pub(crate) fn invalidate_list(&mut self) {
+        self.list_epoch = self.list_epoch.wrapping_add(1);
     }
 
     /// F10. A session with no title anywhere: read its head and take the first

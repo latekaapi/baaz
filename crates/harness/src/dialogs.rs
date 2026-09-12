@@ -126,7 +126,7 @@ impl Harness {
                 .collect(),
             PaletteKind::Resume => self
                 .visible_sessions(cx)
-                .into_iter()
+                .iter()
                 // Newest first, and only as many as the palette can show: a
                 // list taller than the window is a list with a hidden bottom.
                 .take(PALETTE_ROWS)
@@ -151,13 +151,23 @@ impl Harness {
         }
     }
 
-    /// Run the palette's selected row.
+    /// Run the palette's selected row: the keyboard's path, which is the one
+    /// that still has to resolve an index into a row.
     fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((kind, selected)) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected)) else {
             return;
         };
         let rows = self.palette_rows(kind, cx);
         let Some((id, _, _)) = rows.get(selected).cloned() else { return };
+        self.run_palette_row(kind, id, window, cx);
+    }
+
+    /// Run one palette row by its id.
+    ///
+    /// A click already knows which row it hit, so it comes straight here
+    /// rather than rebuilding every row to turn the id back into an index and
+    /// the index back into the same id (finding `performance-7`).
+    fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, _| overlays.palette = None);
         match kind {
             PaletteKind::Search => {
@@ -328,19 +338,14 @@ impl Harness {
                         palette_items_ref_matching(&files, PaletteIcon::Glyph(IconName::File), &query),
                     ));
                 }
-                (SharedString::from(""), self.search_status(cx).into(), sections)
+                (SharedString::from(""), self.search_status(cx), sections)
             }
         };
+        // The click carries the row id, so it runs that row directly instead
+        // of rebuilding every row to map the id back to a position and the
+        // position back to the same id (finding `performance-7`).
         let select = cx.listener(move |this: &mut Self, id: &SharedString, window, cx| {
-            let index = this.palette_rows(kind, cx).iter().position(|(row, _, _)| row == id);
-            if let Some(index) = index {
-                this.overlays.update(cx, |overlays, _| {
-                    if let Some(palette) = overlays.palette.as_mut() {
-                        palette.selected = index;
-                    }
-                });
-                this.confirm_palette(window, cx);
-            }
+            this.run_palette_row(kind, id.clone(), window, cx);
         });
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.palette = None);

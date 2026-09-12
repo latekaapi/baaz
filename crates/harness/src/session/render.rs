@@ -13,11 +13,14 @@ impl SessionView {
     pub fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(text) = self.pending_prompt.take() {
             self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
+            self.note_draft(cx);
         }
-        // A `--screenshot` run that asked for an approval waits for one; this
-        // is where the capture learns that it arrived (finding F9).
-        self.capture.set_pending_approval(self.newest_pending_approval().is_some());
         let transcript = self.render_transcript(window, cx);
+        // A `--screenshot` run that asked for an approval waits for one; this
+        // is where the capture learns that it arrived (finding F9). After the
+        // transcript, because that is what refreshes the render cache the
+        // pending-approval answer is now read from (finding `performance-2`).
+        self.capture.set_pending_approval(self.newest_pending_approval().is_some());
         let status = self.render_status();
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
@@ -334,8 +337,17 @@ impl SessionView {
             self.cached_turns = Rc::new(turns);
         }
         let mut full_output = HashMap::new();
+        // The newest pending approval falls out of the same walk (finding
+        // `performance-2`): forward order, keeping the last hit, is the same
+        // block the old per-frame reverse scan found first.
+        let mut pending: Option<(String, Vec<aui_protocol::ApprovalChoice>)> = None;
         for turn in self.cached_turns.iter() {
             for block in turn.blocks() {
+                if let Block::Approval { id, state, choices, .. } = block {
+                    if *state == aui_protocol::ApprovalState::Pending {
+                        pending = Some((id.clone(), choices.clone()));
+                    }
+                }
                 if let Block::ToolCall { id, body: aui_protocol::ToolBody::Shell { .. }, .. } = block
                 {
                     if self.fold.stored_output(&self.session_id, id).is_some() {
@@ -352,6 +364,7 @@ impl SessionView {
             }
         }
         self.cached_full_output = Rc::new(full_output);
+        self.cached_pending_approval = pending;
     }
 
     /// Flip one card's fold override (C8: group headers and per-call cards
@@ -1054,7 +1067,6 @@ impl SessionView {
     }
 
     pub(super) fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let draft = self.composer.read(cx).value().to_string();
         let blocked = self.context().pressure == ContextPressure::Blocked;
         let intent = cx.listener(|this: &mut Self, intent: &ComposerIntent, window, cx| match intent {
             ComposerIntent::Send => this.send(window, cx),
@@ -1128,7 +1140,14 @@ impl SessionView {
             .streaming(self.busy())
             // Blocked context is the server refusing to take more, so the
             // composer refuses too and the meter offers the way out.
-            .can_send(!blocked && (!draft.trim().is_empty() || !self.images.is_empty() || !self.files.is_empty()))
+            // The draft's emptiness is a maintained flag, not a copy of the
+            // whole draft made once a frame to be trimmed (finding
+            // `performance-8`).
+            .can_send(
+                !blocked
+                    && !self.attachments_pending()
+                    && (!self.draft_empty || !self.images.is_empty() || !self.files.is_empty()),
+            )
             .plus_menu(self.plus_open, Some(plus_item))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
         for (anchor, menu) in self.render_pickers(cx) {

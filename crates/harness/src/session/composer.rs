@@ -12,6 +12,7 @@ impl SessionView {
     /// The draft changed: re-derive the caret popovers and step off the
     /// history.
     pub(super) fn on_draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.note_draft(cx);
         if self.history.walking() {
             self.history.reset();
         }
@@ -287,6 +288,7 @@ impl SessionView {
             state.set_value(next, window, cx);
             state.set_cursor_position(position, window, cx);
         });
+        self.note_draft(cx);
         self.close_menu(cx);
     }
 
@@ -325,6 +327,7 @@ impl SessionView {
             state.set_value(text, window, cx);
             state.set_cursor_position(position, window, cx);
         });
+        self.note_draft(cx);
         cx.notify();
     }
 
@@ -355,10 +358,18 @@ impl SessionView {
                 path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
                 self.image_seq += 1;
-                match images::from_path(format!("img-{}", self.image_seq), &path) {
-                    Ok(image) => self.images.push(image),
-                    Err(reason) => self.banner = Some(reason),
-                }
+                let id = format!("img-{}", self.image_seq);
+                // The chip goes up now; the read, the decode and the
+                // thumbnail happen on the background executor and replace it
+                // when they land (finding `performance-14`). A ten-megabyte
+                // photo used to stall the frame it was dropped on.
+                self.images.push(images::placeholder(id.clone(), images::display_name(&path)));
+                let work_id = id.clone();
+                self.wire_call(
+                    cx,
+                    move || images::from_path(work_id, &path),
+                    move |this: &mut Self, decoded, cx| this.resolve_image(&id, decoded, cx),
+                );
                 continue;
             }
             if self.files.len() >= attachments::MAX_FILES {
@@ -379,11 +390,42 @@ impl SessionView {
 
     pub(super) fn attach_bytes(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.image_seq += 1;
-        match images::from_bytes(format!("img-{}", self.image_seq), name, &bytes) {
-            Ok(image) => self.images.push(image),
-            Err(reason) => self.banner = Some(reason),
+        let id = format!("img-{}", self.image_seq);
+        let chip_name = if name.is_empty() { "pasted image".to_owned() } else { name.to_owned() };
+        // Same split as a dropped file (finding `performance-14`): the
+        // clipboard already handed over the bytes, but the decode and the
+        // thumbnail are the expensive half and they do not belong on a frame.
+        self.images.push(images::placeholder(id.clone(), chip_name));
+        let (work_id, name) = (id.clone(), name.to_owned());
+        self.wire_call(
+            cx,
+            move || images::from_bytes(work_id, name, &bytes),
+            move |this: &mut Self, decoded, cx| this.resolve_image(&id, decoded, cx),
+        );
+        cx.notify();
+    }
+
+    /// A background decode landed: swap the placeholder chip for the image, or
+    /// take it away and say why.
+    ///
+    /// A chip the person removed while the decode ran is simply gone, and the
+    /// result is dropped with it — removing a chip means removing it.
+    pub(super) fn resolve_image(&mut self, id: &str, decoded: Result<images::Image, String>, cx: &mut Context<Self>) {
+        let Some(slot) = self.images.iter().position(|image| image.id == id) else { return };
+        match decoded {
+            Ok(image) => self.images[slot] = image,
+            Err(reason) => {
+                self.images.remove(slot);
+                self.banner = Some(reason);
+            }
         }
         cx.notify();
+    }
+
+    /// Whether an attachment is still being read and decoded, which is what
+    /// keeps the send button down until it lands (finding `performance-14`).
+    pub fn attachments_pending(&self) -> bool {
+        self.images.iter().any(|image| image.pending)
     }
 
     /// Open the system picker for a file. Image extensions attach as images;

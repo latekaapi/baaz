@@ -66,6 +66,7 @@ impl SessionView {
         let Ok(n) = rest.parse::<usize>() else { return };
         let Some((approval_id, choices)) = self.newest_pending_approval() else { return };
         let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
+        let (approval_id, choice) = (approval_id.clone(), choice.clone());
         if choice.accepts_feedback && self.feedback_open.is_none() {
             // The same two-press dance a person does: the first press
             // opens the field, `feedback:` fills it, the second sends.
@@ -182,15 +183,16 @@ impl SessionView {
     /// The newest approval still awaiting a decision, and its current choices.
     ///
     /// Read from the transcript rather than from the pending map, because the
-    /// transcript is in wire order and "newest" is a question about order.
-    pub(super) fn newest_pending_approval(&self) -> Option<(String, Vec<aui_protocol::ApprovalChoice>)> {
-        let session = self.session()?;
-        session.turns.iter().rev().flat_map(|turn| turn.blocks().iter().rev()).find_map(|block| match block {
-            Block::Approval { id, state, choices, .. } if *state == aui_protocol::ApprovalState::Pending => {
-                Some((id.clone(), choices.clone()))
-            }
-            _ => None,
-        })
+    /// transcript is in wire order and "newest" is a question about order —
+    /// but read from the render cache rather than re-scanned, because the
+    /// answer only changes when the fold does (finding `performance-2`).
+    /// [`Self::refresh_render_cache`] fills it, and every fold change sets
+    /// `follow`, so the cache is refreshed before the frame that could show a
+    /// new card and before any keystroke that frame's reader could send.
+    pub(super) fn newest_pending_approval(
+        &self,
+    ) -> Option<&(String, Vec<aui_protocol::ApprovalChoice>)> {
+        self.cached_pending_approval.as_ref()
     }
 
     /// The newest question still awaiting an answer, and its option labels.

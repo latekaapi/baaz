@@ -198,6 +198,7 @@ impl Harness {
                 let was_in = matches!(self.auth, Auth::SignedIn(_));
                 self.active = None;
                 self.sessions.clear();
+            self.invalidate_list();
                 self.auth = Auth::SignedOut;
                 self.login.reset_to_choose();
                 if was_in {
@@ -430,6 +431,7 @@ impl Harness {
         let Some(client) = self.client.clone() else {
             self.active = None;
             self.sessions.clear();
+            self.invalidate_list();
             self.auth = Auth::SignedOut;
             self.login.reset_to_choose();
             cx.notify();
@@ -453,6 +455,7 @@ impl Harness {
                 None => {
                     this.active = None;
                     this.sessions.clear();
+                    this.invalidate_list();
                     this.auth = Auth::SignedOut;
                     this.login.reset_to_choose();
                     cx.notify();

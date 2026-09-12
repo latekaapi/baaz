@@ -41,6 +41,35 @@ pub struct Image {
     pub height: u32,
     /// The downscaled preview the chip draws; dropped on remove/send.
     pub thumb: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// The read, the decode and the thumbnail have not finished yet.
+    ///
+    /// A ten-megabyte photo used to be read and decoded inline in the drop,
+    /// paste or step handler, stalling the frame it landed on (finding
+    /// `performance-14`). The chip goes up straight away as a placeholder —
+    /// the name, no preview — and [`placeholder`] is what makes it; the work
+    /// runs on the background executor and replaces this entry when it lands.
+    /// Nothing may be sent while one of these is in the composer: it has no
+    /// bytes yet, so [`Image::part`] would send an empty payload.
+    pub pending: bool,
+}
+
+/// The chip that stands in while an image is read and decoded.
+pub fn placeholder(id: impl Into<String>, name: impl Into<String>) -> Image {
+    Image {
+        id: id.into(),
+        name: name.into(),
+        media_type: String::new(),
+        base64_data: String::new(),
+        width: 0,
+        height: 0,
+        thumb: None,
+        pending: true,
+    }
+}
+
+/// What a file name says the chip should be called before anything is read.
+pub fn display_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".to_owned())
 }
 
 impl PartialEq for Image {
@@ -53,6 +82,7 @@ impl PartialEq for Image {
             && self.base64_data == other.base64_data
             && self.width == other.width
             && self.height == other.height
+            && self.pending == other.pending
     }
 }
 
@@ -68,6 +98,7 @@ impl std::fmt::Debug for Image {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("thumbnail", &self.thumb.is_some())
+            .field("pending", &self.pending)
             .finish_non_exhaustive()
     }
 }
@@ -122,6 +153,7 @@ pub fn from_bytes(id: impl Into<String>, name: impl Into<String>, bytes: &[u8]) 
         width,
         height,
         thumb: Some(thumb),
+        pending: false,
     })
 }
 

@@ -94,10 +94,43 @@ pub fn auth_path() -> PathBuf {
     base.join("muse").join("auth.json")
 }
 
+/// The two display strings, and the `auth.json` mtime they were read at.
+///
+/// Keyed the same way [`crate::tier::cached`] is, and for the same reason: a
+/// logout and a re-login rewrite the file, and nothing else changes what is
+/// in it. Process-global because `auth.json` is.
+static STORED: std::sync::Mutex<Option<(Option<u64>, NameAndEmail)>> = std::sync::Mutex::new(None);
+
+/// The pair [`stored_name_and_email`] hands back: a display name and an
+/// email, either of which the file may not have.
+type NameAndEmail = (Option<String>, Option<String>);
+
 /// The name and email stored in `auth.json`'s `providers.meta`, when the
 /// file has them. A supplement only: the wire owns sign-in, and this is
 /// just the two display strings for when its `label` is absent.
+///
+/// Cached against the file's modification time (finding `support-12`):
+/// `Identity::from_account` calls this on every `account/changed`, and the
+/// file read and the JSON parse behind two strings do not need repeating
+/// until the file itself changes.
 pub fn stored_name_and_email() -> (Option<String>, Option<String>) {
+    let mtime = crate::tier::auth_mtime();
+    if let Ok(cache) = STORED.lock() {
+        if let Some((cached, pair)) = cache.as_ref() {
+            if *cached == mtime {
+                return pair.clone();
+            }
+        }
+    }
+    let pair = read_name_and_email();
+    if let Ok(mut cache) = STORED.lock() {
+        *cache = Some((mtime, pair.clone()));
+    }
+    pair
+}
+
+/// [`stored_name_and_email`] without the cache: the read and the parse.
+fn read_name_and_email() -> (Option<String>, Option<String>) {
     let text = std::fs::read_to_string(auth_path()).ok();
     let meta = text
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())

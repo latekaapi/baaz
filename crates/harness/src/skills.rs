@@ -61,15 +61,48 @@ struct Listing {
     skills: Vec<Skill>,
 }
 
+/// How long `muse skills list --json` is given before it is killed.
+///
+/// `Command::output()` waits for ever, so a hung CLI held the background task
+/// that owns the `/` menu's sources for the life of the process (finding
+/// `support-10`). A timeout is a fifth failure mode with the same answer as
+/// the other four: no Skills section.
+pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the wait checks on the child.
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Run `muse skills list --json`.
 ///
-/// Blocking, and forgiving: a `muse` that is not there, a non-zero exit and a
-/// shape this build has never seen all yield an empty list, because the `/` menu
-/// still works without a Skills section.
+/// Blocking, bounded by [`TIMEOUT`], and forgiving: a `muse` that is not
+/// there, a non-zero exit, a child that never returns and a shape this build
+/// has never seen all yield an empty list, because the `/` menu still works
+/// without a Skills section.
 pub fn list(program: &str) -> Vec<Skill> {
-    let Ok(output) = Command::new(program).args(["skills", "list", "--json"]).output() else {
-        return Vec::new();
-    };
+    let child = Command::new(program)
+        .args(["skills", "list", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return Vec::new() };
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        match child.try_wait() {
+            // Exited: `wait_with_output` now only drains the pipe.
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) => {
+                // Over the deadline. Kill it and reap it, so no `muse`
+                // outlives the window that asked.
+                let _ = child.kill();
+                let _ = child.wait();
+                crate::harness_log!("`{program} skills list` did not answer in {TIMEOUT:?}");
+                return Vec::new();
+            }
+            Err(_) => return Vec::new(),
+        }
+    }
+    let Ok(output) = child.wait_with_output() else { return Vec::new() };
     if !output.status.success() {
         return Vec::new();
     }
