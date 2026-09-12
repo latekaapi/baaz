@@ -51,7 +51,7 @@ use aui::transcript::{
     UserTurnAction, needs_you_banner, retry_row, status_row, StatusLead, turn_selected_text,
 };
 use aui_icons::IconName;
-use aui_protocol::{Block, PermissionMode, PlanState, ReasoningEffort, Session, Turn};
+use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
 use aui_tokens::scale;
 use gpui::{
     div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, Entity,
@@ -114,6 +114,54 @@ const TRANSCRIPT_MEASURE: f32 = 880.0;
 /// split by auto margins.
 fn centred(content: impl IntoElement) -> AnyElement {
     div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().child(content).into_any_element()
+}
+
+/// Whether one assistant turn's reply has fully arrived: at least one text
+/// block, none of them still streaming, and no tool call still running.
+///
+/// What [`SessionView::reply_complete_for_running_turn`] reads for the
+/// running turn: a complete reply with the turn still open means Muse is on
+/// the `reminderChild` tail, and the status row says so.
+fn reply_complete(turn: &Turn) -> bool {
+    let Turn::Assistant { blocks, .. } = turn else { return false };
+    let mut saw_text = false;
+    for block in blocks {
+        match block {
+            Block::Text { streaming, .. } => {
+                if *streaming {
+                    return false;
+                }
+                saw_text = true;
+            }
+            Block::Thinking { state, .. } => {
+                if *state == ThinkingState::Thinking {
+                    return false;
+                }
+            }
+            Block::Activity { state, .. } => {
+                if *state == ActivityState::Working {
+                    return false;
+                }
+            }
+            Block::ToolCall { .. } => {
+                if block.as_tool_call().is_some_and(|call| {
+                    matches!(call.status, ToolStatus::Pending | ToolStatus::Running)
+                }) {
+                    return false;
+                }
+            }
+            Block::ToolGroup { calls, state, summary: _ }
+                if *state == ActivityState::Working
+                    || calls
+                        .iter()
+                        .any(|call| matches!(call.status, ToolStatus::Pending | ToolStatus::Running)) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    saw_text
 }
 /// Top inset: the first turn's first line must clear the header (C8 — the
 /// owner's screenshot showed it cut off). Same step as the horizontal gutter.
@@ -629,6 +677,20 @@ impl SessionView {
         self.running.is_some() || self.submitting
     }
 
+    /// Whether the running turn's reply has fully arrived while the turn is
+    /// still open: after the `agentMessage` completes and `session/tokenUsage`
+    /// arrives, Muse runs `reminderChild` items (memory reminders) for 30–70 s
+    /// before `turn/completed`. The status row reads "Finishing up…"
+    /// meanwhile instead of "Working…", so a long quiet tail does not read
+    /// as stuck.
+    pub fn reply_complete_for_running_turn(&self) -> bool {
+        let Some(running) = self.running.as_ref() else { return false };
+        self.cached_turns
+            .iter()
+            .find(|turn| turn.id() == running.turn_id)
+            .is_some_and(|turn| reply_complete(turn))
+    }
+
     /// Whether the composer is empty, which is what Escape branches on — and
     /// what the send button is enabled by, once a frame (finding
     /// `performance-8`).
@@ -774,13 +836,37 @@ impl SessionView {
                 return;
             }
         };
+        // A capture cut before its last `turn/completed` is mid-turn, and the
+        // status row should say so ("Finishing up…" once the reply is whole):
+        // track the open turn per session while folding, then hold the
+        // followed session's one open exactly as a live `turn/started` would.
+        let mut open_turns: HashMap<String, String> = HashMap::new();
         for event in events {
+            if let MuseEvent::Notification { method, params, session_id, .. } = &event {
+                if method == "turn/started" {
+                    if let (Some(session), Some(turn)) =
+                        (session_id.clone(), params.get("turnId").and_then(|v| v.as_str()))
+                    {
+                        open_turns.insert(session, turn.to_owned());
+                    }
+                } else if method == "turn/completed" {
+                    if let Some(session) = session_id {
+                        let ours = params.get("turnId").and_then(|v| v.as_str());
+                        if open_turns.get(session).is_some_and(|turn| Some(turn.as_str()) == ours) {
+                            open_turns.remove(session);
+                        }
+                    }
+                }
+            }
             self.fold.apply(event);
         }
         // The capture names its own session; the view was opened on whatever the
         // caller guessed, so it follows the file rather than the guess.
         if let Some(id) = self.fold.session_ids().next() {
             self.session_id = id.to_owned();
+        }
+        if let Some(turn_id) = open_turns.get(&self.session_id) {
+            self.running = Some(Running { turn_id: turn_id.clone(), started: crate::clock::now_instant() });
         }
         for (command_id, text) in sent {
             self.fold.record_command(&self.session_id, &command_id, &text);
@@ -1194,6 +1280,53 @@ fn fork_time(meta: &aui_protocol::TurnMeta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assistant_turn(blocks: Vec<Block>) -> Turn {
+        Turn::Assistant { id: "t-1".to_owned(), blocks, meta: aui_protocol::TurnMeta::default() }
+    }
+
+    #[test]
+    fn a_complete_two_block_reply_counts_as_complete() {
+        let turn = assistant_turn(vec![
+            Block::Text { text: "first".into(), streaming: false },
+            Block::Text { text: "second".into(), streaming: false },
+        ]);
+        assert!(reply_complete(&turn));
+    }
+
+    #[test]
+    fn a_streaming_text_block_is_still_working() {
+        let turn = assistant_turn(vec![
+            Block::Text { text: "half".into(), streaming: true },
+            Block::Text { text: "done".into(), streaming: false },
+        ]);
+        assert!(!reply_complete(&turn));
+    }
+
+    #[test]
+    fn a_working_activity_group_is_still_working() {
+        let turn = assistant_turn(vec![
+            Block::Text { text: "done".into(), streaming: false },
+            Block::Activity {
+                steps: Vec::new(),
+                summary: String::new(),
+                elapsed_ms: 0,
+                state: ActivityState::Working,
+            },
+        ]);
+        assert!(!reply_complete(&turn));
+    }
+
+    #[test]
+    fn a_user_turn_is_never_a_complete_reply() {
+        let turn = Turn::User {
+            id: "u-1".into(),
+            text: "hi".into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+        };
+        assert!(!reply_complete(&turn));
+    }
 
     #[test]
     fn fork_takes_an_optional_turn_number() {

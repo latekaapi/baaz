@@ -61,7 +61,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
     actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding,
-    SharedString, Subscription, Task, Window,
+    ScrollHandle, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -376,6 +376,12 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
+    /// The sessions list's scroll state, tracked so the Sessions view menu
+    /// can anchor under the caption's sliders icon: the caption scrolls with
+    /// the list, so its visible position is its content position minus this
+    /// offset. One handle for the window's life, so the state persists
+    /// across frames.
+    pub(crate) sessions_scroll: ScrollHandle,
     /// The two flags a `--screenshot` wait reads out of this window (see
     /// [`crate::shot::CaptureToken`]). Handed to every session view this
     /// window opens and to `capture_and_quit`, so a second window would wait
@@ -482,6 +488,7 @@ impl Harness {
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
+            sessions_scroll: ScrollHandle::new(),
             capture,
             user_shell: true,
             focus_root: cx.focus_handle(),
@@ -661,8 +668,29 @@ impl Harness {
         // A finished turn is when the index has something new to say about the
         // session, so the sidebar is refreshed then rather than on a timer.
         let completed = matches!(&event, MuseEvent::Notification { method, .. } if method == "turn/completed");
+        // A started turn titles the new session's local row: the wire still
+        // does not list it, but the prompt the view sent is known.
+        let started: Option<String> = match &event {
+            MuseEvent::Notification { method, params, session_id, .. } if method == "turn/started" => session_id
+                .clone()
+                .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)),
+            _ => None,
+        };
         if let Some(active) = &self.active {
             active.update(cx, |view, cx| view.apply(event, cx));
+        }
+        if let Some(session_id) = started {
+            let prompt = self
+                .active
+                .as_ref()
+                .filter(|view| view.read(cx).session_id == session_id)
+                .and_then(|view| view.read(cx).first_prompt_text());
+            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id && entry.local) {
+                if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+                    entry.label = prompt;
+                }
+                self.invalidate_list();
+            }
         }
         if completed {
             self.load_index(cx);

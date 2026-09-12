@@ -886,6 +886,12 @@ pub fn elapsed(ms: u64) -> SharedString {
     aui::transcript::format_duration(ms)
 }
 
+/// The empty transcript's measure: the design bounds the transcript column,
+/// composer included, and the suggestion chips sit centred inside it. Kept
+/// equal to the centre pane's `TRANSCRIPT_MEASURE` (which lives next to the
+/// rows it binds) rather than reaching across for it.
+pub(crate) const EMPTY_STATE_MEASURE: f32 = 880.0;
+
 /// The empty transcript: what a brand-new session shows before the first turn.
 pub fn empty_state(
     workspace: &str,
@@ -913,7 +919,16 @@ pub fn empty_state(
         // sparkling in: a capture is a static composition.
         let chips = aui::composer::suggestion_chips("empty-suggestions", SUGGESTIONS.iter().map(|s| (*s).into()).collect());
         let chips = if crate::clock::deterministic() { chips.at_rest() } else { chips };
-        column = column.child(chips.on_pick(move |index, window, cx| on_pick(index, window, cx)));
+        // Centred under the title, inside the measure: the chips element is
+        // full-width and left-aligned, so the outer row centres the capped
+        // box and the inner row centres the chips inside it.
+        let chips = chips.on_pick(move |index, window, cx| on_pick(index, window, cx));
+        let chips = div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(div().flex().justify_center().max_w(px(EMPTY_STATE_MEASURE)).child(chips));
+        column = column.child(chips);
     }
     column.into_any_element()
 }
