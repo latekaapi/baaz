@@ -129,8 +129,12 @@ fn every_capture_produces_at_least_one_turn() {
         // protocol evidence for the account surface, and
         // `synthetic-modelrouteunserved.jsonl` exists only to pin a
         // side-state marker that fires with no turn ever open.
+        // `synthetic-empty.jsonl` is the empty state: a started session with
+        // no turns, which replays to no turns on purpose.
         if path.file_name().is_some_and(|name| {
-            name == "transcript-account.jsonl" || name == "synthetic-modelrouteunserved.jsonl"
+            name == "transcript-account.jsonl"
+                || name == "synthetic-modelrouteunserved.jsonl"
+                || name == "synthetic-empty.jsonl"
         }) {
             continue;
         }

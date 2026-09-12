@@ -1,5 +1,28 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round
+
+Six fixes from `docs/diagnosis/owner-round-2026-09-13.md` (harness package; the
+library items ride the agentic-ui `owner-round-2026-09-13` branch). Brief in
+`docs/briefs/muse-owner-harness.md`; Muse implemented, no turn spent.
+
+- **H1 — the new session's row appears at once.** `session/start` places a local
+  row ("New session") before `load_sessions`; the first `turn/started` titles it
+  from the prompt the view sent. The merge keeps locals the wire does not list
+  yet and drops them once listed.
+- **H2 — links open the right thing.** Absolute workspace paths resolve as is;
+  folders open in Finder and files in their default app (`open_with_system`).
+- **H3 — the Sessions view menu anchors under its button.** The sessions scroll
+  handle reports the viewport and offset, so the popover sits under the sliders
+  icon, right-aligned, following resizes and scrolls.
+- **H4 — the rename field keeps the row's height.** The wrapper is the library's
+  fixed 22 px box (`dense_field` un-overridden), so siblings never move.
+- **H5 — the empty state is centred.** The suggestion chips sit in the measure,
+  centred under the title; `synthetic-empty.jsonl` replays to the empty state.
+- **H6 — "Finishing up…" after the reply.** While the running turn's reply is
+  complete but the turn is still open (the `reminderChild` tail), the status row
+  says so with a "memory reminders" note; `synthetic-finishing.jsonl` pins it.
+
 ## 2026-09-12 — The five owner-visible faults (transcript design, scroll, open path, lights/header, reopen)
 
 Diagnosed first (`docs/diagnosis/transcript-pass-2026-09-12.md`), then fixed library-first:
