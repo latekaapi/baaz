@@ -58,6 +58,6 @@ Every package's brief lists its findings by id; Muse reads the finding text from
 | E2 (library follow-up) | agentic-ui `820e258` + harness (this commit) |
 | F | this commit: gates both repos, 47/47 captures identical, bench table in `CHANGELOG.md` |
 
-agentic-ui branch `audit-2026-09-12` is stacked on `login-methods` on `improvements-2026-09-10`;
-none of the three is merged to the library's `main` — the owner merges. The harness on
-`main` builds against the checkout.
+agentic-ui branch `audit-2026-09-12` was stacked on `login-methods` on `improvements-2026-09-10`;
+all of them (and `transcript-2026-09-12` above) were fast-forwarded into the library's `main`
+on 2026-09-13, which is what the harness builds against now.
