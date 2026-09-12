@@ -71,7 +71,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use aui_tokens::{scale, AuiTheme, ThemeKind};
-use gpui::{px, size, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui::{px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions};
 use gpui_kit::component::{Root, TitleBar};
 
 /// The window the spec asks for.
@@ -455,6 +455,9 @@ fn run_bench(args: Args) {
             window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_H))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Harness".into()),
+                // The sidebar header reserves the native lights' footprint;
+                // this centres them in the header row at every density.
+                traffic_light_position: Some(aui::shell::traffic_light_position(cx)),
                 ..TitleBar::window_options().titlebar.unwrap_or_default()
             }),
             ..TitleBar::window_options()
@@ -497,6 +500,65 @@ fn shellexpand(path: &str) -> String {
     }
 }
 
+/// Open the shell window: the one function that builds it, shared by the boot
+/// below and by `on_reopen`.
+///
+/// Closing the window hides the app instead of removing the window — the
+/// window and the `muse serve` child survive, so Cmd-Tab and the Dock bring
+/// the same session back. Quitting still goes through the app-quit hook, and
+/// `--screenshot` runs quit themselves through [`shot::capture_and_quit`].
+fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::CaptureToken) {
+    let bounds = match args.screenshot {
+        // A capture renders at the display's top-left, away from the
+        // pointer, so no hover state leaks into the PNG.
+        Some(_) => Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H))),
+        None => Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx),
+    };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_MIN_H))),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Harness".into()),
+            // The sidebar header reserves the native lights' footprint;
+            // this centres them in the header row at every density.
+            traffic_light_position: Some(aui::shell::traffic_light_position(cx)),
+            ..TitleBar::window_options().titlebar.unwrap_or_default()
+        }),
+        ..TitleBar::window_options()
+    };
+    // One token per window: the capture's waits are this window's, not the
+    // process's (finding `support-16`).
+    let capture = shot::CaptureToken::default();
+    let handle = cx
+        .open_window(options, {
+            let capture = capture.clone();
+            let args = args.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| app::Harness::new(args.clone(), capture.clone(), window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            }
+        })
+        .expect("open the harness window");
+    // Closing the window — or quitting the app — with a tier probe still
+    // driving the `muse` TUI would orphan it, the way quitting
+    // mid-screenshot once did: the child is its own session leader, so
+    // the `Pty` drop that would SIGKILL it never runs. The red dot hides the
+    // app instead of removing the window, after the same bounded probe wait
+    // the app-quit hook runs; macOS does not quit when the last window
+    // closes, and the Dock icon and Cmd-Tab re-activate the hidden window
+    // (or `on_reopen` rebuilds it above).
+    handle
+        .update(cx, |_, window, cx| {
+            window.on_window_should_close(cx, |_, cx| {
+                crate::tier::cleanup_probes();
+                cx.hide();
+                false
+            });
+        })
+        .ok();
+    (handle, capture)
+}
+
 fn main() {
     let args = parse_args();
     // The billing probe with no window: it drives the `muse` TUI in a pty,
@@ -516,7 +578,20 @@ fn main() {
     let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
     let await_steps = !args.steps.is_empty() || !args.login_steps.is_empty();
     // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
-    gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(aui::assets::AuiAssets);
+    // The Dock icon and Cmd-Tab after every window is gone: re-activate
+    // the surviving window, or rebuild it through the same function if it
+    // was removed some other way. `--screenshot` runs and `--bench` quit
+    // themselves and never reach here.
+    let reopen_args = args.clone();
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() {
+            let _ = open_shell_window(&reopen_args, cx);
+        } else {
+            cx.activate(true);
+        }
+    });
+    app.run(move |cx| {
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(theme, cx);
         // A deterministic capture holds the platform's reduced-motion switch:
@@ -533,47 +608,7 @@ fn main() {
         app::bind_keys(cx);
         app::set_menus(cx);
 
-        let bounds = match screenshot {
-            // A capture renders at the display's top-left, away from the
-            // pointer, so no hover state leaks into the PNG.
-            Some(_) => Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H))),
-            None => Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx),
-        };
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_MIN_H))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Harness".into()),
-                ..TitleBar::window_options().titlebar.unwrap_or_default()
-            }),
-            ..TitleBar::window_options()
-        };
-        // One token per window: the capture's waits are this window's, not the
-        // process's (finding `support-16`).
-        let capture = shot::CaptureToken::default();
-        let handle = cx
-            .open_window(options, {
-                let capture = capture.clone();
-                move |window, cx| {
-                let view = cx.new(|cx| app::Harness::new(args.clone(), capture.clone(), window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            }})
-            .expect("open the harness window");
-        // Closing the window — or quitting the app — with a tier probe still
-        // driving the `muse` TUI would orphan it, the way quitting
-        // mid-screenshot once did: the child is its own session leader, so
-        // the `Pty` drop that would SIGKILL it never runs. Same kill plus
-        // bounded wait as the screenshot path, on both hooks: macOS does not
-        // quit when the last window closes, so the window hook covers the red
-        // dot and the app hook covers Cmd+Q and `cx.quit()`. Each rerun is a
-        // no-op once the probes are gone, and the quit proceeds when the wait
-        // expires.
-        handle.update(cx, |_, window, cx| {
-            window.on_window_should_close(cx, |_, _| {
-                crate::tier::cleanup_probes();
-                true
-            });
-        }).ok();
+        let (handle, capture) = open_shell_window(&args, cx);
         cx.on_app_quit(|_| async {
             crate::tier::cleanup_probes();
         })

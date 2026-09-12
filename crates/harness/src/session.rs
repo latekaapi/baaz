@@ -97,6 +97,19 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(3);
 const PAGE_LIMIT: u32 = 1000;
 /// The transcript's own padding, matching the assistant screen's `.tr`.
 const TRANSCRIPT_PAD_X: f32 = scale::SP_7;
+/// The transcript measure: the design bounds the transcript column to
+/// ~760-800 px and centres it, composer included. At the 1.1 text scale that
+/// is 880 px here (800 x 1.1). Centre-pane rows keep their `TRANSCRIPT_PAD_X`
+/// gutters and centre their content inside them with [`centred`], so below
+/// 880 px of content nothing changes.
+const TRANSCRIPT_MEASURE: f32 = 880.0;
+/// Bound a full-width centre-pane row to the transcript measure and centre it.
+///
+/// An inner `w_full` wrapper: capped at `TRANSCRIPT_MEASURE`, the leftover
+/// split by auto margins.
+fn centred(content: impl IntoElement) -> AnyElement {
+    div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().child(content).into_any_element()
+}
 /// Top inset: the first turn's first line must clear the header (C8 — the
 /// owner's screenshot showed it cut off). Same step as the horizontal gutter.
 const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7;

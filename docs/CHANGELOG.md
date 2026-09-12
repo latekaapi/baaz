@@ -54,8 +54,7 @@ Numbers, `--bench`, debug build, before the pass → after (release in brackets)
 
 Frame time is gpui layout and paint and did not move; what moved is everything the
 harness and the library do before handing gpui the tree. Still open, recorded in
-`docs/audit/00-findings.md` and the package reports: `reconnect_after_login` stays until
-the owner's first billed turn after a Meta-account login (D25); the library's terminal
+`docs/audit/00-findings.md` and the package reports: the library's terminal
 and TUI cursors blink without a focus gate; the 1 Hz caret still samples at frame rate.
 
 Spend: zero model turns for the harness packages; the audit and P0 ran on Muse (the

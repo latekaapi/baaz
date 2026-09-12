@@ -8,3 +8,4 @@ Owner list: `inputs/owner-issue-list.md`.
 - `composer.md` — Composer 1-6 (Enter/Shift+Enter; thumbnails; file uploads; plus-menu contents + transition; menu width; scroll bleed) — skipped: none.
 - `overall.md` — Overall 1-5 (performance; local storage; menu bar; app icon; Cmd+W/Cmd+Q) — skipped: none.
 - `library.md` — Library merge-back map (Table 1: components used; Table 2: gaps 1-11; library gates) — skipped: none.
+- `transcript-pass-2026-09-12.md` — the 2026-09-12 five-fault pass (transcript design, scroll, open path, lights/header, reopen).
