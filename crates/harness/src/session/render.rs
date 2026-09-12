@@ -114,7 +114,7 @@ impl SessionView {
     /// Every intent a card can raise, bound once per frame.
     pub(super) fn fold_intents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Folds {
         Folds {
-            toggled: self.toggled.clone(),
+            toggled: Rc::clone(&self.toggled),
             toggle: {
                 let toggle = cx.listener(|this: &mut Self, key: &String, _, cx| {
                     this.toggle_fold(key.clone(), cx);
@@ -133,9 +133,9 @@ impl SessionView {
             // picking an option are local, and anything that would reach the
             // wire is refused by `wire_client` with a banner that says why.
             cards: Some(self.card_intents(window, cx)),
-            titles: self.titles.clone(),
+            titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
-            full_output: self.cached_full_output.clone(),
+            full_output: Rc::clone(&self.cached_full_output),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {
                     this.show_full_output(id.clone(), cx);
@@ -183,11 +183,7 @@ impl SessionView {
             },
             // Text selection (C8b): every turn gets its own held cell, and
             // every intent carries its turn's markdown source back.
-            text_selections: self
-                .text_selections
-                .iter()
-                .map(|(id, (_, selection))| (id.clone(), selection.clone()))
-                .collect(),
+            text_selections: Rc::clone(&self.text_selections),
             selection_change: {
                 let changed = cx.listener(
                     |this: &mut Self,
@@ -317,7 +313,25 @@ impl SessionView {
     /// per frame, so steady-state frames share one `Rc`.
     pub(super) fn refresh_render_cache(&mut self) {
         if let Some(session) = self.fold.session(&self.session_id) {
-            self.cached_turns = Rc::new(session.turns.clone());
+            // Only the turns that changed are copied. The rest hand back the
+            // `Rc` the previous snapshot already held, so a streaming chunk
+            // costs one turn's clone rather than the transcript's
+            // (finding `performance-4`). The comparison is what makes it
+            // safe without a dirty list: an unequal turn is always re-cloned,
+            // whatever produced the change.
+            let mut held: HashMap<&str, &Rc<Turn>> = HashMap::with_capacity(self.cached_turns.len());
+            for turn in self.cached_turns.iter() {
+                held.insert(turn.id(), turn);
+            }
+            let turns: Vec<Rc<Turn>> = session
+                .turns
+                .iter()
+                .map(|turn| match held.get(turn.id()) {
+                    Some(previous) if ***previous == *turn => Rc::clone(previous),
+                    _ => Rc::new(turn.clone()),
+                })
+                .collect();
+            self.cached_turns = Rc::new(turns);
         }
         let mut full_output = HashMap::new();
         for turn in self.cached_turns.iter() {
@@ -337,14 +351,15 @@ impl SessionView {
                 }
             }
         }
-        self.cached_full_output = full_output;
+        self.cached_full_output = Rc::new(full_output);
     }
 
     /// Flip one card's fold override (C8: group headers and per-call cards
     /// share this, keyed stably).
     pub(super) fn toggle_fold(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.toggled.remove(&key) {
-            self.toggled.insert(key);
+        let toggled = Rc::make_mut(&mut self.toggled);
+        if !toggled.remove(&key) {
+            toggled.insert(key);
         }
         cx.notify();
     }
@@ -557,13 +572,14 @@ impl SessionView {
                     .get(&turn_id)
                     .map(|(_, held)| held != &selection)
                     .unwrap_or(true);
-                self.text_selections.clear();
-                self.text_selections.insert(turn_id, (source, selection));
+                let held = Rc::make_mut(&mut self.text_selections);
+                held.clear();
+                held.insert(turn_id, (source, selection));
                 // One cell at a time: the clear above leaves exactly this
                 // one, so any fresh intent changed what is held.
                 fresh
             }
-            None => self.text_selections.remove(&turn_id).is_some(),
+            None => Rc::make_mut(&mut self.text_selections).remove(&turn_id).is_some(),
         };
         if changed {
             cx.notify();
@@ -588,7 +604,7 @@ impl SessionView {
         if self.text_selections.is_empty() {
             return false;
         }
-        self.text_selections.clear();
+        Rc::make_mut(&mut self.text_selections).clear();
         cx.notify();
         true
     }
@@ -644,7 +660,7 @@ impl SessionView {
             };
             for (index, block) in blocks.iter().enumerate() {
                 if matches!(block, Block::ToolGroup { .. }) {
-                    self.toggled.insert(transcript::block_key(id, index));
+                    Rc::make_mut(&mut self.toggled).insert(transcript::block_key(id, index));
                 }
             }
         }
@@ -844,7 +860,7 @@ impl SessionView {
             .queued
             .iter()
             .map(|q| {
-                let row = QueueStripRow::new(q.turn_id.clone(), q.text.clone());
+                let row = QueueStripRow::new(q.turn_id.clone(), side.queued_text(q).to_owned());
                 if editing.get(&q.turn_id) == Some(&Unqueue::Edit) {
                     row.editing()
                 } else {

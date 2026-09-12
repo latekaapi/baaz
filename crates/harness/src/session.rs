@@ -262,7 +262,11 @@ pub struct SessionView {
     /// the halves that are not anchored to the composer.
     overlays: Entity<Overlays>,
     /// Cards the person folded away from their default.
-    toggled: HashSet<String>,
+    ///
+    /// Behind an `Rc` because [`Folds`] takes a snapshot every frame and a
+    /// toggle is rare: the frame clones a refcount, `toggle_fold` clones the
+    /// set once with `Rc::make_mut` (finding `performance-3`).
+    toggled: Rc<HashSet<String>>,
     /// Virtualized transcript list (gpui `list()`, top-aligned, one item
     /// per turn) and the item count it was last synced to. Only visible rows
     /// are built and laid out per frame; `splice` keeps indices stable across
@@ -274,9 +278,13 @@ pub struct SessionView {
     /// by steady-state frames, refreshed only when the fold changes (length
     /// drift or `follow`), so per-frame cost stays bounded as the transcript
     /// grows. Event handlers keep reading the live fold.
-    cached_turns: Rc<Vec<Turn>>,
+    /// Each turn is shared rather than copied: a refresh re-clones the turns
+    /// that actually changed and hands the rest back their existing `Rc`, so
+    /// a streaming chunk no longer deep-clones the whole transcript
+    /// (finding `performance-4`).
+    cached_turns: Rc<Vec<Rc<Turn>>>,
     /// The truncated-output map for the cached turns (same refresh rule).
-    cached_full_output: HashMap<String, FullOutput>,
+    cached_full_output: Rc<HashMap<String, FullOutput>>,
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
@@ -287,7 +295,7 @@ pub struct SessionView {
     /// cell: the library scopes cell keys (`p0`, `b0-0`, …) to the markdown
     /// view that rendered them, so a single shared selection would light up
     /// the same key in every turn at once.
-    text_selections: HashMap<String, (String, TextSelection)>,
+    text_selections: Rc<HashMap<String, (String, TextSelection)>>,
     /// Last elapsed second the turn ticker painted, so the 1 Hz clock
     /// notifies only when the displayed number changes (P2).
     last_tick_secs: Option<u64>,
@@ -335,7 +343,7 @@ pub struct SessionView {
     user_shell: bool,
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name its source rather than print a uuid.
-    titles: HashMap<String, String>,
+    titles: Rc<HashMap<String, String>>,
     /// Draw the cards settled rather than entering.
     ///
     /// A `--screenshot` run renders a handful of frames and then quits, so a
@@ -450,7 +458,7 @@ impl SessionView {
             workspace,
             composer,
             overlays,
-            toggled: HashSet::new(),
+            toggled: Rc::new(HashSet::new()),
             list_state: ListState::new(
                 0,
                 // Top, not Bottom: a short transcript starts at the top
@@ -464,9 +472,9 @@ impl SessionView {
             ),
             list_len: 0,
             cached_turns: Rc::new(Vec::new()),
-            cached_full_output: HashMap::new(),
+            cached_full_output: Rc::new(HashMap::new()),
             follow: true,
-            text_selections: HashMap::new(),
+            text_selections: Rc::new(HashMap::new()),
             last_tick_secs: None,
             running: None,
             submitting: false,
@@ -486,7 +494,7 @@ impl SessionView {
             countdown: None,
             refresh_pending: false,
             user_shell: true,
-            titles: HashMap::new(),
+            titles: Rc::new(HashMap::new()),
             at_rest: false,
             capture,
             pending_prompt: None,
@@ -615,7 +623,7 @@ impl SessionView {
     /// sessions in this workspace are called (for a `ForkedFrom` marker), and
     /// whether `initialize` granted `userShell`.
     pub fn set_context(&mut self, titles: HashMap<String, String>, user_shell: bool) {
-        self.titles = titles;
+        self.titles = Rc::new(titles);
         self.user_shell = user_shell;
     }
 

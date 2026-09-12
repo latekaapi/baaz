@@ -1,8 +1,8 @@
 [
   {
-    "sessionId": "synthetic-turn-removed",
+    "sessionId": "synthetic-wirefault",
     "session": {
-      "id": "synthetic-turn-removed",
+      "id": "synthetic-wirefault",
       "agent": "muse",
       "model": "muse-spark-1.3",
       "mode": "onRequest",
@@ -16,7 +16,7 @@
         {
           "kind": "user",
           "id": "i-syn-user-1",
-          "text": "one",
+          "text": "say something",
           "attachments": [],
           "mentions": []
         },
@@ -26,7 +26,7 @@
           "blocks": [
             {
               "kind": "text",
-              "text": "Reply one",
+              "text": "Something.",
               "streaming": false
             }
           ],
@@ -40,20 +40,14 @@
           }
         },
         {
-          "kind": "user",
-          "id": "i-syn-user-3",
-          "text": "three",
-          "attachments": [],
-          "mentions": []
-        },
-        {
           "kind": "assistant",
-          "id": "t-syn-3",
+          "id": "protocol-error:synthetic-wirefault:1",
           "blocks": [
             {
-              "kind": "text",
-              "text": "Reply three final",
-              "streaming": false
+              "kind": "error",
+              "title": "Protocol error",
+              "detail": "expected value at line 1 column 1",
+              "retryable": false
             }
           ],
           "meta": {
@@ -67,14 +61,41 @@
         },
         {
           "kind": "assistant",
-          "id": "marker:v:syn:13",
+          "id": "marker:v:syn:6",
           "blocks": [
             {
               "kind": "marker",
               "marker_kind": {
-                "kind": "turn_retracted"
+                "kind": "view_gap"
               },
-              "text": "Prompt retracted"
+              "text": "Some events were missed while disconnected; backfilling to v:syn:99"
+            },
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "view_gap"
+              },
+              "text": "Backfill did not finish: view/page failed: request timed out: view/page"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "protocol-error:synthetic-wirefault:4",
+          "blocks": [
+            {
+              "kind": "error",
+              "title": "Protocol error",
+              "detail": "response for unknown or timed-out request id 41",
+              "retryable": false
             }
           ],
           "meta": {
@@ -102,12 +123,11 @@
       "pending_inputs": {},
       "model": null,
       "approval_mode": "onRequest",
-      "last_cursor": "v:syn:14",
+      "last_cursor": "v:syn:6",
       "command_text": {
-        "t-syn-1": "one",
-        "t-syn-3": "three"
+        "t-syn-1": "say something"
       },
-      "restored_prompt": "two",
+      "restored_prompt": null,
       "model_route_unserved": null,
       "decode_failures": 0
     }

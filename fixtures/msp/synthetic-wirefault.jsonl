@@ -1,0 +1,30 @@
+# synthetic-wirefault.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# The two faults the transport synthesises itself, which no server ever sends
+# and therefore no capture can hold:
+#
+#   * `client/protocolError` — `read_loop` raises it for a line it cannot
+#     frame, for an error frame with a null id, and for a response no request
+#     is waiting on. Every one of them used to fall into the fold's
+#     untyped-method catch-all and vanish (finding `client-adapter-4`); it is
+#     an error card of its own now.
+#   * `client/gapAborted` — the backfill a `view/gap` promised gave up, either
+#     because `view/page` failed or because the page loop or the parked-event
+#     buffer hit its bound (finding `client-adapter-7`). The row withdraws the
+#     promise the `view/gap` row made.
+#
+# A real `client/protocolError` carries no `sessionId` — a frame-level fault
+# belongs to no session — and `SessionView::apply` files it against the view
+# that is open. This file gives it one so the fold-level test has something to
+# fold; the row it produces is identical either way.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire.
+<-- {"jsonrpc":"2.0","method":"session/started","params":{"viewCursor":"v:syn:1","session":{"sessionId":"synthetic-wirefault","workspaceRoot":"/tmp/synthetic","modelId":"muse-spark-1.3","status":"idle","createdAt":"2026-09-09T09:00:00Z","updatedAt":"2026-09-09T09:00:00Z","turnCount":0,"approvalMode":{"mode":"onRequest","source":"session"},"path":"/Users/latekaapi/.local/share/muse/sessions/2026/09/09/synthetic-wirefault/session.jsonl","activeTurnId":null}}}
+<-- {"jsonrpc":"2.0","method":"turn/started","params":{"viewCursor":"v:syn:2","sessionId":"synthetic-wirefault","turnId":"t-syn-1","commandId":"t-syn-1"}}
+<-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:syn:3","sessionId":"synthetic-wirefault","item":{"itemId":"i-syn-user-1","kind":"userMessage","turnId":"t-syn-1","revision":1,"status":"completed","text":"say something","commandId":"t-syn-1"}}}
+<-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:syn:4","sessionId":"synthetic-wirefault","item":{"itemId":"i-syn-agent-1","kind":"agentMessage","turnId":"t-syn-1","revision":1,"status":"completed","text":"Something."}}}
+<-- {"jsonrpc":"2.0","method":"turn/completed","params":{"viewCursor":"v:syn:5","sessionId":"synthetic-wirefault","turnId":"t-syn-1","terminal":"completed"}}
+<-- {"jsonrpc":"2.0","method":"client/protocolError","params":{"sessionId":"synthetic-wirefault","message":"expected value at line 1 column 1"}}
+<-- {"jsonrpc":"2.0","method":"view/gap","params":{"viewCursor":"v:syn:6","sessionId":"synthetic-wirefault","after":"v:syn:5","next":"v:syn:99"}}
+<-- {"jsonrpc":"2.0","method":"client/gapAborted","params":{"sessionId":"synthetic-wirefault","reason":"view/page failed: request timed out: view/page"}}
+<-- {"jsonrpc":"2.0","method":"client/protocolError","params":{"sessionId":"synthetic-wirefault","id":41,"message":"response for unknown or timed-out request id 41"}}

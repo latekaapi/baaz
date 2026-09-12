@@ -16,10 +16,14 @@ use serde::{Deserialize, Serialize};
 pub struct QueuedTurn {
     /// The turn id the queueing ack minted. `turn/unqueue` needs it verbatim.
     pub turn_id: String,
-    /// The `commandId` that queued it, which `turn/unqueued` echoes back.
+    /// The `commandId` that queued it, which `turn/unqueued` echoes back, and
+    /// the key its composer text is held under in
+    /// [`SideState::command_text`].
+    ///
+    /// The text itself used to be copied in here as well, so every queued
+    /// prompt was stored twice (finding `client-adapter-6`); read it with
+    /// [`SideState::queued_text`].
     pub command_id: String,
-    /// The composer text to restore on Edit or on an unqueue.
-    pub text: String,
 }
 
 /// Everything about a Muse session that `aui_protocol::Session` has no slot for.
@@ -108,14 +112,17 @@ impl Default for SideState {
 }
 
 impl SideState {
-    /// Remember what a command was sent with, so a later retraction can give it
-    /// back.
-    pub fn remember_command(&mut self, command_id: impl Into<String>, text: impl Into<String>) {
-        self.command_text.insert(command_id.into(), text.into());
-    }
-
     /// The queued row for a turn, if it is still queued.
     pub fn queued_turn(&self, turn_id: &str) -> Option<&QueuedTurn> {
         self.queued.iter().find(|q| q.turn_id == turn_id)
+    }
+
+    /// The composer text a queued submission was sent with.
+    ///
+    /// One copy, in [`SideState::command_text`], which is where a retraction
+    /// and an unqueue read it from too. Empty when the text is no longer
+    /// held — a queue strip row with nothing to show is still a row.
+    pub fn queued_text(&self, queued: &QueuedTurn) -> &str {
+        self.command_text.get(&queued.command_id).map(String::as_str).unwrap_or_default()
     }
 }

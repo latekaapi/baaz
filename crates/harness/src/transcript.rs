@@ -47,7 +47,11 @@ pub const APPROVAL_TITLE: &str = "Allow Muse to run this command?";
 /// a person who opened it by hand.
 pub struct Folds {
     /// Keys (`"<turn id>:<block index>"`) of the cards toggled by hand.
-    pub toggled: HashSet<String>,
+    ///
+    /// Shared, not copied: every one of these maps is read by the frame and
+    /// written only by an intent, so a steady-state frame takes a refcount
+    /// rather than rebuilding a collection per turn (finding `performance-3`).
+    pub toggled: Rc<HashSet<String>>,
     /// Called with the key of the card whose header was clicked.
     pub toggle: ToggleHandler,
     /// Called when a plan card's action row is used. `None` renders the plan
@@ -57,11 +61,11 @@ pub struct Folds {
     pub cards: Option<Cards>,
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name the session it came from rather than its uuid.
-    pub titles: HashMap<String, String>,
+    pub titles: Rc<HashMap<String, String>>,
     /// Tool block id → what its truncated server-side output offers. Only
     /// blocks whose item carried `truncated: true` with an `outputRef` appear
     /// here; every other tool card keeps the plain fold toggle.
-    pub full_output: HashMap<String, FullOutput>,
+    pub full_output: Rc<HashMap<String, FullOutput>>,
     /// "Show full output" on a truncated tool card: the block's id, out. The
     /// card never fetches itself — the app pages `item/readOutput` on a
     /// background task and replaces the body on the server's result.
@@ -78,7 +82,9 @@ pub struct Folds {
     /// What each turn currently holds selected, by turn id (C8b). Per turn
     /// because the library scopes cell keys to the markdown view that
     /// rendered them — one shared cell would light up every turn at once.
-    pub text_selections: HashMap<String, TextSelection>,
+    /// The markdown source is carried alongside so the map can be shared
+    /// straight from the view rather than re-collected each frame.
+    pub text_selections: Rc<HashMap<String, (String, TextSelection)>>,
     /// Selection intents out of the turns: turn id, that turn's markdown
     /// source, and the intent (C8b).
     pub selection_change: Option<TextSelectionChangeHandler>,
@@ -326,7 +332,7 @@ pub fn turn(turn: &Turn, settled: bool, folds: &Folds, window: &mut Window, cx: 
             }
             // The turn's own held selection, if any (C8b): every turn gets
             // only its own, because cell keys repeat across turns.
-            turn = turn.selection(folds.text_selections.get(id));
+            turn = turn.selection(folds.text_selections.get(id).map(|(_, held)| held));
             if let Some(on_change) = &folds.selection_change {
                 let on_change = on_change.clone();
                 let (turn_id, source) = (id.clone(), text.clone());
@@ -466,7 +472,7 @@ fn text_card(
     // other's — the library scopes keys to the markdown view, and a turn
     // holds several. The source that travels back with an intent is still
     // exactly this block's text, so ⌘C copies what was dragged.
-    turn = turn.selection(folds.text_selections.get(turn_id));
+    turn = turn.selection(folds.text_selections.get(turn_id).map(|(_, held)| held));
     if let Some(on_change) = &folds.selection_change {
         let on_change = on_change.clone();
         let (owner, source) = (turn_id.to_owned(), text.to_owned());
@@ -843,6 +849,14 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
         MarkerKind::TurnCancelled => row.glyph(IconName::X, None).text("Turn interrupted").strong(text.to_owned()),
         MarkerKind::TurnRetracted => row.glyph(IconName::X, None).text("Prompt retracted"),
         MarkerKind::RetryScheduled => row.glyph(IconName::Refresh, Some(p.warning)).text(text.to_owned()),
+        // Two rows share this marker: the promise a `view/gap` makes, and the
+        // withdrawal of it when the backfill gave up (finding
+        // `client-adapter-7`). The promise's text names a raw cursor, which is
+        // not for a reader; the withdrawal's names the reason, which is.
+        MarkerKind::ViewGap if text.starts_with(muse_adapter::GAP_ABORT_PREFIX) => row
+            .glyph(IconName::X, Some(p.warning))
+            .text("Backfill did not finish, so events may be missing above")
+            .strong(text.trim_start_matches(muse_adapter::GAP_ABORT_PREFIX).to_owned()),
         MarkerKind::ViewGap => row
             .glyph(IconName::Shield, Some(p.warning))
             .text("Some events were missed while disconnected"),
