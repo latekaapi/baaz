@@ -120,8 +120,12 @@ pub const TRANSCRIPT_CONTEXT: &str = "HarnessTranscript";
 /// never the composer, a card field or the rename field.
 pub const TRANSCRIPT_COPY_KEYS: &str =
     "HarnessTranscript && !HarnessComposer && !field && !HarnessRename";
-/// How close to the bottom counts as "reading the tail" for auto-scroll.
-const TAIL_SLACK: f32 = 48.0;
+/// The height hint a fresh transcript row carries before it is measured: a
+/// typical settled turn. Unmeasured rows without a hint count as 0 px in the
+/// list's sum tree, so one upward wheel event clamps at the head and
+/// teleports there (H2); with the hint the scrollbar and the wheel map onto
+/// roughly the right rows until measurement replaces it.
+pub(crate) const TURN_HEIGHT_HINT: f32 = 120.0;
 /// The gap the caret popovers leave above the composer, matching the
 /// library's own `.pop{margin-bottom:8px}`.
 const POPOVER_GAP: f32 = 8.0;
@@ -283,8 +287,8 @@ pub struct SessionView {
     /// Virtualized transcript list (gpui `list()`, top-aligned, one item
     /// per turn) and the item count it was last synced to. Only visible rows
     /// are built and laid out per frame; `splice` keeps indices stable across
-    /// folds (C1). Tail-follow rides `is_scrolled_to_end`/`scroll_to_end`
-    /// with the `TAIL_SLACK` semantics below.
+    /// folds (C1). Tail-follow rides `is_scrolled_to_end`/`scroll_to_end`,
+    /// gated by the `follow` flag each fold change sets.
     list_state: ListState,
     list_len: usize,
     /// What `render_transcript` reads every frame (C1): one snapshot shared
@@ -494,9 +498,12 @@ impl SessionView {
                 // by the `follow` flag below (`scroll_to_end` when the
                 // reader was at the tail), never by the alignment.
                 ListAlignment::Top,
-                // Overdraw covers the tail-slack zone twice over, so rows
-                // entering at the tail are already measured (C1).
-                px(TAIL_SLACK * 2.0),
+                // Overdraw is a viewport's worth (`WINDOW_H`): rows past the
+                // visible edge are measured once each and never re-laid out
+                // per frame, so the cost is one measurement per row while a
+                // flick's whole travel stays on measured heights instead of
+                // clamping into zero-height territory (H2).
+                px(crate::WINDOW_H),
             ),
             list_len: 0,
             cached_turns: Rc::new(Vec::new()),
@@ -791,6 +798,21 @@ impl SessionView {
         self.follow = true;
         self.list_state.scroll_to_end();
         cx.notify();
+    }
+
+    /// The transcript list's current scroll offset, sampled once per frame by
+    /// `--bench --bench-scroll wheel`.
+    pub fn bench_list_top(&self) -> gpui::ListOffset {
+        self.list_state.logical_scroll_top()
+    }
+
+    /// Whether the transcript list is pinned at its tail, sampled with the
+    /// offset above: a wheel event that leaves the position unchanged *at*
+    /// the limit is clamped, not stalled. Mirrors the app's own follow
+    /// logic (`sync_virtual_list`, `render_needs_you`), which treats the
+    /// unknown-height `None` as at the tail.
+    pub fn bench_list_end(&self) -> bool {
+        self.list_state.is_scrolled_to_end().unwrap_or(true)
     }
 
     /// Put text in the composer. Only the scripted `--send` uses this; a person
@@ -1200,11 +1222,42 @@ mod tests {
     }
 
     #[test]
-    fn tail_slack_stays_put() {
-        // Tail-follow slack (C1): the virtual list pins the tail through
-        // `is_scrolled_to_end`, and this is the slack readers still count as
-        // "at the tail" — kept as a named constant so the behaviour stays put.
-        assert_eq!(TAIL_SLACK, 48.0);
+    fn the_height_hint_is_a_typical_settled_turn() {
+        // First-fill hint (H2): what an unmeasured row counts as before
+        // layout measures it. Kept as a named constant so the assumption
+        // stays visible.
+        assert_eq!(TURN_HEIGHT_HINT, 120.0);
+    }
+
+    #[test]
+    fn pixel_scrolling_needs_row_heights() {
+        // The scroll-jank mechanism (H2), without a window: rows with no
+        // hint count as 0 px in the sum tree, so an upward wheel event from
+        // the tail has no heights to move through — the offset sticks at
+        // the past-end anchor (the element's wheel path then clamps through
+        // that zero-stack and resolves at the head, which `bench-scroll
+        // wheel` shows end to end). With the uniform first-fill hint the
+        // same event climbs exactly one hinted row. `scroll_by` is the pixel
+        // arithmetic the wheel handler runs, sign included.
+        let bare = ListState::new(0, ListAlignment::Top, px(48.0));
+        bare.reset(592);
+        bare.scroll_to_end();
+        bare.scroll_by(px(-120.0));
+        assert_eq!(bare.logical_scroll_top().item_ix, 592);
+        let hinted = ListState::new(0, ListAlignment::Top, px(crate::WINDOW_H));
+        hinted.reset_with_uniform_height(592, px(TURN_HEIGHT_HINT));
+        hinted.scroll_to_end();
+        hinted.scroll_by(px(-120.0));
+        assert_eq!(hinted.logical_scroll_top().item_ix, 591);
+    }
+
+    #[test]
+    fn an_unlaid_list_reports_no_tail_state() {
+        // What `bench_list_end` unwraps: before the first layout there are
+        // no bounds, so the tail state is unknown — and the app treats
+        // unknown as at the tail (`sync_virtual_list`, `render_needs_you`).
+        let fresh = ListState::new(0, ListAlignment::Top, px(crate::WINDOW_H));
+        assert_eq!(fresh.is_scrolled_to_end(), None);
     }
 
     #[test]

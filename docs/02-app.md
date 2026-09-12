@@ -396,6 +396,23 @@ is the interval between consecutive paints while frames are requested, and
 `bench-frames` reports `frames fps dropped`, dropped meaning past 16.7 ms) —
 plus `bench-rss` (peak RSS) and `bench-idle`: the frames a settled
 transcript requests over the next 2 s, which must be none.
+`--bench-scroll wheel` is the scroll-jank instrument rather than a frame
+driver: the stream lands head-pinned (so, as after a real backfill, every
+row above the tail is still unmeasured), the list is then pinned at the
+tail, and the instrument dispatches real `ScrollWheelEvent`s at the
+transcript's centre, one per frame — (a) a flick up of 6 × +600 px, (b) 90 × −40 px back down, (c) a slow
+trackpad climb of 300 × +20 px, (d) its 300 × −20 px mirror — sampling the
+list's `logical_scroll_top` after each. The other modes drive `scroll_to`
+while the stream lands and never exercise the wheel's pixel-delta path
+through the sum tree's heights, which is where the jank lived. `wheel`
+prints one `bench-scroll` line (`events frames jumps stalls clamped` plus
+the `item_ix` after each phase: `jumps` counts frames where `item_ix` moved
+across more rows than the event's travel at the height hint explains, `stalls` frames where an event left the position unchanged
+short of a scroll limit, `clamped` frames where the event ran into the head
+or the tail limit instead — correct end-of-list behaviour, so `stalls +
+clamped` is every no-move frame) and carries the same numbers in
+`--bench-out`'s `scroll` object; its phases are the run's frames, so it
+skips the `--bench-frames` sweep.
 `--bench-open-turn` stops the stream before the capture's last
 `turn/completed` instead, so the same window is measured with a turn
 still running: the only clock that may still ask for frames is the 1 Hz
