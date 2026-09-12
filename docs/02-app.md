@@ -310,7 +310,9 @@ the handle resets to the 252 px default. `--steps sidebar-width:<px>`
 scripts a settled width for screenshots.
 
 The shell paints no traffic lights of its own — the window's native ones are
-the only set. The centre header shows the active session's label ("Harness"
+the only set. The sidebar header reserves their footprint (`native_lights`)
+and the window positions them with `aui::shell::traffic_light_position`, so
+they sit centred in the header row at every density. The centre header shows the active session's label ("Harness"
 with nothing open) with the provider mark and the overflow "…" menu (Rename,
 Fork, Archive); the title flexes inside the header cell and elides to one
 line, so a whole first prompt as the label can never push the overflow button
@@ -321,9 +323,11 @@ stays empty; the shell is always given `right_open(false)`, and there is no
 per-session state for it any more (B-DEAD-3, 2026-09-12). The
 shell wraps the header row in its drag region, so press-drag moves the window
 and double-click zooms while the buttons and the rename field keep their
-clicks. Collapsed, the rail column is 48 px and the centre title stands 14 px
-off so it clears the native lights (x 9–61), chosen from the collapsed
-screenshot rather than from guesswork.
+clicks. Collapsed (⌘B), only the pane below becomes the 48 px rail: the header
+row stands still (`header_follows_sidebar(false)`), so the sidebar cell keeps
+its width — reservation, toggle and search included — and the centre header
+never slides under the native lights. There is no expand button in the centre
+header; the toggle lives in the sidebar header in both states.
 
 ---
 
@@ -363,7 +367,12 @@ at the top instead of leaving a void above it; tail-follow is the `follow`
 flag (`scroll_to_end` when the reader was at the tail), never the alignment.
 The list wrapper carries the pre-virtualised container's own gutters
 (`TRANSCRIPT_PAD_TOP`/`TRANSCRIPT_PAD_X`, `SP_4` below), so the turns line up
-with the status and banner rows. Fold changes `splice` the affected
+with the status and banner rows. Inside those gutters every row is centred on
+an 880 px measure (`TRANSCRIPT_MEASURE`: the design's ~760–800 px column at
+the 1.1 text scale) — the list, the loading and status rows, the banners, the
+caret menus, the queue strip, and the composer's content, whose docked band
+still spans the pane. Blocks inside a turn sit 8 px apart (the design's
+`.grp2{gap:8px}`) and turns 16 px apart (its `.tr{gap:16px}`). Fold changes `splice` the affected
 range only, and only visible rows are laid out per frame, so per-frame cost
 stays bounded as the transcript grows. `apply` notifies only when the fold
 changed or view state changed (unchanged streaming deltas earn no frame), the
@@ -488,9 +497,11 @@ after `bind_keys` — after, because macOS reads each item's shortcut from the
 keymap. Harness (About, Services, Quit), File (New, Close), Edit (the
 standard six with `OsAction`), View (sidebar, palette, search, theme),
 Window (Minimize, Zoom), Help (Harness Documentation, which reveals the
-`docs/` folder in Finder). ⌘W runs the tier-probe cleanup and
-`remove_window`; ⌘Q runs the same cleanup and `cx.quit()` — the same pair
-the window's should-close hook and the app-quit hook run
+`docs/` folder in Finder). The red dot and ⌘W both hide the app (`cx.hide()`
+after the tier-probe cleanup): the window and the `muse serve` child survive,
+so the Dock icon and ⌘-Tab bring the same session back, and `on_reopen`
+rebuilds the window through the shared `open_shell_window` if it was removed
+some other way. ⌘Q runs the cleanup and `cx.quit()` through the app-quit hook
 (`tier::cleanup_probes`), so every exit path is one function. The docs
 lookup (`find_docs_dir`, unit-tested in `app.rs`) tries the working
 directory's `docs/` first, then three ancestors above the executable, so it

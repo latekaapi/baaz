@@ -66,7 +66,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘K | The command palette: every `/` command and every session operation |
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
-| ⌘W | Close the window (File → Close Window; probe cleanup first) |
+| ⌘W | Close the window (File → Close Window): probe cleanup, then the app hides; the Dock icon or ⌘-Tab brings the same window and session back |
 | ⌘Q | Quit (Harness → Quit Harness; probe cleanup first) |
 | ⌘M | Minimize the window |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
@@ -88,9 +88,12 @@ View (sidebar, palette ⌘K, search ⌘⇧F, theme), Window (Minimize ⌘M, Zoom
 Help (Harness Documentation reveals `docs/` in Finder). A menu item's shortcut displays
 from the keymap, so an item without a binding shows none — which is why the
 Edit items show none: ⌘X/⌘C/⌘V/⌘A/⌘Z belong to the focused field and are not
-rebound globally. ⌘W closes through `remove_window` and ⌘Q quits through
-`cx.quit()`, each after the same tier-probe cleanup as the window-close and
-app-quit hooks (`tier::cleanup_probes`).
+rebound globally. ⌘W and the red dot both hide the app (`cx.hide()`) after the
+tier-probe cleanup (`tier::cleanup_probes`), so the window and the `muse serve`
+child survive and the Dock icon and ⌘-Tab bring the same session back;
+`on_reopen` re-activates, or rebuilds the window through the shared
+`open_shell_window` if it was removed some other way. ⌘Q quits through
+`cx.quit()` after the same cleanup.
 
 ## Deliberately not bound
 

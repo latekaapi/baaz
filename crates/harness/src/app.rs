@@ -260,15 +260,12 @@ pub fn set_menus(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         crate::harness_log!("CloseWindow");
         crate::tier::cleanup_probes();
-        // Deferred: menu dispatch already holds this window in an update
-        // (`update_window_id` takes it out of `App.windows` while the
-        // dispatch runs), so closing inline fails with "window not found".
-        let windows = cx.windows();
-        cx.defer(move |cx| {
-            for window in windows {
-                window.update(cx, |_, window, _| window.remove_window()).ok();
-            }
-        });
+        // Same as the red dot: hide the app rather than remove the window,
+        // so the session and the `muse serve` child survive and the Dock
+        // icon or Cmd-Tab bring the same window back (`main.rs`,
+        // `open_shell_window`). Deferred: menu dispatch already holds this
+        // window in an update.
+        cx.defer(|cx| cx.hide());
     });
     cx.on_action(|_: &QuitApp, cx: &mut App| {
         crate::harness_log!("QuitApp (global)");
@@ -755,7 +752,6 @@ impl Harness {
             .unwrap_or_else(|| "Harness".to_owned());
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        let expand = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
         // The title flexes inside the header cell and clips to one line, so
         // a whole first prompt as the derived title can never push the
         // overflow button out; the provider mark is flex-none so it stays
@@ -793,20 +789,10 @@ impl Harness {
             title.into_any_element()
         };
         let _ = window;
-        let mut cell = header_cell("hd-centre");
-        if !self.sidebar_open {
-            cell = cell.child(
-                icon_button("hd-centre-expand", IconName::Sidebar)
-                    .ghost()
-                    .muted()
-                    .size(ButtonSize::Sm)
-                    .on_click(expand),
-            );
-            // The native lights own x 9–61 whether the sidebar is open or
-            // not; with the rail at 48 px the centre cell starts underneath
-            // them, so the title stands this far off.
-            cell = cell.child(div().w(px(14.0)).flex_none());
-        }
+        // No expand button: the header row stands still while the sidebar
+        // collapses, so the toggle in the sidebar header stays put and the
+        // centre cell never slides under the native lights.
+        let cell = header_cell("hd-centre");
         cell
             .child(title)
             .child(
@@ -1153,11 +1139,14 @@ impl Render for Harness {
                 .resizing(self.resize.active)
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
+                // The header row stands still while the pane collapses: the
+                // sidebar cell keeps its width — and the native-lights
+                // reservation — so the toggle and search stay where they are.
+                .header_follows_sidebar(false)
                 .right_open(false)
                 .header_sidebar(
                     sidebar_header("hd-side")
-                        .traffic_lights(false)
-                        .collapsed(!self.sidebar_open)
+                        .native_lights(true)
                         .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
                         .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
                 )

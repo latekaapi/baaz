@@ -99,9 +99,9 @@ variant, so opting in is safe for the mirror in `schema.rs`.
   argument or a fixture.
 - **D25. No reconnect after a granted login.** The flow is host-owned, so the
   `muse serve` that ran it holds the credential. The app proceeds on
-  `account/changed` reporting a signed-in lane. The old reconnect-after-login
-  stays as one function, unused, until the owner's first live turn confirms
-  it is not needed (this is the one thing only a billed turn can verify).
+  `account/changed` reporting a signed-in lane. Verified live 2026-09-12: the
+  Meta-account login proceeded with no reconnect (the owner's billed turn),
+  so `Harness::reconnect_after_login` is deleted.
 - **D26. The browser opens once, automatically,** when the device state is
   entered; "Open in browser" re-opens it.
 - **D27. `model/list` is not a sign-in signal.** `account/read` is the only probe.

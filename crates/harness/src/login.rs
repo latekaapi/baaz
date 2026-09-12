@@ -28,10 +28,8 @@
 //!   (**D24**).
 //! * A granted login needs **no reconnect** (**D25**): the flow is host-owned,
 //!   so the `muse serve` that ran it already holds the credential and the app
-//!   proceeds on the signed-in `account/changed`.
-//!   [`Harness::reconnect_after_login`] stays as one unused function until a
-//!   live billed turn confirms that, which is the one thing only a billed turn
-//!   can verify.
+//!   proceeds on the signed-in `account/changed`. Verified live with a billed
+//!   turn after a Meta-account login on 2026-09-12.
 //! * [`Harness::logout`] signs out over the wire; an `envKey` lane survives it
 //!   (the environment still holds the key), so that case keeps the shell and
 //!   explains itself in a toast (**D28**).
@@ -50,9 +48,8 @@ use muse_client::schema::{
     AccountState, AccountStateKind,
 };
 
-use crate::app::{Harness, Wire};
+use crate::app::Harness;
 use crate::auth::{self, Identity};
-use crate::conn;
 use crate::overlays::{Dialog, DialogAction};
 use crate::tier::Tier;
 use crate::wire::WireCall;
@@ -386,39 +383,6 @@ impl Harness {
             let _ = client.account_login_cancel();
         })
         .detach();
-    }
-
-    /// After a successful login: drop the child that inherited no credential,
-    /// spawn a fresh one and re-probe.
-    ///
-    /// Delete this once one billed turn, run after a real Meta-account login,
-    /// confirms D25: that the device flow is host-owned, so the `muse serve`
-    /// that ran it already holds the credential and the app proceeds on
-    /// `account/changed` with no reconnect. Until that turn is run, this stays
-    /// as dead code kept warm for the case D25 turns out wrong.
-    #[allow(dead_code)]
-    pub(crate) fn reconnect_after_login(&mut self, cx: &mut Context<Self>) {
-        self.client = None;
-        self.active = None;
-        let program = self.args.program.clone();
-        self.wire_call(cx, move || conn::connect(&program), |this, result, cx| match result {
-            Ok((connection, events)) => {
-                this.client = Some(connection.client);
-                this.wire = Wire::Ready;
-                this.login.reset_to_choose();
-                this.pump(events, cx);
-                this.probe_account(cx);
-                cx.notify();
-            }
-            Err(error) => {
-                this.wire = Wire::Down(error.to_string());
-                this.set_login_state(
-                    LoginState::Error { message: error.to_string().into(), method: this.login.method },
-                    cx,
-                );
-                this.auth = Auth::SignedOut;
-            }
-        });
     }
 
     /// Sign out over the wire: `account/logout` in the background, and its

@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use aui_tokens::ActiveAui;
 
 impl SessionView {
     // ----------------------------------------------------------------- render
@@ -29,6 +30,7 @@ impl SessionView {
         let caret_menu = self.render_caret_menu(cx);
         let composer = self.render_composer(cx);
         let drop = self.dragging;
+        let p = cx.aui().colors;
         v_flex()
             .size_full()
             .relative()
@@ -38,8 +40,29 @@ impl SessionView {
             .children(banner)
             .children(tier_banner)
             .children(queue)
-            .child(div().w_full().relative().px(px(TRANSCRIPT_PAD_X)).children(caret_menu))
-            .child(composer)
+            // The caret menus anchor to the measure: the positioned ancestor is
+            // the centred inner wrapper, so the popover spans 880 px, not the
+            // pane.
+            .child(
+                div().w_full().px(px(TRANSCRIPT_PAD_X)).child(
+                    div()
+                        .w_full()
+                        .max_w(px(TRANSCRIPT_MEASURE))
+                        .mx_auto()
+                        .relative()
+                        .children(caret_menu),
+                ),
+            )
+            // The docked band spans the pane, hairline included; only the
+            // composer's content is bound to the measure, as in the design.
+            // The library's docked composer draws its own top hairline, which
+            // would stop at the measure's edges: the band draws the pane-wide
+            // one and the composer is pulled up a pixel so its own lies on it.
+            .child(
+                div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
+                    div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().mt(px(-1.0)).child(composer),
+                ),
+            )
             .child(aui::composer::drop_overlay("drop", drop))
             // gpui reports an external drag only while it moves, so that is
             // what raises the overlay; the drop takes it down again.
@@ -257,7 +280,8 @@ impl SessionView {
         // the pre-virtualised transcript's own gutters (pt/px/pb) because
         // the list items themselves are full-bleed rows; the px step is
         // the same TRANSCRIPT_PAD_X the status and banner rows use, so
-        // the turns line up with them.
+        // the turns line up with them. The list itself sits in the centred
+        // measure wrapper, so turns are capped at TRANSCRIPT_MEASURE.
         div()
             .w_full()
             .flex_1()
@@ -268,27 +292,39 @@ impl SessionView {
             .pb(px(scale::SP_4))
             .key_context(TRANSCRIPT_CONTEXT)
             .child(
-                list(self.list_state.clone(), move |ix, window, cx| {
-                    // One item per turn: only visible rows are built and laid
-                    // out per frame, so per-frame cost stays bounded as the
-                    // transcript grows (C1). Turn bodies still come from
-                    // blocks exactly as before.
-                    let mut row = v_flex().w_full().pb(px(scale::SP_5));
-                    if ix == 0 {
-                        row = row.pt(px(TRANSCRIPT_PAD_TOP));
-                    }
-                    // Under the deterministic flag every turn draws settled:
-                    // the newest turn's reveal (fade + rise) never lands on
-                    // the same frame twice.
-                    let settled = ix != last || crate::clock::deterministic();
-                    match turns.get(ix) {
-                        Some(turn) => row.children(transcript::turn(turn, settled, &folds, window, cx)),
-                        None => row,
-                    }
-                    .into_any_element()
-                })
-                .flex_1()
-                .into_any_element(),
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .max_w(px(TRANSCRIPT_MEASURE))
+                    .mx_auto()
+                    .child(
+                        list(self.list_state.clone(), move |ix, window, cx| {
+                            // One item per turn: only visible rows are built and laid
+                            // out per frame, so per-frame cost stays bounded as the
+                            // transcript grows (C1). Turn bodies still come from
+                            // blocks exactly as before. The 8 px gap between a turn's
+                            // blocks is the design's `.grp2{gap:8px}`; the 16 px below
+                            // each row is the transcript column's `.tr{gap:16px}`.
+                            let mut row = v_flex().w_full().gap(px(scale::SP_3)).pb(px(scale::SP_5));
+                            if ix == 0 {
+                                row = row.pt(px(TRANSCRIPT_PAD_TOP));
+                            }
+                            // Under the deterministic flag every turn draws settled:
+                            // the newest turn's reveal (fade + rise) never lands on
+                            // the same frame twice.
+                            let settled = ix != last || crate::clock::deterministic();
+                            match turns.get(ix) {
+                                Some(turn) => row.children(transcript::turn(turn, settled, &folds, window, cx)),
+                                None => row,
+                            }
+                            .into_any_element()
+                        })
+                        .flex_1()
+                        .into_any_element(),
+                    )
             )
             .into_any_element()
     }
@@ -300,11 +336,11 @@ impl SessionView {
             .w_full()
             .pt(px(TRANSCRIPT_PAD_TOP))
             .px(px(TRANSCRIPT_PAD_X))
-            .child(
+            .child(centred(
                 status_row("transcript-loading", "Loading history\u{2026}")
                     .lead(StatusLead::Spinner)
                     .shimmer(true),
-            )
+            ))
             .into_any_element()
     }
 
@@ -745,7 +781,7 @@ impl SessionView {
                     .w_full()
                     .px(px(TRANSCRIPT_PAD_X))
                     .pb(px(scale::SP_4))
-                    .child(retry_row("retry", attempt, max, remaining_ms, reason))
+                    .child(centred(retry_row("retry", attempt, max, remaining_ms, reason)))
                     .into_any_element(),
             );
         }
@@ -773,7 +809,7 @@ impl SessionView {
                 .w_full()
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_4))
-                .child(row)
+                .child(centred(row))
                 .into_any_element(),
         )
     }
@@ -794,11 +830,11 @@ impl SessionView {
                 .w_full()
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_3))
-                .child(
+                .child(centred(
                     banner("session-banner", BannerKind::Error, vec![BannerRun::Text(message.into())])
                         .action(label, BannerActionStyle::Ghost)
                         .on_action(move |window, cx| press(&(), window, cx)),
-                )
+                ))
                 .into_any_element(),
         )
     }
@@ -826,7 +862,14 @@ impl SessionView {
             row.action("Check again", BannerActionStyle::Ghost)
                 .on_action(move |window, cx| recheck(&(), window, cx))
         };
-        Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(row).into_any_element())
+        Some(
+            div()
+                .w_full()
+                .px(px(TRANSCRIPT_PAD_X))
+                .pb(px(scale::SP_3))
+                .child(centred(row))
+                .into_any_element(),
+        )
     }
 
     /// The needs-you banner: something is waiting on the person and they are
@@ -856,7 +899,7 @@ impl SessionView {
                 .w_full()
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_3))
-                .child(banner.on_jump(move |_, window, cx| jump(&(), window, cx)))
+                .child(centred(banner.on_jump(move |_, window, cx| jump(&(), window, cx))))
                 .into_any_element(),
         )
     }
@@ -894,9 +937,9 @@ impl SessionView {
                 .w_full()
                 .px(px(TRANSCRIPT_PAD_X))
                 .pb(px(scale::SP_3))
-                .child(queue_strip("queue", rows).on_intent(move |id, i, window, cx| {
+                .child(centred(queue_strip("queue", rows).on_intent(move |id, i, window, cx| {
                     intent(&(id.clone(), i), window, cx)
-                }))
+                })))
                 .into_any_element(),
         )
     }
