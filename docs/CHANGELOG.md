@@ -1,5 +1,50 @@
 # Harness changelog
 
+## 2026-09-12 — The five owner-visible faults (transcript design, scroll, open path, lights/header, reopen)
+
+Diagnosed first (`docs/diagnosis/transcript-pass-2026-09-12.md`), then fixed library-first:
+agentic-ui `b0b40bd` on `transcript-2026-09-12` (stacked on `audit-2026-09-12`), harness
+`2e71c09` (H1) plus the `wt/scroll` and `wt/open` merges. Briefs in `docs/briefs/muse-*.md`;
+Muse implemented, the reviewer audited, reran every gate and committed.
+
+- **Transcript design.** The library cards matched the design and the gallery; the harness
+  composition did not. Blocks inside a turn now sit 8 px apart (`.grp2{gap:8px}`), the
+  column is bounded to an 880 px measure and centred (composer content included, the docked
+  band and its hairline still spanning the pane), and colour/type were verified unchanged.
+- **Traffic lights and header.** The window places macOS's own lights with
+  `aui::shell::traffic_light_position` and the sidebar header reserves their 72 pt footprint
+  (`native_lights`); the header row no longer collapses with the sidebar
+  (`header_follows_sidebar(false)`): only the pane below "New session" goes to the rail.
+- **Scroll.** gpui's `list` counts an unmeasured row with no hint as 0 px; the harness used a
+  96 px overdraw and `reset()` with no hint, so one upward flick from the tail of a backfilled
+  session landed on turn 1 and the list never got back. The first fill now hints every row
+  at a typical turn height and the overdraw is a viewport. `--bench-scroll wheel` streams
+  head-pinned (the tail unmeasured, as after a real open) and dispatches real wheel events:
+  before `a_ix=0 … d_ix=64` (stuck at the head), after `a_ix=551 b_ix=590 c_ix=524 d_ix=589`,
+  `jumps=0 stalls=0`. Frame time was never the fault (6–7 ms p50 before and after, 0 dropped).
+- **Open path.** The click's target highlights the row and titles the header on its own
+  frame; the centre swaps at once to the new view (its loading row until page 1 lands);
+  `view/page` pages fold one per update with `HistoryReady` after the first; the last eight
+  views are parked in an MRU and reopen instantly, topped up by `session/resume { cursor }`
+  (a forward `view/page` from the cached head answers `missingAnchor`). `HARNESS_TRACE=1`
+  prints the timeline; `--steps open:<id>` scripts a switch. Live, free calls only: a 790-event
+  session went from ~990 ms click-to-content to 1–4 ms to its loading row and ~1 s to
+  complete; a cached reopen draws the full transcript in ~2 ms.
+- **Close and reopen.** ⌘W and the red dot hide the app (`cx.hide()`) after the probe
+  cleanup, so the window and the `muse serve` child survive and the Dock icon or ⌘-Tab
+  bring the same session back; `on_reopen` rebuilds the window through `open_shell_window`
+  if it is ever gone.
+- **D25 closed.** `reconnect_after_login` and its `allow(dead_code)` deleted.
+
+Proof: `scripts/captures.sh` (53 deterministic captures) — every session capture changed
+once, for H1's named visual changes, and was byte-identical through the scroll and open-path
+merges; the five login captures never changed; adapter snapshots unchanged. Bench, debug,
+`synthetic-stress-300`: sweep element 7/77/264 → 4/59/89 µs, frame 6/7/10 → 6/7/8 ms,
+dropped 8 → 0, idle 8 → 0 (the 8 did not reproduce for any implementor and was not
+gated). Still for the owner on screen: the lights' alignment, a real trackpad, ⌘W then
+the Dock. Spend: zero model turns from the harness; the runs were four `muse exec`
+sessions on the subscription.
+
 ## 2026-09-12 — Code review and performance pass (audit packages P0, E, A, B, C1, C2, D1, D2)
 
 A read-only audit first (`docs/audit/00-findings.md`: 85 unique findings, two HIGH), then
