@@ -504,6 +504,21 @@ impl Harness {
                     crate::log::trace_mark("resume-ack-stale");
                     crate::harness_log!("resume of {resumed} hit a stale sidecar ({error}); paging anyway");
                 }
+                // A rejection about this session — another host holding its
+                // lease — is not a failure of the wire: the view stays open
+                // under the same lease notice the reconnect path raises,
+                // read-only, with no dialog, and the sidebar row stays
+                // selectable.
+                Err(error) if conn::is_session_scoped(error) => {
+                    crate::log::trace_mark("resume-ack-held");
+                    let banner = conn::lease_banner(error);
+                    crate::harness_log!("resume of {resumed} rejected ({error}); banner on the view, wire stays up");
+                    let held =
+                        this.active.clone().filter(|view| view.read(cx).session_id == resumed);
+                    if let Some(view) = held {
+                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
+                    }
+                }
                 Err(error) => {
                     crate::log::trace_mark("resume-ack-err");
                     this.report(error, cx);
@@ -697,6 +712,20 @@ impl Harness {
                         this.resume(topped.clone(), window, cx);
                         // `resume` parked the stale view; it must not come back.
                         this.session_cache.retain(|(id, _)| *id != topped);
+                    }
+                }
+                // Any other rejection about this session banners the still-open
+                // topped-up view like the reconnect path, never a dialog.
+                Err(error) if conn::is_session_scoped(&error) => {
+                    crate::log::trace_mark("resume-ack-held");
+                    let banner = conn::lease_banner(&error);
+                    crate::harness_log!("cached resume of {topped} rejected ({error}); banner on the view, wire stays up");
+                    let still_open = this
+                        .active
+                        .clone()
+                        .filter(|view| view.read(cx).session_id == topped);
+                    if let Some(view) = still_open {
+                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
                     }
                 }
                 Err(error) => {

@@ -229,9 +229,9 @@ impl Harness {
     /// workspaces from the index — minus adopted roots, only paths that
     /// still exist as directories, newest first, at most twelve, badged
     /// with their session count. The "Choose folder…" row is gone: the Add
-    /// section's head is the library's `folder_drop_card`, drawn above the
-    /// card (it is not a `PaletteItem` and takes no keyboard selection).
-    /// The query filters both sections by name and path.
+    /// section's lead is the library's `folder_drop_card`, drawn inside the
+    /// card under the section title (it is not a `PaletteItem` and takes no
+    /// keyboard selection). The query filters both sections by name and path.
     fn projects_rows(&self, cx: &gpui::App) -> Vec<ProjectsRow> {
         let p = cx.aui().colors;
         let query = self.projects_query.read(cx).value().trim().to_owned();
@@ -271,7 +271,8 @@ impl Harness {
         }
         // Recent Muse workspaces, newest first: what the index saw sessions
         // in, minus the roots this window already holds. ("Choose folder…"
-        // lives above the card as the `folder_drop_card`, not as a row.)
+        // lives in the Add section as the `folder_drop_card` lead, not as
+        // a row.)
         let adopted: std::collections::HashSet<String> = self
             .projects
             .projects
@@ -371,7 +372,7 @@ impl Harness {
         let rows = self.palette_rows(kind, cx);
         let Some((id, _, _)) = rows.get(selected).cloned() else {
             crate::harness_log!("palette confirm: nothing at {selected} of {} rows", rows.len());
-            // The Add section's head is a card, not a row, so an empty
+            // The Add section's lead is a card, not a row, so an empty
             // Projects palette still offers the panel on ↩.
             if kind == PaletteKind::Projects {
                 self.choose_project_folder(cx);
@@ -562,8 +563,21 @@ impl Harness {
             ),
             PaletteKind::Projects => {
                 // The rows already carry their icons, contexts and badges;
-                // the sections only partition them. An empty section is
-                // omitted, so a fresh window offers Add alone.
+                // the sections only partition them. The Add section always
+                // shows: its lead is the library's folder card, the first
+                // thing under "ADD" above the recent workspaces, so a click
+                // chooses through P1's panel and a drop adopts every dropped
+                // directory, the first becoming current. It is not a row —
+                // the keyboard walks past it.
+                let entity = cx.entity().downgrade();
+                let choose = move |_: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this, cx| this.choose_project_folder(cx)).ok();
+                };
+                let entity = cx.entity().downgrade();
+                let drop = move |paths: Vec<std::path::PathBuf>, _: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this, cx| this.adopt_dropped(paths, cx)).ok();
+                };
+                let lead = folder_drop_card("projects-drop").key("⌘⇧O").on_click(choose).on_drop(drop);
                 let mut adopted = Vec::new();
                 let mut adding = Vec::new();
                 for row in self.projects_rows(cx) {
@@ -577,9 +591,7 @@ impl Harness {
                 if !adopted.is_empty() {
                     sections.push(PaletteSection::new("Projects", adopted));
                 }
-                if !adding.is_empty() {
-                    sections.push(PaletteSection::new("Add", adding));
-                }
+                sections.push(PaletteSection::new("Add", adding).lead(lead));
                 (SharedString::from(""), SharedString::from("Add or switch project"), sections)
             }
             PaletteKind::Search => {
@@ -652,32 +664,9 @@ impl Harness {
         if self.still() {
             card = card.at_rest();
         }
-        // The Projects palette's Add head: the library's folder card above
-        // the rows' card. It is not a row — the keyboard walks past it — so
-        // a click chooses through P1's panel and a drop adopts every dropped
-        // directory, the first becoming current.
-        let centred: AnyElement = if kind == PaletteKind::Projects {
-            let entity = cx.entity().downgrade();
-            let choose = move |_: &mut Window, cx: &mut App| {
-                entity.update(cx, |this, cx| this.choose_project_folder(cx)).ok();
-            };
-            let entity = cx.entity().downgrade();
-            let drop = move |paths: Vec<std::path::PathBuf>, _: &mut Window, cx: &mut App| {
-                entity.update(cx, |this, cx| this.adopt_dropped(paths, cx)).ok();
-            };
-            let drop = folder_drop_card("projects-drop").key("⌘⇧O").on_click(choose).on_drop(drop);
-            // The rows' card is 560 wide (`PAL_W`, private to the library's
-            // palette), so the head matches it exactly rather than filling
-            // the column.
-            gpui_kit::base::v_flex()
-                .w(px(560.0))
-                .gap(px(scale::SP_3))
-                .child(drop)
-                .child(card)
-                .into_any_element()
-        } else {
-            card.into_any_element()
-        };
+        // The Projects palette's drop card rides inside the card as the Add
+        // section's lead now, not as a floating box above it.
+        let centred: AnyElement = card.into_any_element();
         Some(
             popover_layer(
                 div()

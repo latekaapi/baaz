@@ -203,11 +203,12 @@ codebase and bent.
 
 ### Owner round 2, surface (2026-09-13)
 
-- **The "Choose folder…" row is a card, not a row.** The Add section's head
-  is the library's `folder_drop_card`, which is not a `PaletteItem`, so it
-  is drawn above the rows' card (width-matched to it) rather than inside a
-  section. The keyboard walks past it; ↩ on an empty Projects palette opens
-  the panel.
+- **The "Choose folder…" row is a card, not a row.** The Add section's lead
+  is the library's `folder_drop_card` (`PaletteSection::lead`), which is not
+  a `PaletteItem`, so it draws inside the card under the section title —
+  first under "ADD", above the recent workspaces — rather than as a floating
+  box above it. The keyboard walks past it; ↩ on an empty Projects palette
+  opens the panel. The hero keeps its own card.
 - **The panel needed two fixes, found by log.** Clicks never reached any
   palette row — the scrim dismissed on mouse-down, so the release found no
   row — and the panel could open behind an inactive app (`cx.activate(true)`

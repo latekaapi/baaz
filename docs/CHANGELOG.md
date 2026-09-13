@@ -39,6 +39,13 @@ branch. The wire package below landed first on the same branch.
   "Show 2 more" shows; `s-web-1` went idle — a running row's pulse ring
   animates on wall-clock and can never be byte-identical), plus
   `round2-pinned-dark.png` (`…;pin`) and `round2-session-in-use-dark.png`.
+- **Fix-up — The drop card lives inside the palette.** The `folder_drop_card`
+  is the Add section's `.lead(..)` now — first under "ADD", inside the card —
+  and the floating box is gone. `projects-palette-dark.png` retaken.
+- **Fix-up — A held session is a banner, not a dialog.** Every session-scoped
+  rejection from a direct `resume`/`open` raises the reconnect path's lease
+  notice on that session's view (read-only, no dialog). Proven live again:
+  `round2-session-in-use-dark.png` retaken.
 
 ## 2026-09-13 — Owner round 2, wire
 
