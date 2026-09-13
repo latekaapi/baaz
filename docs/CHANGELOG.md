@@ -1,5 +1,39 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 4, menus and palette
+
+- **Every shell menu seats at its trigger through
+  `aui::overlay::anchored_menu`.** The sidebar footer row, the header project
+  crumb and the header overflow `…` button each carry an
+  `on_children_prepainted` wrapper recording their window bounds once per
+  frame; every rendered group row's tray `…` button reports its bounds through
+  the library's `SidebarView::on_group_menu_prepainted`, keyed by group id.
+  The account menu hangs `Above, End` of the footer, the group-row project
+  menu and the header crumb menu `Below, Start` of their triggers, the header
+  overflow menu `Below, End` of its button — each with the existing
+  click-outside catcher as sibling — and gpui's `SwitchAnchor` fit flips the
+  side and slides inside the window on overflow. The old constant seats
+  (`bottom(100) left(12)`, `top(52)`, `resize.width + 12`, `top(48) right(8)`)
+  are gone, and so are the pre-first-prepaint fallbacks: with no bounds
+  recorded yet there is no menu this frame (one frame, no flash at a wrong
+  place).
+- **The Colour submenu hangs off the project menu's right edge at the Colour
+  row's height** through a second `anchored_menu` on a zero-size trigger, so
+  it flips left near the window edge instead of running off it. The row offset
+  counts the project toggles at the theme row height plus the menu's top
+  padding and separator metrics, read off `aui::nav::view_menu` (still
+  private; the library is frozen this round). `project-colour` with no payload
+  opens the submenu for its screenshots.
+- **The Sessions view menu keeps its measured seat** (the caption's own bounds
+  are not obtainable from the frozen library) minus its `top(140) left(12)`
+  fallback. Chip pickers and caret popovers are untouched — already anchored.
+- **The search palette scrolls.** The harness palette scrim carries
+  `.occlude()` beside the library card's own occlude and wheel stop, so the
+  transcript's capture-phase `wheel_capture` yields over the open palette and
+  the palette's list takes the wheel. New `--steps wheel:<dy>` verb dispatches
+  one synthetic wheel event at the window centre and logs
+  `harness: wheel dy=<dy> list_px=<before>-><after>` (`docs/02-app.md` §6).
+
 ## 2026-09-13 — Owner round 3, library (agentic-ui `owner-round-3-2026-09-13`)
 
 - **D2 — A project's rows keep the project row's right edge at any sidebar

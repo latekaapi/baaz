@@ -469,6 +469,16 @@ horizontal than vertical is left alone, so a wide markdown table still
 scrolls sideways. Measured before and after in
 `docs/diagnosis/scroll-research-2026-09-13.md`.
 
+The scripted counterpart is the `--steps wheel:<dy>` verb: one synthetic
+`ScrollWheelEvent` at the window centre, logging
+`harness: wheel dy=<dy> list_px=<before>-><after>` (the transcript's pixel
+offset on either side). Over the open palette the palette's list scrolls and
+the transcript never moves — the library card occludes its own rect and stops
+the wheel after its list scrolls, and the harness palette scrim occludes the
+dimmed ground around it — while over the bare transcript the same wheels move
+it. A wheel dispatched before the first frame lands on no listener, so the
+proof runs put a `wait:` ahead of the wheels.
+
 Auto-scroll is tail-follow, the same rule the block terminal uses: anything new
 scrolls the list to the bottom, but only for a reader who was already within a
 few dozen pixels of it.
