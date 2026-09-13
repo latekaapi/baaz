@@ -35,6 +35,7 @@ open_enum! {
     /// A grantable capability name (SS1.4.4).
     CapabilityName {
         UserShell = "userShell",
+        SessionMcp = "sessionMcp",
     }
 }
 
@@ -581,6 +582,9 @@ open_enum! {
 /// payloads arrive as re-issued server→client requests right after a `session/resume` response;
 /// `session/read` never re-issues them. One flat object with both ids optional — the published
 /// schema names no object-variant union, so `{"kind":"approval","userInputId":…}` is accepted.
+///
+/// Note the shape the binary actually serves in `pendingRequests` is usually
+/// not this but the full payload — see [`PendingRequestEntry`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRequestPointer {
@@ -594,6 +598,31 @@ pub struct PendingRequestPointer {
     pub user_input_id: Option<String>,
     /// The cursor the request opened at.
     pub view_cursor: String,
+}
+
+/// One entry of the `pendingRequests` array on `session/resume`, `session/fork`
+/// and `session/read` (tdd SS2.5.2).
+///
+/// The published schema names only the `{kind, approvalId?, userInputId?,
+/// viewCursor}` pointer — but the muse 1.2.1 binary serves the **full**
+/// server-initiated request payloads there instead: an approval entry is the
+/// whole [`ApprovalRequestParams`], a user-input entry the whole
+/// [`UserInputRequestParams`], and neither carries a top-level `kind`
+/// (observed 2026-09-13: `session/read` for a title failed with
+/// `missing field 'kind'`). The capture wins over the schema
+/// (`docs/01-transport.md` §4), so this is an untagged union that accepts
+/// both: full payloads first, the documented pointer last. Anything else is
+/// a hard error, not a silent drop — an undecodable pending set must not
+/// lose an approval.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PendingRequestEntry {
+    /// A pending approval, served inline with its full payload.
+    Approval(Box<ApprovalRequestParams>),
+    /// A pending user-input prompt, served inline with its full payload.
+    UserInput(Box<UserInputRequestParams>),
+    /// The documented pointer shape (`{kind, …, viewCursor}`).
+    Pointer(PendingRequestPointer),
 }
 
 /// A pending user-input prompt in the snapshot (tdd SS4.9.1, SS5.10).
@@ -727,12 +756,23 @@ pub struct SnapshotState {
     /// Every item, in first-opened order, each at its latest revision at the snapshot cursor — the
     /// same item schema the notifications carry, which is what makes snapshot+suffix a pure splice.
     pub items: Vec<Item>,
+    /// The settled canonical session name (tdd SS4.9.1 / SS2.14). **Additive-optional**, absent
+    /// until the session is named. The schema's own doc says "`null` when the session was never
+    /// named" while typing the member as a bare `string`, so the two arms are indistinguishable
+    /// here: both read as `None` and both write back as absent. No capture has served either arm
+    /// yet; revisit when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The pending-approval half of the pending set.
     pub pending_approvals: Vec<PendingApprovalPointer>,
     /// The pending-user-input half of the pending set.
     pub pending_user_inputs: Vec<PendingUserInputPointer>,
     /// Admitted-but-not-launched submits, in launch order.
     pub queued_turns: Vec<TurnRef>,
+    /// The latest session-default reasoning effort with its source (tdd SS4.9.1, ADR 31255 D1).
+    /// **Additive-optional, absent arm**: missing until a set lands, never present-`null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffortState>,
     /// Latest todo list; `null` when no fact has landed. Required-nullable.
     #[serde(default)]
     pub todo_list: Option<TodoListState>,
@@ -870,19 +910,19 @@ open_enum! {
     }
 }
 
-/// The `sha256:` stable-surface fingerprint of the muse 1.1.1 schema bundle these types were
+/// The `sha256:` stable-surface fingerprint of the muse 1.2.1 schema bundle these types were
 /// generated from (`fixtures/msp/msp/manifest.json`).
 ///
 /// Compare it against `InitializeResult.schema.fingerprint`. **A mismatch is a WARNING, never an
 /// error**: the server is free to ship a different stable surface, and additive evolution keeps
 /// these types working (research §1.2). Log it, do not refuse the connection.
 pub const SCHEMA_FINGERPRINT: &str =
-    "sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f";
+    "sha256:c7ff6c5d1e89cd42f803aea1f05b8e72082f2099685802473eb726903484713b";
 
 /// Every wire **method** in the SS1.9 published index (`MspMethod`).
 ///
-/// Not exhaustive of what the binary answers: the server also *issues* the `userInput/request` and
-/// `approval/request` requests, which are server→client and therefore absent from this list.
+/// The server→client requests (`approval/request`, `userInput/request`) are **not** methods: they
+/// live in the schema's own `requests` index, mirrored here as [`MSP_SERVER_REQUESTS`].
 pub const MSP_METHODS: &[&str] = &[
     "initialize",
     "subagent/sendMessage",
@@ -905,6 +945,8 @@ pub const MSP_METHODS: &[&str] = &[
     "turn/unqueue",
     "session/compact",
     "session/setModel",
+    "session/rename",
+    "session/setReasoningEffort",
     "session/userShell",
     "model/list",
     "view/subscribe",
@@ -921,8 +963,8 @@ pub const MSP_METHODS: &[&str] = &[
 
 /// Every wire **notification** in the SS1.9 published index (`MspNotification`).
 ///
-/// The muse 1.1.1 binary additionally emits `session/started` ([`SessionStartedParams`]), which this
-/// index omits — a client must accept it.
+/// The binary additionally emits `session/started` ([`SessionStartedParams`]), which this index
+/// omits — a client must accept it.
 pub const MSP_NOTIFICATIONS: &[&str] = &[
     "initialized",
     "turn/started",
@@ -941,6 +983,8 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "userInput/requested",
     "userInput/settled",
     "session/modelChanged",
+    "session/nameChanged",
+    "session/reasoningEffortChanged",
     "session/goalChanged",
     "session/todoListChanged",
     "session/branchChanged",
@@ -949,6 +993,35 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "session/approvalModeChanged",
     "session/modelRouteUnserved",
 ];
+
+/// Every server-initiated wire request in the schema's `requests` index
+/// (`MspServerRequest`, SS5.3/SS5.10.1).
+///
+/// These are server→client and therefore absent from [`MSP_METHODS`]: the client never sends them,
+/// it answers each with a [`RequestReceipt`] while the decision/answer travels as a command
+/// (`approval/decide`, `userInput/answer`).
+pub const MSP_SERVER_REQUESTS: &[&str] = &["approval/request", "userInput/request"];
+
+open_enum! {
+    /// Every server-initiated wire request in the schema's `requests` index
+    /// (`MspServerRequest`, SS5.3/SS5.10.1).
+    MspServerRequest {
+        ApprovalRequest = "approval/request",
+        UserInputRequest = "userInput/request",
+    }
+}
+
+/// The SS5.3.3 presentation receipt — the client's response to a server-initiated request
+/// (`approval/request`, `userInput/request`).
+///
+/// The response acknowledges presentation only ("a surface showed or will show this"): it changes
+/// no state, the server uses it for diagnostics alone, and the decision/answer travels as a
+/// command (`approval/decide`, `userInput/answer`). An error response or a dropped connection means
+/// this connection could not present the request; the approval or prompt stays pending and the
+/// request is re-issued on the next subscribe. There is no dismiss-without-deciding on the wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestReceipt {}
 
 /// Every `error.data.kind` in the SS1.6 error table (`MspErrorDataKind`) — each code's primary kind
 /// plus its override kinds. Rendered as strings rather than an enum because [`ErrorKind`] already

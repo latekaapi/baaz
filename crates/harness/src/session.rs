@@ -421,6 +421,14 @@ pub struct SessionView {
     submitting: bool,
     /// History is still being paged in behind the live stream.
     loading_history: bool,
+    /// A stale-sidecar page failure was already retried once in this backfill
+    /// chain (owner round 2 S2): the second failure reports instead.
+    backfill_stale_retried: bool,
+    /// The lease is gone — the session is open in another window (or the
+    /// child that held it exited) — so nothing is sent until a later resume
+    /// succeeds (owner round 2 S3). `Some` is the banner text, re-shown on
+    /// every refused send so a dismissal cannot strand a silent refusal.
+    lease_notice: Option<String>,
     /// The inline banner over the composer: one recoverable command error.
     banner: Option<String>,
     /// The banner's action, when the error is one the person can do something
@@ -617,6 +625,8 @@ impl SessionView {
             running: None,
             submitting: false,
             loading_history: false,
+            backfill_stale_retried: false,
+            lease_notice: None,
             banner: None,
             banner_action: None,
             tier_banner: None,

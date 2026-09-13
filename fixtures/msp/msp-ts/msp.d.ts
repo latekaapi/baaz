@@ -217,7 +217,7 @@ export interface BranchState {
 }
 
 /** A grantable capability name (SS1.4.4). Open: the reserved `rawLog` entry joins this domain as an additive open-enum extension when SS6 un-defers (#13929, Scenario 5 AS-3) — closed would make that a retype. */
-export type CapabilityName = "userShell" | (string & {});
+export type CapabilityName = "userShell" | "sessionMcp" | (string & {});
 
 /** The client's requested capability posture (SS1.4.1). Every member defaults; an absent `capabilities` object means all defaults. */
 export interface ClientCapabilities {
@@ -522,6 +522,10 @@ export interface Item {
   outcome?: CompactionOutcome;
   /** `toolCall`/`userShell`: stored-output reference; fetch the full bytes via `item/readOutput` (served by #208). */
   outputRef?: OutputRef;
+  /** `toolCall`: stored structured-patch reference (`kind: "tool_patch"`, `mediaType: "application/json"`); the body is fetched via `item/readOutput` with `patchRef.id`, and the ref survives the SS2.5.2 elided-snapshot rung exactly like `outputRef` without ever being an elision trigger (tdd SS2.5.2, SS4.5.5; #33025). */
+  patchRef?: OutputRef;
+  /** `toolCall`: server-authored edit-family diff summary (#33025) — always beside `patchRef`; absent = no diff available (tdd SS4.5.5). */
+  patchSummary?: PatchSummary;
   /** `reasoning`: provider reasoning item id (e.g. `rs_...`), for provider-side correlation. */
   providerItemId?: string;
   /** `compaction`: noop/failure reason, verbatim (snake_case durable vocabulary, e.g. `"no_compactable_history"`). */
@@ -809,6 +813,16 @@ export interface OutputRef {
 /** Whether a stored output's bytes are servable (tdd SS4.5.5). Open — durable runtime vocabulary may grow additively. */
 export type OutputRefAvailability = "available" | "missing" | "unsupported" | "accessFailed" | (string & {});
 
+/** Server-authored edit-family diff summary (tdd SS4.5.5, #33025): `files` counts the stored patch document's file entries; `added` and `removed` are the total `+`/`-` prefixed LINE counts summed over the stored patch's hunks across all files — line counts, never hunk or byte counts. Rides the `toolCall` item beside `patchRef`; the body is fetched via `item/readOutput` with `patchRef.id`. */
+export interface PatchSummary {
+  /** Total `+`-prefixed line count across all files' hunks. */
+  added: number;
+  /** File entries in the stored patch document. */
+  files: number;
+  /** Total `-`-prefixed line count across all files' hunks. */
+  removed: number;
+}
+
 /** A pending approval in the snapshot: the SS2.5.2 pointer shape plus the gated `itemId` when one exists (tdd SS4.9.1). */
 export interface PendingApprovalPointer {
   /** The pending approval's id. */
@@ -853,6 +867,17 @@ export type PlatformOs = "macos" | "linux" | "windows";
 /** The reasoning-effort tier sampled at submission (tdd SS3.2, SS3.3). The **same closed tier vocabulary** on both the fresh-turn and steer lanes, spelled identically; invalid tiers are invalid params. `none` is a tier of the vocabulary (ask for no reasoning), not a way to say "unset". */
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
+/** What drove a reasoning-effort default change (tdd SS4.6.9). Open; v1's only producer is `user` (an accepted `session/setReasoningEffort`). */
+export type ReasoningEffortChangeSource = "user" | "default" | "policy" | (string & {});
+
+/** The snapshot's standing session-default reasoning effort (tdd SS4.9.1, ADR 31255 D1): the fold of the latest completed `runtime.reasoning_effort_reconfigure` fact — the same pair `session/reasoningEffortChanged` carries. */
+export interface ReasoningEffortState {
+  /** The standing default tier — the closed SS3.2 vocabulary, spelled identically to `turn/start.reasoningEffort`. */
+  reasoningEffort: ReasoningEffort;
+  /** Which actor class set the default. */
+  source: ReasoningEffortChangeSource;
+}
+
 /** One end of a [`SourceRange`]: a record's event id and its sequence number within the stream (tdd SS4.2). */
 export interface RecordPosition {
   /** The record's event id. */
@@ -878,6 +903,10 @@ export interface Request {
 /** A request id (SS1.3): client-chosen string or integer. `1` and `"1"` do not compare equal; each direction owns its own id space. */
 export type RequestId = number | string;
 
+/** The SS5.3.3 presentation receipt — the client's response to a server-initiated request (`approval/request`, `userInput/request`).  The response acknowledges presentation only ("a surface showed or will show this"): it changes no state, the server uses it for diagnostics alone, and the decision/answer travels as a command (`approval/decide`, `userInput/answer`). An error response or a dropped connection means this connection could not present the request; the approval or prompt stays pending and the request is re-issued on the next subscribe (SS5.6). There is no dismiss-without-deciding on the wire. */
+export interface RequestReceipt {
+}
+
 /** The `schema` pair in [`InitializeResult`] (SS1.4.1, SS1.5.3). `version` is the wire **envelope** schema version — distinct from the session-view `schemaVersion`, the raw-log `schema_version`, and the 0.x/1.0 stability posture, which is not on the wire at all (INV-006a). */
 export interface SchemaInfo {
   /** `sha256:<64 lower hex>` content hash of this server binary's stable-surface bundle (INV-003). A mismatch is a warning condition, not an error (SS1.4.1). */
@@ -900,12 +929,18 @@ export interface Session {
   activeTurnId: string | null;
   /** The folded effective approval mode. **Additive-optional**: a Session object that omits it means the host has not folded a mode, which is why the index-derived `session/list` entry may legitimately omit it (tdd SS2.4, SS5.12). */
   approvalMode?: EffectiveApprovalModeState;
+  /** Derived workspace branch (tdd SS2.14.1, #27598) — the index's last derived value; the live-change signal stays `session/branchChanged` (SS4.6.4). **Additive-optional**, omitted when underivable. */
+  branch?: string;
   /** RFC3339. For a fork this is the fork session id's UUIDv7 mint instant (tdd SS2.4). */
   createdAt: string;
+  /** Derived first-user-prompt preview (tdd SS2.14.1, #27598). **Additive-optional**, omitted when underivable. */
+  firstUserPrompt?: string;
   /** `null` for root sessions; fork provenance otherwise (tdd SS2.4). */
   forkedFrom: ForkProvenance | null;
   /** The winning metadata fold's model; `null` when that record omits it. */
   modelId: string | null;
+  /** The durable allocated session name (tdd SS2.4/SS2.14.1, #27598; ADR 27598 D2/D4). **Additive-optional**: present when the serving path holds an allocated name, omitted otherwise — absent is never fabricated. Authoritative and renameable via `session/rename`. */
+  name?: string;
   /** Absolute path of the session's durable log; non-nullable. Under the ephemeral session profile it is the **empty string**, meaning "no durable log exists" (tdd SS2.13.2) — the one value a client must not hand to a filesystem call. */
   path: string;
   /** The winning metadata fold's provider; `null` when that record omits it. */
@@ -914,6 +949,8 @@ export interface Session {
   sessionId: string;
   /** Load state as this host knows it; `session/list` reports `notLoaded` for sessions loaded by *other* hosts (tdd SS2.4). */
   status: SessionStatus;
+  /** Derived display title (tdd SS2.14.1, #27598): a heuristic that may evolve — its carriage, not its derivation, is the contract. **Additive-optional**, omitted when underivable. */
+  title?: string;
   /** Completed-turn count from the session view fold (tdd SS2.4). */
   turnCount: number;
   /** RFC3339; never precedes `createdAt` (tdd SS2.4). */
@@ -976,8 +1013,10 @@ export interface SessionCompactResult {
   status: CompactStatus;
 }
 
-/** `session/start`'s reserved `config` object (tdd SS2.5.1): no members in v1.  Unknown keys are ignored on the wire, never rejected (tdd SS1.5.4, spec 206 INV-015; D-052 resolving [#23456](https://github.com/mslsrc/tbh/issues/23456)): the live decoder is D-042's tolerant path, and TEST-024 keeps every exported bundle free of `additionalProperties: false`. The Rust typed model's `deny_unknown_fields` is internal and never exported — the #22785 E6b closedness export applies nowhere, and the `x-msp-closed` opt-in mechanism stays inert. Typo detection belongs to the #210 conformance harness as a test posture, not the protocol. */
+/** The open configuration extension object shared by `session/start` and `session/resume` (ADR 32760 D1).  Unknown keys are ignored on the wire, never rejected (tdd SS1.5.4, spec 206 INV-015; D-052 resolving [#23456](https://github.com/mslsrc/tbh/issues/23456)): the live decoder is D-042's tolerant path, and TEST-024 keeps every exported bundle free of `additionalProperties: false`. The Rust typed model's `deny_unknown_fields` is internal and never exported — the #22785 E6b closedness export applies nowhere, and the `x-msp-closed` opt-in mechanism stays inert. Recognized `mcpServers` values are typed and validated before they leave the wire boundary. */
 export interface SessionConfig {
+  /** Native MCP servers added only to this session runtime. */
+  mcpServers?: Record<string, SessionMcpServerConfig>;
 }
 
 /** `session/contextUsage` params (tdd SS4.6.6, #14405): context-window pressure — the counted-once occupancy at the latest provider-reported durable fact, joined with the host's pressure basis. Replace wholesale; emitted only when the `(windowTokens, usedTokens, pressure)` triple changes value (identical adoptions emit nothing). */
@@ -1067,6 +1106,15 @@ export interface SessionListResult {
   sessions: Session[];
 }
 
+/** One native MCP server supplied at session construction (ADR 32760 D1).  **Closed union** (#33295 owner ruling A1, extending D-033/D-050 to `oneOf`): a validator MUST reject an undeclared `transport` arm — the server fails `session/start` decode on an unknown transport, and a future transport arrives as an explicit schema addition. */
+export type SessionMcpServerConfig = { /** Ordered child arguments. */ args?: string[]; /** Executable name or path. Configuration diagnostics never echo it. */ command: string; /** Explicit child environment additions. */ env?: Record<string, string>; /** Stdio framing mode; defaults to automatic detection. */ framing?: SessionMcpStdioFraming; /** Required/optional startup posture; defaults to required. */ mode?: SessionMcpServerMode; transport: "stdio"; } | { /** Explicit request headers. */ headers?: Record<string, string>; /** Required/optional startup posture; defaults to required. */ mode?: SessionMcpServerMode; transport: "streamableHttp"; /** HTTP(S) endpoint. Configuration diagnostics never echo it. */ url: string; };
+
+/** Startup failure posture for a session MCP server. */
+export type SessionMcpServerMode = "required" | "optional";
+
+/** Stdio framing choices exposed by session MCP configuration. */
+export type SessionMcpStdioFraming = "auto" | "contentLength" | "lineDelimitedJson";
+
 /** `session/modelChanged` params (tdd SS4.6.1): a durable model-selection record landed (tdd SS3.8). */
 export interface SessionModelChangedParams {
   /** The selected model. */
@@ -1101,6 +1149,18 @@ export interface SessionModelRouteUnservedParams {
   viewCursor: string;
 }
 
+/** `session/nameChanged` params (tdd SS4.6.7, #27598): the fold of ANY durable session-name record — the FIRST-NAMING automatic allocate as well as an accepted `session/rename` (or the same in-process runtime command). Replace-wholesale like every SS4.6 sibling. */
+export interface SessionNameChangedParams {
+  /** The new canonical name now in effect. */
+  name: string;
+  /** The owning session. */
+  sessionId: string;
+  /** The durable records this event folded from. */
+  sourceRange: SourceRange;
+  /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
+  viewCursor: string;
+}
+
 /** `session/read` params (tdd SS2.5.5): read one stored session **without attaching** — no writer lease, no load, no subscription, no `SessionResumed` record. */
 export interface SessionReadParams {
   /** Metadata-only unless you ask: `false` carries the folded item history. Same name and polarity as `session/resume`/`session/fork`; only the default differs — here it is `true` (tdd SS2.5.5). */
@@ -1121,10 +1181,46 @@ export interface SessionReadResult {
   viewCursor: string;
 }
 
+/** `session/reasoningEffortChanged` params (tdd SS4.6.9, ADR 31255 D1): a durable reasoning-effort reconfigure record landed (tdd SS3.21). Replace wholesale, latest wins; the snapshot carries the latest value (SS4.9.1). */
+export interface SessionReasoningEffortChangedParams {
+  /** The new session default: the closed eight-string tier vocabulary of tdd SS3.2, spelled identically. */
+  reasoningEffort: ReasoningEffort;
+  /** The owning session. */
+  sessionId: string;
+  /** What drove the change. */
+  source: ReasoningEffortChangeSource;
+  /** The durable records this event folded from. */
+  sourceRange: SourceRange;
+  /** Opaque, strictly monotonic view cursor (tdd SS4.1). */
+  viewCursor: string;
+}
+
+/** `session/rename` params (tdd SS2.14.2, #27598): set or change the durable allocated session name through the runtime `session_name` command. One writer; withheld under the ephemeral profile. */
+export interface SessionRenameParams {
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The requested name; the runtime's normalization and validation apply. */
+  name: string;
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `session/rename` result (tdd SS2.14.2, #27598): `name` is the canonical (normalized) name the durable record settled. */
+export interface SessionRenameResult {
+  /** Echoes the client's id. */
+  commandId: string;
+  /** The settled canonical name. Omitted on the `RecoveryPending` arm, which answers `{commandId, status: "accepted"}` and delivers the name via `session/nameChanged` / `Session.name` (tdd SS2.14.2). */
+  name?: string;
+  /** Admission status. */
+  status: CommandStatus;
+}
+
 /** `session/resume` params (tdd SS2.5.2). */
 export interface SessionResumeParams {
   /** The SS2.5 idempotency handle (UUIDv7). A resume that loads a session writes a durable `SessionResumed` record. */
   commandId: string;
+  /** The same open construction-time extension object as `session/start`. */
+  config?: SessionConfig;
   /** A view cursor previously observed by this client — or an observed `summarizedThrough` compaction anchor (tdd SS4.5.10, D-029). When present the server returns only the suffix and `history.mode` is `none` (tdd SS2.5.2). Omitted and explicit `null` both mean "no cursor" (#23468). */
   cursor?: string | null;
   /** Return only session metadata and live resume state; page history separately with `view/page`. Default `false` (tdd SS2.5.2). */
@@ -1143,7 +1239,7 @@ export interface SessionResumeResult {
   pendingRequests: PendingRequestPointer[];
   /** The loaded session. */
   session: Session;
-  /** The session view head; the connection is subscribed after it — except on a still-loaded session a prior `view/unsubscribe` detached, where resume never re-attaches (spec 208 FR-002a) and live re-attach is `view/subscribe` (SS4.7.1). */
+  /** The session view head; the connection is subscribed after it. A still-loaded session a prior `view/unsubscribe` detached is RE-ATTACHED by this resume (spec 208 FR-002a, #28920): live delivery resumes from this head. Explicit-cursor re-attach with `(after, head]` engine replay stays `view/subscribe` (SS4.7.1). */
   viewCursor: string;
 }
 
@@ -1187,13 +1283,31 @@ export interface SessionSetModelResult {
   status: CommandStatus;
 }
 
+/** `session/setReasoningEffort` params (tdd SS3.21, ADR 31255 D1): set the session's standing reasoning-effort default. A turn carrying its own `reasoningEffort` overrides it for that turn only; the default overrides the host's configured default. Same accept/reject and `commandId` idempotency shape as `session/setModel` (SS3.8). */
+export interface SessionSetReasoningEffortParams {
+  /** The SS3.1.1 idempotency handle (UUIDv7). */
+  commandId: string;
+  /** The new session default: the closed eight-string tier vocabulary `turn/start` carries (SS3.2), spelled identically. Invalid tiers are invalid params. A default of `max` rides provider requests verbatim, never clamped (ADR 28621 D8, ADR 31131 D1). */
+  reasoningEffort: ReasoningEffort;
+  /** The target session. */
+  sessionId: string;
+}
+
+/** `session/setReasoningEffort` result (tdd SS3.21). The default is durable on ack and applies to turns launched after admission; a running turn keeps the request options it already resolved. */
+export interface SessionSetReasoningEffortResult {
+  /** Echoes the client's id. */
+  commandId: string;
+  /** Admission status. */
+  status: CommandStatus;
+}
+
 /** `session/start` params (tdd SS2.5.1). */
 export interface SessionStartParams {
   /** The session's starting approval mode; server default when omitted or explicit `null` — both spellings select the default (#23468). Select, never create — the value names a mode the host's configuration already defines (tdd SS2.5.1, SS5.12). This is the only surface that declares a non-interactive run's policy (tdd SS5.11, D-008). */
   approvalMode?: ApprovalMode | null;
   /** The SS2.5 idempotency handle (UUIDv7). Required; the server never mints one. */
   commandId: string;
-  /** Reserved for per-session overrides owned by a future Configuration section, which is why [`SessionConfig`] declares no members. */
+  /** Reserved for per-session overrides owned by a future Configuration section. Issue #32760 admits only its `mcpServers` member. */
   config?: SessionConfig;
   /** Initial model; server default when omitted. */
   modelId?: string;
@@ -1300,12 +1414,16 @@ export interface SnapshotState {
   goal: Goal | null;
   /** Every item, in first-opened order, each at its latest revision at the snapshot cursor. One schema per kind, shared with the notification item object — which is what makes snapshot+suffix a pure splice (tdd SS4.9.1). */
   items: Item[];
+  /** The settled canonical session name; `null` when the session was never named (#27598, tdd SS4.9.1 / SS2.14). Folds the same durable `session/nameChanged` record `Session.name` reports. */
+  name?: string;
   /** The pending-approval half of the pending set. */
   pendingApprovals: PendingApprovalPointer[];
   /** The pending-user-input half of the pending set. */
   pendingUserInputs: PendingUserInputPointer[];
   /** Admitted-but-not-launched submits, in launch order (tdd SS3.1.4). */
   queuedTurns: TurnRef[];
+  /** The latest session-default reasoning effort with its source; ABSENT until a set lands (tdd SS4.9.1 `reasoningEffort`, ADR 31255 D1 — the `contextUsage` absent arm, never present-null). */
+  reasoningEffort?: ReasoningEffortState;
   /** Latest todo list; `null` when no fact has landed. */
   todoList: TodoListState | null;
   /** The `cumulative` block of the last `session/tokenUsage` event; zeroes when none (tdd SS4.9.1). */
@@ -1959,8 +2077,10 @@ export interface WorkflowChild {
 }
 
 /** Every wire method in this schema (SS1.9 index). */
-export type MspMethod = "initialize" | "subagent/sendMessage" | "subagent/followupTask" | "subagent/interrupt" | "subagent/stop" | "subagent/resume" | "subagent/reopen" | "subagent/close" | "subagent/readResult" | "session/start" | "session/resume" | "session/fork" | "session/list" | "session/read" | "turn/start" | "turn/steer" | "turn/interrupt" | "turn/cancel" | "turn/unqueue" | "session/compact" | "session/setModel" | "session/userShell" | "model/list" | "view/subscribe" | "view/unsubscribe" | "view/page" | "item/readOutput" | "approval/decide" | "approval/listPending" | "session/setApprovalMode" | "userInput/answer" | "userInput/cancel" | "userInput/clarify";
+export type MspMethod = "initialize" | "subagent/sendMessage" | "subagent/followupTask" | "subagent/interrupt" | "subagent/stop" | "subagent/resume" | "subagent/reopen" | "subagent/close" | "subagent/readResult" | "session/start" | "session/resume" | "session/fork" | "session/list" | "session/read" | "turn/start" | "turn/steer" | "turn/interrupt" | "turn/cancel" | "turn/unqueue" | "session/compact" | "session/setModel" | "session/rename" | "session/setReasoningEffort" | "session/userShell" | "model/list" | "view/subscribe" | "view/unsubscribe" | "view/page" | "item/readOutput" | "approval/decide" | "approval/listPending" | "session/setApprovalMode" | "userInput/answer" | "userInput/cancel" | "userInput/clarify";
 /** Every wire notification in this schema (SS1.9 index). */
-export type MspNotification = "initialized" | "turn/started" | "turn/completed" | "turn/retracted" | "turn/retryScheduled" | "turn/unqueued" | "item/started" | "item/updated" | "item/delta" | "item/completed" | "view/gap" | "approval/requested" | "approval/updated" | "approval/resolved" | "userInput/requested" | "userInput/settled" | "session/modelChanged" | "session/goalChanged" | "session/todoListChanged" | "session/branchChanged" | "session/tokenUsage" | "session/contextUsage" | "session/approvalModeChanged" | "session/modelRouteUnserved";
+export type MspNotification = "initialized" | "turn/started" | "turn/completed" | "turn/retracted" | "turn/retryScheduled" | "turn/unqueued" | "item/started" | "item/updated" | "item/delta" | "item/completed" | "view/gap" | "approval/requested" | "approval/updated" | "approval/resolved" | "userInput/requested" | "userInput/settled" | "session/modelChanged" | "session/reasoningEffortChanged" | "session/goalChanged" | "session/todoListChanged" | "session/branchChanged" | "session/tokenUsage" | "session/contextUsage" | "session/approvalModeChanged" | "session/modelRouteUnserved" | "session/nameChanged";
+/** Every server-initiated wire request in this schema (SS5.3/SS5.10.1 index). */
+export type MspServerRequest = "approval/request" | "userInput/request";
 /** Every error `data.kind` in this schema's error table (SS1.6) — each code's primary kind plus its override kinds. */
 export type MspErrorDataKind = "parseError" | "invalidRequest" | "notInitialized" | "alreadyInitialized" | "methodNotFound" | "experimentalRequired" | "invalidParams" | "internal" | "pageEventTooLarge" | "outputResultTooLarge" | "overloaded" | "inputTooLarge" | "capabilityRequired" | "notFound" | "interrupted" | "cancelled" | "sessionNotFound" | "sessionInUse" | "sessionAmbiguous" | "forkBoundaryInvalid" | "sessionNotLoaded" | "sessionStreamMismatch" | "commandRejected" | "backpressured" | "viewTruncated" | "outputUnavailable" | "boundaryPruned" | "boundaryUnusable" | "noBoundary" | "approvalNotFound" | "approvalAlreadyResolved" | "approvalChoiceInvalid" | "approvalRequirementStale" | "approvalReviewerUnavailable" | "userInputNotFound" | "userInputAlreadySettled" | "userInputAnswerInvalid";

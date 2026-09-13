@@ -25,6 +25,14 @@ impl SessionView {
             return;
         }
         let Some(client) = self.wire_client(cx) else { return };
+        // The lease is gone: the shell would run with no view to stream
+        // back to. Refused like a send, with the notice re-shown.
+        if let Some(notice) = self.lease_notice.clone() {
+            self.banner = Some(notice);
+            self.banner_action = None;
+            cx.notify();
+            return;
+        }
         self.banner = None;
         self.banner_action = None;
         let command_id = new_command_id();

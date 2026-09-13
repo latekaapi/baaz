@@ -48,14 +48,28 @@ pub struct Session {
     /// legitimately omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<EffectiveApprovalModeState>,
+    /// Derived workspace branch (tdd SS2.14.1). **Additive-optional**, omitted when underivable;
+    /// the live-change signal stays `session/branchChanged`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// RFC3339. For a fork this is the fork session id's UUIDv7 mint instant.
     pub created_at: String,
+    /// Derived first-user-prompt preview (tdd SS2.14.1). **Additive-optional**, omitted when
+    /// underivable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_prompt: Option<String>,
     /// `null` for root sessions; fork provenance otherwise. Required-nullable.
     #[serde(default)]
     pub forked_from: Option<ForkProvenance>,
     /// The winning metadata fold's model; `null` when that record omits it. Required-nullable.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// The durable allocated session name (tdd SS2.4/SS2.14.1, ADR 27598 D2/D4). **Additive-optional**:
+    /// present when the serving path holds an allocated name, omitted otherwise — absent is never
+    /// fabricated. Authoritative and renameable via `session/rename` (not yet wired: the harness
+    /// reads it, it never sends the rename).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Absolute path of the session's durable log; non-nullable. Under the ephemeral session
     /// profile it is the **empty string**, meaning "no durable log exists" — the one value a client
     /// must not hand to a filesystem call.
@@ -68,6 +82,10 @@ pub struct Session {
     /// Load state as this host knows it; `session/list` reports `notLoaded` for sessions loaded by
     /// *other* hosts.
     pub status: SessionStatus,
+    /// Derived display title (tdd SS2.14.1): a heuristic that may evolve — its carriage, not its
+    /// derivation, is the contract. **Additive-optional**, omitted when underivable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Completed-turn count from the session view fold.
     pub turn_count: u64,
     /// RFC3339; never precedes `createdAt`.
@@ -152,11 +170,71 @@ pub struct SessionCompactResult {
     pub status: CompactStatus,
 }
 
-/// `session/start`'s reserved `config` object (tdd SS2.5.1): **no members in v1**. It exists so a
-/// future Configuration section can add per-session overrides additively.
+/// The open configuration extension object shared by `session/start` and `session/resume`
+/// (ADR 32760 D1). Unknown keys are ignored on the wire, never rejected; recognized `mcpServers`
+/// values are typed and validated before they leave the wire boundary.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionConfig {}
+pub struct SessionConfig {
+    /// Native MCP servers added only to this session runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<std::collections::BTreeMap<String, SessionMcpServerConfig>>,
+}
+
+/// One native MCP server supplied at session construction (ADR 32760 D1).
+/// **Closed union**: a validator MUST reject an undeclared `transport` arm — a future transport
+/// arrives as an explicit schema addition.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "camelCase")]
+pub enum SessionMcpServerConfig {
+    /// A stdio child server.
+    #[serde(rename = "stdio")]
+    Stdio {
+        /// Ordered child arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Vec<String>>,
+        /// Executable name or path. Configuration diagnostics never echo it.
+        command: String,
+        /// Explicit child environment additions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env: Option<std::collections::BTreeMap<String, String>>,
+        /// Stdio framing mode; defaults to automatic detection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        framing: Option<SessionMcpStdioFraming>,
+        /// Required/optional startup posture; defaults to required.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionMcpServerMode>,
+    },
+    /// A streamable-HTTP server.
+    #[serde(rename = "streamableHttp")]
+    StreamableHttp {
+        /// Explicit request headers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<std::collections::BTreeMap<String, String>>,
+        /// Required/optional startup posture; defaults to required.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionMcpServerMode>,
+        /// HTTP(S) endpoint. Configuration diagnostics never echo it.
+        url: String,
+    },
+}
+
+closed_enum! {
+    /// Startup failure posture for a session MCP server.
+    SessionMcpServerMode {
+        Required = "required",
+        Optional = "optional",
+    }
+}
+
+closed_enum! {
+    /// Stdio framing choices exposed by session MCP configuration.
+    SessionMcpStdioFraming {
+        Auto = "auto",
+        ContentLength = "contentLength",
+        LineDelimitedJson = "lineDelimitedJson",
+    }
+}
 
 /// `session/contextUsage` params (tdd SS4.6.6): context-window pressure — the counted-once
 /// occupancy at the latest provider-reported durable fact, joined with the host's pressure basis.
@@ -213,8 +291,8 @@ pub struct SessionForkParams {
 pub struct SessionForkResult {
     /// The served history.
     pub history: SessionHistory,
-    /// The late-joiner pointer set.
-    pub pending_requests: Vec<PendingRequestPointer>,
+    /// The late-joiner pending set: full request payloads on muse 1.2.1, pointers per the schema.
+    pub pending_requests: Vec<PendingRequestEntry>,
     /// The new fork session, carrying `forkedFrom` provenance.
     pub session: Session,
     /// The new session's view head.
@@ -357,9 +435,9 @@ pub struct SessionReadParams {
 pub struct SessionReadResult {
     /// The served history.
     pub history: SessionHistory,
-    /// The same pointer shape as `session/resume`. Because `session/read` never subscribes this is
+    /// The same pending set as `session/resume`. Because `session/read` never subscribes this is
     /// a point-in-time log read only: no requests are re-issued after it.
-    pub pending_requests: Vec<PendingRequestPointer>,
+    pub pending_requests: Vec<PendingRequestEntry>,
     /// The session as folded point-in-time.
     pub session: Session,
     /// The fold head at read time.
@@ -373,6 +451,9 @@ pub struct SessionResumeParams {
     /// The SS2.5 idempotency handle (UUIDv7). A resume that loads a session writes a durable
     /// `SessionResumed` record.
     pub command_id: String,
+    /// The same open construction-time extension object as `session/start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<SessionConfig>,
     /// A view cursor previously observed by this client — or an observed `summarizedThrough`
     /// compaction anchor. When present the server returns only the suffix and `history.mode` is
     /// `none`. Omitted and explicit `null` both mean "no cursor".
@@ -397,8 +478,8 @@ pub struct SessionResumeParams {
 pub struct SessionResumeResult {
     /// The served history.
     pub history: SessionHistory,
-    /// The late-joiner pointer set; empty when nothing is pending.
-    pub pending_requests: Vec<PendingRequestPointer>,
+    /// The late-joiner pending set; empty when nothing is pending.
+    pub pending_requests: Vec<PendingRequestEntry>,
     /// The loaded session.
     pub session: Session,
     /// The session view head; the connection is subscribed after it.
@@ -460,6 +541,100 @@ pub struct SessionSetModelResult {
     pub status: CommandStatus,
 }
 
+/// `session/nameChanged` params (tdd SS4.6.7): the fold of ANY durable session-name record — the
+/// FIRST-NAMING automatic allocate as well as an accepted `session/rename` (or the same in-process
+/// runtime command). Replace-wholesale like every SS4.6 sibling.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNameChangedParams {
+    /// The new canonical name now in effect.
+    pub name: String,
+    /// The owning session.
+    pub session_id: String,
+    /// The durable records this event folded from.
+    pub source_range: SourceRange,
+    /// Opaque, strictly monotonic view cursor.
+    pub view_cursor: String,
+}
+
+/// `session/reasoningEffortChanged` params (tdd SS4.6.9, ADR 31255 D1): a durable reasoning-effort
+/// reconfigure record landed. Replace wholesale, latest wins; the snapshot carries the latest
+/// value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReasoningEffortChangedParams {
+    /// The new session default: the closed tier vocabulary of tdd SS3.2, spelled identically.
+    pub reasoning_effort: ReasoningEffort,
+    /// The owning session.
+    pub session_id: String,
+    /// What drove the change.
+    pub source: ReasoningEffortChangeSource,
+    /// The durable records this event folded from.
+    pub source_range: SourceRange,
+    /// Opaque, strictly monotonic view cursor.
+    pub view_cursor: String,
+}
+
+/// `session/rename` params (tdd SS2.14.2): set or change the durable allocated session name
+/// through the runtime `session_name` command. One writer; withheld under the ephemeral profile.
+///
+/// Typed but not wired: the harness reads [`Session::name`], it never sends the rename.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The requested name; the runtime's normalization and validation apply.
+    pub name: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `session/rename` result (tdd SS2.14.2): `name` is the canonical (normalized) name the durable
+/// record settled.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// The settled canonical name. Omitted on the `RecoveryPending` arm, which answers
+    /// `{commandId, status: "accepted"}` and delivers the name via `session/nameChanged` /
+    /// `Session.name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
+/// `session/setReasoningEffort` params (tdd SS3.21, ADR 31255 D1): set the session's standing
+/// reasoning-effort default. A turn carrying its own `reasoningEffort` overrides it for that turn
+/// only; the default overrides the host's configured default. Same accept/reject and `commandId`
+/// idempotency shape as `session/setModel`.
+///
+/// Typed but not wired: no caller sends it yet.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetReasoningEffortParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The new session default: the closed tier vocabulary `turn/start` carries, spelled
+    /// identically. Invalid tiers are invalid params.
+    pub reasoning_effort: ReasoningEffort,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `session/setReasoningEffort` result (tdd SS3.21). The default is durable on ack and applies to
+/// turns launched after admission; a running turn keeps the request options it already resolved.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetReasoningEffortResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
 /// `session/start` params (tdd SS2.5.1).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -470,8 +645,8 @@ pub struct SessionStartParams {
     pub approval_mode: Option<ApprovalMode>,
     /// The SS2.5 idempotency handle (UUIDv7). Required; the server never mints one.
     pub command_id: String,
-    /// Reserved for per-session overrides owned by a future Configuration section, which is why
-    /// [`SessionConfig`] declares no members.
+    /// Reserved for per-session overrides owned by a future Configuration section. Issue #32760
+    /// admits only its `mcpServers` member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<SessionConfig>,
     /// Initial model; server default when omitted.

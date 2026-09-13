@@ -780,7 +780,15 @@ impl Harness {
     /// Hand an event to the session it belongs to, and notice a dead child.
     fn route(&mut self, event: MuseEvent, cx: &mut Context<Self>) {
         if let MuseEvent::Closed(code) = &event {
-            crate::harness_log!("muse serve exited ({code:?}); reconnecting");
+            // The exit reason, while the old client still owns it: its
+            // status and whatever it said on stderr last. Read before
+            // `reconnect` drops the client.
+            let tail = self.client.as_ref().map(|client| client.stderr_tail()).unwrap_or_default();
+            if tail.is_empty() {
+                crate::harness_log!("muse serve exited ({code:?}); reconnecting");
+            } else {
+                crate::harness_log!("muse serve exited ({code:?}); reconnecting; stderr tail: {tail}");
+            }
             self.wire = Wire::Reconnecting;
             self.reconnect(cx);
         }
@@ -832,6 +840,13 @@ impl Harness {
     /// The reconnect procedure: respawn, `initialize`, then `session/resume`
     /// from the last observed cursor, which serves `history.mode: "none"` and
     /// streams only the suffix.
+    ///
+    /// Two phases, split at the handshake (owner round 2 S3). A successful
+    /// `initialize` is `Wire::Ready` no matter what the resume then says: a
+    /// resume rejection about the session (another window holds the lease,
+    /// the session is gone) is not a transport failure, so it becomes a
+    /// banner on that session's view while the sidebar, the palette and ⌘N
+    /// keep working. Only a failed respawn takes the wire down.
     pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
         let program = self.args.program.clone();
@@ -839,27 +854,21 @@ impl Harness {
             .active
             .as_ref()
             .map(|a| (a.read(cx).session_id.clone(), a.read(cx).last_cursor()));
-        let work = move || {
-            let connected = conn::connect(&program)?;
-            if let Some((session_id, cursor)) = &resume {
-                connected.0.client.session_resume(&SessionResumeParams {
-                    command_id: new_command_id(),
-                    session_id: session_id.clone(),
-                    cursor: cursor.clone(),
-                    exclude_items: Some(true),
-                    history: None,
-                })?;
-            }
-            Ok::<_, MuseError>(connected)
-        };
-        self.wire_call(cx, work, |this, result, cx| match result {
+        let work = move || conn::connect(&program);
+        self.wire_call(cx, work, move |this, result, cx| match result {
             Ok((connection, events)) => {
+                if let Some(warning) = &connection.warning {
+                    // A fingerprint mismatch is additive evolution, never a
+                    // failure: say so on stderr and carry on.
+                    crate::harness_log!("{warning:?}");
+                }
                 this.client = Some(connection.client.clone());
                 this.wire = Wire::Ready;
                 if let Some(active) = &this.active {
                     active.update(cx, |view, _| view.reconnected(connection.client.clone()));
                 }
                 this.pump(events, cx);
+                this.resume_after_reconnect(resume, cx);
                 cx.notify();
             }
             Err(error) => {
@@ -873,6 +882,72 @@ impl Harness {
                     archive_target: None,
                 });
                 cx.notify();
+            }
+        });
+    }
+
+    /// The reconnect's second phase: re-attach the session that was open.
+    ///
+    /// Runs after the handshake settled, on the live child. Success clears
+    /// the lease notice a previous rejection left; a session-scoped rejection
+    /// banners that session's view and marks it read-only until a later
+    /// resume succeeds; a stale sidecar logs one line (the history is intact
+    /// and the next open retries the lease); anything else drops the wire as
+    /// before.
+    fn resume_after_reconnect(
+        &mut self,
+        resume: Option<(String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session_id, cursor)) = resume else { return };
+        let Some(client) = self.client.clone() else { return };
+        let resumed_id = session_id.clone();
+        let work = move || {
+            client.session_resume(&SessionResumeParams {
+                command_id: new_command_id(),
+                session_id: session_id.clone(),
+                cursor: cursor.clone(),
+                exclude_items: Some(true),
+                history: None,
+                config: None,
+            })
+        };
+        self.wire_call(cx, work, move |this, result, cx| {
+            // The notice belongs to the resumed session: a switch since owns
+            // its own lease, so anything but the still-open resumed view is
+            // left alone.
+            let open = this.active.clone().filter(|view| view.read(cx).session_id == resumed_id);
+            match result {
+                Ok(_) => {
+                    if let Some(view) = open {
+                        view.update(cx, |view, cx| view.note_resumed(cx));
+                    }
+                    cx.notify();
+                }
+                Err(error) if error.is_stale_sidecar() => {
+                    crate::harness_log!("reconnect resume hit a stale sidecar ({error}); history stays, lease retries on next open");
+                    cx.notify();
+                }
+                Err(error) if conn::is_session_scoped(&error) => {
+                    let banner = conn::lease_banner(&error);
+                    crate::harness_log!("reconnect resume rejected ({error}); banner on the view, wire stays up");
+                    if let Some(view) = open {
+                        view.update(cx, |view, cx| view.set_lease_lost(&banner, cx));
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.wire = Wire::Down(error.to_string());
+                    this.set_dialog(cx, Dialog {
+                        title: conn::title(&error),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Reconnect",
+                        action: DialogAction::Reconnect,
+                        archive_target: None,
+                    });
+                    cx.notify();
+                }
             }
         });
     }

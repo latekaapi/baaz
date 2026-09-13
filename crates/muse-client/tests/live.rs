@@ -236,6 +236,7 @@ fn live_backfill_parity() {
             exclude_items: Some(true),
             cursor: None,
             history: None,
+            config: None,
         })
         .expect("session/resume");
 

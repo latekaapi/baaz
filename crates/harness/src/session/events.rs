@@ -208,6 +208,7 @@ impl SessionView {
             return;
         }
         self.loading_history = true;
+        self.backfill_stale_retried = false;
         cx.notify();
         self.backfill_page(None, FIRST_PAGE_LIMIT, true, cx);
     }
@@ -223,6 +224,9 @@ impl SessionView {
         };
         let session_id = self.session_id.clone();
         crate::log::trace_mark("page-request");
+        // Copies for the one permitted retry: the work closure below moves
+        // its own.
+        let retry_cursor = cursor.clone();
         self.wire_call(
             cx,
             move || {
@@ -263,10 +267,26 @@ impl SessionView {
                         }
                     }
                     Err(error) => {
-                        // What arrived so far stays (the old whole-transcript
-                        // backfill likewise kept its partial pages); the
-                        // loading row stands down and the tail pins.
-                        crate::harness_log!("backfill page failed: {error}");
+                        // A stale sidecar fails once, then reports: the
+                        // resume that preceded this chain was the
+                        // regenerating touch, so the same page usually serves
+                        // on the second attempt — and only a second failure
+                        // reaches the dialog.
+                        if should_retry_stale_page(&error, this.backfill_stale_retried) {
+                            crate::harness_log!("backfill page hit a stale sidecar; retrying once");
+                            this.backfill_stale_retried = true;
+                            this.backfill_page(retry_cursor, limit, first, cx);
+                            return;
+                        }
+                        if error.is_stale_sidecar() {
+                            this.report(&error, cx);
+                        } else {
+                            // What arrived so far stays (the old
+                            // whole-transcript backfill likewise kept its
+                            // partial pages); the loading row stands down and
+                            // the tail pins.
+                            crate::harness_log!("backfill page failed: {error}");
+                        }
                         this.loading_history = false;
                         this.follow = true;
                         cx.notify();
@@ -278,5 +298,48 @@ impl SessionView {
                 }
             },
         );
+    }
+}
+
+/// Whether a failed backfill page gets one more attempt (owner round 2 S2):
+/// exactly the stale-sidecar `-32603`, and only once per chain. A second
+/// stale failure — and any other error — reports instead of looping.
+fn should_retry_stale_page(error: &MuseError, retried: bool) -> bool {
+    !retried && error.is_stale_sidecar()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stale_sidecar() -> MuseError {
+        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+            "code": -32603,
+            "message": "internal error: read materialized session view: stale sidecar generation",
+            "data": {"kind": "internal"},
+        }))
+        .expect("error object decodes");
+        MuseError::Rpc(Box::new(object))
+    }
+
+    fn other_internal() -> MuseError {
+        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+            "code": -32603,
+            "message": "internal error: something else broke",
+            "data": {"kind": "internal"},
+        }))
+        .expect("error object decodes");
+        MuseError::Rpc(Box::new(object))
+    }
+
+    /// Owner round 2 S2: a stale page retries exactly once; any other error
+    /// never retries.
+    #[test]
+    fn a_stale_page_retries_once_and_then_reports() {
+        let stale = stale_sidecar();
+        assert!(should_retry_stale_page(&stale, false));
+        assert!(!should_retry_stale_page(&stale, true));
+        assert!(!should_retry_stale_page(&other_internal(), false));
+        assert!(!should_retry_stale_page(&MuseError::Closed, false));
     }
 }

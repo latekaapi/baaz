@@ -110,6 +110,16 @@ pub struct Item {
     /// `toolCall`/`userShell`: stored-output reference; fetch the full bytes via `item/readOutput`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<OutputRef>,
+    /// `toolCall`: stored structured-patch reference (`kind: "tool_patch"`,
+    /// `mediaType: "application/json"`); the body is fetched via `item/readOutput` with
+    /// `patchRef.id`, and the ref survives the SS2.5.2 elided-snapshot rung exactly like
+    /// `outputRef` without ever being an elision trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_ref: Option<OutputRef>,
+    /// `toolCall`: server-authored edit-family diff summary — always beside `patchRef`;
+    /// absent = no diff available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_summary: Option<PatchSummary>,
     /// `reasoning`: provider reasoning item id (e.g. `rs_...`), for provider-side correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_item_id: Option<String>,
@@ -208,6 +218,22 @@ pub struct Item {
     /// family).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
+}
+
+/// Server-authored edit-family diff summary (tdd SS4.5.5): `files` counts the stored patch
+/// document's file entries; `added` and `removed` are the total `+`/`-` prefixed LINE counts summed
+/// over the stored patch's hunks across all files — line counts, never hunk or byte counts. Rides
+/// the `toolCall` item beside `patchRef`; the body is fetched via `item/readOutput` with
+/// `patchRef.id`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchSummary {
+    /// Total `+`-prefixed line count across all files' hunks.
+    pub added: u64,
+    /// File entries in the stored patch document.
+    pub files: u64,
+    /// Total `-`-prefixed line count across all files' hunks.
+    pub removed: u64,
 }
 
 /// `item/completed` params (tdd SS4.3): the item reached its terminal state — the authoritative

@@ -57,6 +57,16 @@ impl SessionView {
             self.restore_prompt(text, cx);
             return;
         }
+        // The lease is gone: another window holds this session, so the turn
+        // would never stream back. The draft goes back in the composer and
+        // the notice is re-shown — it is already above the composer unless
+        // it was dismissed.
+        if let Some(notice) = self.lease_notice.clone() {
+            self.banner = Some(notice);
+            self.banner_action = None;
+            self.restore_prompt(text, cx);
+            return;
+        }
         // The billing guard. A pay-as-you-go login bills every turn as API
         // usage, so the turn does not leave until the person has said once,
         // out loud, that they meant it. The draft goes back in the composer:
@@ -304,6 +314,29 @@ impl SessionView {
         match conn::severity(error) {
             Severity::Banner => self.banner = Some(format!("{title}. {error}")),
             Severity::Dialog => cx.emit(SessionEvent::Dialog { title, detail: error.to_string() }),
+        }
+        cx.notify();
+    }
+
+    /// The lease is gone (owner round 2 S3): banner the view and refuse sends
+    /// until a later resume succeeds. The banner dismisses like any other;
+    /// the refusal re-shows it, so the notice outlives a dismissal everywhere
+    /// except a successful resume.
+    pub(crate) fn set_lease_lost(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.lease_notice = Some(message.to_owned());
+        self.banner = Some(message.to_owned());
+        self.banner_action = None;
+        cx.notify();
+    }
+
+    /// A later resume succeeded: the lease is back, sends flow again, and the
+    /// notice stands down. A banner some other error left since is kept —
+    /// only the lease notice itself is cleared.
+    pub(crate) fn note_resumed(&mut self, cx: &mut Context<Self>) {
+        let Some(notice) = self.lease_notice.take() else { return };
+        if self.banner.as_deref() == Some(notice.as_str()) {
+            self.banner = None;
+            self.banner_action = None;
         }
         cx.notify();
     }

@@ -89,6 +89,8 @@ fn roundtrip_request_params(method: &str, params: Option<&Value>) -> bool {
         "session/read" => roundtrip::<SessionReadParams>(w, params),
         "session/compact" => roundtrip::<SessionCompactParams>(w, params),
         "session/setModel" => roundtrip::<SessionSetModelParams>(w, params),
+        "session/rename" => roundtrip::<SessionRenameParams>(w, params),
+        "session/setReasoningEffort" => roundtrip::<SessionSetReasoningEffortParams>(w, params),
         "session/setApprovalMode" => roundtrip::<SessionSetApprovalModeParams>(w, params),
         "session/userShell" => roundtrip::<SessionUserShellParams>(w, params),
         "turn/start" => roundtrip::<TurnStartParams>(w, params),
@@ -133,6 +135,8 @@ fn roundtrip_result(method: &str, result: Option<&Value>) -> bool {
         "session/read" => roundtrip::<SessionReadResult>(w, result),
         "session/compact" => roundtrip::<SessionCompactResult>(w, result),
         "session/setModel" => roundtrip::<SessionSetModelResult>(w, result),
+        "session/rename" => roundtrip::<SessionRenameResult>(w, result),
+        "session/setReasoningEffort" => roundtrip::<SessionSetReasoningEffortResult>(w, result),
         "session/setApprovalMode" => roundtrip::<SessionSetApprovalModeResult>(w, result),
         "session/userShell" => roundtrip::<SessionUserShellResult>(w, result),
         "turn/start" => roundtrip::<TurnStartResult>(w, result),
@@ -185,6 +189,8 @@ fn roundtrip_server_params(method: &str, params: Option<&Value>) -> bool {
         "account/changed" => roundtrip::<AccountState>(w, params),
         "account/loginCompleted" => roundtrip::<AccountLoginCompletedParams>(w, params),
         "session/modelChanged" => roundtrip::<SessionModelChangedParams>(w, params),
+        "session/nameChanged" => roundtrip::<SessionNameChangedParams>(w, params),
+        "session/reasoningEffortChanged" => roundtrip::<SessionReasoningEffortChangedParams>(w, params),
         "session/modelRouteUnserved" => roundtrip::<SessionModelRouteUnservedParams>(w, params),
         "session/goalChanged" => roundtrip::<SessionGoalChangedParams>(w, params),
         "session/todoListChanged" => roundtrip::<SessionTodoListChangedParams>(w, params),
@@ -495,8 +501,9 @@ fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
 
 #[test]
 fn index_constants_match_the_published_schema() {
-    assert_eq!(MSP_METHODS.len(), 33);
-    assert_eq!(MSP_NOTIFICATIONS.len(), 24);
+    assert_eq!(MSP_METHODS.len(), 35);
+    assert_eq!(MSP_NOTIFICATIONS.len(), 26);
+    assert_eq!(MSP_SERVER_REQUESTS, &["approval/request", "userInput/request"]);
     assert_eq!(MSP_ERROR_DATA_KINDS.len(), 37);
     assert!(SCHEMA_FINGERPRINT.starts_with("sha256:"));
     // `session/started` is emitted by the binary but absent from the published index.
@@ -546,4 +553,104 @@ fn every_published_method_has_a_dispatch_arm() {
             "{method}: no params arm in roundtrip_server_params"
         );
     }
+}
+
+/// **muse 1.2.1 / owner-round-2 S1.** The 1.2.1 binary serves the *full*
+/// server-initiated request payloads in the `pendingRequests` of
+/// `session/read` (and `resume`/`fork`) — no top-level `kind`, so the
+/// documented `PendingRequestPointer` fails with `missing field 'kind'`.
+///
+/// The entry below is verbatim what `session/read` served on 2026-09-13 for a
+/// session with a pending shell approval (ids are real; the command is
+/// `echo hi && ls` in a throwaway workspace — nothing sensitive). It must
+/// decode as [`PendingRequestEntry::Approval`] and re-serialize byte-exact,
+/// while the documented pointer shape still decodes as
+/// [`PendingRequestEntry::Pointer`].
+#[test]
+fn pending_requests_serve_full_payloads_without_a_kind() {
+    let observed: Value = serde_json::from_str(r#"{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","availableChoices":[{"choiceId":"allow_once","decision":"approved","label":"Allow once","scope":"once"},{"choiceId":"allow_local_prefix","decision":"approvedPolicyAmendment","label":"Always allow in this workspace: echo ...","rulePreview":"Always allow in this workspace: echo ...","scope":"localPersistent"},{"acceptsFeedback":true,"choiceId":"abort","decision":"abort","label":"Reject","scope":"once"}],"currentRequirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"itemId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","judgeEscalated":false,"protectedWrite":false,"rawArgs":"{\"command\":\"echo hi && ls\"}","sessionId":"01a085ab-5461-7b10-a6ab-805e21f7a245","sourceRange":{"first":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"last":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"stream":{"id":"01a085ab-5461-7b10-a6ab-805e21f7a245","kind":"session"}},"subject":{"command":"echo hi && ls","kind":"shell","stages":[{"argv":["echo","hi"],"argvComplete":true,"position":1,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["echo"],"label":"Always allow in this workspace: echo ..."},"totalStages":2},{"argv":["ls"],"argvComplete":true,"position":2,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":1},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["ls"],"label":"Always allow in this workspace: ls ..."},"totalStages":2}],"workspaceRoot":"/private/tmp/harness-ws"},"taskId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","toolCallId":"user_shell_01a085ab-54a7-7411-80ca-08842679168d","toolName":"shell","turnId":"01a085ab-54a7-7411-80ca-08842679168d","viewCursor":"v:01a085ab-5461-7b10-a6ab-805e21f7a245:7"}"#)
+        .expect("observed entry is JSON");
+    // The old shape (`Vec<PendingRequestPointer>`) rejected this with
+    // `missing field 'kind'` — the exact failure the owner saw.
+    assert!(serde_json::from_value::<PendingRequestPointer>(observed.clone()).is_err());
+    let entry: PendingRequestEntry =
+        serde_json::from_value(observed.clone()).expect("full approval payload decodes");
+    assert!(matches!(entry, PendingRequestEntry::Approval(_)));
+    assert_eq!(serde_json::to_value(&entry).expect("serialize"), observed);
+
+    // …and the documented pointer still decodes, as the Pointer arm.
+    let pointer: PendingRequestEntry = serde_json::from_value(serde_json::json!({
+        "kind": "approval",
+        "approvalId": "a1",
+        "viewCursor": "v:s:3",
+    }))
+    .expect("pointer decodes");
+    assert!(matches!(pointer, PendingRequestEntry::Pointer(_)));
+}
+
+/// **muse 1.2.1 / owner-round-2 S1.** The additive-optional `Session` members,
+/// the snapshot's new arms, the `RecoveryPending` rename result without a
+/// name, and the closed MCP union (which must reject an unknown transport).
+#[test]
+fn new_1_2_1_shapes_round_trip() {
+    roundtrip::<Session>(
+        "session with 1.2.1 members",
+        Some(&serde_json::json!({
+            "sessionId": "s1", "path": "/tmp/x", "createdAt": "t", "updatedAt": "t",
+            "status": "idle", "turnCount": 1, "activeTurnId": null, "forkedFrom": null,
+            "modelId": null, "providerId": null, "workspaceRoot": null,
+            "branch": "main", "title": "Do the thing", "name": "tidy-otter",
+            "firstUserPrompt": "Do the thing",
+        })),
+    );
+    // Old rows omit them; the index stays the fallback for those.
+    roundtrip::<Session>(
+        "session without 1.2.1 members",
+        Some(&serde_json::json!({
+            "sessionId": "s1", "path": "", "createdAt": "t", "updatedAt": "t",
+            "status": "idle", "turnCount": 0, "activeTurnId": null, "forkedFrom": null,
+            "modelId": null, "providerId": null, "workspaceRoot": null,
+        })),
+    );
+    roundtrip::<SessionRenameResult>(
+        "rename RecoveryPending arm",
+        Some(&serde_json::json!({"commandId": "c1", "status": "accepted"})),
+    );
+    roundtrip::<SessionRenameResult>(
+        "rename settled arm",
+        Some(&serde_json::json!({"commandId": "c1", "status": "accepted", "name": "tidy-otter"})),
+    );
+    roundtrip::<SessionSetReasoningEffortParams>(
+        "setReasoningEffort params",
+        Some(&serde_json::json!({"commandId": "c1", "reasoningEffort": "high", "sessionId": "s1"})),
+    );
+    roundtrip::<SessionReasoningEffortChangedParams>(
+        "reasoningEffortChanged",
+        Some(&serde_json::json!({
+            "reasoningEffort": "high", "sessionId": "s1", "source": "user",
+            "sourceRange": {"stream": {"kind": "session", "id": "s1"},
+                            "first": {"id": "e1", "sequence": 1},
+                            "last": {"id": "e1", "sequence": 1}},
+            "viewCursor": "v:s1:1",
+        })),
+    );
+    roundtrip::<SessionMcpServerConfig>(
+        "stdio mcp server",
+        Some(&serde_json::json!({"transport": "stdio", "command": "uvx", "mode": "optional"})),
+    );
+    // Closed union: an undeclared transport is a real error, never a guess.
+    assert!(serde_json::from_value::<SessionMcpServerConfig>(
+        serde_json::json!({"transport": "pigeon", "command": "coo"})
+    )
+    .is_err());
+    roundtrip::<Item>(
+        "toolCall with patchRef and patchSummary",
+        Some(&serde_json::json!({
+            "itemId": "i1", "kind": "toolCall", "revision": 2, "status": "completed",
+            "turnId": "t1", "tool": "edit",
+            "patchRef": {"availability": "available", "byteLen": 12, "id": "p1",
+                         "kind": "tool_patch", "mediaType": "application/json", "uri": "msp:p1"},
+            "patchSummary": {"added": 10, "files": 2, "removed": 3},
+        })),
+    );
 }
