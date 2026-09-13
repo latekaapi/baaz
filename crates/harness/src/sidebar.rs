@@ -428,7 +428,11 @@ pub fn grouping_by_project(
         } else {
             visible.into_iter().map(|e| e.summary(now)).collect()
         };
-        let count = rows.len().to_string();
+        // A count says how much is inside; at zero it says only that the row
+        // is empty, which the absent rows already say, and it puts a
+        // meaningless digit on the same baseline as the meaningful ones
+        // (audit 2026-09-13).
+        let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
         let initial = project
             .name
             .chars()
@@ -854,7 +858,9 @@ mod tests {
         assert_eq!(groups[0].count.as_ref(), "2");
         assert_eq!(groups[1].id.as_ref(), "p-agentic");
         assert_eq!(groups[2].id.as_ref(), "p-empty");
-        assert_eq!(groups[2].count.as_ref(), "0");
+        // No count at all rather than "0": the pill says how much is inside,
+        // and at zero the absent rows already say it (audit 2026-09-13).
+        assert_eq!(groups[2].count.as_ref(), "", "an empty project carries no count");
         assert!(groups[2].open, "an empty project still gets an open group row");
         let other = &groups[3];
         assert_eq!(other.id.as_ref(), OTHER_GROUP);
