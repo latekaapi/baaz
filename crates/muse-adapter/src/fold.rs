@@ -2208,9 +2208,17 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
         _ => (
             // There is no tool *kind* taxonomy on the wire, so anything the app
             // does not recognise is presented as a Muse-provided tool.
+            //
+            // The last resort is the tool's own name, not `raw()`. An
+            // unrecognised tool has no field this table knows to read, so
+            // `raw()` put the whole argument object in the card's title —
+            // `Ran {"task": "tidy", "depth": 2}` — while the one thing that
+            // names what happened, `estimate`, was dropped. The arguments are
+            // already in the card's body as parameter pairs, so the title is
+            // free to say which tool ran (audit 2026-09-13, P1).
             ToolKind::Mcp { server: "muse".to_owned(), tool: tool.to_owned() },
             "Ran".to_owned(),
-            field("command").or_else(path).unwrap_or_else(raw),
+            field("command").or_else(path).unwrap_or_else(|| tool.to_owned()),
         ),
     }
 }

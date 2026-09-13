@@ -271,10 +271,14 @@ pub fn silent_reasoning_text(count: u64) -> String {
 /// sync with the library.
 fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
     let tokens = meta.tokens_in + meta.tokens_out;
-    let tokens = if tokens >= 1000 {
-        format!("{:.1}k tokens", tokens as f64 / 1000.0)
-    } else {
-        format!("{tokens} tokens")
+    // Zero is "the wire did not say", not "this turn was free" — dropped
+    // here exactly as the library's `footer_items` drops it, and as the cost
+    // cell below is dropped when the catalog reports no price. `items.retain`
+    // takes the empty string out (audit 2026-09-13).
+    let tokens = match tokens {
+        0 => String::new(),
+        n if n >= 1000 => format!("{:.1}k tokens", n as f64 / 1000.0),
+        n => format!("{n} tokens"),
     };
     let mut items = vec![
         meta.model.clone(),

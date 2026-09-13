@@ -83,7 +83,7 @@
                 "tool": "estimate"
               },
               "verb": "Ran",
-              "target": "{\"task\": \"tidy\", \"depth\": 2}",
+              "target": "estimate",
               "status": "success",
               "duration_ms": null,
               "body": {
