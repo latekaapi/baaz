@@ -94,6 +94,21 @@ appears), add `docs/images/round2-pinned-dark.png` (steps `…;pin`), byte-ident
 run. CHANGELOG entry "2026-09-13 — Owner round 2, surface" with P1–P8 one line each;
 `docs/02-app.md` §5 for folding and the drop card; `docs/12-projects.md` §8 appended.
 
+## P9 — Finish the wire package's open items (S4, S5, one screenshot)
+
+The wire package landed S1–S3 (schema 1.2.1, stale-sidecar retry, session-in-use never
+downs the wire) and stopped on budget. Its diagnosis for S4 stands: the 1.2.1 card prints
+percentages (`Current 1% / Weekly 32%` was observed) and the probe misfires because its
+parser takes the first partial match. Read `docs/briefs/muse-round2-wire.md` S4 and S5 and
+do them here: the probe parses the 1.2.1 card reliably (test on the verbatim card text,
+redacted), is robust to a concurrent instance (lock file with a bounded wait; a fresh
+`tier.json` under an hour old with the same `authMtime` is reused), and "Check again" reads
+"Checking…" while probing, toasts the result, and the banner leaves once the plan is known.
+Docs: CHANGELOG "Owner round 2, wire" entry for S1–S4, `docs/01-transport.md` §4 for 1.2.1,
+`docs/06-billing.md` for the probe. Screenshot `docs/images/round2-session-in-use-dark.png`:
+open the same session from two harness processes (`--session <id>` on both, `--screenshot`
+on the second; no turn) and capture the second's banner.
+
 ## Gates
 
 `cargo build --workspace`; `cargo test --workspace`;

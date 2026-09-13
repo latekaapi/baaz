@@ -50,9 +50,12 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     let session = muse_client::schema::Session {
         active_turn_id: None,
         approval_mode: None,
+        branch: None,
         created_at: row.updated_at.clone(),
+        first_user_prompt: None,
         forked_from: None,
         model_id: None,
+        name: None,
         path: String::new(),
         provider_id: None,
         session_id: row.session_id.clone(),
@@ -61,6 +64,7 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
         } else {
             muse_client::schema::SessionStatus::Idle
         },
+        title: None,
         turn_count: row.turn_count,
         updated_at: row.updated_at.clone(),
         workspace_root: Some(root.to_string_lossy().into_owned()),
@@ -465,9 +469,14 @@ impl Harness {
             return;
         }
         crate::log::trace_mark("cache-miss");
-        self.open(session_id.clone(), true, window, cx);
+        // No backfill yet: the first `view/page` must wait for the resume
+        // round-trip below. The resume is the leased touch that regenerates a
+        // stale `.msp-view-v1` sidecar (muse 1.2.1, #29473); a page fired
+        // before it reads the stale generation and fails `-32603`.
+        self.open(session_id.clone(), false, window, cx);
         crate::log::trace_mark("swap");
         crate::log::trace_arm_first_frame();
+        let resumed = session_id.clone();
         let work = move || {
             client.session_resume(&SessionResumeParams {
                 command_id: new_command_id(),
@@ -477,15 +486,30 @@ impl Harness {
                 exclude_items: Some(true),
                 cursor: None,
                 history: None,
+                config: None,
             })
         };
-        self.wire_call(cx, work, |this, result, cx| {
+        self.wire_call(cx, work, move |this, result, cx| {
             match &result {
                 Ok(_) => crate::log::trace_mark("resume-ack"),
+                // A stale sidecar is not a failure to show: the resume was
+                // still the regenerating first touch, so the backfill below
+                // pages a fresh sidecar. One log line, never a dialog.
+                Err(error) if error.is_stale_sidecar() => {
+                    crate::log::trace_mark("resume-ack-stale");
+                    crate::harness_log!("resume of {resumed} hit a stale sidecar ({error}); paging anyway");
+                }
                 Err(error) => {
                     crate::log::trace_mark("resume-ack-err");
                     this.report(error, cx);
                 }
+            }
+            // Only while the just-opened view is still the open one: a
+            // further switch owns its own backfill, and a parked view must
+            // not start one behind the new view's back.
+            let still_open = this.active.clone().filter(|view| view.read(cx).session_id == resumed);
+            if let Some(view) = still_open {
+                view.update(cx, |view, cx| view.backfill(cx));
             }
             cx.notify();
         });
@@ -627,6 +651,7 @@ impl Harness {
                 cursor,
                 exclude_items: Some(true),
                 history: None,
+                config: None,
             })
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| {
@@ -644,6 +669,9 @@ impl Harness {
                     if let Some(view) = still_open {
                         view.update(cx, |view, cx| {
                             crate::log::trace_mark("HistoryReady");
+                            // A later resume succeeding is what stands the
+                            // lease notice down.
+                            view.note_resumed(cx);
                             view.follow_tail(cx);
                         });
                     }
@@ -658,8 +686,11 @@ impl Harness {
                     crate::harness_log!("cached view of {topped} is stale ({error}); reopening");
                     let still_open = this.active.as_ref().is_some_and(|view| view.read(cx).session_id == topped);
                     if still_open {
-                        this.open(topped.clone(), true, window, cx);
-                        // `open` parked the stale view; it must not come back.
+                        // Through `resume`, not `open`: the fresh view pages
+                        // only after its own resume settles, so a stale
+                        // sidecar regenerates before the first page reads it.
+                        this.resume(topped.clone(), window, cx);
+                        // `resume` parked the stale view; it must not come back.
                         this.session_cache.retain(|(id, _)| *id != topped);
                     }
                 }

@@ -457,6 +457,10 @@ impl Harness {
     /// allowed to come back with nothing: the server decides what history it
     /// serves, and a session no host has loaded can serve none. A row that
     /// still has no title after this is honestly [`crate::sidebar::UNNAMED`].
+    ///
+    /// A stale sidecar (muse 1.2.1, #29473) is "no title this time": one log
+    /// line, never a dialog, and the session stays untitled-marked so a later
+    /// pass retries once the sidecar has regenerated under a lease.
     pub(super) fn derive_titles(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
         let wanted: Vec<String> = self
@@ -478,16 +482,22 @@ impl Harness {
                         session_id: session_id.clone(),
                         exclude_items: Some(false),
                     });
-                    if let Err(error) = &read {
-                        crate::harness_log!("session/read for a title failed: {error}");
+                    match read {
+                        Ok(read) => (session_id, first_shell_command(&read), false),
+                        Err(error) => {
+                            crate::harness_log!("session/read for a title failed: {error}");
+                            (session_id, None, error.is_stale_sidecar())
+                        }
                     }
-                    let title = read.ok().and_then(|read| first_shell_command(&read));
-                    (session_id, title)
                 })
                 .collect::<Vec<_>>()
         };
         self.wire_call(cx, work, |this, derived, cx| {
-            for (session_id, title) in derived {
+            for (session_id, title, stale) in derived {
+                if stale {
+                    this.titled.remove(&session_id);
+                    continue;
+                }
                 let Some(title) = title else { continue };
                 this.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
             }

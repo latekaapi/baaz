@@ -118,6 +118,72 @@ pub fn severity(error: &MuseError) -> Severity {
     }
 }
 
+/// Whether a failed `session/resume` is about *this session* rather than the
+/// transport (owner round 2 S3).
+///
+/// A session-scoped rejection leaves the wire `Ready`: the child is alive
+/// and the handshake passed, so the sidebar, the palette and ⌘N keep
+/// working while the rejection becomes a banner on that session's view.
+/// Anything else — a dead child, an unanswered request, an unparseable frame,
+/// or a server-level kind — is a transport failure and takes the wire down.
+///
+/// Decided per [`ErrorKind`]:
+///
+/// * session-scoped: every `session*` kind (`sessionInUse`, `sessionNotFound`,
+///   `sessionAmbiguous`, `sessionNotLoaded`, `sessionStreamMismatch`,
+///   `forkBoundaryInvalid`), `commandRejected` (in a resume it names this
+///   session's state, e.g. a conflicting id), the approval/userInput kinds
+///   (they name a prompt or approval, never the pipe), generic `notFound`
+///   (an anchor or session the host no longer has), and the race artifacts
+///   `cancelled`/`interrupted`/`noBoundary`;
+/// * transport-level: everything `MuseError` carries without a kind
+///   (`Closed`, `Timeout`, `Protocol`, `Io`), the handshake and framing kinds
+///   (`parseError`, `invalidRequest`, `notInitialized`, `alreadyInitialized`,
+///   `methodNotFound`, `invalidParams`, `experimentalRequired`), the
+///   server-state kinds (`internal`, `overloaded`, `backpressured`,
+///   `capabilityRequired`, `inputTooLarge`, `pageEventTooLarge`,
+///   `outputResultTooLarge`, `outputUnavailable`, `viewTruncated`,
+///   `boundaryPruned`, `boundaryUnusable`).
+pub fn is_session_scoped(error: &MuseError) -> bool {
+    match error {
+        MuseError::Closed | MuseError::Timeout(_) | MuseError::Protocol(_) | MuseError::Io(_) => false,
+        MuseError::Json(_) => false,
+        MuseError::Rpc(_) => matches!(
+            error.kind(),
+            Some(
+                ErrorKind::SessionInUse
+                    | ErrorKind::SessionNotFound
+                    | ErrorKind::SessionAmbiguous
+                    | ErrorKind::SessionNotLoaded
+                    | ErrorKind::SessionStreamMismatch
+                    | ErrorKind::ForkBoundaryInvalid
+                    | ErrorKind::CommandRejected
+                    | ErrorKind::ApprovalNotFound
+                    | ErrorKind::ApprovalAlreadyResolved
+                    | ErrorKind::ApprovalChoiceInvalid
+                    | ErrorKind::ApprovalRequirementStale
+                    | ErrorKind::ApprovalReviewerUnavailable
+                    | ErrorKind::UserInputNotFound
+                    | ErrorKind::UserInputAlreadySettled
+                    | ErrorKind::UserInputAnswerInvalid
+                    | ErrorKind::NotFound
+                    | ErrorKind::Cancelled
+                    | ErrorKind::Interrupted
+                    | ErrorKind::NoBoundary,
+            )
+        ),
+    }
+}
+
+/// The banner a session-scoped resume rejection becomes on that session's
+/// view (owner round 2 S3).
+pub fn lease_banner(error: &MuseError) -> String {
+    if matches!(error.kind(), Some(ErrorKind::SessionInUse)) {
+        return "This session is open in another window. Close it there, or start a new session.".to_owned();
+    }
+    format!("{}. {error}", title(error))
+}
+
 /// A one-line title for an error, for a banner or a dialog heading.
 pub fn title(error: &MuseError) -> String {
     match error.kind() {
@@ -161,6 +227,52 @@ mod tests {
     fn a_dead_child_is_a_dialog_and_a_timeout_names_its_method() {
         assert_eq!(severity(&MuseError::Closed), Severity::Dialog);
         assert_eq!(title(&MuseError::Timeout("turn/start".into())), "Muse did not answer turn/start");
+    }
+
+    fn rpc_error(kind: &str, code: i32, message: &str) -> MuseError {
+        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+            "code": code,
+            "message": message,
+            "data": {"kind": kind},
+        }))
+        .expect("error object decodes");
+        MuseError::Rpc(Box::new(object))
+    }
+
+    /// Owner round 2 S3: a resume rejection about the session banners the
+    /// view and keeps the wire up; a dead child or a server-level kind takes
+    /// the wire down.
+    #[test]
+    fn a_session_scoped_resume_rejection_never_takes_the_wire_down() {
+        // The observed `-32021`: another host holds the lease.
+        let in_use = rpc_error("sessionInUse", -32021, "session s1 is already in use");
+        assert!(is_session_scoped(&in_use));
+        assert_eq!(
+            lease_banner(&in_use),
+            "This session is open in another window. Close it there, or start a new session."
+        );
+        // The other session-scoped kinds banner too, titled by kind.
+        for kind in [
+            "sessionNotFound",
+            "sessionAmbiguous",
+            "sessionNotLoaded",
+            "sessionStreamMismatch",
+            "forkBoundaryInvalid",
+            "commandRejected",
+            "approvalAlreadyResolved",
+            "userInputAlreadySettled",
+            "notFound",
+            "cancelled",
+        ] {
+            let error = rpc_error(kind, -32000, "resume failed");
+            assert!(is_session_scoped(&error), "{kind} should banner, not drop the wire");
+        }
+        // Transport failures and server-level kinds are not session-scoped.
+        assert!(!is_session_scoped(&MuseError::Closed));
+        assert!(!is_session_scoped(&MuseError::Timeout("session/resume".into())));
+        for kind in ["internal", "overloaded", "notInitialized", "invalidParams", "methodNotFound"] {
+            assert!(!is_session_scoped(&rpc_error(kind, -32603, "resume failed")), "{kind} drops the wire");
+        }
     }
 
     #[test]

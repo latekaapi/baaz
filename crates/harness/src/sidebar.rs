@@ -63,6 +63,10 @@ pub struct SessionEntry {
     /// Whether anything but the fallback was found, which is what tells the
     /// application a `session/read` is worth making (finding F10).
     pub needs_title: bool,
+    /// The row's own derived workspace branch (`Session.branch`, muse 1.2.1),
+    /// shown on the meta line. The live-change signal stays
+    /// `session/branchChanged`; this is the index's last derived value.
+    pub branch: Option<String>,
     /// Placed locally at `session/start`: the wire lists a session only
     /// after its log flushes on `turn/completed`, so the window holds this
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
@@ -81,15 +85,21 @@ pub struct SessionEntry {
 impl SessionEntry {
     /// Join one `session/list` row with what the index and the store know.
     ///
-    /// The title, best first (finding F10):
+    /// The title, best first (finding F10). Since muse 1.2.1 the row itself
+    /// carries what only the index used to know, so the row's own copies come
+    /// before the index's — and the index stays as the fallback for older
+    /// rows whose list entries predate the derivation:
     ///
     /// 1. the name someone gave it with `/name` or the row's pencil;
-    /// 2. the index's `session_name`;
-    /// 3. the index's generated `title`;
-    /// 4. the index's `first_user_prompt`;
-    /// 5. the first `userShell` command, cached in the store by the
+    /// 2. the row's own `name`;
+    /// 3. the row's own `title`;
+    /// 4. the row's own `first_user_prompt`;
+    /// 5. the index's `session_name`;
+    /// 6. the index's generated `title`;
+    /// 7. the index's `first_user_prompt`;
+    /// 8. the first `userShell` command, cached in the store by the
     ///    application after a `session/read`;
-    /// 6. [`UNNAMED`].
+    /// 9. [`UNNAMED`].
     ///
     /// The session id is never a title. "Session 01a081ef" tells a person
     /// nothing they can act on, and it reads like something went wrong.
@@ -99,10 +109,16 @@ impl SessionEntry {
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
     ) -> Self {
-        let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-        let indexed = index.and_then(IndexEntry::label);
-        let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-        let label = name.or(indexed).or(derived);
+        fn pick(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|s| !s.is_empty())
+        }
+        let name = pick(meta.and_then(|m| m.name.as_deref()));
+        let label = name
+            .or_else(|| pick(session.name.as_deref()))
+            .or_else(|| pick(session.title.as_deref()))
+            .or_else(|| pick(session.first_user_prompt.as_deref()))
+            .or_else(|| index.and_then(IndexEntry::label))
+            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
         // A user-given name always earns the first prompt below it; any other
         // label earns it only when it does not already say it (see
         // `describe`): Muse writes whole first prompts into the index title,
@@ -134,6 +150,7 @@ impl SessionEntry {
             local: false,
             workspace,
             project,
+            branch: session.branch.clone(),
         }
     }
 
@@ -168,6 +185,7 @@ impl SessionEntry {
             local: false,
             workspace,
             project,
+            branch: None,
         }
     }
 
@@ -195,6 +213,11 @@ impl SessionEntry {
         // last; the turn count stays in the meta after it.
         if !self.description.is_empty() {
             row = row.meta(aui::nav::MetaItem::Text(self.description.clone().into()));
+        }
+        // The row's own derived branch (muse 1.2.1), ahead of the turn count:
+        // which line of work this session is on.
+        if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            row = row.meta(aui::nav::MetaItem::Text(branch.to_owned().into()));
         }
         if self.turns > 0 {
             row = row.meta(aui::nav::MetaItem::Text(
@@ -588,6 +611,75 @@ mod tests {
         assert!(warm < cold, "cached frame ({warm:?}) must cost less than the rebuild ({cold:?})");
     }
 
+    /// A `session/list` row as muse 1.2.1 serves it: the index-era members
+    /// plus the new derivations, each settable per test.
+    fn wire_session() -> muse_client::schema::Session {
+        muse_client::schema::Session {
+            active_turn_id: None,
+            approval_mode: None,
+            branch: None,
+            created_at: "2026-09-13T10:00:00Z".into(),
+            first_user_prompt: None,
+            forked_from: None,
+            model_id: None,
+            name: None,
+            path: String::new(),
+            provider_id: None,
+            session_id: "s1".into(),
+            status: muse_client::schema::SessionStatus::Idle,
+            title: None,
+            turn_count: 0,
+            updated_at: "2026-09-13T10:00:00Z".into(),
+            workspace_root: None,
+        }
+    }
+
+    fn old_index() -> IndexEntry {
+        IndexEntry {
+            session_name: Some("Old Name".into()),
+            title: "Old Title".into(),
+            first_user_prompt: Some("Old prompt".into()),
+            search_text: String::new(),
+            updated_at_us: None,
+            workspace_root: None,
+        }
+    }
+
+    /// Owner round 2 S1: the row's own `name` / `title` / `firstUserPrompt`
+    /// come before the index's copies, and the index stays the fallback for
+    /// older rows that predate the derivation.
+    #[test]
+    fn the_rows_own_words_come_before_the_index_copies() {
+        let projects = crate::projects::Projects::default();
+        let index = old_index();
+        // An old row: nothing of its own, the index names it.
+        let old = SessionEntry::join(&wire_session(), Some(&index), None, &projects);
+        assert_eq!(old.label, "Old Name");
+        assert!(!old.needs_title, "the index named it");
+        // A 1.2.1 row: its own name wins over the index's.
+        let mut named = wire_session();
+        named.name = Some("Wire Name".into());
+        let entry = SessionEntry::join(&named, Some(&index), None, &projects);
+        assert_eq!(entry.label, "Wire Name");
+        // …its own title wins when it has no name…
+        let mut titled = wire_session();
+        titled.title = Some("Wire Title".into());
+        let entry = SessionEntry::join(&titled, Some(&index), None, &projects);
+        assert_eq!(entry.label, "Wire Title");
+        // …and its own first prompt when it has neither.
+        let mut prompted = wire_session();
+        prompted.first_user_prompt = Some("Wire prompt".into());
+        let entry = SessionEntry::join(&prompted, Some(&index), None, &projects);
+        assert_eq!(entry.label, "Wire prompt");
+        // The branch rides along for the row meta.
+        let mut branched = wire_session();
+        branched.branch = Some("feature-x".into());
+        let entry = SessionEntry::join(&branched, None, None, &projects);
+        assert_eq!(entry.branch.as_deref(), Some("feature-x"));
+        assert_eq!(entry.label, UNNAMED);
+        assert!(entry.needs_title);
+    }
+
     fn entry(id: &str) -> SessionEntry {
         SessionEntry {
             id: id.to_owned(),
@@ -605,6 +697,7 @@ mod tests {
             local: false,
             workspace: None,
             project: None,
+            branch: None,
         }
     }
 

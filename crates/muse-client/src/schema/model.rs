@@ -160,3 +160,26 @@ closed_enum! {
         Ultra = "ultra",
     }
 }
+
+open_enum! {
+    /// What drove a reasoning-effort default change (tdd SS4.6.9). Open; v1's only producer is
+    /// `user` (an accepted `session/setReasoningEffort`).
+    ReasoningEffortChangeSource {
+        User = "user",
+        Default = "default",
+        Policy = "policy",
+    }
+}
+
+/// The snapshot's standing session-default reasoning effort (tdd SS4.9.1, ADR 31255 D1): the fold
+/// of the latest completed `runtime.reasoning_effort_reconfigure` fact — the same pair
+/// `session/reasoningEffortChanged` carries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortState {
+    /// The standing default tier — the closed SS3.2 vocabulary, spelled identically to
+    /// `turn/start.reasoningEffort`.
+    pub reasoning_effort: ReasoningEffort,
+    /// Which actor class set the default.
+    pub source: ReasoningEffortChangeSource,
+}

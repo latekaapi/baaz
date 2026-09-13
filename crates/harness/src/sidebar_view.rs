@@ -126,6 +126,9 @@ impl Harness {
                         this.new_session_in(Some(id.to_string()), cx);
                     }
                 }
+                // Folding arrives with the surface package; until then the
+                // row is inert.
+                GroupAction::ToggleMore => {}
                 GroupAction::Menu => {
                     if id.as_ref() == crate::sidebar::OTHER_GROUP {
                         this.open_project_menu(None, false, cx);

@@ -1,9 +1,9 @@
 //! The `muse serve` child, its two I/O threads, and the request plane.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -271,6 +271,27 @@ struct Inner {
     events: Sender<MuseEvent>,
     gap: Mutex<GapState>,
     closed: AtomicBool,
+    /// The child's last stderr lines, oldest first, capped at
+    /// [`STDERR_TAIL_LINES`]. Drained by the `muse-stderr` thread so the
+    /// child can never block on a full pipe.
+    stderr_tail: Mutex<VecDeque<String>>,
+}
+
+/// How many stderr lines the tail keeps: enough for the crash and its
+/// context, too few to matter.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Drain the child's stderr into [`Inner::stderr_tail`], oldest first,
+/// capped. Ends at EOF, which is when the child is gone.
+fn drain_stderr(inner: Arc<Inner>, stderr: ChildStderr) {
+    for line in BufReader::new(stderr).lines() {
+        let Ok(line) = line else { break };
+        let mut tail = inner.stderr_tail.lock().expect("stderr mutex");
+        tail.push_back(line);
+        while tail.len() > STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+    }
 }
 
 impl Inner {
@@ -391,14 +412,15 @@ impl MuseClient {
             command.arg("--no-session-log");
         }
         command.args(&config.extra_args);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        Ok(Self::from_pipes(child, stdin, stdout))
+        let stderr = child.stderr.take().expect("piped stderr");
+        Ok(Self::from_pipes(child, stdin, stdout, stderr))
     }
 
-    fn from_pipes(child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {
+    fn from_pipes(child: Child, stdin: ChildStdin, stdout: ChildStdout, stderr: ChildStderr) -> Self {
         let (writes_tx, writes_rx) = unbounded::<String>();
         let (events_tx, events_rx) = unbounded::<MuseEvent>();
         let inner = Arc::new(Inner {
@@ -413,6 +435,7 @@ impl MuseClient {
                 fills: Vec::new(),
             }),
             closed: AtomicBool::new(false),
+            stderr_tail: Mutex::new(VecDeque::new()),
         });
         let child = Arc::new(Mutex::new(child));
 
@@ -435,7 +458,32 @@ impl MuseClient {
             .spawn(move || read_loop(reader_inner, reader_child, stdout))
             .expect("spawn muse-reader");
 
-        Self { inner, events: events_rx, child, threads: vec![reader, writer] }
+        // The child's stderr is diagnostics, never protocol — but when the
+        // child dies unexpectedly it is the only record of why. Drain it into
+        // a bounded tail so a chatty child cannot grow the client without
+        // bound and a dead one cannot block on a full pipe.
+        let stderr_inner = Arc::clone(&inner);
+        let stderr = std::thread::Builder::new()
+            .name("muse-stderr".into())
+            .spawn(move || drain_stderr(stderr_inner, stderr))
+            .expect("spawn muse-stderr");
+
+        Self { inner, events: events_rx, child, threads: vec![reader, writer, stderr] }
+    }
+
+    /// The child's stderr, line-capped at the tail: what the child was saying
+    /// when it exited. Diagnostics for the next reconnect — never secrets:
+    /// `muse serve` carries no device-code flow on stderr, and the tail is
+    /// bounded either way.
+    pub fn stderr_tail(&self) -> String {
+        self.inner
+            .stderr_tail
+            .lock()
+            .expect("stderr mutex")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The event stream, in wire order.

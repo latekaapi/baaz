@@ -1,0 +1,73 @@
+[
+  {
+    "sessionId": "01a09a06-df47-76e3-b1ac-d4d1447e85d3",
+    "session": {
+      "id": "01a09a06-df47-76e3-b1ac-d4d1447e85d3",
+      "agent": "muse",
+      "model": "",
+      "mode": "promptUnmatched",
+      "plan": false,
+      "cwd": "/tmp/msp-shapes-ws",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "00068268-1b9f-7e51-97ae-161538f34ca1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "700e2c5d-f719-417f-8066-d64a4668cbad",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "error",
+              "duration_ms": 19,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "tool failed: environment failure: managed shell sandbox is unavailable",
+                  "The execution environment is broken: the command was never started and every later command will fail the same way. Do not retry and do not fabricate command output; report this environment failure."
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "promptUnmatched",
+      "last_cursor": "v:01a09a06-df47-76e3-b1ac-d4d1447e85d3:3",
+      "command_text": {},
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
+    }
+  }
+]
