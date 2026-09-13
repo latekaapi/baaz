@@ -170,6 +170,117 @@ fn expected_rows(dy: f32) -> usize {
 /// offset mid-list, so a no-move frame is either pinned at a scroll limit
 /// (up against the head, down against the tail) or a genuine stall; a move
 /// across more rows than the delta explains is a teleport.
+/// One burst's outcome: what a trackpad actually delivers between two frames.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct BurstStats {
+    /// What the burst was called in the report.
+    pub name: &'static str,
+    /// The pixels the burst's events asked for, summed.
+    pub dispatched_px: f32,
+    /// The pixels the list actually travelled.
+    pub travelled_px: f32,
+    /// Events in the burst, including the zero samples.
+    pub events: usize,
+}
+
+impl BurstStats {
+    /// The share of the asked-for travel that survived, `1.0` when none was
+    /// lost. Zero dispatch is reported as `1.0` rather than a division.
+    pub fn kept(&self) -> f32 {
+        if self.dispatched_px.abs() < f32::EPSILON {
+            return 1.0;
+        }
+        self.travelled_px / self.dispatched_px
+    }
+}
+
+/// The bursts. A real trackpad does not deliver one event per frame: macOS
+/// emits them at the display's rate and the app paints when it can, so two or
+/// more land between paints — and AppKit mixes in `scrollingDeltaY == 0.0`
+/// samples (the `MayBegin`/`Began` pair, finger-down pauses, the momentum
+/// tail) and the odd sign-flipped one.
+///
+/// That is the case [`WHEEL_PHASES`] cannot reach, because it waits for a
+/// frame after every event. `ScrollDelta::coalesce` *overrides* rather than
+/// sums when the signs differ, and in Rust `0.0f32.signum()` is `+1.0`, so a
+/// zero sample arriving mid-burst throws away everything accumulated so far
+/// when the travel is negative — and nothing when it is positive. Hence the
+/// two directions, run with the same shape: an asymmetry here is the bug, not
+/// noise (D7, `docs/diagnosis/scroll-research-2026-09-13.md`).
+const BURSTS: [(&str, f32, bool); 4] = [
+    ("up-clean", -12.0, false),
+    ("up-zeroed", -12.0, true),
+    ("down-clean", 12.0, false),
+    ("down-zeroed", 12.0, true),
+];
+/// Events per burst, not counting the zero samples woven in.
+const BURST_EVENTS: usize = 6;
+/// Bursts per direction, averaged: one burst is a handful of pixels and the
+/// list's own clamping can swallow it at either limit.
+const BURST_REPEATS: usize = 12;
+
+/// Dispatch each burst's events back to back with no frame between them, then
+/// let the frame land and measure how far the list actually went.
+async fn drive_bursts(handle: &WindowHandle<Root>, view: &Entity<SessionView>, cx: &mut AsyncApp) -> Vec<BurstStats> {
+    let px_of = |cx: &mut AsyncApp| -> f32 { cx.update(|cx| view.read(cx).bench_list_px()) };
+    let mut out = Vec::with_capacity(BURSTS.len());
+    for (name, dy, zeroed) in BURSTS {
+        let mut stats = BurstStats { name, ..BurstStats::default() };
+        for _ in 0..BURST_REPEATS {
+            // Start each burst from the middle, so neither limit clamps the
+            // travel and the two directions measure the same thing.
+            cx.update(|cx| view.update(cx, |view, cx| view.bench_scroll_to(0.5, cx)));
+            let since = session::frame_sample_count();
+            wait_for_frame(cx, since).await;
+            let before_px = px_of(cx);
+            let before_frames = session::frame_sample_count();
+            let sent = handle
+                .update(cx, |_, window, cx| {
+                    let size = window.bounds().size;
+                    let mut asked = 0.0f32;
+                    let mut events = 0usize;
+                    for i in 0..BURST_EVENTS {
+                        // The zero sample goes in the middle of the burst,
+                        // where it has something to destroy.
+                        if zeroed && i == BURST_EVENTS / 2 {
+                            window.dispatch_event(
+                                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                    position: point(size.width * 0.5, size.height * 0.5),
+                                    delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
+                                    ..Default::default()
+                                }),
+                                cx,
+                            );
+                            events += 1;
+                        }
+                        window.dispatch_event(
+                            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                                position: point(size.width * 0.5, size.height * 0.5),
+                                delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        asked += dy;
+                        events += 1;
+                    }
+                    (asked, events)
+                })
+                .ok();
+            let Some((asked, events)) = sent else { break };
+            wait_for_frame(cx, before_frames).await;
+            let after_px = px_of(cx);
+            // The list scrolls down as the pixel offset grows, and a positive
+            // `dy` scrolls *up*, so the travel is the negated difference.
+            stats.travelled_px += -(after_px - before_px);
+            stats.dispatched_px += asked;
+            stats.events += events;
+        }
+        out.push(stats);
+    }
+    out
+}
+
 fn classify_wheel_step(dy: f32, pre: ListOffset, post: ListOffset, at_end: bool) -> WheelStep {
     if post.item_ix != pre.item_ix || post.offset_in_item != pre.offset_in_item {
         return WheelStep {
@@ -220,7 +331,7 @@ async fn drive_wheel(
     handle: &WindowHandle<Root>,
     view: &Entity<SessionView>,
     cx: &mut AsyncApp,
-) -> (usize, Vec<WheelPhaseStats>) {
+) -> (usize, Vec<WheelPhaseStats>, Vec<BurstStats>) {
     let top = |cx: &mut AsyncApp| -> (ListOffset, bool) {
         cx.update(|cx| (view.read(cx).bench_list_top(), view.read(cx).bench_list_end()))
     };
@@ -272,7 +383,8 @@ async fn drive_wheel(
         }
         phases.push(stats);
     }
-    (tail_ix, phases)
+    let bursts = drive_bursts(handle, view, cx).await;
+    (tail_ix, phases, bursts)
 }
 
 /// The bench window's root: one replayed session view, rendered whole every
@@ -425,7 +537,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         }
         // The wheel instrument runs after the stream, below, and its phases
         // are the frames — about 700 of them — so it skips this sweep.
-        let mut wheel_stats: Option<(usize, Vec<WheelPhaseStats>)> = None;
+        let mut wheel_stats: Option<(usize, Vec<WheelPhaseStats>, Vec<BurstStats>)> = None;
         if opts.scroll == BenchScroll::Wheel {
             wheel_stats = Some(drive_wheel(&_window, &view, cx).await);
         }
@@ -510,7 +622,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         println!("bench-rss peak_mb={rss_mb:.1}");
         println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
         let scroll_json = match wheel_stats.as_ref() {
-            Some((tail_ix, phases)) => {
+            Some((tail_ix, phases, bursts)) => {
                 let events: usize = phases.iter().map(|p| p.events).sum();
                 let frames: usize = phases.iter().map(|p| p.frames).sum();
                 let jumps: usize = phases.iter().map(|p| p.jumps).sum();
@@ -539,6 +651,16 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                     stall(3),
                     clamp(3),
                 );
+                for b in bursts {
+                    println!(
+                        "bench-burst {} events={} dispatched_px={:.1} travelled_px={:.1} kept={:.3}",
+                        b.name,
+                        b.events,
+                        b.dispatched_px,
+                        b.travelled_px,
+                        b.kept(),
+                    );
+                }
                 serde_json::json!({
                     "events": events,
                     "frames": frames,
@@ -554,6 +676,13 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                         "stalls": p.stalls,
                         "clamped": p.clamped,
                         "end_ix": p.end_ix,
+                    })).collect::<Vec<_>>(),
+                    "bursts": bursts.iter().map(|b| serde_json::json!({
+                        "name": b.name,
+                        "events": b.events,
+                        "dispatched_px": b.dispatched_px,
+                        "travelled_px": b.travelled_px,
+                        "kept": b.kept(),
                     })).collect::<Vec<_>>(),
                 })
             }

@@ -55,6 +55,18 @@ captures are `docs/images/projects-*.png`. The next piece of work is
 **worktrees** (D31): `git worktree add` by the harness, the worktree path as
 `workspaceRoot`, the stored project id keeping the session under its project.
 
+**Owner round 3** (2026-09-13, branches `owner-round-3-2026-09-13` in both repos) is in
+`docs/diagnosis/scroll-research-2026-09-13.md`, `docs/audit/ui-audit-2026-09-13.md` and
+`docs/audit/journeys-2026-09-13.md`. Two rules it set. **The transcript's wheel is the
+harness's, not `list()`'s** (`session/render.rs`, `wheel_capture`): gpui's `list()` sums a
+frame's deltas with `ScrollDelta::coalesce`, which overrides on a sign change and reads an
+exactly-zero delta as positive, so it silently ate half of every upward flick; the capture
+-phase handler drives `ListState::scroll_by` per event, which is what every `div` in the app
+already does. Do not put the wheel back through `list()`. **A one-event-per-frame bench
+cannot see a scroll fault** — that shape is why round 2 measured the scroll clean while the
+owner still saw it stepping; `--bench-scroll wheel` now also prints `bench-burst`, events
+dispatched *between* frames with a zero sample woven in, in both directions.
+
 The 2026-09-13 owner round (fifteen faults, then four more the same evening) is in
 `docs/diagnosis/owner-round-2026-09-13.md` and the two newest changelog entries. Two rules
 it set: the transcript list is one item per **block** (`transcript::turn_rows` /

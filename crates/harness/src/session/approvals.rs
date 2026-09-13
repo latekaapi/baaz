@@ -23,9 +23,23 @@ impl SessionView {
             .map(|request| request.current_requirement_id.clone())
         else {
             // Nothing pending under that id: the resolution already landed.
+            // Ordinary, but not silent — a press that reaches here and says
+            // nothing is indistinguishable from a press that never arrived,
+            // which is precisely what made the "buttons do nothing" report
+            // undiagnosable (D1).
+            crate::harness_log!("approval {approval_id}: nothing pending under that id; the resolution already landed");
             return;
         };
-        let Some(client) = self.wire_client(cx) else { return };
+        let Some(client) = self.wire_client(cx) else {
+            // `wire_client` raises the read-only banner on a replay; on a live
+            // session with no client there is nothing on screen at all, so say
+            // it here.
+            crate::harness_log!("approval {approval_id}: no wire to decide on");
+            return;
+        };
+        // Every decision is logged as it goes out, so the wire log and the app
+        // log agree about whether a press was ever turned into a call.
+        crate::harness_log!("approval {approval_id}: deciding {choice_id}");
         self.feedback_open = None;
         let params = ApprovalDecideParams {
             approval_id: approval_id.clone(),
@@ -58,8 +72,13 @@ impl SessionView {
             }
             // The choices moved under the press, which only happens between
             // stages; the update that moved them is already on its way, so
-            // saying anything here would be noise.
-            Some(ErrorKind::ApprovalRequirementStale) => {}
+            // the person needs no banner. It still goes to the log: a press
+            // that loses this race looks exactly like a press that did
+            // nothing, and without a line here there is no way to tell the
+            // two apart after the fact (D1).
+            Some(ErrorKind::ApprovalRequirementStale) => {
+                crate::harness_log!("approval {approval_id}: the choices moved under the press; waiting for the update that moved them");
+            }
             Some(ErrorKind::ApprovalChoiceInvalid) => {
                 self.set_banner("That choice is no longer offered for this command.", None, cx);
             }

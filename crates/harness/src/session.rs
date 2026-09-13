@@ -986,6 +986,20 @@ impl SessionView {
         self.list_state.logical_scroll_top()
     }
 
+    /// The transcript list's absolute scroll offset in pixels — the number a
+    /// scrollbar would draw, and the only place the list exposes its
+    /// logical-to-pixel mapping.
+    ///
+    /// [`Self::bench_list_top`] above is the list's *logical* anchor
+    /// (`item_ix` + an offset inside that item), which cannot be compared
+    /// across frames: the pixels an item is worth change as its 72 px hint is
+    /// replaced by a real measurement. This is what a smoothness trace has to
+    /// sample — a smooth scroll is a straight line here, and stepping is a
+    /// staircase (D7, `docs/diagnosis/scroll-research-2026-09-13.md`).
+    pub fn bench_list_px(&self) -> f32 {
+        f32::from(self.list_state.scroll_px_offset_for_scrollbar().y)
+    }
+
     /// Whether the transcript list is pinned at its tail, sampled with the
     /// offset above: a wheel event that leaves the position unchanged *at*
     /// the limit is clamped, not stalled. Mirrors the app's own follow

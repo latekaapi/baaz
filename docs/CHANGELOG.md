@@ -1,5 +1,76 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 3, library (agentic-ui `owner-round-3-2026-09-13`)
+
+- **D2 — A project's rows keep the project row's right edge at any sidebar
+  width.** `collapse` lays its child out as a *root* (`Reveal::prepaint` →
+  `layout_as_root`), and a root with `width: auto` is fit-content, not
+  stretch. The status and date bodies get a width for free because `rows` is
+  itself `w_full`; the project branch puts an indent wrapper between `rows`
+  and the reveal, and that wrapper had no width, so the indented block
+  collapsed to its content — the rows stopped short of the project row at a
+  wide sidebar and spilled past its right margin at a narrow one. One
+  `w_full` on the wrapper fixes both ends.
+- **D4 — `ProjectGroup::current` / `ProjectGroupRow::current`.** The project
+  the open session belongs to keeps `ink` at semibold even when muted, and
+  wears a 2 px accent bar at the row's left edge, inside the row's margin so
+  nothing in the row moves. No new colour.
+- **D6 — The hover tray no longer covers the branch.** One tween drives both
+  ends: the branch and the count fade out exactly as the tray fades in,
+  opacity only, so neither box moves under the pointer.
+- **Gallery.** `sidebar/views` gains the project grouping at 240 px and at
+  520 px. The wide state is past the shell's own `SIDEBAR_MAX_WIDTH` (420) on
+  purpose: the component must not assume a bound the shell happens to impose.
+
+## 2026-09-13 — Owner round 3, harness
+
+- **D7 — The transcript scrolls by the same arithmetic as everything else.**
+  Named cause: `list()` accumulates a frame's wheel deltas with
+  `ScrollDelta::coalesce` and applies the running sum against the offset it
+  captured at paint. `coalesce` *overrides* instead of summing when the signs
+  differ, and `0.0f32.signum()` is `+1.0` — so a `scrollingDeltaY == 0.0`
+  sample, which AppKit emits constantly, throws away everything accumulated so
+  far whenever the travel is negative and nothing when it is positive.
+  Measured (release, `synthetic-stress-300`, the new `bench-burst` lines): a
+  six-event upward burst with one zero sample in it kept **432 px of 864**;
+  the same burst downward kept all 864. The transcript now takes the wheel in
+  the capture phase and drives `ListState::scroll_by` one event at a time, as
+  gpui's own `div` does everywhere else in the app: **864 of 864 in both
+  directions**, the single-event phases unchanged (`jumps=0 stalls=0
+  clamped=0`), frame rate unchanged (256 fps). Full diagnosis, including the
+  mechanisms ruled out, in `docs/diagnosis/scroll-research-2026-09-13.md`.
+- **New instrument.** `--bench-scroll wheel` gains `bench-burst`: events
+  dispatched *between* two frames, the way a trackpad delivers them, with a
+  zero sample woven in, run in both directions. The old one-event-per-frame
+  phases cannot reproduce this class of fault at all, which is why round 2
+  measured the scroll clean while the owner still saw it stepping.
+  `SessionView::bench_list_px` exposes the list's absolute pixel offset —
+  the logical anchor cannot be compared across frames.
+- **D3 — A freshly adopted project sorts to the top.** `Projects::sorted`
+  keyed on session activity alone, and a folder adopted a moment ago has no
+  sessions, so it sorted as 0 — under every project that had ever been used.
+  It now sorts on the newest of session activity, `last_opened_at` and
+  `added_at`. Consequence worth knowing: adopting several folders at once
+  ties them all at "now", so they order by name until they are used.
+- **D4 — The current project wears the bar.** The project of the open
+  session; with no session open, the store's `current` — the project the
+  header crumb names and the one a new session would land in.
+- **D5 — The plan label is the plan's name.** `footer_label` dropped
+  "· N% weekly"; the meter row under it already draws the same number, and
+  printing it twice made one reading look like two.
+- **D1 — No approval decision fails silently.** Not fixed: not reproduced.
+  What was ruled out, with evidence: the buttons do not move (the card is
+  byte-identical at 4 s, 9 s and 14 s), the element ids are stable, the
+  handler is wired, `pending_approvals` holds the id, and both the pointer
+  and the keyboard (`ChooseNth`, digits 1–9 in `APPROVAL_CONTEXT`) converge
+  on the same `decide_approval`. A live reproduction was attempted for free
+  through `session/userShell` and could not run: this machine answers
+  "managed shell sandbox is unavailable". What changed is that the three
+  silent exits — nothing pending under that id, no wire, and
+  `approvalRequirementStale` — now each write a `harness:` line, so a press
+  that does nothing can never again be indistinguishable from a press that
+  never arrived.
+
 ## 2026-09-13 — Owner round 2, surface
 
 Eight items from the owner's screenshots, on the `owner-round-2-2026-09-13`

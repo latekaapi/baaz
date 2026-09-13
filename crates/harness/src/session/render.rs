@@ -372,6 +372,36 @@ impl SessionView {
                             let _ = width_report.update(cx, |view, _| view.note_list_width(width));
                         }
                     })
+                    // D7. The wheel goes to `ListState::scroll_by` here, in the
+                    // capture phase, and never reaches `list()`'s own handler.
+                    //
+                    // `list()` accumulates a frame's wheel deltas with
+                    // `ScrollDelta::coalesce` and applies the running sum
+                    // against the offset it captured at paint. `coalesce`
+                    // *overrides* instead of summing when the two signs
+                    // differ, and `0.0f32.signum()` is `+1.0` — so a
+                    // `scrollingDeltaY == 0.0` sample, which AppKit emits
+                    // constantly (the MayBegin/Began pair, a finger-down
+                    // pause, the momentum tail), throws away everything
+                    // accumulated so far whenever the travel is negative, and
+                    // nothing when it is positive. Measured on the 300-turn
+                    // capture: a six-event burst with one zero in it kept
+                    // 432 px of 864 scrolling up and all 864 scrolling down.
+                    // That is the owner's "visibly stepped", and it is
+                    // asymmetric by direction.
+                    //
+                    // `scroll_by` is what every other scrollable surface in
+                    // the app already does — gpui's `div` adds each event's
+                    // own delta to the offset as it arrives — so the
+                    // transcript now moves by the same arithmetic as the
+                    // sidebar, the menus and the palettes. The hitbox is
+                    // gpui's own, so an overlay above the transcript takes the
+                    // wheel instead of us; `line_height` matches `div`'s
+                    // conversion for a real mouse wheel, where `list()` used a
+                    // hardcoded 20 px; and a gesture that is more horizontal
+                    // than vertical is left alone, so a wide markdown table
+                    // still scrolls sideways.
+                    .child(wheel_capture(self.list_state.clone(), cx))
                     .child(
                         list(self.list_state.clone(), move |ix, window, cx| {
                             // One item per row of a turn: only visible rows are
@@ -1448,6 +1478,65 @@ pub(super) fn resolve_workspace_path(workspace: &Path, raw: &str) -> Result<Path
         return Err(Escape::OutsideWorkspace);
     }
     Ok(normalized)
+}
+
+/// The transcript's wheel handler: a zero-size canvas over the list that
+/// takes every scroll event in the **capture** phase and drives the list with
+/// [`gpui::ListState::scroll_by`], one event at a time.
+///
+/// Capture, not bubble, is the only phase that can win here. `list()`
+/// registers its own handler during its paint, and `Interactivity::paint`
+/// registers a container's listeners *before* painting its children, so in
+/// the bubble phase — which runs in reverse registration order — the list
+/// always runs before anything wrapping it. A parent `on_scroll_wheel` plus
+/// `stop_propagation` is useless against it. Capture runs in registration
+/// order and precedes every bubble handler, so this one gets there first and
+/// stops the event before `list()` ever sees it.
+///
+/// See the call site for why `list()`'s own arithmetic had to go.
+fn wheel_capture(list_state: gpui::ListState, cx: &mut Context<SessionView>) -> gpui::AnyElement {
+    let view = cx.entity().downgrade();
+    gpui::canvas(
+        // Prepaint: gpui's own hitbox, so the wheel goes to whatever is
+        // actually on top. A palette or menu over the transcript owns the
+        // pointer, and `should_handle_scroll` is the same test `list()` and
+        // every `div` scroll container use.
+        move |bounds, window, _cx| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_bounds, hitbox, window, _cx| {
+            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(window.line_height());
+                // A gesture that is more sideways than not belongs to
+                // whatever is under it — a wide markdown table is the one
+                // horizontally scrollable thing inside a turn.
+                if delta.y.abs() < delta.x.abs() {
+                    return;
+                }
+                // The list counts pixels from the top, the wheel counts
+                // travel, and they run opposite ways. `scroll_by` reads the
+                // current position fresh, so nothing accumulates and nothing
+                // is rebased against a stale frame.
+                list_state.scroll_by(-delta.y);
+                // Taken whether or not it moved us: a zero sample that
+                // reaches `list()` is exactly what resets its accumulator.
+                cx.stop_propagation();
+                let _ = view.update(cx, |view, cx| {
+                    // An upward scroll leaves the tail, as it does everywhere
+                    // else; `scroll_by` has already stopped the list
+                    // following, and this keeps the view's own flag in step.
+                    if delta.y > gpui::px(0.0) {
+                        view.follow = false;
+                    }
+                    cx.notify();
+                });
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 #[cfg(test)]
