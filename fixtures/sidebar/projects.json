@@ -5,7 +5,7 @@
     "label": "Rewrite the router",
     "updatedAt": "2026-09-13T11:20:00Z",
     "turnCount": 12,
-    "status": "running"
+    "status": "idle"
   },
   {
     "sessionId": "s-web-2",
@@ -29,6 +29,30 @@
     "label": "Boot probe",
     "updatedAt": "2026-09-05T10:15:00Z",
     "turnCount": 2,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-web-5",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Search scopes",
+    "updatedAt": "2026-09-03T09:00:00Z",
+    "turnCount": 5,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-web-6",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Empty states",
+    "updatedAt": "2026-09-01T15:30:00Z",
+    "turnCount": 3,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-web-7",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Old deploy notes",
+    "updatedAt": "2026-08-28T11:00:00Z",
+    "turnCount": 1,
     "status": "idle"
   },
   {

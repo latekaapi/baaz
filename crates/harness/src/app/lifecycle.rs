@@ -275,8 +275,13 @@ impl Harness {
     }
 
     /// `pin`: pin or unpin the active session.
-    pub(crate) fn step_pin(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.active_id(cx) {
+    /// `pin`: toggle the active session's pin; `pin:<id>`: toggle that row's.
+    /// The id form is for captures: the replay row lives in closed Other, so
+    /// pinning it shows nothing — `pin:s-web-1` pins a row on screen.
+    pub(crate) fn step_pin(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let id =
+            if rest.is_empty() { self.active_id(cx) } else { Some(rest.to_owned()) };
+        if let Some(session_id) = id {
             self.toggle_pin(session_id, cx);
         }
     }

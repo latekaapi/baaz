@@ -40,7 +40,7 @@
 use std::io::Read;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -176,10 +176,21 @@ pub fn auth_mtime() -> Option<u64> {
     modified.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
+/// How long a cached answer is trusted before an ordinary boot probes again
+/// (owner round 2, S4). A forced probe — "Check again", `/usage`, `/status`
+/// — always re-probes; a second window booting inside the hour reuses the
+/// first's answer instead of driving a second TUI at the same workspace.
+const CACHE_TTL: Duration = Duration::from_secs(3600);
+
 /// The cached tier, when it was probed against the `auth.json` that is on disk
-/// now. A stale entry — a login or a logout since — reads as `None`, which is
-/// what makes the caller re-probe.
+/// now and inside [`CACHE_TTL`]. A stale entry — a login or a logout since,
+/// or an answer older than the hour — reads as `None`, which is what makes
+/// the caller re-probe.
 pub fn cached() -> Option<Tier> {
+    let modified = std::fs::metadata(cache_path()).ok()?.modified().ok()?;
+    if modified.elapsed().ok()? > CACHE_TTL {
+        return None;
+    }
     let cached: Cached = crate::store::read_json(&cache_path());
     if cached.auth_mtime != auth_mtime() {
         return None;
@@ -361,6 +372,101 @@ fn probe_cmdline(pid: u32) -> Option<String> {
     }
 }
 
+/// How long a probe waits for another harness's probe before going ahead
+/// alone (owner round 2, S4). Past one ceiling the holder is either done or
+/// stuck; either way the waiter stops waiting.
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// One probe at a time across harnesses, held while the TUI runs.
+///
+/// Two windows probing together drove two TUIs at the same throwaway
+/// workspace, and the second read "Plan unknown" while the first owned it.
+/// The lock serialises them; the waiter then reuses the winner's fresh
+/// cache ([`probe`]) instead of re-driving. Best-effort like the pid file:
+/// a lock whose holder died is stolen, and a wait past [`LOCK_WAIT`]
+/// proceeds without it rather than failing the probe.
+struct ProbeLock {
+    path: PathBuf,
+    pid: u32,
+}
+
+/// Take the probe lock, waiting boundedly. Returns the lock (if taken) and
+/// whether any wait happened — a waiter re-checks the cache, which the
+/// holder may have refreshed meanwhile.
+fn acquire_probe_lock() -> (Option<ProbeLock>, bool) {
+    let path = probe_workspace().join("probe.lock");
+    let _ = std::fs::create_dir_all(probe_workspace());
+    let start = Instant::now();
+    let mut waited = false;
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => {
+                let pid = std::process::id();
+                let _ = std::fs::write(&path, pid.to_string());
+                return (Some(ProbeLock { path, pid }), waited);
+            }
+            Err(_) => {
+                if lock_is_stale(&path) {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                if start.elapsed() >= LOCK_WAIT {
+                    return (None, waited);
+                }
+                waited = true;
+                std::thread::sleep(TICK);
+            }
+        }
+    }
+}
+
+/// Whether the lock may be taken: its holder is gone, or it outlived any
+/// probe — a ceiling and a grace past its write, so a stuck holder cannot
+/// wedge every later probe.
+fn lock_is_stale(path: &Path) -> bool {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = modified.elapsed() {
+                if age > PROBE_CEILING + JOIN_GRACE + Duration::from_secs(5) {
+                    return true;
+                }
+            }
+        }
+    }
+    let pid: Option<u32> = std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok());
+    match pid {
+        Some(pid) => !pid_alive(pid),
+        // Unparseable: nobody sane holds it.
+        None => true,
+    }
+}
+
+/// Whether `pid` names a live process. Signal 0 performs no action.
+fn pid_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // Past `pid_t` width the cast wraps — `u32::MAX` becomes `-1`, which
+    // addresses every signalable process and always answers alive. No real
+    // pid lives there, so a corrupt lock file reads as stale instead.
+    if pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: `kill` with a pid and signal 0 neither reads nor writes.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+impl Drop for ProbeLock {
+    fn drop(&mut self) {
+        // Only our own entry: a newer probe may hold the file now.
+        let mine: Option<u32> =
+            std::fs::read_to_string(&self.path).ok().and_then(|text| text.trim().parse().ok());
+        if mine == Some(self.pid) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Run [`probe`] on a thread and join it with a bounded wait, so exiting
 /// after it cannot orphan the child: the `Pty` is dropped — the child
 /// SIGKILLed and reaped — before this returns.
@@ -386,13 +492,39 @@ fn probe_blocking(muse: &str) -> Result<Tier, String> {
     }
 }
 
+/// Whether a parse is an answer rather than a card still drawing: a
+/// subscription counts only once both usage windows arrived. muse 1.2.1
+/// draws the plan sentence first and the percentages land later, so a plan
+/// without them is "not yet", not "none" — accepting it is what printed
+/// `Current — / Weekly —` while the card still had ink to lay (owner round
+/// 2, S4). Anything else is complete as parsed.
+fn complete(tier: &Tier) -> bool {
+    match tier {
+        Tier::Subscription { current_pct, weekly_pct, .. } => current_pct.is_some() && weekly_pct.is_some(),
+        Tier::PayAsYouGo | Tier::Unavailable(_) => true,
+    }
+}
+
 /// Drive the TUI and read the `/upgrade` card. Blocking for up to
 /// [`PROBE_CEILING`]; call it on a background thread.
+///
+/// One probe runs at a time across harnesses ([`acquire_probe_lock`]): a
+/// second window waits for the first's answer, then reuses its cache when it
+/// landed rather than driving a second TUI at the same workspace.
 ///
 /// Every error is a `String` that is safe to show: it names what went wrong,
 /// never what the terminal said.
 pub fn probe(muse: &str) -> Result<Tier, String> {
     let deadline = Instant::now() + PROBE_CEILING;
+    let (_lock, waited) = acquire_probe_lock();
+    // Whoever held the lock just remembered: a fresh cache is their answer,
+    // seconds old. Without a wait this changes nothing — a forced probe
+    // with no contention still probes.
+    if waited {
+        if let Some(tier) = cached() {
+            return Ok(tier);
+        }
+    }
     let mut pty = Pty::open(muse)?;
     let mut text = String::new();
 
@@ -415,12 +547,16 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
     //    and one of the early pieces names pay-as-you-go even on a subscribed
     //    account — the upgrade card is, after all, about upgrading — so a
     //    matcher that stopped at the first hit would report the opposite of
-    //    the truth. Read the whole window, then parse once.
+    //    the truth. Read the whole window, then parse once. A plan without
+    //    its percentages is still drawing (see [`complete`]), so the loop
+    //    holds for a complete answer; on the deadline a partial subscription
+    //    still names the plan (the footer shows it without a meter), which
+    //    beats "did not answer".
     pty.pump(&mut text, CARD.min(deadline.saturating_duration_since(Instant::now())));
     let mut tier = parse_card(&text);
-    while tier.is_none() && Instant::now() < deadline && text.len() < MAX_OUTPUT {
+    while tier.as_ref().is_none_or(|t| !complete(t)) && Instant::now() < deadline && text.len() < MAX_OUTPUT {
         pty.pump(&mut text, TICK);
-        tier = parse_card(&text);
+        tier = parse_card(&text).or(tier);
     }
 
     // 4. Two interrupts is how the TUI is asked to leave; the drop SIGKILLs
@@ -898,6 +1034,80 @@ mod tests {
         // No pid file at all sweeps nothing.
         sweep_stale_with(None, &|_| true, &kill);
         assert!(killed.borrow().is_empty());
+    }
+
+    /// The verbatim 1.2.1 card (owner round 2, S4), captured 2026-09-13 and
+    /// redacted: the plan name still arrives glued to the template's own
+    /// "usage", and both windows carry percentages — `Current 13%`,
+    /// `Weekly 36%` on this login. The parser takes both, not the first
+    /// partial draw.
+    #[test]
+    fn the_1_2_1_card_parses_with_its_percentages() {
+        let card = "Muse Code 1.2.1 Model set to muse-spark-1.3-contributor \
+                    /upgrade Show your subscription plan \
+                    You are currently subscribed to the Muse Code Power Usage usage plan. \
+                    Current 13% used · Resets at 7:14 PM Weekly 36% used · \
+                    Resets Sep 14 at 5:30 AM as of 3:29 PM Manage your plan in Account Center";
+        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets }) = parse_card(card) else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(plan, "Muse Code Power Usage");
+        assert_eq!(current_pct, Some(13));
+        assert_eq!(weekly_pct, Some(36));
+        assert_eq!(resets, vec!["Resets at 7:14 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+        assert!(complete(&Tier::Subscription {
+            plan,
+            current_pct,
+            weekly_pct,
+            resets,
+        }));
+    }
+
+    /// A plan sentence on its own parses — and reads as still drawing, not
+    /// as an answer. 1.2.1 lays the sentence before the usage windows, and
+    /// accepting the early match is what printed the dashes.
+    #[test]
+    fn a_plan_without_its_percentages_is_still_drawing() {
+        let partial = parse_card("You are currently subscribed to the Muse Code Power Usage usage plan.")
+            .expect("the plan parses early");
+        assert!(
+            matches!(partial, Tier::Subscription { current_pct: None, weekly_pct: None, .. }),
+            "percentages absent, not borrowed: {partial:?}"
+        );
+        assert!(!complete(&partial), "a plan without percentages is not an answer");
+        let full = parse_card(
+            "You are currently subscribed to the Muse Code Power Usage usage plan. \
+             Current 1% used · Resets soon Weekly 32% used · Resets later",
+        )
+        .expect("the full card parses");
+        assert!(complete(&full));
+        assert!(complete(&Tier::PayAsYouGo));
+    }
+
+    /// A lock whose holder died is stolen; one whose holder lives is waited
+    /// on; garbage is nobody's.
+    #[test]
+    fn a_dead_lock_is_stolen_and_a_live_one_waits() {
+        let dir = std::env::temp_dir().join(format!("harness-lock-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let lock = dir.join("probe.lock");
+        // A pid that cannot exist holds nothing.
+        std::fs::write(&lock, u32::MAX.to_string()).expect("write lock");
+        assert!(lock_is_stale(&lock), "a dead holder is stolen");
+        // This process holds it: wait.
+        std::fs::write(&lock, std::process::id().to_string()).expect("write lock");
+        assert!(!lock_is_stale(&lock), "a live holder is waited on");
+        // Garbage holds nothing either.
+        std::fs::write(&lock, "nope").expect("write lock");
+        assert!(lock_is_stale(&lock), "garbage is nobody's");
+        // Missing is takeable, which reads as stale.
+        std::fs::remove_file(&lock).expect("remove lock");
+        assert!(lock_is_stale(&lock), "a missing lock is takeable");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(1));
+        assert!(!pid_alive(u32::MAX));
     }
 
     /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same

@@ -169,7 +169,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
-    WindowVerb { verb: "pin", run: |this, _, _, cx| this.step_pin(cx) },
+    WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| this.confirm_archive_dialog(window, cx) },
     WindowVerb { verb: "show-archived", run: |this, _, _, cx| this.step_toggle_archived(cx) },

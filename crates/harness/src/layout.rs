@@ -42,6 +42,11 @@ pub struct Layout {
     /// "Other workspaces" group, which starts closed.
     #[serde(rename = "closedGroups", default, skip_serializing_if = "Vec::is_empty")]
     pub closed_groups: Vec<String>,
+    /// Project-group ids whose held-back rows stand shown: the "Show N more"
+    /// row's flip side (owner round 2, P3). Persisted exactly like
+    /// `closed_groups`, and empty by default so old files read unchanged.
+    #[serde(rename = "expandedGroups", default, skip_serializing_if = "Vec::is_empty")]
+    pub expanded_groups: Vec<String>,
     /// Whether the search palette looks across every project (`true`) or
     /// only the current one. Read by package 2's palette; stored here from
     /// the start so the toggle has somewhere to land.
@@ -55,7 +60,13 @@ fn default_search_all() -> bool {
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { sidebar_width: None, group_by: None, closed_groups: Vec::new(), search_all_projects: true }
+        Self {
+            sidebar_width: None,
+            group_by: None,
+            closed_groups: Vec::new(),
+            expanded_groups: Vec::new(),
+            search_all_projects: true,
+        }
     }
 }
 
@@ -122,24 +133,29 @@ mod tests {
         let layout = Layout::default();
         assert_eq!(layout.group_by, None);
         assert!(layout.closed_groups.is_empty());
+        assert!(layout.expanded_groups.is_empty());
         assert!(layout.search_all_projects);
         let stored = Layout {
             sidebar_width: Some(300.0),
             group_by: Some(GroupBy::Project),
             closed_groups: vec!["other".into()],
+            expanded_groups: vec!["p-harness".into()],
             search_all_projects: false,
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
         assert!(text.contains("\"closedGroups\":[\"other\"]"));
+        assert!(text.contains("\"expandedGroups\":[\"p-harness\"]"));
         assert!(text.contains("\"searchAllProjects\":false"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
+        assert_eq!(back.expanded_groups, vec!["p-harness".to_owned()]);
         assert!(!back.search_all_projects);
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.group_by, None);
+        assert!(old.expanded_groups.is_empty());
         assert!(old.search_all_projects);
     }
 

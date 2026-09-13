@@ -126,9 +126,11 @@ impl Harness {
                         this.new_session_in(Some(id.to_string()), cx);
                     }
                 }
-                // Folding arrives with the surface package; until then the
-                // row is inert.
-                GroupAction::ToggleMore => {}
+                // The folded group's "Show N more" / "Show less" row flips
+                // the group's id in `expanded_groups` and regroups.
+                GroupAction::ToggleMore => {
+                    this.toggle_expanded(id.to_string(), cx);
+                }
                 GroupAction::Menu => {
                     if id.as_ref() == crate::sidebar::OTHER_GROUP {
                         this.open_project_menu(None, false, cx);
@@ -510,9 +512,27 @@ impl Harness {
             Some((top, left)) => pop.top(px(top)).left(px(left)),
             None => pop.top(px(140.0)).left(px(12.0)),
         };
+        // A click anywhere outside closes it: the catcher is a sibling of
+        // the menu inside the same deferred draw (owner round 2, P4).
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        });
+        let catcher = div()
+            .id("sessions-view-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
             popover_layer(
-                pop.child(view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+                div().absolute().inset_0().child(catcher).child(
+                    pop.child(
+                        view_menu("sessions-view", rows).at_rest().on_activate(move |i, w, cx| {
+                            activate(&i, w, cx)
+                        }),
+                    ),
+                ),
             )
             .into_any_element(),
         )
@@ -538,13 +558,29 @@ impl Harness {
                 this.logout(cx);
             }
         });
+        // A click anywhere outside closes it: the catcher is a sibling of
+        // the menu inside the same deferred draw (owner round 2, P4).
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        });
+        let catcher = div()
+            .id("account-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
             popover_layer(
-                div()
-                    .absolute()
-                    .bottom(px(100.0))
-                    .left(px(12.0))
-                    .child(view_menu("account", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+                div().absolute().inset_0().child(catcher).child(
+                    div()
+                        .absolute()
+                        .bottom(px(100.0))
+                        .left(px(12.0))
+                        .child(view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
+                            activate(&i, w, cx)
+                        })),
+                ),
             )
             .into_any_element(),
         )

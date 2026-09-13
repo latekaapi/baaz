@@ -40,6 +40,7 @@ proj_shot() { # <name> <theme> <steps>
 }
 proj_shot projects-sidebar-dark dark "$proj_steps"
 proj_shot projects-sidebar-light light "$proj_steps"
+proj_shot round2-pinned-dark dark "$proj_steps;pin:s-web-1"
 proj_shot projects-header-menu-dark dark "$proj_steps;project-menu"
 proj_shot projects-group-menu-dark dark "$proj_steps;project-menu:acme-internal"
 proj_shot projects-palette-dark dark "$proj_steps;projects"

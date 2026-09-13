@@ -266,7 +266,11 @@ one collapsible group per adoption in sidebar order (pinned projects first,
 then newest session activity, no drag reorder), each with its mark, the
 branch in mono, a running dot and the count, hover `+` and `…`; sessions
 inside run newest-first with pinned first; then the muted "Other workspaces"
-group, always last and closed until opened. With one project and nothing in
+group, always last and closed until opened. Past five a group folds: it shows
+its pinned rows, then the five most recent others, and holds the rest behind
+a "Show N more" / "Show less" row (`expanded_groups` in the layout file,
+persisted like `closed_groups`); the open session is always among the
+visible ones even when older than the fifth. With one project and nothing in
 Other the list stays the date view: the grouping follows the data until the
 view menu persists a choice. A session just started is listed by the wire
 only after its log flushes on `turn/completed`, so its row appears at once as
@@ -316,15 +320,20 @@ adoption, and there is no Undo — re-adding is one click in the palette.
 The **Projects palette** (⌘⇧O, File › Add Project…, the nav row, the rail
 cell, `/project`): section Projects — every adoption with its mark, the root
 with `~` for home, and the visible session count; picking one starts a
-session there — then section Add: "Choose folder…" (the native panel,
-directories only) and recent Muse workspaces from the index (not yet adopted,
-still on disk, newest first, at most twelve, badged with their session
-count); adopting never starts a session. The query filters both sections by
-name and path. With no current project the crumb reads "Add a project…" and
-opens this palette; with no project at all the transcript column shows the
-**hero** ("Add a project", "Muse works inside a folder. Add one to start.",
-Choose folder… and Recent workspaces — the second opens the palette on its
-Add section).
+session there — then section Add, whose head is the library's
+`folder_drop_card` ("Drop a folder here / or click to choose one", ⌘⇧O
+keycap): a click opens the native folder panel (directories only), a drop
+adopts every dropped directory with the first becoming current. Below the
+card, recent Muse workspaces from the index (not yet adopted, still on disk,
+newest first, at most twelve, badged with their session count); adopting
+never starts a session. The card is not a row, so the keyboard walks past
+it; ↩ on an empty Projects palette opens the panel. The query filters both
+sections by name and path. With no current project the crumb reads "Add a
+project…" and opens this palette; with no project at all the transcript
+column shows the **hero** ("Add a project", "Muse works inside a folder. Add
+one to start.", Choose folder… and Recent workspaces — the second opens the
+palette on its Add section; the whole hero column also takes a drop, same
+rule as the card).
 
 Row actions are Pin, Rename and Archive. Pin regroups the list around the
 Pinned group. Rename opens the dense inline field — the library's

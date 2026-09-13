@@ -72,6 +72,33 @@ impl Harness {
         cx.notify();
     }
 
+    /// Adopt every dropped directory, the first becoming current: the
+    /// folder card and the hero's drop land here. Files never arrive (the
+    /// card filters them) and missing paths are skipped, so a sloppy drop
+    /// adopts what it can.
+    pub(crate) fn adopt_dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let dirs: Vec<std::path::PathBuf> = paths.into_iter().filter(|p| p.is_dir()).collect();
+        if dirs.is_empty() {
+            return;
+        }
+        crate::harness_log!("adopting {} dropped folder{}", dirs.len(), if dirs.len() == 1 { "" } else { "s" });
+        let mut first: Option<String> = None;
+        for root in &dirs {
+            let id = self.adopt_root(root, cx);
+            if first.is_none() {
+                first = Some(id);
+            }
+        }
+        // `adopt_root` leaves the last adoption current; the drop's first
+        // folder is the one the person aimed at.
+        if let Some(id) = first {
+            self.projects.current = Some(id.clone());
+            self.current_project = Some(id);
+            projects::write(&self.projects);
+            cx.notify();
+        }
+    }
+
     /// Adopt `root` into the sidebar and make it current, without starting
     /// a session there: adopting is not opening. Returns the project id.
     pub(crate) fn adopt_root(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> String {
@@ -429,6 +456,21 @@ impl Harness {
             };
             (HEADER_H + MENU_GAP, (right - MENU_W).max(8.0))
         };
+        // A click anywhere outside closes the menu and its colour submenu:
+        // the catcher is a sibling of the menu inside the same deferred
+        // draw, so it covers the window without covering the menu — the same
+        // shape the composer's chip pickers use (owner round 2, P4).
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.project_colour_open = false;
+            cx.notify();
+        });
+        let catcher = div()
+            .id("project-menu-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
         let mut stack = div()
             .absolute()
             .top(px(top))
@@ -468,7 +510,7 @@ impl Harness {
                 }
             }
         }
-        Some(popover_layer(stack).into_any_element())
+        Some(popover_layer(div().absolute().inset_0().child(catcher).child(stack)).into_any_element())
     }
 }
 

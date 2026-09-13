@@ -13,16 +13,18 @@ use super::*;
 /// one change to the next instead of rebuilt per caller per frame
 /// (findings `performance-5`, `support-2`, `performance-7`).
 ///
-/// Validity is four keys, not a timestamp: `key` is the list epoch plus the
-/// open session's id (the empty filter never hides the open session, so a
-/// switch changes the rows) plus the grouping mode and the closed set (a
-/// toggle regroups the same rows), and the grouping carries the minute it
-/// labelled its rows against.
+/// What `visible` was built for: the list epoch plus the open session's id
+/// (the empty filter never hides the open session, so a switch changes the
+/// rows) plus the grouping mode, the closed set and the expanded set (a
+/// toggle regroups the same rows).
+type ListKey = (u64, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>);
+
+/// Validity is five keys, not a timestamp (see [`ListKey`]), and the grouping
+/// carries the minute it labelled its rows against.
 #[derive(Default)]
 pub(crate) struct ListCache {
-    /// The `(list_epoch, active session id, grouping, closed groups)`
-    /// `visible` was built for.
-    key: Option<(u64, Option<String>, crate::layout::GroupBy, Vec<String>)>,
+    /// The [`ListKey`] `visible` was built for.
+    key: Option<ListKey>,
     /// The sorted visible rows for that key.
     visible: Rc<Vec<SessionEntry>>,
     /// The grouping of those rows, and the minute its elapsed tags read.
@@ -365,18 +367,34 @@ impl Harness {
         cx.notify();
     }
 
+    /// Flip a project group's "Show N more": its id moves in or out of
+    /// `expanded_groups` (persisted exactly like `closed_groups`) and the
+    /// list regroups. The group's own disclosure is untouched — an expanded
+    /// group can stand closed and open folded.
+    pub(crate) fn toggle_expanded(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.layout.expanded_groups.iter().any(|g| g == &id) {
+            self.layout.expanded_groups.retain(|g| g != &id);
+        } else {
+            self.layout.expanded_groups.push(id);
+        }
+        layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
     pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
         let active = self.active_id(cx);
         let group_by = self.effective_group_by();
         let closed = self.layout.closed_groups.clone();
+        let expanded = self.layout.expanded_groups.clone();
         let mut cache = self.list_cache.borrow_mut();
-        if cache
-            .key
-            .as_ref()
-            .is_some_and(|(epoch, id, cached_group, cached_closed)| {
-                *epoch == self.list_epoch && *id == active && *cached_group == group_by && *cached_closed == closed
-            })
-        {
+        if cache.key.as_ref().is_some_and(|(epoch, id, cached_group, cached_closed, cached_expanded)| {
+            *epoch == self.list_epoch
+                && *id == active
+                && *cached_group == group_by
+                && *cached_closed == closed
+                && *cached_expanded == expanded
+        }) {
             return Rc::clone(&cache.visible);
         }
         let mut rows: Vec<SessionEntry> = self
@@ -396,7 +414,7 @@ impl Harness {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        cache.key = Some((self.list_epoch, active, group_by, closed));
+        cache.key = Some((self.list_epoch, active, group_by, closed, expanded));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)
@@ -425,7 +443,11 @@ impl Harness {
             crate::layout::GroupBy::Project if self.sessions_loaded && self.index_loaded => {
                 let closed: std::collections::HashSet<String> =
                     self.layout.closed_groups.iter().cloned().collect();
-                sidebar::grouping_by_project(&visible, &self.projects, &cx.aui().colors, &self.branches, &closed, now)
+                let expanded: std::collections::HashSet<String> =
+                    self.layout.expanded_groups.iter().cloned().collect();
+                let active = self.active_id(cx);
+                let view = sidebar::GroupView { closed: &closed, expanded: &expanded, active: active.as_deref() };
+                sidebar::grouping_by_project(&visible, &self.projects, &cx.aui().colors, &self.branches, &view, now)
             }
             // The list or the index hasn't landed yet: a flat date view,
             // exactly what the window showed while loading before projects

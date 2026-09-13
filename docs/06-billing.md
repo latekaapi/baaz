@@ -63,8 +63,9 @@ So `crates/harness/src/tier.rs` drives that card:
    the palette would report the opposite of the truth on a subscribed account.
    Only what the card draws after the Enter is parsed.
 5. Read for 6 s, flatten (escapes dropped, box drawing and control characters
-   turned into spaces, whitespace collapsed), and parse once. Ceiling for the
-   whole probe: 20 s.
+   turned into spaces, whitespace collapsed), and parse — then keep reading
+   while the parse is a plan without its percentages (see below). Ceiling for
+   the whole probe: 20 s.
 6. Two `Ctrl-C`s to ask the TUI to leave; the `Drop` kills it if it declines.
 
 Opening the TUI **writes a session record and makes no model call**, so the
@@ -77,7 +78,7 @@ once left two orphans alive for six hours. Its pid is written to
 force-quit (the sweep checks the command line still names the probe workspace,
 never the pid alone). Closing the window or quitting mid-probe runs the same kill plus a bounded 3 s wait, so the interactive exit no longer orphans the child either. The next-probe sweep stays as the backstop for force-quits, which run no exit hook at all.
 
-### Two things the card does that a reasonable person would not expect
+### Three things the card does that a reasonable person would not expect
 
 - Its sentence is `subscribed to the {plan} usage plan.`, so the plan's name
   arrives glued to the template's own word. `Muse Code High Usage usage` is a
@@ -86,8 +87,15 @@ never the pid alone). Closing the window or quitting mid-probe runs the same kil
 - The card's footer follows the second reset with no separator
   (`… 5:30 AM as of 3:27 PM Manage your plan in Account Center <url>`), so the
   reset clauses are cut at `as of` and `Manage` as well as at `·`.
+- Under muse 1.2.1 the plan sentence draws **before** the usage windows: an
+  early read finds the plan with neither percentage, and accepting it printed
+  `Current — / Weekly —` while the card still had ink to lay. A subscription
+  missing either percentage reads as "not yet", not as an answer — the probe
+  keeps reading while time remains, and only on the deadline settles for the
+  plan without a meter. The verbatim 1.2.1 card (URL redacted) is pinned by
+  `tier::tests::the_1_2_1_card_parses_with_its_percentages`.
 
-Both are pinned by `tier::tests::the_card_this_muse_really_draws_parses`.
+The first two are pinned by `tier::tests::the_card_this_muse_really_draws_parses`.
 
 ### The rule the module keeps
 
@@ -112,8 +120,19 @@ time of `auth.json` in whole seconds:
 
 A cached entry whose `authMtime` no longer matches the `auth.json` on disk is
 ignored, which is what makes a logout and a re-login re-probe without anyone
-having to remember to. Beyond that the probe re-runs when the person asks:
-`/usage`, `/status`, and the unknown-plan banner's "Check again".
+having to remember to. An entry older than an hour is ignored the same way:
+an ordinary boot inside the hour reuses the cache instead of re-driving the
+TUI. Beyond that the probe re-runs when the person asks: `/usage`, `/status`,
+and the unknown-plan banner's "Check again" always re-probe.
+
+One probe runs at a time across harnesses. The probe takes
+`tier-probe/probe.lock` (its pid inside) before opening the TUI; a second
+window waits up to 30 s, then reuses the winner's fresh cache when it landed
+instead of driving a second TUI at the same workspace, and proceeds without
+the lock past the wait rather than failing. A lock whose holder died — or
+which outlived any probe by a ceiling and a grace — is stolen; the holder
+removes only its own entry. The next-probe sweep of `probe.pid` stays as the
+backstop behind it.
 
 Writes go through `crate::store::write_atomic` — a sibling file and a rename —
 so a crash mid-write leaves the previous answer rather than half of the next.
@@ -122,7 +141,7 @@ so a crash mid-write leaves the previous answer rather than half of the next.
 
 ## 4. What the app does about it
 
-| tier | sidebar footer, third row | banner over the composer | sending |
+| tier | sidebar footer, name row (the plan sits beside the name) | banner over the composer | sending |
 |---|---|---|---|
 | Subscription | `Muse Code High Usage · 2% this week`, quiet ink | none | normal |
 | Pay-as-you-go | `Pay-as-you-go`, **warning ink** | warning: "This login is on pay-as-you-go: every turn bills API usage. Sign out and back in after subscribing, or send anyway." · **Sign out** · **Send anyway** | **refused** until "Send anyway" |
@@ -136,6 +155,11 @@ who accepted the bill this morning is asked again tomorrow.
 
 `/status` and `/usage` lead with the plan, both percentages and the reset times,
 above everything the session knows about itself.
+
+While a probe runs, the unknown-plan banner's button reads **Checking…** and
+pressing it again is a no-op (a second probe is refused while the first runs).
+An asked-for probe toasts its result — "Plan: *Muse Code Power Usage*" or
+"Still unknown: *reason*" — and a known subscription clears its own banner.
 
 **A probe that fails never stops the app.** Every failure — no `muse` on the
 path, no pseudo-terminal, a card that never arrived — becomes

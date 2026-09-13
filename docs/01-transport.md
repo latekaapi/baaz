@@ -255,6 +255,15 @@ the schema and a capture disagree, the capture wins and it is written down.
     non-empty apiKey member"); a wrong-but-non-empty key fails as a
     `failed` outcome instead.
 
+15. **A loaded session refuses its second host, and only its second host.**
+    Under muse 1.2.1 two harness processes can list the same session, but the
+    second one's `session/resume` for it is rejected with `-32021` (`session
+    … is already in use`, `data.kind: sessionInUse`) while the first keeps
+    its lease — verified live with `--session <id>` on both and the second's
+    screen captured (`docs/images/round2-session-in-use-dark.png`). The
+    rejection is session-scoped: the wire stays up and everything else keeps
+    working.
+
 ---
 
 ## 5. What the fold does with the shape mismatch
