@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     point, px, App, AppContext as _, AsyncApp, Context, Entity, IntoElement, ListOffset,
-    PlatformInput, Render, ScrollDelta, ScrollWheelEvent, Window, WindowHandle,
+    ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollWheelEvent, Styled as _,
+    Window, WindowHandle,
 };
 use gpui_kit::component::Root;
 
@@ -116,8 +117,15 @@ pub(crate) const WHEEL_PHASES: [(char, f32, usize); 4] = [
     ('d', -20.0, 300),
 ];
 
-/// How long one wheel event waits for its frame before giving up on it.
-const WHEEL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one wheel event waits for its frame before giving up on it:
+/// one frame's turn, not a diagnosis. The old 2 s timeout made every quiet
+/// run (a settled transcript requests no frames) sit out the full timeout
+/// once per burst repeat — up to ~95 s of instrument artifact per run
+/// (`round4-scroll-cadence.md` §1) — and junked the run's `bench-frame`
+/// percentiles with it. A real frame lands within a few ticks; past 50 ms
+/// the frame is simply not coming, so the run samples the offset and moves
+/// on instead.
+const WHEEL_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 /// Frames to let the tail settle before the first wheel phase.
 const WHEEL_SETTLE_FRAMES: usize = 3;
 
@@ -221,7 +229,17 @@ const BURST_REPEATS: usize = 12;
 
 /// Dispatch each burst's events back to back with no frame between them, then
 /// let the frame land and measure how far the list actually went.
-async fn drive_bursts(handle: &WindowHandle<Root>, view: &Entity<SessionView>, cx: &mut AsyncApp) -> Vec<BurstStats> {
+///
+/// Every dispatched event and every landed frame appends the absolute pixel
+/// offset to `offsets` (owner round 4 §1): the per-frame series that tells
+/// hint re-basing (first-difference steps as rows measure) apart from frame
+/// overrun (uniform large steps).
+async fn drive_bursts(
+    handle: &WindowHandle<Root>,
+    view: &Entity<SessionView>,
+    cx: &mut AsyncApp,
+    offsets: &mut Vec<f32>,
+) -> Vec<BurstStats> {
     let px_of = |cx: &mut AsyncApp| -> f32 { cx.update(|cx| view.read(cx).bench_list_px()) };
     let mut out = Vec::with_capacity(BURSTS.len());
     for (name, dy, zeroed) in BURSTS {
@@ -239,6 +257,10 @@ async fn drive_bursts(handle: &WindowHandle<Root>, view: &Entity<SessionView>, c
                     let size = window.bounds().size;
                     let mut asked = 0.0f32;
                     let mut events = 0usize;
+                    // One sample per dispatched event: the handlers run
+                    // synchronously inside `dispatch_event`, so each read
+                    // sees exactly that event's application.
+                    let mut trail = Vec::with_capacity(2 * BURST_EVENTS + 1);
                     for i in 0..BURST_EVENTS {
                         // The zero sample goes in the middle of the burst,
                         // where it has something to destroy.
@@ -252,6 +274,7 @@ async fn drive_bursts(handle: &WindowHandle<Root>, view: &Entity<SessionView>, c
                                 cx,
                             );
                             events += 1;
+                            trail.push(view.read(cx).bench_list_px());
                         }
                         window.dispatch_event(
                             PlatformInput::ScrollWheel(ScrollWheelEvent {
@@ -263,13 +286,16 @@ async fn drive_bursts(handle: &WindowHandle<Root>, view: &Entity<SessionView>, c
                         );
                         asked += dy;
                         events += 1;
+                        trail.push(view.read(cx).bench_list_px());
                     }
-                    (asked, events)
+                    (asked, events, trail)
                 })
                 .ok();
-            let Some((asked, events)) = sent else { break };
+            let Some((asked, events, mut trail)) = sent else { break };
+            offsets.append(&mut trail);
             wait_for_frame(cx, before_frames).await;
             let after_px = px_of(cx);
+            offsets.push(after_px);
             // The list scrolls down as the pixel offset grows, and a positive
             // `dy` scrolls *up*, so the travel is the negated difference.
             stats.travelled_px += -(after_px - before_px);
@@ -320,6 +346,15 @@ async fn wait_for_frame(cx: &mut AsyncApp, since: u64) -> usize {
     }
 }
 
+/// The wheel instrument's outcome: per-phase stats, per-burst stats, and the
+/// per-frame offset series (owner round 4 §1).
+struct WheelOutcome {
+    tail_ix: usize,
+    phases: Vec<WheelPhaseStats>,
+    bursts: Vec<BurstStats>,
+    offsets: Vec<f32>,
+}
+
 /// The wheel instrument: pin the tail, then dispatch real `ScrollWheelEvent`s
 /// at the window centre — where the transcript is — one per frame, sampling
 /// the list's `logical_scroll_top` after each.
@@ -331,10 +366,12 @@ async fn drive_wheel(
     handle: &WindowHandle<Root>,
     view: &Entity<SessionView>,
     cx: &mut AsyncApp,
+    offsets: &mut Vec<f32>,
 ) -> (usize, Vec<WheelPhaseStats>, Vec<BurstStats>) {
     let top = |cx: &mut AsyncApp| -> (ListOffset, bool) {
         cx.update(|cx| (view.read(cx).bench_list_top(), view.read(cx).bench_list_end()))
     };
+    let px_of = |cx: &mut AsyncApp| -> f32 { cx.update(|cx| view.read(cx).bench_list_px()) };
     // Pin the tail first — the anchor every phase starts from — then let
     // layout settle so the first phase starts from a realized tail. The
     // pin is unconditional: with zero settle frames the flick lands on the
@@ -373,8 +410,12 @@ async fn drive_wheel(
                 break;
             }
             stats.events += 1;
+            // The offset after this event's application, then after its
+            // frame: one sample per event and one per frame (§1).
+            offsets.push(px_of(cx));
             stats.frames += wait_for_frame(cx, before).await;
             let (post, at_end) = top(cx);
+            offsets.push(px_of(cx));
             let step = classify_wheel_step(dy, pre, post, at_end);
             stats.jumps += step.jumped as usize;
             stats.stalls += step.stalled as usize;
@@ -383,7 +424,7 @@ async fn drive_wheel(
         }
         phases.push(stats);
     }
-    let bursts = drive_bursts(handle, view, cx).await;
+    let bursts = drive_bursts(handle, view, cx, offsets).await;
     (tail_ix, phases, bursts)
 }
 
@@ -411,7 +452,14 @@ impl BenchRoot {
 
 impl Render for BenchRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.view.update(cx, |view, cx| view.render_centre(window, cx))
+        // The whole-frame instrument's start; the trailing marker closes it
+        // after paint (see `session::draw_end_marker`).
+        session::note_draw_start();
+        let centre = self.view.update(cx, |view, cx| view.render_centre(window, cx));
+        // `size_full`: the wrapper fills the window exactly as the centre
+        // did standing alone, so the transcript keeps its viewport (a bare
+        // `div` would collapse it to zero height and unscrollable).
+        gpui::div().size_full().child(centre).child(session::draw_end_marker()).into_any_element()
     }
 }
 
@@ -470,9 +518,24 @@ fn git_hash() -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// What a `--bench` run drives: the bare transcript view, or the normal
+/// shell with its replayed session active (owner round 4 §1).
+pub enum BenchSeed {
+    /// The transcript alone (`--bench-bare`): the transcript-only number.
+    Bare(Entity<BenchRoot>),
+    /// The normal `Harness` root (the default): `bench-draw` includes the
+    /// sidebar, header and composer. The shell builds the replayed view on
+    /// its first frame, already in bench-replay state.
+    Shell(Entity<crate::app::Harness>),
+}
+
+/// How long the driver waits for the shell's first frame to open the
+/// replayed view before failing loudly.
+const SHELL_VIEW_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Drive the bench: stream the capture, scroll the list, then print one line
 /// per metric and quit.
-pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptions, command: String, cx: &mut App) {
+pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, command: String, cx: &mut App) {
     let (events, sent) = match session::parse_replay_file(&opts.capture) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -484,21 +547,41 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
     // `SessionView::apply` drops events for any other session, so the view
     // opens on the capture's own id (a capture names exactly one) and learns
     // the prompts turns were sent with, exactly like `--replay`.
-    let session_id = events
-        .iter()
-        .find_map(|event| match event {
-            MuseEvent::Notification { session_id: Some(id), .. } => Some(id.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "bench".to_owned());
+    let session_id = session::capture_session_id(&events).unwrap_or_else(|| "bench".to_owned());
     let events = cut_for_open_turn(events, opts.open_turn);
-    root.update(cx, |root, cx| {
-        root.view.update(cx, |view, cx| view.begin_bench_replay(session_id, sent, cx));
-    });
-    let view = root.read(cx).view.clone();
     cx.spawn(async move |cx| {
         // Held to the end: dropping the window handle closes the window.
         let _window = handle;
+        // The driven view: bare hands it over at once; the shell builds it
+        // on its first frame, so the driver waits for it — bounded, so a
+        // broken boot fails loudly instead of streaming into nothing.
+        let view = match seed {
+            BenchSeed::Bare(root) => {
+                let view = cx.update(|cx| root.read(cx).view.clone());
+                cx.update(|cx| view.update(cx, |view, cx| view.begin_bench_replay(session_id, sent, cx)));
+                view
+            }
+            BenchSeed::Shell(harness) => {
+                let mut waited = Duration::ZERO;
+                let view = loop {
+                    if let Some(view) = cx.update(|cx| harness.read(cx).active.clone()) {
+                        break view;
+                    }
+                    if waited >= SHELL_VIEW_TIMEOUT {
+                        eprintln!("bench: the shell never opened its replayed session");
+                        crate::tier::cleanup_probes();
+                        cx.update(|cx| cx.quit());
+                        return;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    waited += Duration::from_millis(50);
+                };
+                // The shell's `open_replay` in bench mode already parsed the
+                // capture and put the view in bench-replay state.
+                let _ = (session_id, sent);
+                view
+            }
+        };
         let total = events.len();
         let start_samples = session::frame_sample_count();
         let run_start = Instant::now();
@@ -537,9 +620,13 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         }
         // The wheel instrument runs after the stream, below, and its phases
         // are the frames — about 700 of them — so it skips this sweep.
-        let mut wheel_stats: Option<(usize, Vec<WheelPhaseStats>, Vec<BurstStats>)> = None;
+        let mut wheel_stats: Option<WheelOutcome> = None;
         if opts.scroll == BenchScroll::Wheel {
-            wheel_stats = Some(drive_wheel(&_window, &view, cx).await);
+            // The per-frame offset series (§1): one sample after every
+            // dispatched event and every frame, for the H-1 analysis.
+            let mut offsets = Vec::with_capacity(4096);
+            let (tail_ix, phases, bursts) = drive_wheel(&_window, &view, cx, &mut offsets).await;
+            wheel_stats = Some(WheelOutcome { tail_ix, phases, bursts, offsets });
         }
         // The frames: a small capture streams in milliseconds, so keep
         // sweeping until the asked frame count renders. Every scroll update
@@ -602,6 +689,18 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
             percentile(&element, 0.99),
             element.last().copied().unwrap_or(0)
         );
+        // Whole-frame render-to-paint, beside the element construction above:
+        // the gap between the two is layout, row building and paint.
+        let mut draw = session::take_draw_samples();
+        draw.sort_unstable();
+        println!(
+            "bench-draw n={} p50={}us p90={}us p99={}us max={}us",
+            draw.len(),
+            percentile(&draw, 0.5),
+            percentile(&draw, 0.9),
+            percentile(&draw, 0.99),
+            draw.last().copied().unwrap_or(0)
+        );
         println!(
             "bench-apply n={} p50={}us p90={}us p99={}us max={}us",
             apply_us.len(),
@@ -622,7 +721,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
         println!("bench-rss peak_mb={rss_mb:.1}");
         println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
         let scroll_json = match wheel_stats.as_ref() {
-            Some((tail_ix, phases, bursts)) => {
+            Some(WheelOutcome { tail_ix, phases, bursts, offsets }) => {
                 let events: usize = phases.iter().map(|p| p.events).sum();
                 let frames: usize = phases.iter().map(|p| p.frames).sum();
                 let jumps: usize = phases.iter().map(|p| p.jumps).sum();
@@ -684,6 +783,7 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                         "travelled_px": b.travelled_px,
                         "kept": b.kept(),
                     })).collect::<Vec<_>>(),
+                    "offset_px": offsets,
                 })
             }
             None => serde_json::Value::Null,
@@ -700,6 +800,13 @@ pub fn run(handle: WindowHandle<Root>, root: Entity<BenchRoot>, opts: BenchOptio
                     "p90_us": percentile(&element, 0.9),
                     "p99_us": percentile(&element, 0.99),
                     "max_us": element.last().copied().unwrap_or(0),
+                },
+                "draw": {
+                    "n": draw.len(),
+                    "p50_us": percentile(&draw, 0.5),
+                    "p90_us": percentile(&draw, 0.9),
+                    "p99_us": percentile(&draw, 0.99),
+                    "max_us": draw.last().copied().unwrap_or(0),
                 },
                 "fold_apply": {
                     "n": apply_us.len(),

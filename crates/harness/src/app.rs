@@ -79,7 +79,7 @@ use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
 use crate::resize::ResizeDrag;
 use crate::shot::CaptureToken;
-use crate::session::{SessionEvent, SessionHost, SessionView};
+use crate::session::{self, SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
 use crate::projects::{self, Project, Projects};
@@ -1125,13 +1125,24 @@ impl Harness {
         let (provider, workspace) = (self.args.provider.clone(), workspace);
         let overlays = self.overlays.clone();
         let capture = self.capture.clone();
+        // `--bench` through the shell drives the stream itself, event by
+        // event, so the view opens in bench-replay state instead of folding
+        // the capture at once.
+        let bench = self.args.bench_shell;
         // The capture names its own session; this id is a placeholder the view
         // replaces the moment the first line is folded.
         let view = cx.new(|cx| {
             let host = SessionHost { provider_id: provider, workspace, overlays, capture };
             let mut view = SessionView::new("replay".to_owned(), None, host, window, cx);
             view.set_at_rest(at_rest);
-            view.load_replay(&path, cx);
+            if bench {
+                if let Ok((events, sent)) = session::parse_replay_file(&path) {
+                    let id = session::capture_session_id(&events).unwrap_or_else(|| "bench".to_owned());
+                    view.begin_bench_replay(id, sent, cx);
+                }
+            } else {
+                view.load_replay(&path, cx);
+            }
             view.load_history(cx);
             view
         });
@@ -1469,6 +1480,9 @@ impl Harness {
 
 impl Render for Harness {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The whole-frame instrument's start; the trailing marker below
+        // closes it after paint (see `session::draw_end_marker`).
+        session::note_draw_start();
         self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.
@@ -1617,7 +1631,10 @@ impl Render for Harness {
                 .children(overflow)
                 .children(view_options)
                 .children(account)
-                .children(project_menu),
+                .children(project_menu)
+                // Painted last: the whole-frame instrument's end. Zero-size,
+                // paints nothing, takes no space — captures are unaffected.
+                .child(session::draw_end_marker()),
         )
     }
 }
