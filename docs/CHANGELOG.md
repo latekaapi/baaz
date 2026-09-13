@@ -22,6 +22,29 @@
   520 px. The wide state is past the shell's own `SIDEBAR_MAX_WIDTH` (420) on
   purpose: the component must not assume a bound the shell happens to impose.
 
+## 2026-09-13 — Owner round 3, audit and journeys
+
+- **`docs/audit/ui-audit-2026-09-13.md`** — every surface the app can be driven
+  to without spending a turn, under the eight headings the brief names. Fixed:
+  a tool the app does not recognise was titled with its raw arguments rather
+  than its name (P1); `0 tokens` drawn under a turn whose usage the wire never
+  reported (P2, library + harness); a project with no sessions wearing a `0`
+  pill (P2). Not fixed, each with its reason in the document: tool cards'
+  trailing cells disagreeing, the per-turn action row's contrast (an owner
+  decision from 2026-09-10 to re-take), and a tool *failure* routed into the
+  body meant for terminal output so it clips instead of wrapping. Twelve P3s.
+- **`docs/audit/journeys-2026-09-13.md`** and **`scripts/journeys.sh`** — 55
+  scripted journeys, each run twice from a fresh state dir; 44 pass. All 11
+  failures are one cause, verified twice and not an app fault:
+  `HARNESS_DETERMINISTIC=1` freezes the clock per *process*, not to a fixed
+  instant, so a relative label ("4h") can tick between two runs 24 s apart. The
+  same cause explains 10 of 69 capture pairs. A `HARNESS_NOW=<rfc3339>` would
+  retire it, and the sub-pixel-AA caveat carried since 2026-09-12 with it.
+- **Spend: zero billed turns** against a budget of six. The J2 approval
+  journeys are blocked on this machine answering "managed shell sandbox is
+  unavailable" to `session/userShell`, not on the budget; a billed turn asking
+  the model to run a shell command would have hit the same wall.
+
 ## 2026-09-13 — Owner round 3, harness
 
 - **D7 — The transcript scrolls by the same arithmetic as everything else.**
