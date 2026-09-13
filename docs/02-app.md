@@ -226,10 +226,33 @@ its tests are in `conn.rs`.
 
 ---
 
-## 5. Sessions (spec §3.7)
+## 5. Projects and sessions (spec §3.7)
 
-The workspace is the app's own — `--workspace <path>`, defaulting to `$PWD` —
-and `session/list` is filtered to it with `workspaceRoot`.
+One window over several workspaces (design `docs/12-projects.md`). A
+**project** is an adopted root with an identity of its own — a UUID, a stable
+colour (slot 1–8 on the library's label ramp), a name that renames without
+touching the folder, and the last-used model, effort and approval mode new
+sessions start with. The store is `projects.json` under the harness support
+dir (version 1, camelCase, atomic write, best-effort read); `sessions.json`
+`SessionMeta` carries `project: Option<String>`, written at `session/start`.
+
+A session resolves to a project in one order only: its stored project id when
+that adoption still exists, else the adoption whose canonical root equals the
+row's `workspace_root`, else "Other workspaces". Never by prefix, never by
+the current project — a worktree session's folder differs from its project's
+root, and a prefix would file it under the wrong project. `session/list` is
+unfiltered and paged (200/page to `nextCursor`), so every workspace's
+sessions arrive; rows carry the canonicalized workspace and the resolved
+project id, re-resolved after adoptions change.
+
+The **current project** is the open session's project, else the last used.
+Boot adopts per D39 (`--workspace` wins and is adopted if new; else the
+stored current; else the most recently opened; on a first run the launch
+directory unless it is `/` or `$HOME`, in which case the window opens with no
+project and the hero owns the empty state). ⌘N starts in the current project
+with its root and defaults; picking model, effort or approval mode in a
+session stores it on that session's project. The window title is
+`session — project`, or the project alone.
 
 `session/list` gives identity and timestamps and nothing a person can read. The
 words come from `~/.local/share/muse/session-index.db`, opened **read-only** and
@@ -238,13 +261,21 @@ database another process has locked all yield an empty map, and the sidebar
 falls back to `Session <first id group>`. Nothing ever writes to it.
 
 The rows are the library's `SessionSummary`, grouped by **calendar day** —
-Today / Yesterday / This week / This month / Earlier — and rendered by
-`nav::sidebar_view` in its date grouping, with a **Pinned** group first
-whenever a session is pinned (the library partitions `pinned` rows out of the
-date buckets itself). A session just started is listed by the wire only after
-its log flushes on `turn/completed`, so its row appears at once as a local one
-("New session", titled from the first prompt on `turn/started`) and the next
-`session/list` keeps it until the wire lists its id.
+Today / Yesterday / This week / This month / Earlier — or by **project**:
+one collapsible group per adoption in sidebar order (pinned projects first,
+then newest session activity, no drag reorder), each with its mark, the
+branch in mono, a running dot and the count, hover `+` and `…`; sessions
+inside run newest-first with pinned first; then the muted "Other workspaces"
+group, always last and closed until opened. With one project and nothing in
+Other the list stays the date view: the grouping follows the data until the
+view menu persists a choice. A session just started is listed by the wire
+only after its log flushes on `turn/completed`, so its row appears at once as
+a local one ("New session", titled from the first prompt on `turn/started`)
+and the next `session/list` keeps it until the wire lists its id.
+
+A group row's `+` starts a session in that project (making it current); on
+Other it opens the Projects palette. Its `…` opens the project menu for that
+project; on Other the menu carries the single row "Add as project…".
 
 Every row carries one muted second line: `last_summary` when a turn completed
 in this app, else the index's first prompt — but only when the row's label is
@@ -256,16 +287,44 @@ assistant text block: the fold is already in memory, so it costs no model
 call, and it persists through `sessions.json` beside the name, the hidden and
 archived flags, the pin and the derived title.
 
-Above the Sessions caption sit two `nav_item` rows: **New session** (Plus,
-the ⌘N in the sidebar) and **Automations** (Zap) with a muted "Soon" tag —
-a placeholder with no destination yet, so it answers with a toast saying so.
-The caption's sliders icon opens the **view menu**: Show empty (n) / Hide
-empty, Show hidden (n) / Hide hidden (the legacy `/hide` rows), Clear empty,
-and Show archived (n) / Hide archived. Toggles keep the menu open so the
+Above the Sessions caption sit three `nav_item` rows: **New session** (Plus,
+the ⌘N in the sidebar), **Add project** (Folder, the ⌘⇧O in the sidebar) and
+**Automations** (Zap) with a muted "Soon" tag — a placeholder with no
+destination yet, so it answers with a toast saying so.
+The caption's sliders icon opens the **view menu**: Group by project
+(toggle), Show empty (n) / Hide empty, Show hidden (n) / Hide hidden (the
+legacy `/hide` rows), Clear empty, Show archived (n) / Hide archived, and
+Search all projects (toggle). Toggles keep the menu open so the
 check is seen to change; Clear empty closes it and hides through the same
 `hidden = true` override as `/hide`, with the same eight-second Undo.
 Archived sessions are excluded from the list and from Clear-empty; shown,
 they carry a muted Archived tag and their Archive tray action puts them back.
+
+The **project menu** (`mark project ▾` in the header, or a group row's `…`):
+one toggle row per project in sidebar order, checked for the menu's project —
+picking one replaces a still-empty unnamed active session (hidden locally)
+and otherwise starts a sibling session there — then New session here, Rename
+project, a Colour submenu of eight swatches, Pin/Unpin project, Reveal in
+Finder, and Remove from sidebar. Renaming swaps the crumb's name for the
+dense field (Enter writes, Escape cancels, empty reverts to the folder name).
+**Remove from sidebar** asks first ("Its n sessions stay on disk and move to
+Other workspaces. Nothing in the folder changes."); on confirm the adoption
+is forgotten, its sessions' stored project is cleared (a later re-add
+resolves them by root), current passes to the most recently opened remaining
+adoption, and there is no Undo — re-adding is one click in the palette.
+
+The **Projects palette** (⌘⇧O, File › Add Project…, the nav row, the rail
+cell, `/project`): section Projects — every adoption with its mark, the root
+with `~` for home, and the visible session count; picking one starts a
+session there — then section Add: "Choose folder…" (the native panel,
+directories only) and recent Muse workspaces from the index (not yet adopted,
+still on disk, newest first, at most twelve, badged with their session
+count); adopting never starts a session. The query filters both sections by
+name and path. With no current project the crumb reads "Add a project…" and
+opens this palette; with no project at all the transcript column shows the
+**hero** ("Add a project", "Muse works inside a folder. Add one to start.",
+Choose folder… and Recent workspaces — the second opens the palette on its
+Add section).
 
 Row actions are Pin, Rename and Archive. Pin regroups the list around the
 Pinned group. Rename opens the dense inline field — the library's
@@ -279,13 +338,18 @@ remaining visible session opens (or the empty state), and a toast offers Undo
 for eight seconds.
 
 Collapsed (⌘B), the sidebar column is the library `rail` (`flat(true)`):
-New and Search cells, a separator, one dot per running session mirroring the
-rows' selection and pulse, and the account avatar. The Search cell opens the
-full-text search palette, exactly as ⌘⇧F does — there is no sidebar
-quick-filter, so the two can never be open together. The window-level
+New, Search and Projects cells, a separator, the open session and up to eight
+of the visible list as titled tiles — each tinted with its project's colour
+(sessions in Other keep the default ink), running ones pulsing — and the
+account avatar. The Search cell opens the full-text search palette, exactly
+as ⌘⇧F does; the Projects cell opens the Projects palette, exactly as ⌘⇧O
+does — there is no sidebar quick-filter, so the palettes can never share the
+sidebar. The window-level
 `--steps` verbs for all of this are `sidebar` (toggle), `overflow`,
-`view-menu`, `account`, `pin`, `archive`, `archive-confirm`, and
-`show-archived`, beside the older `search`,
+`view-menu`, `account`, `pin`, `archive`, `archive-confirm`,
+`show-archived`, `projects`, `project:<path>`, `project-menu[:<name>]`,
+`project-colour:<n>`, `group-by:<date|project>`, `remove-project:<name>` and
+`remove-confirm`, beside the older `search`,
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 
 Opening a session is `session/resume { excludeItems: true }` to attach, then
@@ -308,10 +372,14 @@ reconnect procedure of `docs/01-transport.md` §3, which serves `history.mode:
 `notFound/missingAnchor`. Hidden, archived and replayed views are never
 cached; eviction drops the view.
 
-⌘N starts a new session in the workspace; ⌘B toggles the sidebar rail.
+⌘N starts a new session in the current project; ⌘B toggles the sidebar rail.
 ⌘⇧F opens the full-text search palette (`PaletteKind::Search`): sessions by
 transcript text plus the files the workspace's turns created, Enter resumes a
-session and reveals a file in Finder. Full detail in `docs/12-search.md`.
+session and reveals a file in Finder. Every hit wears its project's display
+name (the folder name for sessions in Other); with "Search all projects" off
+the query is scoped to the current project and the card reads
+"Search {project}…". Full detail in `docs/12-search.md`. ⌘⇧O opens the
+Projects palette.
 
 The sidebar is resizable: a 6 px transparent strip over the sidebar/centre
 divider carries the horizontal-resize cursor, and dragging it sets the width
@@ -327,12 +395,16 @@ scripts a settled width for screenshots.
 The shell paints no traffic lights of its own — the window's native ones are
 the only set. The sidebar header reserves their footprint (`native_lights`)
 and the window positions them with `aui::shell::traffic_light_position`, so
-they sit centred in the header row at every density. The centre header shows the active session's label ("Harness"
-with nothing open) with the provider mark and the overflow "…" menu (Rename,
-Fork, Archive); the title flexes inside the header cell and elides to one
-line, so a whole first prompt as the label can never push the overflow button
-out. Renaming the open session swaps the title for the same dense single-line
-field the sidebar row uses, through the same confirm/Escape path. There is no
+they sit centred in the header row at every density. The centre header shows
+the project crumb (`mark project ▾`, one click target opening the project
+menu; "Add a project…" with no current project), a `·` separator, then the
+active session's label with the provider mark before it, and the overflow "…"
+menu (Rename, Fork, Archive); the title flexes inside the header cell and
+elides to one line, so a whole first prompt as the label can never push the
+overflow button out. Renaming the open session swaps the session label for
+the same dense single-line field the sidebar row uses, and renaming the
+project swaps the crumb's name, both through the same confirm/Escape path.
+There is no
 right-pane toggle and no right-header close button — the right pane's slot
 stays empty; the shell is always given `right_open(false)`, and there is no
 per-session state for it any more (B-DEAD-3, 2026-09-12). The
@@ -570,8 +642,9 @@ The banner stays up until the new child answers.
 
 The menu bar is built in `crate::app::set_menus`, called from `main.rs`
 after `bind_keys` — after, because macOS reads each item's shortcut from the
-keymap. Harness (About, Services, Quit), File (New, Close), Edit (the
-standard six with `OsAction`), View (sidebar, palette, search, theme),
+keymap. Harness (About, Services, Quit), File (Add Project…, New, Close),
+Edit (the standard six with `OsAction`), View (sidebar, palette, search,
+theme),
 Window (Minimize, Zoom), Help (Harness Documentation, which reveals the
 `docs/` folder in Finder). The red dot and ⌘W both hide the app (`cx.hide()`
 after the tier-probe cleanup): the window and the `muse serve` child survive,

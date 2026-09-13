@@ -53,6 +53,7 @@ mod log;
 mod login;
 mod overlays;
 mod plan;
+mod project_menu;
 mod projects;
 mod resize;
 mod search;
@@ -106,6 +107,9 @@ pub enum LoginSample {
     Validating,
     /// A failed flow, with both ways out.
     Error,
+    /// The signed-in shell with sample identity, for captures past the
+    /// login screen (the Projects hero). Sample data only, like the rest.
+    SignedIn,
 }
 
 /// Everything the command line and the environment decide.
@@ -182,9 +186,10 @@ pub struct Args {
     pub approval_mode: Option<muse_client::schema::ApprovalMode>,
     /// `--login <state>`: which login-screen state `--no-connect` boots
     /// into for a capture — `choose` (the default), `device`, `apikey`,
-    /// `apikey-error`, `validating` or `error`. Honoured only without a
-    /// connection; a live boot always starts at the method choice and lets
-    /// `account/read` decide.
+    /// `apikey-error`, `validating`, `error`, or `signed-in` (the shell with
+    /// sample identity, for captures past the login screen). Honoured only
+    /// without a connection; a live boot always starts at the method choice
+    /// and lets `account/read` decide.
     pub login: LoginSample,
     /// `--login-steps <a;b;c>`: what to do on the login screen before the
     /// capture. Honoured only when the app is really connected (never with
@@ -222,6 +227,18 @@ pub struct Args {
     /// `turn/completed`, so the idle window is measured with a turn still
     /// running (finding `performance-13`).
     pub bench_open_turn: bool,
+    /// `--sidebar-fixture <json>`: a scripted session list merged into the
+    /// sidebar as if the wire had listed it — `{ "sessionId",
+    /// "workspaceRoot", "label", "updatedAt", "turnCount", "status" }` per
+    /// row, built into [`SessionEntry`](crate::sidebar::SessionEntry)s
+    /// through its `join` with a synthetic `Session`. Relative roots resolve
+    /// against the launch directory. Allowed only with `--replay` or
+    /// `--no-connect`: it is a capture aid, not a live-session override.
+    /// Scripting only, and free.
+    pub sidebar_fixture: Option<PathBuf>,
+    /// `--no-project`: boot with no current project and adopt nothing, so a
+    /// capture can show the "Add a project" hero. Scripting only, and free.
+    pub no_project: bool,
 }
 
 fn parse_args() -> Args {
@@ -255,6 +272,8 @@ fn parse_args() -> Args {
         bench_frames: 600,
         bench_out: None,
         bench_open_turn: false,
+        sidebar_fixture: None,
+        no_project: false,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
@@ -330,7 +349,8 @@ fn parse_args() -> Args {
                     "apikey-error" => LoginSample::ApiKeyError,
                     "validating" => LoginSample::Validating,
                     "error" => LoginSample::Error,
-                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error, not `{other}`")),
+                    "signed-in" => LoginSample::SignedIn,
+                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in, not `{other}`")),
                 };
             }
             "--login-steps" => {
@@ -363,6 +383,11 @@ fn parse_args() -> Args {
                 out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
             }
             "--bench-open-turn" => out.bench_open_turn = true,
+            "--sidebar-fixture" => {
+                let value = args.next().unwrap_or_else(|| usage("--sidebar-fixture needs <fixture.json>"));
+                out.sidebar_fixture = Some(PathBuf::from(shellexpand(&value)));
+            }
+            "--no-project" => out.no_project = true,
             "--bench-out" => {
                 let value = args.next().unwrap_or_else(|| usage("--bench-out needs <file.json>"));
                 out.bench_out = Some(PathBuf::from(value));
@@ -386,6 +411,13 @@ fn parse_args() -> Args {
         if out.replay.is_some() {
             usage("--bench takes no --replay");
         }
+    }
+
+    // The fixture is a capture aid: with a live child it would be a lie
+    // about sessions the server never listed. Fail loudly rather than
+    // silently showing scripted rows beside live ones.
+    if out.sidebar_fixture.is_some() && out.replay.is_none() && !out.offline {
+        usage("--sidebar-fixture needs --replay or --no-connect");
     }
 
     // Scripted runs — screenshots, `--steps`, `--send` — are how a phase burns

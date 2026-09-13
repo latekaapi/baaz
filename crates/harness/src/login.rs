@@ -636,6 +636,18 @@ impl Harness {
                     cx,
                 );
             }
+            // Past the login screen with sample identity, for captures of
+            // the signed-in shell. No child runs behind it: the chrome
+            // draws, and anything needing the wire quietly does nothing.
+            LoginSample::SignedIn => {
+                self.auth = Auth::SignedIn(Identity {
+                    lane: AccountStateKind::AccountLogin,
+                    name: "Sample".into(),
+                    email: String::new(),
+                });
+                self.wire = crate::app::Wire::Ready;
+                cx.notify();
+            }
         }
     }
 

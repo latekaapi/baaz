@@ -48,9 +48,12 @@ Do not touch ~/Projects/cockpit.
 
 ## Where things are
 
-The next piece of work is **Projects** — one window over several workspaces — and
-`docs/09-handoff-improvements.md` §12 holds the brief for it: what the wire offers, what
-the harness already has, the decisions to take, and the order to build in. Start there.
+**Projects has landed** — one window over several workspaces, both packages
+(2026-09-13). The design record is `docs/12-projects.md` (§8 lists what bent
+between the drawing and the build); the model is `docs/02-app.md` §5 and the
+captures are `docs/images/projects-*.png`. The next piece of work is
+**worktrees** (D31): `git worktree add` by the harness, the worktree path as
+`workspaceRoot`, the stored project id keeping the session under its project.
 
 The 2026-09-13 owner round (fifteen faults, then four more the same evening) is in
 `docs/diagnosis/owner-round-2026-09-13.md` and the two newest changelog entries. Two rules

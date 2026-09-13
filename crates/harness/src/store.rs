@@ -23,6 +23,14 @@ pub fn support_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("HARNESS_STATE_DIR") {
         return PathBuf::from(dir);
     }
+    default_support_dir()
+}
+
+/// `~/Library/Application Support/harness` regardless of `HARNESS_STATE_DIR`:
+/// the directory the real app writes, which a scripted run with its own state
+/// dir still has to recognise as the harness's own (the tier probe's throwaway
+/// workspace lives there and is never a project to adopt).
+pub fn default_support_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join("Library").join("Application Support").join("harness")
 }

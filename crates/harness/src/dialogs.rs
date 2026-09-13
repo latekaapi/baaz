@@ -18,9 +18,9 @@ use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{view_menu, MenuRow};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui_icons::IconName;
-use aui_tokens::scale;
+use aui_tokens::{scale, ActiveAui};
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, SharedString, Window,
+    div, prelude::*, px, AnyElement, Context, Focusable, SharedString, Window,
 };
 use gpui_kit::component::input::Textarea;
 
@@ -46,26 +46,32 @@ fn palette_items(
     rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone())).collect()
 }
 
-/// [`palette_items`] over partitioned row references, which is what the search
-/// palette's two sections are built from.
-fn palette_items_ref(
-    rows: &[&(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon.clone(), (*label).clone()).context((*detail).clone())).collect()
+/// One row of the Projects palette: its stable id, whether it belongs to
+/// the Add section, and the drawn item.
+struct ProjectsRow {
+    /// `p:<project id>`, `choose`, or `a:<workspace root>`.
+    id: SharedString,
+    /// Section "Add" rather than section "Projects".
+    add: bool,
+    /// The drawn row: mark or folder glyph, root context, session-count
+    /// badge, and the `⌘⇧O` hint on "Choose folder…".
+    item: PaletteItem,
 }
 
-/// [`palette_items_ref`] with the query's first hit in each label emphasised
-/// through the row's own `matched` ranges. An empty query emphasises nothing.
-fn palette_items_ref_matching(
-    rows: &[&(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-    needle: &str,
-) -> Vec<PaletteItem> {
-    palette_items_ref(rows, icon)
-        .into_iter()
-        .map(|item| if needle.trim().is_empty() { item } else { item.matching(needle) })
-        .collect()
+/// A root with `~` for home, for the Projects section's context line.
+fn tilde_root(root: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy().into_owned();
+        if let Some(rest) = root.strip_prefix(home.as_str()) {
+            if rest.is_empty() {
+                return "~".to_owned();
+            }
+            if rest.starts_with('/') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    root.to_owned()
 }
 
 impl Harness {
@@ -133,6 +139,172 @@ impl Harness {
         cx.notify();
     }
 
+    /// Open the Projects palette: adopted projects to start a session in,
+    /// then "Choose folder…" and recent Muse workspaces to adopt. Picking a
+    /// project starts a session there (and makes it current); adopting only
+    /// adopts. `focus_add` starts the selection on "Choose folder…", which
+    /// is where the hero's "Recent workspaces" button points.
+    pub(crate) fn open_projects(&mut self, focus_add: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.projects_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        let rows = self.projects_rows(cx);
+        let selected = if focus_add { rows.iter().position(|row| row.add).unwrap_or(0) } else { 0 };
+        self.overlays.update(cx, |overlays, _| {
+            overlays.palette = Some(Palette { kind: PaletteKind::Projects, selected });
+        });
+        window.focus(&self.projects_query.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The Projects palette's query editor, drawn inside the card's own
+    /// query row like the search palette's: the query filters both sections
+    /// by name and path, synchronously.
+    fn projects_query_editor(&self) -> AnyElement {
+        Textarea::new(&self.projects_query)
+            .appearance(false)
+            .bordered(false)
+            .text_size(aui_tokens::scaled(scale::FS_14))
+            .h_auto()
+            .whitespace_nowrap()
+            .into_any_element()
+    }
+
+    /// Keep the Projects selection inside the filtered rows after a
+    /// keystroke: the rows are rebuilt at render, so a selection past the
+    /// new end wraps to the head.
+    pub(crate) fn clamp_projects_selection(&mut self, cx: &mut Context<Self>) {
+        let count = self.projects_rows(cx).len();
+        self.overlays.update(cx, |overlays, _| {
+            if let Some(palette) = overlays.palette.as_mut() {
+                if palette.kind == PaletteKind::Projects && palette.selected >= count {
+                    palette.selected = 0;
+                }
+            }
+        });
+    }
+
+    /// The native folder panel, directories only: a chosen folder is adopted
+    /// exactly like a recent workspace. Cancel does nothing.
+    pub(crate) fn choose_project_folder(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add".into()),
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(root) = paths.first() {
+                    this.adopt_root(root, cx);
+                }
+            });
+        }));
+    }
+
+    /// One ordered vec feeds the Projects palette's keyboard, click and
+    /// drawn sections, so the three agree about what row 3 is. Section
+    /// "Projects" holds every adoption in sidebar order (mark, root with `~`
+    /// for home, visible session count); section "Add" holds "Choose
+    /// folder…" then recent Muse workspaces from the index — minus adopted
+    /// roots, only paths that still exist as directories, newest first, at
+    /// most twelve, badged with their session count. The query filters both
+    /// sections by name and path.
+    fn projects_rows(&self, cx: &gpui::App) -> Vec<ProjectsRow> {
+        let p = cx.aui().colors;
+        let query = self.projects_query.read(cx).value().trim().to_owned();
+        let needle = query.to_lowercase();
+        let matches = |name: &str, path: &str| {
+            needle.is_empty() || name.to_lowercase().contains(&needle) || path.to_lowercase().contains(&needle)
+        };
+        let emphasise = |item: PaletteItem| if query.is_empty() { item } else { item.matching(&query) };
+        let mut rows = Vec::new();
+        let visible = self.visible_sessions(cx);
+        for project in self.ordered_projects() {
+            let root = project.root.to_string_lossy().into_owned();
+            if !matches(&project.name, &root) {
+                continue;
+            }
+            let initial = project
+                .name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "?".to_owned());
+            let count = visible.iter().filter(|e| e.project.as_deref() == Some(project.id.as_str())).count();
+            let item = emphasise(
+                PaletteItem::new(
+                    SharedString::from(format!("p:{}", project.id)),
+                    PaletteIcon::Mark {
+                        initial: initial.into(),
+                        colour: p.label(project.colour.saturating_sub(1)),
+                    },
+                    project.name.clone(),
+                )
+                .context(tilde_root(&root))
+                .badge(count.to_string()),
+            );
+            rows.push(ProjectsRow { id: SharedString::from(format!("p:{}", project.id)), add: false, item });
+        }
+        if matches("Choose folder…", "") {
+            rows.push(ProjectsRow {
+                id: "choose".into(),
+                add: true,
+                item: emphasise(PaletteItem::new(
+                    "choose",
+                    PaletteIcon::Glyph(IconName::Folder),
+                    "Choose folder…",
+                ))
+                .key("⌘⇧O"),
+            });
+        }
+        // Recent Muse workspaces, newest first: what the index saw sessions
+        // in, minus the roots this window already holds.
+        let adopted: std::collections::HashSet<String> = self
+            .projects
+            .projects
+            .iter()
+            .map(|p| crate::projects::canonical_path(&p.root).to_string_lossy().into_owned())
+            .collect();
+        // The harness's own state directory holds the tier probe's throwaway
+        // workspace; it is never a project anyone means to adopt.
+        let own_state = [crate::store::support_dir(), crate::store::default_support_dir()];
+        let mut recents = 0;
+        for (root, count, _) in crate::index::workspaces(&self.index) {
+            if recents >= 12 {
+                break;
+            }
+            if adopted.contains(&crate::projects::canonical_str(&root)) {
+                continue;
+            }
+            if own_state.iter().any(|dir| std::path::Path::new(&root).starts_with(dir)) {
+                continue;
+            }
+            if !std::path::Path::new(&root).is_dir() {
+                continue;
+            }
+            let name = std::path::Path::new(&root)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.clone());
+            if !matches(&name, &root) {
+                continue;
+            }
+            let item = emphasise(
+                PaletteItem::new(
+                    SharedString::from(format!("a:{root}")),
+                    PaletteIcon::Glyph(IconName::Folder),
+                    name,
+                )
+                .context(root.clone())
+                .badge(count.to_string()),
+            );
+            rows.push(ProjectsRow { id: SharedString::from(format!("a:{root}")), add: true, item });
+            recents += 1;
+        }
+        rows
+    }
+
     /// The palette's rows, in the order it draws them, so the keyboard and the
     /// click agree about what row 3 is.
     fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
@@ -154,6 +326,16 @@ impl Harness {
                 })
                 .collect(),
             PaletteKind::Search => self.search_rows(cx),
+            // The keyboard walks the same ordered rows the sections draw,
+            // so an index is a row in both.
+            PaletteKind::Projects => self
+                .projects_rows(cx)
+                .into_iter()
+                .map(|row| {
+                    let detail = row.item.context.clone().unwrap_or_default();
+                    (row.id, row.item.label, detail)
+                })
+                .collect(),
             // The active session's completed turns, newest first; the rows
             // come from the view because the window does not keep a transcript.
             PaletteKind::Fork => self
@@ -195,6 +377,18 @@ impl Harness {
                 }
             }
             PaletteKind::Resume => self.resume(id.to_string(), window, cx),
+            // Picking a project starts a session there (and makes it
+            // current); adopting a folder only adopts — it never starts one.
+            PaletteKind::Projects => {
+                if id.as_ref() == "choose" {
+                    self.choose_project_folder(cx);
+                } else if let Some(project) = id.strip_prefix("p:") {
+                    self.new_session_in(Some(project.to_owned()), cx);
+                } else if let Some(root) = id.strip_prefix("a:") {
+                    self.adopt_root(std::path::Path::new(root), cx);
+                }
+                let _ = window;
+            }
             PaletteKind::Fork => {
                 self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));
             }
@@ -329,6 +523,28 @@ impl Harness {
                     palette_items(&rows, PaletteIcon::Glyph(IconName::Git)),
                 )],
             ),
+            PaletteKind::Projects => {
+                // The rows already carry their icons, contexts and badges;
+                // the sections only partition them. An empty section is
+                // omitted, so a fresh window offers Add alone.
+                let mut adopted = Vec::new();
+                let mut adding = Vec::new();
+                for row in self.projects_rows(cx) {
+                    if row.add {
+                        adding.push(row.item);
+                    } else {
+                        adopted.push(row.item);
+                    }
+                }
+                let mut sections = Vec::new();
+                if !adopted.is_empty() {
+                    sections.push(PaletteSection::new("Projects", adopted));
+                }
+                if !adding.is_empty() {
+                    sections.push(PaletteSection::new("Add", adding));
+                }
+                (SharedString::from(""), SharedString::from("Add or switch project"), sections)
+            }
             PaletteKind::Search => {
                 let (sessions, files): (Vec<_>, Vec<_>) =
                     rows.iter().partition(|(id, _, _)| id.starts_with("s:"));
@@ -337,18 +553,35 @@ impl Harness {
                 // context (the snippet) stays muted mono. Primary text is
                 // the sidebar label either way; the snippet is display-only.
                 let query = self.search_query.read(cx).value().to_string();
+                // Every row wears its project's display name (the folder
+                // name for sessions no project holds), so hits from several
+                // projects tell themselves apart.
+                let badged = |part: Vec<&(SharedString, SharedString, SharedString)>, icon: PaletteIcon| {
+                    part.into_iter()
+                        .map(|(id, label, detail)| {
+                            let session_id = id
+                                .strip_prefix("s:")
+                                .or_else(|| id.strip_prefix("f:").and_then(|r| r.split_once(':').map(|(s, _)| s)));
+                            let mut item =
+                                PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone());
+                            if let Some(badge) =
+                                session_id.and_then(|sid| self.search_badge(sid).map(SharedString::from))
+                            {
+                                item = item.badge(badge);
+                            }
+                            if query.trim().is_empty() { item } else { item.matching(&query) }
+                        })
+                        .collect::<Vec<_>>()
+                };
                 let mut sections = Vec::new();
                 if !sessions.is_empty() {
                     sections.push(PaletteSection::new(
                         "Sessions",
-                        palette_items_ref_matching(&sessions, PaletteIcon::Glyph(IconName::Clock), &query),
+                        badged(sessions, PaletteIcon::Glyph(IconName::Clock)),
                     ));
                 }
                 if !files.is_empty() {
-                    sections.push(PaletteSection::new(
-                        "Files",
-                        palette_items_ref_matching(&files, PaletteIcon::Glyph(IconName::File), &query),
-                    ));
+                    sections.push(PaletteSection::new("Files", badged(files, PaletteIcon::Glyph(IconName::File))));
                 }
                 (SharedString::from(""), self.search_status(cx), sections)
             }
@@ -374,6 +607,9 @@ impl Harness {
             .on_dismiss(move |w, cx| dismiss(&(), w, cx));
         if kind == PaletteKind::Search {
             card = card.query_slot(self.search_query_editor());
+        }
+        if kind == PaletteKind::Projects {
+            card = card.query_slot(self.projects_query_editor());
         }
         if self.still() {
             card = card.at_rest();
@@ -422,7 +658,7 @@ impl Harness {
         // the entity's borrow and `cx.listener` cannot be alive at once.
         let (title, detail, kind, primary_label, action, danger) = {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
-            let danger = modal.action == DialogAction::Archive;
+            let danger = modal.action == DialogAction::Archive || modal.action == DialogAction::RemoveProject;
             (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, danger)
         };
         // The archive target stays on the dialog until its own button runs:
@@ -441,6 +677,10 @@ impl Harness {
                 this.confirm_archive_dialog(window, cx);
                 return;
             }
+            if action == DialogAction::RemoveProject {
+                this.confirm_remove_project(cx);
+                return;
+            }
             this.close_dialog(cx);
             match action {
                 DialogAction::Dismiss => {}
@@ -454,6 +694,8 @@ impl Harness {
                     this.login.reset_to_choose();
                 }
                 DialogAction::Archive => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::RemoveProject => {}
             }
             cx.notify();
         });
@@ -550,5 +792,21 @@ impl Harness {
             )
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tilde_root;
+
+    #[test]
+    fn home_folds_to_a_tilde_and_other_roots_stand() {
+        // HOME is read, never written: safe beside parallel tests.
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy().into_owned();
+            assert_eq!(tilde_root(&format!("{home}/Projects/harness")), "~/Projects/harness");
+            assert_eq!(tilde_root(&home), "~");
+        }
+        assert_eq!(tilde_root("/private/tmp/h4ws"), "/private/tmp/h4ws");
     }
 }

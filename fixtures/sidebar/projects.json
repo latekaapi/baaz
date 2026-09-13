@@ -1,0 +1,74 @@
+[
+  {
+    "sessionId": "s-web-1",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Rewrite the router",
+    "updatedAt": "2026-09-13T11:20:00Z",
+    "turnCount": 12,
+    "status": "running"
+  },
+  {
+    "sessionId": "s-web-2",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Fix the header",
+    "updatedAt": "2026-09-13T09:05:00Z",
+    "turnCount": 4,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-web-3",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Sidebar grouping",
+    "updatedAt": "2026-09-12T16:40:00Z",
+    "turnCount": 7,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-web-4",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Boot probe",
+    "updatedAt": "2026-09-05T10:15:00Z",
+    "turnCount": 2,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-int-1",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Rotate the keys",
+    "updatedAt": "2026-09-13T08:00:00Z",
+    "turnCount": 5,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-int-2",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Audit log",
+    "updatedAt": "2026-09-06T14:30:00Z",
+    "turnCount": 1,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-notes-1",
+    "workspaceRoot": "fixtures/ws/notes",
+    "label": "Weeknotes",
+    "updatedAt": "2026-09-12T20:00:00Z",
+    "turnCount": 3,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-stray-1",
+    "workspaceRoot": "/private/tmp/h4ws",
+    "label": "Scratch pad",
+    "updatedAt": "2026-09-13T07:30:00Z",
+    "turnCount": 2,
+    "status": "idle"
+  },
+  {
+    "sessionId": "s-demo-1",
+    "workspaceRoot": "/private/tmp/harness-demo",
+    "label": "Demo walkthrough",
+    "updatedAt": "2026-09-04T12:00:00Z",
+    "turnCount": 6,
+    "status": "idle"
+  }
+]
