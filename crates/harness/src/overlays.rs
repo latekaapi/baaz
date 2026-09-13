@@ -120,6 +120,11 @@ pub struct Palette {
     pub selected: usize,
 }
 
+/// How many roots the `@` index and the skills cache hold: one window over
+/// several workspaces, not an unbounded map. Matches the parked-view MRU, so
+/// a root with an open view is never the one dropped.
+pub(crate) const MAX_CACHED_ROOTS: usize = 8;
+
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
@@ -131,15 +136,14 @@ pub struct Overlays {
     pub palette: Option<Palette>,
     /// Toasts, oldest first.
     pub toasts: Vec<ToastData>,
-    /// The `/` menu's **Skills** section, from `muse skills list --json`.
-    pub skills: Vec<crate::skills::Skill>,
-    /// The `@` picker's candidates: the workspace's files, relative to it,
-    /// lowercased once at walk time (see [`crate::files::FileEntry`]).
-    pub files: Vec<crate::files::FileEntry>,
-    /// Whether the walk that produced `files` hit `files::CAP` and stopped
-    /// (finding `support-8`): some files in the workspace are then missing
-    /// from `files` with nothing in the picker to say so.
-    pub files_truncated: bool,
+    /// The `@` picker's candidates per root: the root's files, relative to
+    /// it, lowercased once at walk time (see [`crate::files::FileEntry`]).
+    files_by_root: std::collections::HashMap<String, crate::files::WalkResult>,
+    /// The `/` menu's **Skills** section per root, from `muse skills list
+    /// --json` with that root as the working directory.
+    skills_by_root: std::collections::HashMap<String, Vec<crate::skills::Skill>>,
+    /// Roots in walk order, oldest first: what the cap above evicts from.
+    roots_order: Vec<String>,
     /// Monotonic id source, so two identical toasts are still two toasts.
     next_toast: u64,
 }
@@ -223,6 +227,42 @@ impl Overlays {
     /// Drop the toast with this id.
     pub fn dismiss_toast(&mut self, id: &str) {
         self.toasts.retain(|t| t.id != id);
+    }
+
+    /// Whether `root`'s files and skills are already cached.
+    pub fn has_root(&self, root: &str) -> bool {
+        self.files_by_root.contains_key(root)
+    }
+
+    /// The `@` picker's candidates for `root`: walked files, relative to it.
+    /// An unwalked root offers nothing, which is the caller's cue to walk it.
+    pub fn files_for(&self, root: &str) -> &[crate::files::FileEntry] {
+        self.files_by_root.get(root).map(|walk| walk.entries.as_slice()).unwrap_or(&[])
+    }
+
+    /// The `/` menu's **Skills** section for `root`.
+    pub fn skills_for(&self, root: &str) -> &[crate::skills::Skill] {
+        self.skills_by_root.get(root).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Store a walked root's files and skills, evicting the least recently
+    /// walked past [`MAX_CACHED_ROOTS`]. A re-walk counts as use: the root
+    /// moves to the back of the queue.
+    pub fn insert_root(
+        &mut self,
+        root: String,
+        files: crate::files::WalkResult,
+        skills: Vec<crate::skills::Skill>,
+    ) {
+        self.roots_order.retain(|cached| cached != &root);
+        self.roots_order.push(root.clone());
+        while self.roots_order.len() > MAX_CACHED_ROOTS {
+            let oldest = self.roots_order.remove(0);
+            self.files_by_root.remove(&oldest);
+            self.skills_by_root.remove(&oldest);
+        }
+        self.files_by_root.insert(root.clone(), files);
+        self.skills_by_root.insert(root, skills);
     }
 }
 
@@ -454,5 +494,44 @@ mod tests {
             assert_eq!(Command::parse(command.slash()), Some(command));
         }
         assert_eq!(Command::parse("/nope"), None);
+    }
+
+    fn walk_with(paths: &[&str]) -> crate::files::WalkResult {
+        crate::files::WalkResult {
+            entries: paths
+                .iter()
+                .map(|path| crate::files::FileEntry { path: path.to_string(), lower: path.to_lowercase() })
+                .collect(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn the_per_root_cache_serves_each_root_its_own_files() {
+        let mut overlays = Overlays::default();
+        assert!(overlays.files_for("/work/a").is_empty());
+        overlays.insert_root("/work/a".into(), walk_with(&["src/main.rs"]), Vec::new());
+        overlays.insert_root("/work/b".into(), walk_with(&["docs/notes.md"]), Vec::new());
+        assert_eq!(overlays.files_for("/work/a").len(), 1);
+        assert_eq!(overlays.files_for("/work/a")[0].path, "src/main.rs");
+        assert_eq!(overlays.files_for("/work/b")[0].path, "docs/notes.md");
+        assert!(overlays.has_root("/work/a"));
+        assert!(!overlays.has_root("/work/c"));
+    }
+
+    #[test]
+    fn the_cache_holds_eight_roots_and_re_walk_counts_as_use() {
+        let mut overlays = Overlays::default();
+        for i in 0..MAX_CACHED_ROOTS {
+            overlays.insert_root(format!("/work/{i}"), walk_with(&["f"]), Vec::new());
+        }
+        assert!(overlays.has_root("/work/0"));
+        // Re-walking `/work/0` moves it to the back; the next insert drops
+        // `/work/1` instead.
+        overlays.insert_root("/work/0".into(), walk_with(&["f"]), Vec::new());
+        overlays.insert_root("/work/new".into(), walk_with(&["f"]), Vec::new());
+        assert!(overlays.has_root("/work/0"));
+        assert!(overlays.has_root("/work/new"));
+        assert!(!overlays.has_root("/work/1"));
     }
 }

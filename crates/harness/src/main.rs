@@ -53,6 +53,7 @@ mod log;
 mod login;
 mod overlays;
 mod plan;
+mod projects;
 mod resize;
 mod search;
 mod session;
@@ -112,6 +113,10 @@ pub enum LoginSample {
 pub struct Args {
     /// The workspace every session in this window runs in.
     pub workspace: PathBuf,
+    /// Whether `--workspace` was passed explicitly, as opposed to the launch
+    /// directory default. Boot adopts an explicit workspace into the projects
+    /// store; a defaulted one only when a scripted run needs today's meaning.
+    pub workspace_explicit: bool,
     /// `meta`, or `echo` under `HARNESS_PROVIDER=echo`.
     pub provider: String,
     /// The `muse` binary to drive.
@@ -223,6 +228,7 @@ fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut out = Args {
         workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        workspace_explicit: false,
         // The spec caps real turns. `echo` does not dodge that cap — it is
         // routed to the real model on a signed-in machine (see the module
         // header) — but it is the cheapest route and the one scripted runs
@@ -260,6 +266,7 @@ fn parse_args() -> Args {
             "--workspace" => {
                 let value = args.next().unwrap_or_else(|| usage("--workspace needs a path"));
                 out.workspace = PathBuf::from(shellexpand(&value));
+                out.workspace_explicit = true;
             }
             "--provider" => {
                 out.provider = args.next().unwrap_or_else(|| usage("--provider needs an id"));

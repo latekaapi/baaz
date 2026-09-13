@@ -130,6 +130,7 @@ impl SessionView {
                 path,
                 session_id: self.session_id.clone(),
                 kind: verb.to_owned(),
+                workspace: crate::projects::canonical_str(&self.workspace),
             });
         }
         if records.is_empty() {

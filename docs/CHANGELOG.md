@@ -1,5 +1,45 @@
 # Harness changelog
 
+## 2026-09-13 — Projects, package 1
+
+The model under the Projects design (`docs/12-projects.md` §4): adopted roots with
+their own identity, every session carrying its workspace, the sidebar grouping by
+project. With one adopted project the window draws exactly as before (the date view
+stays the default); with more, sessions group under their project and the rest under
+"Other workspaces". The header crumb, project menu, Projects palette, removal and the
+steps verbs arrive in package 2. Upgrading drops and rebuilds `search.db`'s FTS
+tables (`sessions_fts` is rebuilt from the list; `files_fts` starts empty and fills
+again as turns complete).
+
+- **H1 — `projects.rs`.** `projects.json` (version 1, camelCase, atomic write,
+  best-effort read): id, canonical root, name, colour 1–8 (least-used wins),
+  `pinned`, timestamps, per-project model/effort/approval-mode defaults; resolve
+  is stored id, then canonical root equality, never a prefix.
+- **H2 — the index reads `workspace_root`.** Selected only when the column
+  exists, so an older Muse index still yields titles; `workspaces()` aggregates
+  root, session count, newest activity for package 2's palette.
+- **H3 — every session, each with its workspace.** `session/list` is unfiltered
+  and paged (200/page, cursor to `None`); rows carry the canonicalized workspace
+  and the resolved project id, re-resolved after adoptions change; replays read
+  theirs from the capture.
+- **H4 — grouping by project.** `layout.json` gains `groupBy` (auto: Project
+  with ≥2 adoptions or a stray session, else Date), `closedGroups` ("Other
+  workspaces" starts closed) and `searchAllProjects`; the view menu toggles the
+  grouping and the search scope; group rows carry mark, branch and running dot.
+- **H5 — the current project.** Boot adopts per D39; opening a session adopts
+  its project; ⌘N starts in the current project with its root, model and mode;
+  the title bar names the project.
+- **H6 — per-project defaults.** Picking model, effort or approval mode in a
+  session stores it on that session's project; the next session there starts
+  with it.
+- **H7 — the `@` index and skills per root.** File and skill caches are keyed
+  by root (8 roots, LRU); the mention picker never ranks another root's files;
+  the truncation toast names the project.
+- **H8 — `history.json` honours `HARNESS_STATE_DIR`.**
+- **H9 — `search.db` learns the workspace.** Both FTS tables gain `workspace
+  UNINDEXED` behind a `meta` schema version; queries return it, scoped search
+  filters by the current project's root, reveals join the hit's own workspace.
+
 ## 2026-09-13 — Owner follow-up: settled cards, one-line menu rows, a palette that holds its field, a rail worth collapsing to
 
 Four faults from the owner's second look, diagnosed on the wire and fixed the same evening

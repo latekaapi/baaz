@@ -33,6 +33,7 @@ pub struct FileEntry {
 /// rather than running out of files on its own (finding `support-8`) — a
 /// monorepo's mention picker silently missing files past 5 000 with no
 /// signal at all was the bug; this is the signal.
+#[derive(Clone, Debug)]
 pub struct WalkResult {
     /// The mentionable files, sorted shortest path first.
     pub entries: Vec<FileEntry>,

@@ -13,14 +13,16 @@ use super::*;
 /// one change to the next instead of rebuilt per caller per frame
 /// (findings `performance-5`, `support-2`, `performance-7`).
 ///
-/// Validity is two keys, not a timestamp: `key` is the list epoch plus the
+/// Validity is four keys, not a timestamp: `key` is the list epoch plus the
 /// open session's id (the empty filter never hides the open session, so a
-/// switch changes the rows), and the grouping carries the minute it labelled
-/// its rows against.
+/// switch changes the rows) plus the grouping mode and the closed set (a
+/// toggle regroups the same rows), and the grouping carries the minute it
+/// labelled its rows against.
 #[derive(Default)]
 pub(crate) struct ListCache {
-    /// The `(list_epoch, active session id)` `visible` was built for.
-    key: Option<(u64, Option<String>)>,
+    /// The `(list_epoch, active session id, grouping, closed groups)`
+    /// `visible` was built for.
+    key: Option<(u64, Option<String>, crate::layout::GroupBy, Vec<String>)>,
     /// The sorted visible rows for that key.
     visible: Rc<Vec<SessionEntry>>,
     /// The grouping of those rows, and the minute its elapsed tags read.
@@ -294,10 +296,68 @@ impl Harness {
     /// caller per frame (finding `performance-5`). `render_sidebar`, the
     /// sidebar's empty states, the Resume palette and the search rows all read
     /// the same `Rc`; [`Self::invalidate_list`] is what drops it.
+    /// Which grouping the sidebar draws: the person's explicit choice, else
+    /// Project once there is more than one adoption or a session that
+    /// resolves to none, else Date — so one adopted project with everything
+    /// in it draws exactly the date view it always did.
+    ///
+    /// Replayed rows are capture stand-ins, not sessions that failed to
+    /// adopt: they never flip the default on their own, so a `--replay`
+    /// capture draws as it always did whatever the store holds.
+    pub(crate) fn effective_group_by(&self) -> crate::layout::GroupBy {
+        if let Some(mode) = self.layout.group_by {
+            return mode;
+        }
+        if self.projects.projects.len() >= 2 {
+            return crate::layout::GroupBy::Project;
+        }
+        if self.sessions.iter().any(|e| !e.replayed && e.project.is_none()) {
+            return crate::layout::GroupBy::Project;
+        }
+        crate::layout::GroupBy::Date
+    }
+
+    /// The Sessions view menu's "Group by project": persist the other mode
+    /// and regroup. The first toggle is what persists the choice at all —
+    /// until then the grouping follows the data.
+    pub(crate) fn toggle_group_by(&mut self, cx: &mut Context<Self>) {
+        let next = match self.effective_group_by() {
+            crate::layout::GroupBy::Project => crate::layout::GroupBy::Date,
+            crate::layout::GroupBy::Date => crate::layout::GroupBy::Project,
+        };
+        self.layout.group_by = Some(next);
+        layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// Flip a project group's disclosure: its id moves in or out of
+    /// `closed_groups` and the layout is written. "Other workspaces" reads
+    /// the same set inverted (closed until opened), so the one flip rule
+    /// serves both rows.
+    pub(crate) fn toggle_group(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.layout.closed_groups.iter().any(|g| g == &id) {
+            self.layout.closed_groups.retain(|g| g != &id);
+        } else {
+            self.layout.closed_groups.push(id);
+        }
+        layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
     pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
         let active = self.active_id(cx);
+        let group_by = self.effective_group_by();
+        let closed = self.layout.closed_groups.clone();
         let mut cache = self.list_cache.borrow_mut();
-        if cache.key.as_ref().is_some_and(|(epoch, id)| *epoch == self.list_epoch && *id == active) {
+        if cache
+            .key
+            .as_ref()
+            .is_some_and(|(epoch, id, cached_group, cached_closed)| {
+                *epoch == self.list_epoch && *id == active && *cached_group == group_by && *cached_closed == closed
+            })
+        {
             return Rc::clone(&cache.visible);
         }
         let mut rows: Vec<SessionEntry> = self
@@ -317,7 +377,7 @@ impl Harness {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        cache.key = Some((self.list_epoch, active));
+        cache.key = Some((self.list_epoch, active, group_by, closed));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)
@@ -341,7 +401,21 @@ impl Harness {
                 return Rc::clone(grouping);
             }
         }
-        let grouping = Rc::new(sidebar::grouping_at(&visible, now));
+        let grouping = Rc::new(match self.effective_group_by() {
+            crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
+            crate::layout::GroupBy::Project if self.sessions_loaded && self.index_loaded => {
+                let closed: std::collections::HashSet<String> =
+                    self.layout.closed_groups.iter().cloned().collect();
+                sidebar::grouping_by_project(&visible, &self.projects, &cx.aui().colors, &self.branches, &closed, now)
+            }
+            // The list or the index hasn't landed yet: a flat date view,
+            // exactly what the window showed while loading before projects
+            // existed. Row visibility comes from the index, so project
+            // groups debut only with their rows — the collapse measures
+            // content on its first frame instead of opening from an empty
+            // box it never re-measures.
+            crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
+        });
         cache.grouping = Some((minute, Rc::clone(&grouping)));
         grouping
     }

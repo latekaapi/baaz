@@ -13,7 +13,7 @@ repository = "https://github.com/latekaapi/harness"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 crossbeam-channel = "0.5"
 futures = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }

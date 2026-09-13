@@ -254,6 +254,25 @@ pub enum SessionEvent {
         /// The new name, or `None` to fall back to what the index calls it.
         name: Option<String>,
     },
+    /// The person picked a model in this session: the application stores it
+    /// on the session's project defaults, so the next session there starts
+    /// with it.
+    ModelSelected {
+        /// The picked model id.
+        model_id: String,
+    },
+    /// The person picked a reasoning effort in this session: stored on the
+    /// project defaults like the model.
+    EffortSelected {
+        /// The picked effort as the store spells it (`None` is "Default").
+        effort: Option<String>,
+    },
+    /// The person picked an approval mode in this session: stored on the
+    /// project defaults like the model.
+    ModeSelected {
+        /// The picked mode, as the wire spells it.
+        mode: ApprovalMode,
+    },
     /// `/name` with nothing after it: open the sidebar row's inline field.
     RenameStart,
     /// `/hide`: take this session out of the list.
@@ -493,6 +512,8 @@ pub struct SessionView {
     mention_cache: Vec<String>,
     /// The filter `mention_cache` was ranked for.
     mention_cache_for: String,
+    /// The root `mention_cache` was ranked over: ranks never cross roots.
+    mention_cache_root: String,
     /// How many files the rank above ran over: a re-walk invalidates it.
     mention_files_len: usize,
     /// The filter a background rank is computing, if any.
@@ -625,6 +646,7 @@ impl SessionView {
             workspace_key,
             mention_cache: Vec::new(),
             mention_cache_for: String::new(),
+            mention_cache_root: String::new(),
             mention_files_len: 0,
             mention_pending: None,
             mention_epoch: 0,

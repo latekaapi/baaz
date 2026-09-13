@@ -66,7 +66,7 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
 use muse_client::schema::{
-    AccountStateKind, SessionListParams, SessionResumeParams, SessionStartParams,
+    AccountStateKind, SessionListParams, SessionResumeParams,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
@@ -80,6 +80,7 @@ use crate::shot::CaptureToken;
 use crate::session::{SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
+use crate::projects::{self, Project, Projects};
 use crate::app::list::ListCache;
 use crate::sidebar::{self, SessionEntry};
 use crate::search::{FileHit, SessionHit};
@@ -405,6 +406,23 @@ pub struct Harness {
     /// The harness's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
     overrides: sessions::Overrides,
+    /// The adopted workspaces (design `docs/12-projects.md` §4).
+    pub(crate) projects: Projects,
+    /// The current project: the open session's project, else the last used.
+    pub(crate) current_project: Option<String>,
+    /// The branch behind every project group row, by project id, read on
+    /// each `session/list` off the UI thread.
+    pub(crate) branches: HashMap<String, String>,
+    /// Whether the session list has landed at least once. The sidebar draws
+    /// project groups only after it and the index both have: groups debut
+    /// with their rows, so the collapse measures content on its first frame
+    /// instead of opening from an empty box it never re-measures.
+    pub(crate) sessions_loaded: bool,
+    /// Whether the session index has landed at least once: row descriptions
+    /// (and with them, row visibility) come from it.
+    pub(crate) index_loaded: bool,
+    /// Window preferences: the sidebar grouping, closed groups, search scope.
+    pub(crate) layout: layout::Layout,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
     pub(crate) show_hidden: bool,
     /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
@@ -498,6 +516,12 @@ impl Harness {
             tier: None,
             tier_probing: false,
             overrides: sessions::Overrides::new(),
+            projects: Projects::default(),
+            current_project: None,
+            branches: HashMap::new(),
+            sessions_loaded: false,
+            index_loaded: false,
+            layout: layout::read(),
             show_hidden: false,
             show_empty: false,
             show_archived: false,
@@ -539,6 +563,7 @@ impl Harness {
             }
         }));
         this.overrides = sessions::read();
+        this.boot_projects();
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the
         // banner is captured for nothing.
@@ -565,33 +590,92 @@ impl Harness {
         }
         this.connect(cx);
         this.load_index(cx);
-        this.load_menu_sources(cx);
+        this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
         this
     }
 
-    /// The workspace path as the wire and the header want it.
-    fn workspace(&self) -> String {
-        self.args.workspace.to_string_lossy().into_owned()
+    /// The workspace path as the wire and the header want it: the current
+    /// project's root, else the launch workspace.
+    pub(crate) fn workspace(&self) -> String {
+        self.current_project()
+            .map(|p| p.root.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned())
     }
 
-    /// What the window's own title bar says: the open session, or the
-    /// workspace when nothing is open.
+    /// The current project's id, when one is current.
+    pub(crate) fn current_project_id(&self) -> Option<String> {
+        self.current_project.clone()
+    }
+
+    /// The current project: the open session's project, else the last used.
+    pub(crate) fn current_project(&self) -> Option<&Project> {
+        self.current_project.as_deref().and_then(|id| self.projects.find(id))
+    }
+
+    /// What the window's own title bar says: the open session against its
+    /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
         let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
         let label = session.and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()));
-        match label {
-            Some(label) => format!("{label} \u{2014} {}", self.workspace_name()),
-            None => self.workspace_name(),
+        match self.current_project() {
+            Some(project) => match label {
+                Some(label) => format!("{label} \u{2014} {}", project.name),
+                None => project.name.clone(),
+            },
+            None => "Harness".to_owned(),
         }
     }
 
-    /// The workspace's last path component, which is what the header shows.
+    /// The current project's name, which is what the header and the empty
+    /// state show — or the app name when no project is current.
     fn workspace_name(&self) -> String {
-        self.args
-            .workspace
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.workspace())
+        self.current_project().map(|p| p.name.clone()).unwrap_or_else(|| "Harness".to_owned())
+    }
+
+    /// Read the projects store and settle the current project (decision D39):
+    /// an explicit `--workspace` wins and is adopted if new; a scripted run's
+    /// launch directory keeps today's semantics by the same rule; else the
+    /// stored current project if it still exists; else the most recently
+    /// opened adoption; else the launch directory, unless it is `/` or
+    /// `$HOME`, where the window opens with no project and the hero owns the
+    /// empty state. The file is written when anything above changed it.
+    pub(super) fn boot_projects(&mut self) {
+        self.projects = projects::read();
+        let scripted = self.args.replay.is_some()
+            || self.args.offline
+            || !self.args.steps.is_empty()
+            || self.args.screenshot.is_some();
+        let mut dirty = false;
+        if self.args.workspace_explicit || scripted {
+            let workspace = self.args.workspace.clone();
+            let id = self.projects.add(&workspace).id.clone();
+            self.projects.touch(&id);
+            if self.projects.current.as_deref() != Some(id.as_str()) {
+                self.projects.current = Some(id);
+            }
+            dirty = true;
+        } else if self.projects.current.as_deref().is_some_and(|id| self.projects.find(id).is_some()) {
+            // The stored current project still exists: keep it, untouched.
+        } else if let Some(recent) = self.projects.most_recent().map(|p| p.id.clone()) {
+            self.projects.current = Some(recent);
+            dirty = true;
+        } else {
+            let launch = self.args.workspace.clone();
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            if launch.as_path() != std::path::Path::new("/") && home.as_deref() != Some(launch.as_path()) {
+                let id = self.projects.add(&launch).id.clone();
+                self.projects.touch(&id);
+                self.projects.current = Some(id);
+                dirty = true;
+            } else if self.projects.current.is_some() {
+                self.projects.current = None;
+                dirty = true;
+            }
+        }
+        self.current_project = self.projects.current.clone();
+        if dirty {
+            projects::write(&self.projects);
+        }
     }
 
     // ------------------------------------------------------------ connection
@@ -861,7 +945,12 @@ impl Harness {
     fn open_replay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.args.replay.take() else { return };
         let at_rest = self.still();
-        let (provider, workspace) = (self.args.provider.clone(), self.workspace());
+        // The capture's own root when it names one: the replayed row groups
+        // where a live session of that root would.
+        let workspace = sidebar::replay_workspace(&path)
+            .map(|root| projects::canonical_str(&root))
+            .unwrap_or_else(|| self.workspace());
+        let (provider, workspace) = (self.args.provider.clone(), workspace);
         let overlays = self.overlays.clone();
         let capture = self.capture.clone();
         // The capture names its own session; this id is a placeholder the view
@@ -876,7 +965,12 @@ impl Harness {
         });
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        self.sessions = vec![SessionEntry::replayed(&view.read(cx).session_id, &path)];
+        self.sessions =
+            vec![SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects)];
+        // The replay's one row is the whole list, and there is no index
+        // to wait for: both have landed.
+        self.sessions_loaded = true;
+        self.index_loaded = true;
         self.invalidate_list();
         // A replayed window has no wire, but the search palette still needs
         // the host's session index: read it (read-only) and rebuild `search.db`
@@ -1024,12 +1118,19 @@ impl Harness {
 
     /// Reveal a created file from the search palette in Finder.
     ///
-    /// `rest` is `<session_id>:<workspace-relative path>`. A path that no
-    /// longer exists is a toast, not a reveal of whatever happens to sit at
-    /// the workspace root.
+    /// `rest` is `<session_id>:<workspace-relative path>`. The join is
+    /// against the hit's own workspace — the session's, not this window's —
+    /// so a file created in project A reveals under A while B is current. A
+    /// path that no longer exists is a toast, not a reveal of whatever
+    /// happens to sit at the workspace root.
     pub(crate) fn reveal_created(&mut self, rest: &str, cx: &mut Context<Self>) {
-        let Some((_, path)) = rest.split_once(':') else { return };
-        let full = self.args.workspace.join(path);
+        let Some((session_id, path)) = rest.split_once(':') else { return };
+        let workspace =
+            self.sessions.iter().find(|e| e.id == session_id).and_then(|e| e.workspace.clone());
+        let full = match workspace {
+            Some(root) => std::path::PathBuf::from(root).join(path),
+            None => self.args.workspace.join(path),
+        };
         if !full.is_file() {
             self.overlays.update(cx, |overlays, _| {
                 overlays.toast("File not found", format!("{path} is no longer in this workspace."));

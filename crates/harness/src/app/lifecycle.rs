@@ -16,6 +16,9 @@ impl Harness {
     /// Read the local index once at boot; it is a cache, not a source of truth.
     pub(super) fn load_index(&mut self, cx: &mut Context<Self>) {
         self.wire_call(cx, index::read, |this, index, cx| {
+            // Settled, even on an empty read: row visibility comes from the
+            // index, and the sidebar waits for it before debuting groups.
+            this.index_loaded = true;
             this.index = index;
             this.rejoin();
             this.rebuild_search_index(cx);
@@ -23,29 +26,59 @@ impl Harness {
         });
     }
 
-    /// `session/list`, filtered to this window's workspace.
+    /// `session/list`, unfiltered and paged: one window over every
+    /// workspace, so the filter that used to hide other workspaces' sessions
+    /// is gone and the cursor is followed until the server says `None`.
+    /// Everything lands on the one background task behind this
+    /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        let workspace = self.workspace();
+        let projects = self.projects.clone();
         let work = move || {
-            client.session_list(&SessionListParams {
-                workspace_root: Some(workspace),
-                ..Default::default()
-            })
+            let mut sessions = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let page = client.session_list(&SessionListParams {
+                    cursor,
+                    limit: Some(200),
+                    ..Default::default()
+                })?;
+                sessions.extend(page.sessions);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            // The branch behind every project group row, read while already
+            // off the UI thread.
+            let mut branches = HashMap::new();
+            for project in &projects.projects {
+                if let Some(branch) = crate::projects::branch_of(&project.root) {
+                    branches.insert(project.id.clone(), branch);
+                }
+            }
+            Ok::<_, MuseError>((sessions, branches))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
-            if let Ok(list) = result {
+            this.sessions_loaded = true;
+            if let Ok((sessions, branches)) = result {
                 this.invalidate_list();
-                let wire: Vec<SessionEntry> = list
-                    .sessions
+                let projects = this.projects.clone();
+                let wire: Vec<SessionEntry> = sessions
                     .iter()
                     .map(|s| {
-                        SessionEntry::join(s, this.index.get(&s.session_id), this.overrides.get(&s.session_id))
+                        SessionEntry::join(
+                            s,
+                            this.index.get(&s.session_id),
+                            this.overrides.get(&s.session_id),
+                            &projects,
+                        )
                     })
                     .collect();
                 // Local rows whose id the reply does not contain survive;
                 // a local whose id is listed is replaced by its wire row.
                 this.sessions = sidebar::merge_session_list(wire, &this.sessions);
+                this.branches = branches;
                 this.derive_titles(cx);
             }
             this.open_boot_session(window, cx);
@@ -178,6 +211,14 @@ impl Harness {
     pub(super) fn rejoin(&mut self) {
         self.invalidate_list();
         for entry in &mut self.sessions {
+            // The adoption may have changed under the row: re-resolve every
+            // entry, including local and replayed ones, whose labels keep
+            // their own rules below.
+            let meta = self.overrides.get(&entry.id);
+            entry.project = self
+                .projects
+                .resolve(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()))
+                .map(|p| p.id.clone());
             if entry.local {
                 // A local row predates the wire list: no index or store
                 // source speaks for it, so its label ("New session", or the
@@ -227,31 +268,36 @@ impl Harness {
         }
     }
 
-    /// `session/start` in this workspace, on the configured provider.
+    /// `session/start` in the current project, on the configured provider.
     ///
     /// A new session is also the moment to re-walk the workspace: files come
     /// and go while the window is open, and the `@` picker should not offer a
-    /// path that was deleted an hour ago.
+    /// path that was deleted an hour ago. With no adoption there is nowhere
+    /// to start, so nothing starts — package 2's hero owns that state.
     pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        self.load_menu_sources(cx);
-        let (workspace, provider) = (self.workspace(), self.args.provider.clone());
-        // `session/start` is the only surface that declares a session's policy
-        // up front; `session/setApprovalMode` afterwards is a different thing,
-        // and on this server it does not reach `promptUnmatched`.
-        let approval_mode = self.args.approval_mode.clone();
-        let work = move || {
-            client.session_start(&SessionStartParams {
-                command_id: new_command_id(),
-                workspace_root: Some(workspace),
-                provider_id: Some(provider),
-                approval_mode,
-                ..Default::default()
-            })
+        let current = self.current_project_id();
+        // `session/start` is the only surface that declares a session's
+        // policy up front; `session/setApprovalMode` afterwards is a
+        // different thing, and on this server it does not reach
+        // `promptUnmatched`. The params carry the project's root and its
+        // defaults, with the command line's approval mode winning.
+        let Some(params) =
+            projects::start_params(&self.projects, current.as_deref(), &self.args.provider, self.args.approval_mode.clone())
+        else {
+            return;
         };
-        self.wire_call_in(cx, work, |this, result, window, cx| match result {
+        let effort = current
+            .as_deref()
+            .and_then(|id| self.projects.find(id))
+            .and_then(|p| p.defaults.effort.as_deref())
+            .and_then(projects::parse_effort);
+        self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
+        let work = move || client.session_start(&params);
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(started) => {
-                this.open(started.session.session_id.clone(), false, window, cx);
+                let session_id = started.session.session_id.clone();
+                this.open(session_id.clone(), false, window, cx);
                 // The result carries the session object `session/started`
                 // would have carried, and it is the only place a mode set
                 // at start-up is reported: `session/start` with an
@@ -268,11 +314,20 @@ impl Harness {
                 // one — labelled "New session" until the first
                 // `turn/started` titles it from the prompt — and the next
                 // `load_sessions` keeps it until the wire lists its id.
-                let mut local = SessionEntry::join(&started.session, None, None);
+                let mut local = SessionEntry::join(&started.session, None, None, &this.projects);
                 local.local = true;
                 this.sessions.retain(|entry| entry.id != local.id);
                 this.sessions.push(local);
                 this.invalidate_list();
+                // The session groups under the project it started in, even
+                // when its folder later proves to be a worktree of that root.
+                this.set_override(&session_id, |meta| meta.project = current.clone(), cx);
+                // The project's effort rides along before the first turn.
+                if let Some(effort) = effort {
+                    if let Some(view) = this.active.clone() {
+                        view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
+                    }
+                }
                 this.load_sessions(cx);
             }
             Err(error) => this.report(&error, cx),
@@ -295,6 +350,7 @@ impl Harness {
         if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
             return;
         }
+        self.adopt_session_project(&session_id);
         let Some(client) = self.client.clone() else { return };
         crate::log::trace_reset();
         crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
@@ -334,19 +390,50 @@ impl Harness {
         });
     }
 
+    /// The root a session of this id runs in: its own row's workspace when
+    /// the list knows it, else where the next session would go. Anything
+    /// about a session reads this; anything about "where the next session
+    /// goes" reads the current project directly.
+    fn session_workspace(&self, session_id: &str) -> String {
+        self.sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .and_then(|e| e.workspace.clone())
+            .unwrap_or_else(|| self.workspace())
+    }
+
+    /// A session view opened: the current project becomes that session's
+    /// project when it has one. Touched and written, so the next boot and
+    /// the next ⌘N start where this session is.
+    fn adopt_session_project(&mut self, session_id: &str) {
+        let project = self
+            .sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .and_then(|e| e.project.clone())
+            .filter(|id| self.projects.find(id).is_some());
+        let Some(id) = project else { return };
+        self.projects.touch(&id);
+        self.projects.current = Some(id.clone());
+        self.current_project = Some(id);
+        projects::write(&self.projects);
+    }
+
     /// Put a fresh session view in the centre pane now and subscribe to what
     /// it needs help with. The swap is immediate — the view, or its loading
     /// row while the first page is still on the wire — never the old view
     /// held past its switch.
     pub(super) fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        let (provider, workspace) = (self.args.provider.clone(), self.workspace());
+        let (provider, workspace) = (self.args.provider.clone(), self.session_workspace(&session_id));
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), Some(client), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
-        self.pending_id = Some(session_id);
+        self.pending_id = Some(session_id.clone());
         self.activate(view, window, cx);
+        self.adopt_session_project(&session_id);
         if backfill {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.backfill(cx));
@@ -468,6 +555,24 @@ impl Harness {
         });
     }
 
+    /// Store a picked default on a session's project: resolve the session to
+    /// its project — its stored id first, then its own workspace's root —
+    /// edit that adoption's defaults and persist. A session that resolves to
+    /// no project changes nothing.
+    fn note_project_default(&mut self, session_id: &str, edit: impl FnOnce(&mut crate::projects::ProjectDefaults)) {
+        let project = self
+            .sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .and_then(|e| self.projects.resolve(e.workspace.as_deref(), e.project.as_deref()))
+            .map(|p| p.id.clone());
+        let Some(id) = project else { return };
+        if let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) {
+            edit(&mut project.defaults);
+        }
+        projects::write(&self.projects);
+    }
+
     /// What a session cannot decide for itself.
     pub(super) fn on_session_event(
         &mut self,
@@ -553,6 +658,29 @@ impl Harness {
                     let session_id = view.read(cx).session_id.clone();
                     self.rename_session(session_id, name.clone(), cx);
                 }
+            }
+            // The person picked a model, effort or approval mode in a
+            // session: it becomes that session's project defaults, so the
+            // next session there starts with it. Scripted `setmodel:` /
+            // `setmode:` steps and plan-mode toggles never emit these, so
+            // scripted and transient choices stay out of the defaults.
+            SessionEvent::ModelSelected { model_id } => {
+                let session_id = view.read(cx).session_id.clone();
+                self.note_project_default(&session_id, |defaults| {
+                    defaults.model_id = Some(model_id.clone());
+                });
+            }
+            SessionEvent::EffortSelected { effort } => {
+                let session_id = view.read(cx).session_id.clone();
+                self.note_project_default(&session_id, |defaults| {
+                    defaults.effort = effort.clone();
+                });
+            }
+            SessionEvent::ModeSelected { mode } => {
+                let session_id = view.read(cx).session_id.clone();
+                self.note_project_default(&session_id, |defaults| {
+                    defaults.approval_mode = Some(mode.clone());
+                });
             }
             SessionEvent::RenameStart => {
                 if let Some(view) = self.active.clone() {

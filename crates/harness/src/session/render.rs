@@ -1107,7 +1107,7 @@ impl SessionView {
         let skill_rows: Vec<skills::Skill> = self
             .overlays
             .read(cx)
-            .skills
+            .skills_for(&self.workspace)
             .iter()
             .filter(|s| s.name.to_lowercase().starts_with(&needle))
             // F7: a skill whose name is already a client command is hidden.
@@ -1125,18 +1125,26 @@ impl SessionView {
     /// The rank itself runs in [`SessionView::refresh_mentions`] off the UI
     /// thread; this only reads the cache, so render-adjacent code never scans
     /// 5 000 paths per keystroke. An empty query is the head of the walk
-    /// order, which is a slice, not a rank.
+    /// order, which is a slice, not a rank. Everything is keyed by this
+    /// session's root: a rank for another root's files never shows here.
     pub(super) fn mention_rows(&self, filter: &str, cx: &gpui::App) -> Vec<String> {
         let overlays = self.overlays.read(cx);
+        let files = overlays.files_for(&self.workspace);
         if filter.is_empty() {
-            return overlays.files.iter().take(files::VISIBLE).map(|entry| entry.path.clone()).collect();
+            return files.iter().take(files::VISIBLE).map(|entry| entry.path.clone()).collect();
         }
-        if self.mention_cache_for == filter && self.mention_files_len == overlays.files.len() {
+        if self.mention_cache_for == filter
+            && self.mention_cache_root == self.workspace
+            && self.mention_files_len == files.len()
+        {
             return self.mention_cache.clone();
         }
         // A rank is in flight (or not yet started): show the previous rank
         // while it narrows this filter, rather than an empty menu for a frame.
-        if !self.mention_cache_for.is_empty() && filter.starts_with(&self.mention_cache_for) {
+        if !self.mention_cache_for.is_empty()
+            && self.mention_cache_root == self.workspace
+            && filter.starts_with(&self.mention_cache_for)
+        {
             return self.mention_cache.clone();
         }
         Vec::new()
@@ -1150,22 +1158,28 @@ impl SessionView {
         if filter.is_empty() {
             return;
         }
-        let files_len = self.overlays.read(cx).files.len();
-        if self.mention_cache_for == filter && self.mention_files_len == files_len {
+        let root = self.workspace.clone();
+        let files: Vec<files::FileEntry> = self.overlays.read(cx).files_for(&root).to_vec();
+        let files_len = files.len();
+        if self.mention_cache_for == filter && self.mention_cache_root == root && self.mention_files_len == files_len {
             return;
         }
-        if self.mention_pending.as_deref() == Some(filter.as_str()) && self.mention_files_len == files_len {
+        if self.mention_pending.as_deref() == Some(filter.as_str())
+            && self.mention_cache_root == root
+            && self.mention_files_len == files_len
+        {
             return;
         }
         self.mention_epoch += 1;
         let epoch = self.mention_epoch;
         self.mention_pending = Some(filter.clone());
         self.mention_files_len = files_len;
-        let files = self.overlays.read(cx).files.clone();
         // The cache says what it was ranked for, exactly: a newer keystroke
         // always starts a newer rank (bumping the epoch), so whatever lands
-        // here is either current or dropped above.
+        // here is either current or dropped above. The root rides along, so a
+        // rank for another root's files can never land in this session.
         let wanted = filter.clone();
+        let wanted_root = root.clone();
         let work =
             move || files::filter(&files, &filter).into_iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
         self.wire_call(cx, work, move |this: &mut Self, rows, cx| {
@@ -1174,6 +1188,7 @@ impl SessionView {
             }
             this.mention_pending = None;
             this.mention_cache_for = wanted;
+            this.mention_cache_root = wanted_root;
             this.mention_cache = rows;
             cx.notify();
         });
