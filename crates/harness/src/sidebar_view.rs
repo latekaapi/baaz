@@ -19,7 +19,7 @@
 
 use aui::data::{icon_button, ButtonSize};
 use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem, RowAction};
-use aui::overlay::popover_layer;
+use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
 use gpui::{
@@ -140,6 +140,12 @@ impl Harness {
                 }
             },
         );
+        // Every rendered group row's tray `…` button reports its window bounds
+        // once per frame: a group row's project menu seats at its own `…`,
+        // never under the header. New group ids notify once so a menu opened
+        // before the first prepaint appears on the next frame; steady bounds
+        // never schedule work of their own.
+        let menu_report = cx.entity().downgrade();
         let mut view = sidebar_view("sessions", grouping)
             .caption("Sessions")
             .on_view_options(move |w, cx| open_view(&(), w, cx))
@@ -147,6 +153,16 @@ impl Harness {
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_toggle(move |id, w, cx| toggle(id, w, cx))
             .on_group_action(move |id, action, w, cx| group(&(id.clone(), action), w, cx))
+            .on_group_menu_prepainted(move |id, bounds, _, cx| {
+                let id = id.to_string();
+                let _ = menu_report.update(cx, |this, cx| {
+                    let fresh = !this.group_menu_bounds.contains_key(&id);
+                    this.group_menu_bounds.insert(id, bounds);
+                    if fresh {
+                        cx.notify();
+                    }
+                });
+            })
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
         if let Some(renaming) = self.renaming.clone() {
             view = view.editing(renaming, self.rename_field(window, cx));
@@ -305,7 +321,22 @@ impl Harness {
                     .icon_size(px(12.0)),
             );
         }
-        footer.into_any_element()
+        // The wrapper reports the footer row's own rect (its only child),
+        // which is what the account menu seats at — above the footer's top
+        // edge, right edges aligned, at any sidebar width.
+        let footer_report = cx.entity().downgrade();
+        div()
+            .w_full()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = footer_report.update(cx, |this, cx| {
+                        Harness::note_trigger_bounds(&mut this.footer_bounds, bounds, cx);
+                    });
+                }
+            })
+            .child(footer)
+            .into_any_element()
     }
 
     /// The collapsed rail: new-session and search cells, a separator, then
@@ -389,7 +420,10 @@ impl Harness {
     /// a 4 px gap under it. The tracked scroll handle reports the viewport
     /// and its offset in window coordinates every prepaint, so the menu
     /// follows the sidebar's width and the list's scroll; before the first
-    /// prepaint it keeps the old fixed seat.
+    /// prepaint there are no bounds, so there is no menu this frame (never a
+    /// seat at a fixed corner). The caption's own bounds are not obtainable
+    /// from the frozen library, so this menu keeps its measured seat rather
+    /// than moving to `anchored_menu`.
     pub(crate) fn render_view_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
             return None;
@@ -507,11 +541,16 @@ impl Harness {
         } else {
             None
         };
-        let mut pop = div().absolute();
-        pop = match placed {
-            Some((top, left)) => pop.top(px(top)).left(px(left)),
-            None => pop.top(px(140.0)).left(px(12.0)),
+        // No bounds yet (before the first prepaint, or the rail): no menu
+        // this frame, never a fixed corner. The notify covers the cold open;
+        // the rail guard keeps a scripted menu there from repainting forever.
+        let Some((top, left)) = placed else {
+            if self.sidebar_open {
+                cx.notify();
+            }
+            return None;
         };
+        let pop = div().absolute().top(px(top)).left(px(left));
         // A click anywhere outside closes it: the catcher is a sibling of
         // the menu inside the same deferred draw (owner round 2, P4).
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
@@ -558,8 +597,19 @@ impl Harness {
                 this.logout(cx);
             }
         });
+        // Above the footer's top edge, right edges aligned, at any sidebar
+        // width — `anchored_menu` flips below and slides inside the window
+        // when the seat would overflow. No footer bounds yet: no menu this
+        // frame (the rail guard keeps a scripted menu there from repainting
+        // forever).
+        let Some(trigger) = self.footer_bounds else {
+            if self.sidebar_open {
+                cx.notify();
+            }
+            return None;
+        };
         // A click anywhere outside closes it: the catcher is a sibling of
-        // the menu inside the same deferred draw (owner round 2, P4).
+        // the menu inside the same draw (owner round 2, P4).
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
@@ -571,17 +621,14 @@ impl Harness {
             .inset_0()
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
-            popover_layer(
-                div().absolute().inset_0().child(catcher).child(
-                    div()
-                        .absolute()
-                        .bottom(px(100.0))
-                        .left(px(12.0))
-                        .child(view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
-                            activate(&i, w, cx)
-                        })),
-                ),
-            )
+            div().absolute().inset_0().child(catcher).child(anchored_menu(
+                trigger,
+                MenuSide::Above,
+                MenuAlign::End,
+                view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
+                    activate(&i, w, cx)
+                }),
+            ))
             .into_any_element(),
         )
     }

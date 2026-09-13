@@ -263,6 +263,27 @@ impl Harness {
         cx.notify();
     }
 
+    /// `wheel:<dy>`: dispatch one synthetic wheel event at the window centre
+    /// and log the transcript's pixel offset before and after — the
+    /// palette-scroll instrument (owner round 4): over the open palette the
+    /// palette's list scrolls and the transcript never moves, while over the
+    /// bare transcript the same wheels move it. Free: no turn, no wire.
+    pub(crate) fn step_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let dy: f32 = rest.trim().parse().unwrap_or(0.0);
+        let before = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
+        let size = window.bounds().size;
+        window.dispatch_event(
+            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: point(size.width * 0.5, size.height * 0.5),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                ..Default::default()
+            }),
+            cx,
+        );
+        let after = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
+        crate::harness_log!("wheel dy={dy} list_px={before}->{after}");
+    }
+
     /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
     /// clamped and settled exactly like a released drag, minus the pointer.
     pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
