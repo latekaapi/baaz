@@ -71,19 +71,25 @@ pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How often the wait checks on the child.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Run `muse skills list --json`.
+/// Run `muse skills list --json` with the working directory pinned.
 ///
 /// Blocking, bounded by [`TIMEOUT`], and forgiving: a `muse` that is not
 /// there, a non-zero exit, a child that never returns and a shape this build
 /// has never seen all yield an empty list, because the `/` menu still works
-/// without a Skills section.
-pub fn list(program: &str) -> Vec<Skill> {
-    let child = Command::new(program)
+/// without a Skills section. A project's skills are listed with that root as
+/// the working directory, so per-root skill sets land in the per-root cache
+/// under their own root.
+pub fn list_in(program: &str, dir: Option<&std::path::Path>) -> Vec<Skill> {
+    let mut command = Command::new(program);
+    command
         .args(["skills", "list", "--json"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let child = command.spawn();
     let Ok(mut child) = child else { return Vec::new() };
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {

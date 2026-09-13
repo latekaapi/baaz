@@ -40,10 +40,12 @@ const RAIL_SESSIONS: usize = 8;
 /// Actions of the Sessions caption's view menu, in row order.
 #[derive(Clone, Copy)]
 enum ViewAction {
+    GroupByProject,
     ToggleEmpty,
     ToggleHidden,
     ClearEmpty,
     ToggleArchived,
+    SearchAllProjects,
 }
 
 impl Harness {
@@ -105,11 +107,18 @@ impl Harness {
         let open_view = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.open_menu(MenuKind::ViewOptions, cx);
         });
+        let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+            this.toggle_group(id.to_string(), cx);
+        });
         let mut view = sidebar_view("sessions", grouping)
             .caption("Sessions")
             .on_view_options(move |w, cx| open_view(&(), w, cx))
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
+            .on_toggle(move |id, w, cx| toggle(id, w, cx))
+            // Group-row trays arrive in package 2; for now the tap lands
+            // here and is ignored, deliberately logging nothing.
+            .on_group_action(move |_, _, _, _| {})
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
         if let Some(renaming) = self.renaming.clone() {
             view = view.editing(renaming, self.rename_field(window, cx));
@@ -351,6 +360,12 @@ impl Harness {
         let archived = self.sessions.iter().filter(|e| e.archived).count();
         let mut rows: Vec<MenuRow> = Vec::new();
         let mut actions: Vec<Option<ViewAction>> = Vec::new();
+        // The grouping first: it decides what the list below the menu is.
+        rows.push(MenuRow::Toggle {
+            label: "Group by project".into(),
+            checked: self.effective_group_by() == crate::layout::GroupBy::Project,
+        });
+        actions.push(Some(ViewAction::GroupByProject));
         // Either toggle only appears once it has something to show: an
         // affordance for an empty set is a question nobody asked.
         if empty > 0 || self.show_empty {
@@ -386,9 +401,24 @@ impl Harness {
         };
         rows.push(MenuRow::Toggle { label: archived_label.into(), checked: self.show_archived });
         actions.push(Some(ViewAction::ToggleArchived));
+        rows.push(MenuRow::Separator);
+        actions.push(None);
+        // Stored here, read by package 2's palette: the toggle lands now so
+        // the menu already says what search will do.
+        rows.push(MenuRow::Toggle {
+            label: "Search all projects".into(),
+            checked: self.layout.search_all_projects,
+        });
+        actions.push(Some(ViewAction::SearchAllProjects));
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
             match actions.get(*index).copied().flatten() {
                 // Toggles keep the menu open, so the check is seen to change.
+                Some(ViewAction::GroupByProject) => {
+                    this.toggle_group_by(cx);
+                }
+                Some(ViewAction::SearchAllProjects) => {
+                    this.toggle_search_scope(cx);
+                }
                 Some(ViewAction::ToggleEmpty) => {
                     this.show_empty = !this.show_empty;
                     cx.notify();

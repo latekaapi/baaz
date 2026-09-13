@@ -30,6 +30,12 @@ pub fn db_path() -> PathBuf {
 /// How many rows one palette section shows.
 pub const LIMIT: usize = 12;
 
+/// The FTS schema version, stamped in `meta`. FTS5 cannot add a column, so
+/// a version bump drops and recreates both tables: `sessions_fts` is rebuilt
+/// from the list anyway, and `files_fts` starts empty (a completed turn
+/// re-records its session's files on the next completion).
+const SCHEMA_VERSION: u32 = 2;
+
 /// One session row to index.
 pub struct SessionRow {
     /// The Muse session id.
@@ -42,6 +48,8 @@ pub struct SessionRow {
     pub first_prompt: String,
     /// The index's `search_text`: transcript text Muse made searchable.
     pub body: String,
+    /// The session's workspace, canonicalized when it exists.
+    pub workspace: Option<String>,
 }
 
 /// One created file to record.
@@ -52,6 +60,8 @@ pub struct FileRecord {
     pub session_id: String,
     /// `"write"` or `"edit"`: the verb family that produced it.
     pub kind: String,
+    /// The session's workspace, canonicalized when it exists.
+    pub workspace: String,
 }
 
 /// A session matching the query.
@@ -63,6 +73,8 @@ pub struct SessionHit {
     pub label: String,
     /// One line of `body` around the first match (see [`snippet_for`]).
     pub snippet: String,
+    /// The session's workspace.
+    pub workspace: Option<String>,
 }
 
 /// A created file matching the query.
@@ -72,6 +84,18 @@ pub struct FileHit {
     pub path: String,
     /// The session whose turn wrote it.
     pub session_id: String,
+    /// The session's workspace.
+    pub workspace: Option<String>,
+}
+
+/// Whether a hit belongs in a scoped query: an unscoped query takes
+/// everything, and a query scoped to a root takes only the hits recorded
+/// under it.
+pub fn matches_scope(hit_workspace: Option<&str>, scope: Option<&str>) -> bool {
+    match scope {
+        None => true,
+        Some(root) => hit_workspace == Some(root),
+    }
 }
 
 /// Open (creating) the database, ensuring the schema and FTS5 work.
@@ -97,10 +121,37 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
     connection.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS fts5_smoke USING fts5(x); DROP TABLE fts5_smoke;",
     )?;
-    connection.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body);
-         CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind);",
-    )?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);")?;
+    let stored: u32 = connection
+        .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    if stored != SCHEMA_VERSION {
+        // FTS5 cannot add a column: drop both tables and recreate them with
+        // `workspace UNINDEXED`. `sessions_fts` is rebuilt from the list on
+        // the next refresh; `files_fts` starts empty and fills again as turns
+        // complete.
+        connection.execute_batch(
+            "DROP TABLE IF EXISTS sessions_fts;
+             DROP TABLE IF EXISTS files_fts;
+             DROP TABLE IF EXISTS files_seen;
+             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, workspace UNINDEXED);
+             CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
+        )?;
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+    } else {
+        connection.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind, workspace UNINDEXED);",
+        )?;
+    }
     // Dedupe for `files_fts`, which cannot hold a unique index of its own:
     // an FTS5 table has no constraints, so `(path, session_id)` used to be
     // checked with a `SELECT` per record — a full-text scan each time
@@ -127,10 +178,17 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
     transaction.execute("DELETE FROM sessions_fts", [])?;
     {
         let mut insert = transaction.prepare(
-            "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body, workspace) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for row in rows {
-            insert.execute(params![row.session_id, row.label, row.title, row.first_prompt, row.body])?;
+            insert.execute(params![
+                row.session_id,
+                row.label,
+                row.title,
+                row.first_prompt,
+                row.body,
+                row.workspace
+            ])?;
         }
     }
     transaction.commit()
@@ -146,15 +204,15 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
 pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(), rusqlite::Error> {
     let mut claim = connection
         .prepare("INSERT OR IGNORE INTO files_seen(path, session_id) VALUES (?1, ?2)")?;
-    let mut insert =
-        connection.prepare("INSERT INTO files_fts(path, session_id, kind) VALUES (?1, ?2, ?3)")?;
+    let mut insert = connection
+        .prepare("INSERT INTO files_fts(path, session_id, kind, workspace) VALUES (?1, ?2, ?3, ?4)")?;
     for record in records {
         // `execute` returns the rows it changed: 0 means the key was already
         // claimed, which is exactly "already recorded".
         if claim.execute(params![record.path, record.session_id])? == 0 {
             continue;
         }
-        insert.execute(params![record.path, record.session_id, record.kind])?;
+        insert.execute(params![record.path, record.session_id, record.kind, record.workspace])?;
     }
     Ok(())
 }
@@ -162,23 +220,28 @@ pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(
 pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec<SessionHit> {
     let Some(matched) = fts_query(query) else { return Vec::new() };
     let mut statement = match connection.prepare(
-        "SELECT session_id, label, body FROM sessions_fts WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
+        "SELECT session_id, label, body, workspace FROM sessions_fts WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
     ) {
         Ok(statement) => statement,
         Err(_) => return Vec::new(),
     };
     let rows = statement.query_map(params![matched, limit as i64], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
     });
     let Ok(rows) = rows else { return Vec::new() };
     rows.filter_map(Result::ok)
-        .map(|(session_id, label, body)| {
+        .map(|(session_id, label, body, workspace)| {
             // The indexed body is Muse's raw `search_text`: unit-separated
             // header segments (ids, status, paths) ahead of the transcript.
             // The row shows words, so the snippet is cut from the cleaned
             // text, never from the raw envelope.
             let snippet = snippet_for(&clean_search_text(&body), query);
-            SessionHit { session_id, label, snippet }
+            SessionHit { session_id, label, snippet, workspace }
         })
         .collect()
 }
@@ -190,26 +253,26 @@ pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec
 pub fn query_files(connection: &Connection, query: &str, limit: usize) -> Vec<FileHit> {
     if query.trim().is_empty() {
         let mut statement = match connection.prepare(
-            "SELECT path, session_id FROM files_fts ORDER BY rowid DESC LIMIT ?1",
+            "SELECT path, session_id, workspace FROM files_fts ORDER BY rowid DESC LIMIT ?1",
         ) {
             Ok(statement) => statement,
             Err(_) => return Vec::new(),
         };
         let rows = statement.query_map(params![limit as i64], |row| {
-            Ok(FileHit { path: row.get(0)?, session_id: row.get(1)? })
+            Ok(FileHit { path: row.get(0)?, session_id: row.get(1)?, workspace: row.get(2)? })
         });
         let Ok(rows) = rows else { return Vec::new() };
         return rows.filter_map(Result::ok).collect();
     }
     let Some(matched) = fts_query(query) else { return Vec::new() };
     let mut statement = match connection.prepare(
-        "SELECT path, session_id FROM files_fts WHERE files_fts MATCH ?1 ORDER BY bm25(files_fts) LIMIT ?2",
+        "SELECT path, session_id, workspace FROM files_fts WHERE files_fts MATCH ?1 ORDER BY bm25(files_fts) LIMIT ?2",
     ) {
         Ok(statement) => statement,
         Err(_) => return Vec::new(),
     };
     let rows = statement.query_map(params![matched, limit as i64], |row| {
-        Ok(FileHit { path: row.get(0)?, session_id: row.get(1)? })
+        Ok(FileHit { path: row.get(0)?, session_id: row.get(1)?, workspace: row.get(2)? })
     });
     let Ok(rows) = rows else { return Vec::new() };
     rows.filter_map(Result::ok).collect()
@@ -403,6 +466,21 @@ mod tests {
         assert!(!version.is_empty());
     }
 
+    fn session_row(session_id: &str, body: &str, workspace: Option<&str>) -> SessionRow {
+        SessionRow {
+            session_id: session_id.into(),
+            label: format!("session {session_id}"),
+            title: format!("session {session_id}"),
+            first_prompt: String::new(),
+            body: body.into(),
+            workspace: workspace.map(str::to_owned),
+        }
+    }
+
+    fn file_record(path: &str, session_id: &str, workspace: &str) -> FileRecord {
+        FileRecord { path: path.into(), session_id: session_id.into(), kind: "write".into(), workspace: workspace.into() }
+    }
+
     #[test]
     fn sessions_round_trip_through_match() {
         let mut connection = memory();
@@ -414,6 +492,7 @@ mod tests {
                 title: "Fix the parser".into(),
                 first_prompt: "why does this panic".into(),
                 body: "the parser panics on nested generics in parser.rs".into(),
+                workspace: Some("/work/a".into()),
             }],
         )
         .expect("rebuild");
@@ -421,7 +500,64 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, "s1");
         assert!(hits[0].snippet.contains("generics"));
+        assert_eq!(hits[0].workspace.as_deref(), Some("/work/a"));
         assert!(query_sessions(&connection, "zebra", LIMIT).is_empty());
+    }
+
+    #[test]
+    fn workspaces_round_trip_and_scope_the_query() {
+        let mut connection = memory();
+        rebuild_sessions(
+            &mut connection,
+            &[
+                session_row("s1", "the parser panics on nested generics", Some("/work/a")),
+                session_row("s2", "the parser panics on nested generics", Some("/work/b")),
+            ],
+        )
+        .expect("rebuild");
+        record_files(&connection, &[file_record("src/main.rs", "s1", "/work/a")]).expect("record");
+        // Unscoped: everything matches.
+        assert_eq!(query_sessions(&connection, "generics", LIMIT).len(), 2);
+        // Scoped to B: A's session is not returned.
+        let scoped: Vec<SessionHit> = query_sessions(&connection, "generics", LIMIT)
+            .into_iter()
+            .filter(|hit| matches_scope(hit.workspace.as_deref(), Some("/work/b")))
+            .collect();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].session_id, "s2");
+        // Files carry their workspace too.
+        let files = query_files(&connection, "main", LIMIT);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].workspace.as_deref(), Some("/work/a"));
+        assert!(matches_scope(files[0].workspace.as_deref(), Some("/work/a")));
+        assert!(!matches_scope(files[0].workspace.as_deref(), Some("/work/b")));
+        assert!(matches_scope(files[0].workspace.as_deref(), None));
+        assert!(!matches_scope(None, Some("/work/b")));
+    }
+
+    #[test]
+    fn an_old_database_migrates_to_the_workspace_schema() {
+        let dir = std::env::temp_dir().join(format!("harness-search-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("search.db");
+        // What the previous build left behind: the old shapes, no `meta`.
+        let old = Connection::open(&path).expect("old db");
+        old.execute_batch(
+            "CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body);
+             CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind);
+             INSERT INTO sessions_fts(session_id, label, title, first_prompt, body) VALUES ('s1', 'old', 'old', '', 'generics everywhere');",
+        )
+        .expect("old rows");
+        drop(old);
+        // Opening migrates: the old rows are gone, the new columns exist.
+        let mut migrated = open_at(&path).expect("migrated db");
+        assert!(query_sessions(&migrated, "generics", LIMIT).is_empty());
+        rebuild_sessions(&mut migrated, &[session_row("s1", "generics everywhere", Some("/work/a"))])
+            .expect("rebuild");
+        let hits = query_sessions(&migrated, "generics", LIMIT);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workspace.as_deref(), Some("/work/a"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -435,7 +571,8 @@ mod tests {
     #[test]
     fn files_record_once_and_rank_by_recency_when_empty() {
         let connection = memory();
-        let records = |path: &str| FileRecord { path: path.into(), session_id: "s1".into(), kind: "write".into() };
+        let records =
+            |path: &str| FileRecord { path: path.into(), session_id: "s1".into(), kind: "write".into(), workspace: "/work/a".into() };
         record_files(&connection, &[records("src/main.rs"), records("src/main.rs")]).expect("record");
         record_files(&connection, &[records("docs/notes.md")]).expect("record");
         // Recorded twice, stored once.
@@ -452,6 +589,7 @@ mod tests {
             path: "src/main.rs".into(),
             session_id: session.into(),
             kind: "write".into(),
+            workspace: "/work/a".into(),
         };
         record_files(&connection, &[record("s1"), record("s2"), record("s1")]).expect("record");
         // The key is `(path, session_id)`, so two sessions that wrote the
@@ -482,6 +620,7 @@ mod tests {
                 path: "src/main.rs".into(),
                 session_id: "s1".into(),
                 kind: "write".into(),
+                workspace: "/work/a".into(),
             }],
         )
         .expect("record");

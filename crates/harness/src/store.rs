@@ -54,6 +54,14 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Pat
         .unwrap_or_default()
 }
 
+/// Serializes the tests that point `HARNESS_STATE_DIR` at a temp dir: two
+/// tests pointing it at two dirs at once would read each other's state.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

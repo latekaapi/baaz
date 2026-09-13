@@ -1,10 +1,12 @@
-//! The sidebar width: the one piece of shell geometry the harness remembers.
+//! The window's own preferences: the sidebar width, how the session list
+//! groups, which groups stand closed, and how far search looks.
 //!
 //! Global, not per workspace: the divider sits in the same place whatever the
-//! window opened, the way the traffic-lights rail does. The file is
+//! window opened, the way the traffic-lights rail does, and so does the
+//! grouping — these are window preferences, not project ones. The file is
 //! `~/Library/Application Support/harness/layout.json`, written atomically
 //! through [`crate::store`], and every read is best-effort: a missing or
-//! unparseable file is the default width, which loses a preference and never
+//! unparseable file is the defaults, which lose a preference and never
 //! a session.
 //!
 //! The drag math lives here too, next to the persistence, so both the pointer
@@ -14,12 +16,47 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// How the sidebar groups its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    /// Flat rows under calendar-day headers, as the window always did.
+    Date,
+    /// One collapsible group per project, then "Other workspaces".
+    Project,
+}
+
 /// What `layout.json` holds. `None` is "never resized": the default width.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layout {
     /// The settled sidebar width in window pixels, if the person ever set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<f32>,
+    /// The explicit grouping choice. `None` is "undecided": the window reads
+    /// Project once there is more than one adoption or a session that
+    /// resolves to none, else Date — and persists the choice the first time
+    /// the person toggles it.
+    #[serde(rename = "groupBy", default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
+    /// Group ids standing closed: project ids, and `"other"` for the
+    /// "Other workspaces" group, which starts closed.
+    #[serde(rename = "closedGroups", default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_groups: Vec<String>,
+    /// Whether the search palette looks across every project (`true`) or
+    /// only the current one. Read by package 2's palette; stored here from
+    /// the start so the toggle has somewhere to land.
+    #[serde(rename = "searchAllProjects", default = "default_search_all")]
+    pub search_all_projects: bool,
+}
+
+fn default_search_all() -> bool {
+    true
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self { sidebar_width: None, group_by: None, closed_groups: Vec::new(), search_all_projects: true }
+    }
 }
 
 /// `~/Library/Application Support/harness/layout.json`.
@@ -81,15 +118,39 @@ mod tests {
     }
 
     #[test]
+    fn the_new_preferences_default_and_round_trip() {
+        let layout = Layout::default();
+        assert_eq!(layout.group_by, None);
+        assert!(layout.closed_groups.is_empty());
+        assert!(layout.search_all_projects);
+        let stored = Layout {
+            sidebar_width: Some(300.0),
+            group_by: Some(GroupBy::Project),
+            closed_groups: vec!["other".into()],
+            search_all_projects: false,
+        };
+        let text = serde_json::to_string(&stored).unwrap();
+        assert!(text.contains("\"groupBy\":\"project\""));
+        assert!(text.contains("\"closedGroups\":[\"other\"]"));
+        assert!(text.contains("\"searchAllProjects\":false"));
+        let back: Layout = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.group_by, Some(GroupBy::Project));
+        assert_eq!(back.closed_groups, vec!["other".to_owned()]);
+        assert!(!back.search_all_projects);
+        // An old file with only a width still reads, taking the new defaults.
+        let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
+        assert_eq!(old.group_by, None);
+        assert!(old.search_all_projects);
+    }
+
+    fn with_width(width: f32) -> Layout {
+        Layout { sidebar_width: Some(width), ..Layout::default() }
+    }
+
+    #[test]
     fn a_stored_width_is_clamped_on_the_way_in() {
-        assert_eq!(
-            sidebar_width(&Layout { sidebar_width: Some(1.0) }),
-            aui::shell::SIDEBAR_MIN_WIDTH
-        );
-        assert_eq!(
-            sidebar_width(&Layout { sidebar_width: Some(10_000.0) }),
-            aui::shell::SIDEBAR_MAX_WIDTH
-        );
-        assert_eq!(sidebar_width(&Layout { sidebar_width: Some(300.0) }), 300.0);
+        assert_eq!(sidebar_width(&with_width(1.0)), aui::shell::SIDEBAR_MIN_WIDTH);
+        assert_eq!(sidebar_width(&with_width(10_000.0)), aui::shell::SIDEBAR_MAX_WIDTH);
+        assert_eq!(sidebar_width(&with_width(300.0)), 300.0);
     }
 }

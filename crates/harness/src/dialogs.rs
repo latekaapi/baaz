@@ -43,7 +43,7 @@ fn palette_items(
     rows: &[(SharedString, SharedString, SharedString)],
     icon: PaletteIcon,
 ) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon, label.clone()).context(detail.clone())).collect()
+    rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone())).collect()
 }
 
 /// [`palette_items`] over partitioned row references, which is what the search
@@ -52,7 +52,7 @@ fn palette_items_ref(
     rows: &[&(SharedString, SharedString, SharedString)],
     icon: PaletteIcon,
 ) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon, (*label).clone()).context((*detail).clone())).collect()
+    rows.iter().map(|(id, label, detail)| PaletteItem::new((*id).clone(), icon.clone(), (*label).clone()).context((*detail).clone())).collect()
 }
 
 /// [`palette_items_ref`] with the query's first hit in each label emphasised
@@ -81,27 +81,45 @@ impl Harness {
         cx.notify();
     }
 
-    /// The two lists the `/` and `@` menus are built from, walked once at boot
-    /// on the background executor and re-walked when a new session starts.
+    /// The two lists the `/` and `@` menus are built from, walked per root
+    /// on the background executor: at boot, when a session view for a root
+    /// opens and the cache lacks that root, and when a new session starts.
     ///
     /// Neither is on the wire: skills reach MSP only as `toolCall` items, and
-    /// a mention is plain text inside the prompt (research §1.5).
-    pub(crate) fn load_menu_sources(&mut self, cx: &mut Context<Self>) {
+    /// a mention is plain text inside the prompt (research §1.5). Skills are
+    /// listed with the root as the working directory.
+    pub(crate) fn load_menu_sources(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        if self.overlays.read(cx).has_root(&root.to_string_lossy()) {
+            return;
+        }
         let program = self.args.program.clone();
-        let root = self.args.workspace.clone();
-        let work = move || (skills::list(&program), files::walk(&root));
-        self.wire_call(cx, work, |this, (skills, files), cx| {
+        let work = move || {
+            let skills = skills::list_in(&program, Some(&root));
+            let files = files::walk(&root);
+            (skills, files, root)
+        };
+        self.wire_call(cx, work, |this, (skills, files, root), cx| {
+            let key = root.to_string_lossy().into_owned();
             if files.truncated {
+                // The toast names the project the walk ran in, so a person
+                // with eight roots knows whose picker is short.
+                let name = this
+                    .projects
+                    .find_by_root(&root)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| key.clone());
                 crate::harness_log!(
                     "@ mention index stopped at {} files; some workspace files are not mentionable",
                     files::CAP
                 );
+                this.overlays.update(cx, |overlays, _| {
+                    overlays.toast(
+                        "@ mentions shortened",
+                        format!("{name} holds more than {} files; some are not mentionable.", files::CAP),
+                    );
+                });
             }
-            this.overlays.update(cx, |overlays, _| {
-                overlays.skills = skills;
-                overlays.files = files.entries;
-                overlays.files_truncated = files.truncated;
-            });
+            this.overlays.update(cx, |overlays, _| overlays.insert_root(key, files, skills));
             cx.notify();
         });
     }

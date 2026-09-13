@@ -15,15 +15,14 @@ use std::path::PathBuf;
 /// How many prompts are remembered per workspace.
 const CAP: usize = 200;
 
-/// `~/Library/Application Support/harness/history.json`.
-pub fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/harness/history.json"))
+/// `~/Library/Application Support/harness/history.json`, honouring
+/// `HARNESS_STATE_DIR` like every other store.
+pub fn path() -> PathBuf {
+    crate::store::support_dir().join("history.json")
 }
 
 fn read_all() -> BTreeMap<String, Vec<String>> {
-    let Some(path) = path() else { return BTreeMap::new() };
-    let Ok(text) = std::fs::read_to_string(path) else { return BTreeMap::new() };
+    let Ok(text) = std::fs::read_to_string(path()) else { return BTreeMap::new() };
     serde_json::from_str(&text).unwrap_or_default()
 }
 
@@ -68,7 +67,7 @@ fn is_recent_duplicate(entries: &[String], text: &str) -> bool {
 }
 
 fn write_all(all: &BTreeMap<String, Vec<String>>) {
-    let Some(path) = path() else { return };
+    let path = path();
     // Atomic like every other store write: a crash mid-send leaves the
     // previous history rather than half of the next one.
     if let Ok(text) = serde_json::to_string_pretty(all) {
@@ -194,5 +193,24 @@ mod tests {
         // reappear.
         assert!(!is_recent_duplicate(&entries, "old"));
         assert!(is_recent_duplicate(&entries, "c"));
+    }
+
+    #[test]
+    fn the_file_lives_under_harness_state_dir() {
+        let dir = std::env::temp_dir().join(format!("harness-history-{}", std::process::id()));
+        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let old = std::env::var_os("HARNESS_STATE_DIR");
+        std::env::set_var("HARNESS_STATE_DIR", &dir);
+        assert_eq!(path(), dir.join("history.json"));
+        let entries = append("/work/a", "hello");
+        assert_eq!(entries, vec!["hello".to_owned()]);
+        assert_eq!(read("/work/a"), vec!["hello".to_owned()]);
+        assert!(path().is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("HARNESS_STATE_DIR", value),
+            None => std::env::remove_var("HARNESS_STATE_DIR"),
+        }
+        drop(guard);
     }
 }

@@ -9,14 +9,17 @@
 //! Everything here is pure: a list in, a [`Grouping`] out. The application owns
 //! the fetching.
 
+use std::collections::{HashMap, HashSet};
+
 use aui_icons::Provider;
 use aui_tokens::AgentState;
 pub use aui::nav::Grouping;
 
-use aui::nav::{DateGroup, SessionSummary};
+use aui::nav::{DateGroup, ProjectGroup, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
+use crate::projects::Projects;
 use crate::sessions::SessionMeta;
 
 /// What a session with nothing to be called is called.
@@ -65,6 +68,14 @@ pub struct SessionEntry {
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
     /// its id, then the joined wire row replaces it.
     pub local: bool,
+    /// The row's `workspace_root`: canonicalized when the path exists,
+    /// verbatim otherwise. What project resolution reads — never the current
+    /// project, so a worktree session keeps its own folder.
+    pub workspace: Option<String>,
+    /// The resolved project id: the stored one when it still names a
+    /// project, else the adoption whose root equals [`Self::workspace`].
+    /// `None` is "Other workspaces".
+    pub project: Option<String>,
 }
 
 impl SessionEntry {
@@ -86,6 +97,7 @@ impl SessionEntry {
         session: &muse_client::schema::Session,
         index: Option<&IndexEntry>,
         meta: Option<&SessionMeta>,
+        projects: &crate::projects::Projects,
     ) -> Self {
         let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let indexed = index.and_then(IndexEntry::label);
@@ -102,6 +114,10 @@ impl SessionEntry {
                 .map(str::trim)
                 .is_some_and(|s| !s.is_empty());
         let text = label.unwrap_or(UNNAMED);
+        let workspace = session.workspace_root.as_deref().map(crate::projects::canonical_str);
+        let project = projects
+            .resolve(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()))
+            .map(|p| p.id.clone());
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
@@ -116,6 +132,8 @@ impl SessionEntry {
             named: name.is_some(),
             needs_title: label.is_none(),
             local: false,
+            workspace,
+            project,
         }
     }
 
@@ -124,9 +142,16 @@ impl SessionEntry {
     /// It is labelled by the file rather than by the index, because a replayed
     /// session is not one this host ever ran and the index has nothing to say
     /// about it. The timestamp is the deterministic clock, so two runs label
-    /// the row the same way (see [`grouping_now`]).
-    pub fn replayed(session_id: &str, capture: &std::path::Path) -> Self {
+    /// the row the same way (see [`grouping_now`]). Its workspace is the
+    /// capture's own `workspace_root`, so it groups where a live session of
+    /// that root would.
+    pub fn replayed(session_id: &str, capture: &std::path::Path, projects: &crate::projects::Projects) -> Self {
         let label = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
+        let workspace = replay_workspace(capture).map(|root| crate::projects::canonical_str(&root));
+        let project = workspace
+            .as_deref()
+            .and_then(|root| projects.resolve(Some(root), None))
+            .map(|p| p.id.clone());
         Self {
             id: session_id.to_owned(),
             label,
@@ -141,6 +166,8 @@ impl SessionEntry {
             named: false,
             needs_title: false,
             local: false,
+            workspace,
+            project,
         }
     }
 
@@ -185,6 +212,40 @@ impl SessionEntry {
         }
         row
     }
+}
+
+/// The `workspace_root` a `--replay` capture ran in: the first `session/…`
+/// line's, or `None` when it carries none.
+///
+/// Captures are JSON-RPC with a direction prefix (`-->` for what the client
+/// sent, `<--` for what the server said). The workspace travels in the known
+/// shapes — `session/start`'s params, `session/started`'s session object, a
+/// `session/branchChanged` observation — and only the first `session/…` line
+/// counts: a capture is one session's story, and its root is where that story
+/// starts. Best-effort like every file read: an unreadable capture is a row
+/// with no workspace, never an error.
+pub fn replay_workspace(capture: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(capture).ok()?;
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches("-->").trim_start_matches("<--").trim();
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("method").and_then(|m| m.as_str()).is_none_or(|m| !m.starts_with("session/")) {
+            continue;
+        }
+        let params = value.get("params")?;
+        for shape in [
+            params.pointer("/session/workspaceRoot"),
+            params.pointer("/session/workspace_root"),
+            params.get("workspaceRoot"),
+            params.get("workspace_root"),
+        ] {
+            if let Some(root) = shape.and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(root.to_owned());
+            }
+        }
+        return None;
+    }
+    None
 }
 
 /// Merge a `session/list` reply with the rows the window placed locally.
@@ -233,6 +294,107 @@ pub fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
         }
     }
     Grouping::Date(groups)
+}
+
+/// The "Other workspaces" group id: sessions whose workspace no adoption
+/// holds. Always last, muted, and closed until the person opens it.
+pub const OTHER_GROUP: &str = "other";
+
+/// Group the entries by project, against an explicit clock.
+///
+/// One group per adoption in [`Projects::sorted`] order — pinned projects
+/// first, then by newest session activity — each carrying its mark (the
+/// name's initial in the project's label colour), the branch when known, a
+/// running dot when any of its sessions runs, and the visible-session count
+/// (an empty project still gets its row, counting `"0"`). Sessions inside
+/// run newest-first with pinned rows first, each drawn exactly as the date
+/// view draws it. Entries that resolve to no project land in a last muted
+/// "Other workspaces" group, each row tagged with its workspace's folder
+/// name. A group stands open unless its id is in `closed` — except "Other
+/// workspaces", which reads the same set inverted and starts closed, so one
+/// flip rule serves both.
+///
+/// `entries` arrive already filtered: the empty/hidden/archived filters hide
+/// rows, never groups.
+pub fn grouping_by_project(
+    entries: &[SessionEntry],
+    projects: &Projects,
+    palette: &aui_tokens::Palette,
+    branches: &HashMap<String, String>,
+    closed: &HashSet<String>,
+    now: DateTime<Local>,
+) -> Grouping {
+    let mut activity: HashMap<String, i64> = HashMap::new();
+    let mut by_project: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
+    let mut other: Vec<&SessionEntry> = Vec::new();
+    for entry in entries {
+        match entry.project.as_deref().and_then(|id| projects.find(id)) {
+            Some(project) => {
+                by_project.entry(project.id.as_str()).or_default().push(entry);
+                activity
+                    .entry(project.id.clone())
+                    .and_modify(|newest| *newest = (*newest).max(entry.updated.timestamp_millis()))
+                    .or_insert(entry.updated.timestamp_millis());
+            }
+            None => other.push(entry),
+        }
+    }
+    let mut groups = Vec::new();
+    for project in projects.sorted(&activity) {
+        let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
+        rows.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
+        let sessions: Vec<SessionSummary> = rows.iter().map(|e| e.summary(now)).collect();
+        let count = sessions.len().to_string();
+        let initial = project
+            .name
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().collect::<String>())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "?".to_owned());
+        let mut group =
+            ProjectGroup::new(project.id.clone(), project.name.clone(), count).mark(initial, palette.label(project.colour.saturating_sub(1)));
+        if let Some(branch) = branches.get(&project.id) {
+            group = group.trailing(branch.clone());
+        }
+        if rows.iter().any(|e| e.running) {
+            group = group.state(AgentState::Running);
+        }
+        if !closed.contains(&project.id) {
+            group = group.open(sessions);
+        }
+        groups.push(group);
+    }
+    if !other.is_empty() {
+        other.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
+        let sessions: Vec<SessionSummary> = other
+            .iter()
+            .map(|e| {
+                let row = e.summary(now);
+                match e.workspace.as_deref().map(workspace_folder) {
+                    Some(folder) => row.repo(folder),
+                    None => row,
+                }
+            })
+            .collect();
+        let count = sessions.len().to_string();
+        let mut group = ProjectGroup::new(OTHER_GROUP, "Other workspaces", count).muted();
+        if closed.contains(OTHER_GROUP) {
+            group = group.open(sessions);
+        }
+        groups.push(group);
+    }
+    Grouping::Project(groups)
+}
+
+/// The last path component of a workspace root, for the "Other workspaces"
+/// rows' repo tag. A root with no final component names itself whole rather
+/// than tagging nothing.
+fn workspace_folder(workspace: &str) -> String {
+    std::path::Path::new(workspace)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| workspace.to_owned())
 }
 
 /// Which date header a moment belongs under, on the calendar and not on a
@@ -440,7 +602,255 @@ mod tests {
             named: false,
             needs_title: false,
             local: false,
+            workspace: None,
+            project: None,
         }
+    }
+
+    fn project(id: &str, name: &str, colour: u8, pinned: bool) -> crate::projects::Project {
+        crate::projects::Project {
+            id: id.to_owned(),
+            root: std::path::PathBuf::from(format!("/work/{id}")),
+            name: name.to_owned(),
+            colour,
+            pinned,
+            added_at: "2026-09-13T10:00:00Z".into(),
+            last_opened_at: "2026-09-13T10:00:00Z".into(),
+            defaults: crate::projects::ProjectDefaults::default(),
+        }
+    }
+
+    fn grouped_projects() -> crate::projects::Projects {
+        crate::projects::Projects {
+            version: 1,
+            current: None,
+            projects: vec![
+                project("p-harness", "harness", 1, false),
+                project("p-agentic", "agentic-ui", 2, false),
+                project("p-empty", "empty", 3, false),
+            ],
+        }
+    }
+
+    fn grouped_entry(id: &str, project: Option<&str>, workspace: Option<&str>, days_ago: i64) -> SessionEntry {
+        let mut e = entry(id);
+        e.label = format!("session {id}");
+        e.project = project.map(str::to_owned);
+        e.workspace = workspace.map(str::to_owned);
+        e.updated = Local::now() - chrono::Duration::days(days_ago);
+        e.turns = 1;
+        e
+    }
+
+    fn dark_palette() -> aui_tokens::Palette {
+        aui_tokens::Palette::for_kind(aui_tokens::ThemeKind::Dark)
+    }
+
+    fn by_project(entries: &[SessionEntry], projects: &crate::projects::Projects) -> Grouping {
+        grouping_by_project(entries, projects, &dark_palette(), &HashMap::new(), &HashSet::new(), Local::now())
+    }
+
+    #[test]
+    fn three_projects_and_two_strays_group_into_four() {
+        let projects = grouped_projects();
+        let entries = vec![
+            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0),
+            grouped_entry("s2", Some("p-harness"), Some("/work/p-harness"), 2),
+            grouped_entry("s3", Some("p-agentic"), Some("/work/p-agentic"), 1),
+            grouped_entry("s4", None, Some("/tmp/stray-one"), 0),
+            grouped_entry("s5", None, Some("/tmp/stray-two"), 3),
+        ];
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        // Newest activity first: harness (today), agentic-ui (yesterday),
+        // the empty project, then Other workspaces last.
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].id.as_ref(), "p-harness");
+        assert_eq!(groups[0].count.as_ref(), "2");
+        assert_eq!(groups[1].id.as_ref(), "p-agentic");
+        assert_eq!(groups[2].id.as_ref(), "p-empty");
+        assert_eq!(groups[2].count.as_ref(), "0");
+        assert!(groups[2].open, "an empty project still gets an open group row");
+        let other = &groups[3];
+        assert_eq!(other.id.as_ref(), OTHER_GROUP);
+        assert_eq!(other.name.as_ref(), "Other workspaces");
+        assert!(other.muted);
+        assert!(!other.open, "Other workspaces starts closed");
+        assert_eq!(other.count.as_ref(), "2");
+        assert!(other.sessions.is_empty(), "a closed group counts its rows without carrying them");
+        // Marks: the name's initial in the project's label colour.
+        let palette = dark_palette();
+        assert_eq!(groups[0].mark.as_ref().map(|(initial, _)| initial.to_string()), Some("H".to_owned()));
+        assert_eq!(
+            groups[0].mark.clone().map(|(_, colour)| format!("{colour:?}")),
+            Some(format!("{:?}", palette.label(0)))
+        );
+        // Newest first inside the group.
+        assert_eq!(groups[0].sessions[0].id.as_ref(), "s1");
+        assert_eq!(groups[0].sessions[1].id.as_ref(), "s2");
+    }
+
+    #[test]
+    fn a_pinned_project_leads_whatever_its_activity() {
+        let mut projects = grouped_projects();
+        projects.projects.iter_mut().find(|p| p.id == "p-agentic").expect("agentic").pinned = true;
+        let entries = vec![
+            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0),
+            grouped_entry("s3", Some("p-agentic"), Some("/work/p-agentic"), 5),
+        ];
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        assert_eq!(groups[0].id.as_ref(), "p-agentic");
+    }
+
+    #[test]
+    fn a_running_session_marks_its_group_and_branches_trail() {
+        let projects = grouped_projects();
+        let mut entries = vec![grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0)];
+        entries[0].running = true;
+        let mut branches = HashMap::new();
+        branches.insert("p-harness".to_owned(), "main".to_owned());
+        let Grouping::Project(groups) = grouping_by_project(
+            &entries,
+            &projects,
+            &dark_palette(),
+            &branches,
+            &HashSet::new(),
+            Local::now(),
+        ) else {
+            panic!("project grouping must yield project groups");
+        };
+        assert_eq!(groups[0].state, Some(AgentState::Running));
+        assert_eq!(groups[0].trailing.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_closed_group_keeps_its_count_but_hides_its_rows() {
+        let projects = grouped_projects();
+        let entries = vec![grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0)];
+        let mut closed = HashSet::new();
+        closed.insert("p-harness".to_owned());
+        let Grouping::Project(groups) =
+            grouping_by_project(&entries, &projects, &dark_palette(), &HashMap::new(), &closed, Local::now())
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        assert!(!groups[0].open);
+        assert_eq!(groups[0].count.as_ref(), "1");
+        assert!(groups[0].sessions.is_empty());
+        // …while opening Other workspaces is the same set read inverted.
+        let mut closed = HashSet::new();
+        closed.insert(OTHER_GROUP.to_owned());
+        let entries = vec![
+            grouped_entry("s4", None, Some("/tmp/stray"), 0),
+            grouped_entry("s5", None, Some("/tmp/stray-two"), 3),
+        ];
+        let Grouping::Project(groups) =
+            grouping_by_project(&entries, &projects, &dark_palette(), &HashMap::new(), &closed, Local::now())
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        let other = groups.last().expect("other group");
+        assert!(other.open);
+        // Stray rows carry their workspace's folder name, newest first.
+        assert_eq!(other.sessions.len(), 2);
+        assert_eq!(other.sessions[0].id.as_ref(), "s4");
+        assert_eq!(other.sessions[0].repo.as_deref(), Some("stray"));
+        assert_eq!(other.sessions[1].repo.as_deref(), Some("stray-two"));
+    }
+
+    #[test]
+    fn pinned_rows_lead_their_group_newest_first() {
+        let projects = grouped_projects();
+        let mut entries = vec![
+            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0),
+            grouped_entry("s2", Some("p-harness"), Some("/work/p-harness"), 1),
+        ];
+        entries[1].pinned = true;
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s2", "s1"]);
+    }
+
+    /// The project-grouping twin of
+    /// [`five_hundred_sidebar_rows_cost_less_from_the_cache`]: the pure half
+    /// `render_sidebar` builds in project mode, timed against the cached
+    /// frame, which hands the same `Rc` back. The assertion is only the
+    /// ordering, so the test is not a timing flake.
+    #[test]
+    fn five_hundred_project_rows_cost_less_from_the_cache() {
+        const N: usize = 500;
+        const FRAMES: usize = 20;
+        let now = Local::now();
+        let projects = grouped_projects();
+        let ids = ["p-harness", "p-agentic", "p-empty"];
+        let entries: Vec<SessionEntry> = (0..N)
+            .map(|i| {
+                let mut e = entry(&format!("s{i}"));
+                e.label = format!("session number {i}");
+                e.description = format!("did something to file {i}");
+                e.turns = (i % 7) as u64;
+                e.updated = now - chrono::Duration::minutes(i as i64 * 7);
+                e.project = Some(ids[i % ids.len()].to_owned());
+                e.workspace = Some(format!("/work/{}", ids[i % ids.len()]));
+                e
+            })
+            .collect();
+        let palette = dark_palette();
+        let cold = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            std::hint::black_box(grouping_by_project(
+                &entries,
+                &projects,
+                &palette,
+                &HashMap::new(),
+                &HashSet::new(),
+                now,
+            ));
+        }
+        let cold = cold.elapsed() / FRAMES as u32;
+        let grouping = std::rc::Rc::new(grouping_by_project(
+            &entries,
+            &projects,
+            &palette,
+            &HashMap::new(),
+            &HashSet::new(),
+            now,
+        ));
+        let warm = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            std::hint::black_box(std::rc::Rc::clone(&grouping));
+        }
+        let warm = warm.elapsed() / FRAMES as u32;
+        eprintln!("project-rows n={N} cold={cold:?}/frame warm={warm:?}/frame");
+        assert!(warm < cold, "cached frame ({warm:?}) must cost less than the rebuild ({cold:?})");
+    }
+
+    #[test]
+    fn a_replay_takes_its_workspace_from_the_capture() {
+        let dir = std::env::temp_dir().join(format!("harness-replay-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let capture = dir.join("capture.jsonl");
+        std::fs::write(
+            &capture,
+            "--> {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/start\",\"params\":{\"workspaceRoot\":\"/work/a\"}}\n<-- {\"jsonrpc\":\"2.0\",\"method\":\"session/started\",\"params\":{\"session\":{\"workspaceRoot\":\"/work/a\"}}}\n",
+        )
+        .expect("capture");
+        assert_eq!(replay_workspace(&capture).as_deref(), Some("/work/a"));
+        // The first `session/…` line decides: when it carries no root the
+        // row has no workspace even if a later line does.
+        std::fs::write(
+            &capture,
+            "<-- {\"jsonrpc\":\"2.0\",\"method\":\"session/started\",\"params\":{\"session\":{}}}\n<-- {\"jsonrpc\":\"2.0\",\"method\":\"session/branchChanged\",\"params\":{\"workspaceRoot\":\"/work/b\"}}\n",
+        )
+        .expect("capture");
+        assert_eq!(replay_workspace(&capture), None);
+        assert_eq!(replay_workspace(&dir.join("missing.jsonl")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

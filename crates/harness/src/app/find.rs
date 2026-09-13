@@ -24,10 +24,21 @@ impl Harness {
         cx.notify();
     }
 
+    /// The Sessions view menu's "Search all projects": flip the scope the
+    /// next query reads, persist it, and re-run an open palette. Package 2's
+    /// palette reads the scope; the toggle lands in this package.
+    pub(crate) fn toggle_search_scope(&mut self, cx: &mut Context<Self>) {
+        self.layout.search_all_projects = !self.layout.search_all_projects;
+        layout::write(&self.layout);
+        self.refresh_search(cx);
+        cx.notify();
+    }
+
     /// Re-query `search.db` off the UI thread, latest keystroke wins.
     ///
     /// A no-op unless the search palette is open: typing anywhere else must
-    /// not touch the disk.
+    /// not touch the disk. When the Sessions view menu narrowed search to the
+    /// current project, hits from every other workspace stay out.
     pub(super) fn refresh_search(&mut self, cx: &mut Context<Self>) {
         if !self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search) {
             return;
@@ -35,11 +46,25 @@ impl Harness {
         self.search_epoch += 1;
         let epoch = self.search_epoch;
         let query = self.search_query.read(cx).value().to_string();
+        let scope: Option<String> = if self.layout.search_all_projects {
+            None
+        } else {
+            self.current_project().map(|p| p.root.to_string_lossy().into_owned())
+        };
         let work = move || match crate::search::open() {
-            Ok(connection) => (
-                crate::search::query_sessions(&connection, &query, crate::search::LIMIT),
-                crate::search::query_files(&connection, &query, crate::search::LIMIT),
-            ),
+            Ok(connection) => {
+                let sessions: Vec<crate::search::SessionHit> =
+                    crate::search::query_sessions(&connection, &query, crate::search::LIMIT)
+                        .into_iter()
+                        .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
+                        .collect();
+                let files: Vec<crate::search::FileHit> =
+                    crate::search::query_files(&connection, &query, crate::search::LIMIT)
+                        .into_iter()
+                        .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
+                        .collect();
+                (sessions, files)
+            }
             Err(_) => (Vec::new(), Vec::new()),
         };
         self.wire_call(cx, work, move |this: &mut Self, (sessions, files), cx| {
@@ -84,6 +109,7 @@ impl Harness {
                     title: entry.title.clone(),
                     first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
                     body: entry.search_text.clone(),
+                    workspace: entry.workspace_root.as_deref().map(crate::projects::canonical_str),
                 }
             })
             .collect();

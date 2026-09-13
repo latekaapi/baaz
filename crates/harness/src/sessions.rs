@@ -50,6 +50,13 @@ pub struct SessionMeta {
     /// sidebar's description line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_summary: Option<String>,
+    /// The project this session was started in: the adoption it groups
+    /// under even when its folder is a worktree of the project's root.
+    /// Written at `session/start`; always serialized, so a file that says
+    /// nothing about a session says `"project":null` rather than staying
+    /// silent about the question.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 impl SessionMeta {
@@ -62,6 +69,7 @@ impl SessionMeta {
             && !self.pinned
             && !self.archived
             && self.last_summary.is_none()
+            && self.project.is_none()
     }
 }
 
@@ -132,17 +140,19 @@ mod tests {
             pinned: true,
             archived: true,
             last_summary: Some("did a thing".into()),
+            project: Some("6d0e".into()),
             ..SessionMeta::default()
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains("\"pinned\":true"));
         assert!(text.contains("\"archived\":true"));
         assert!(text.contains("\"lastSummary\":\"did a thing\""));
+        assert!(text.contains("\"project\":\"6d0e\""));
         let back: SessionMeta = serde_json::from_str(&text).unwrap();
         assert_eq!(back, meta);
         // Old files without the fields still read.
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
-        assert!(!old.pinned && !old.archived && old.last_summary.is_none());
+        assert!(!old.pinned && !old.archived && old.last_summary.is_none() && old.project.is_none());
     }
 
     #[test]

@@ -159,7 +159,7 @@ impl SessionView {
         let name = self
             .overlays
             .read(cx)
-            .skills
+            .skills_for(&self.workspace)
             .iter()
             .find(|s| s.id == id.as_ref())
             .map(|s| s.name.clone());
@@ -170,16 +170,27 @@ impl SessionView {
 
     pub(super) fn pick_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
         self.set_model(model_id, cx);
+        cx.emit(SessionEvent::ModelSelected { model_id: model_id.to_owned() });
         self.close_menu(cx);
     }
 
     pub(super) fn pick_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
         self.effort = effort;
+        cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
         self.close_menu(cx);
+    }
+
+    /// A new session's starting effort, from its project's defaults: applied
+    /// before the first turn, reporting nothing back — it already is what
+    /// the project says.
+    pub(crate) fn set_initial_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
+        self.effort = effort;
+        cx.notify();
     }
 
     pub(super) fn pick_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         self.set_mode(mode, cx);
+        cx.emit(SessionEvent::ModeSelected { mode: wire_mode(mode) });
         self.close_menu(cx);
     }
 

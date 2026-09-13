@@ -53,9 +53,13 @@ impl ResizeDrag {
     }
 
     /// The divider's settled x, for `layout.json`. Small and synchronous like
-    /// the sessions store: one pretty object, best-effort.
+    /// the sessions store: one pretty object, best-effort. A read-modify-write
+    /// rather than a fresh object, so a drag never drops the grouping, the
+    /// closed groups or the search scope the person chose.
     pub(crate) fn persist(&self) {
-        layout::write(&layout::Layout { sidebar_width: Some(self.width) });
+        let mut layout = layout::read();
+        layout.sidebar_width = Some(self.width);
+        layout::write(&layout);
     }
 }
 
