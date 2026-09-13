@@ -223,6 +223,19 @@ pub struct SessionHost {
     pub capture: CaptureToken,
 }
 
+/// An unsent composer's content: the text plus the images and files waiting
+/// to go out with the next turn. One project's draft moved into another's
+/// session travels as one of these.
+#[derive(Clone, Default)]
+pub(crate) struct Draft {
+    /// The composer's text, verbatim.
+    pub text: String,
+    /// Images waiting to go out with the next turn.
+    pub images: Vec<images::Image>,
+    /// Files waiting to go out with the next turn, as extracted text.
+    pub files: Vec<attachments::AttachedFile>,
+}
+
 /// What the session needs the application to do about something.
 pub enum SessionEvent {
     /// Show this in a modal dialog: an identity or protocol failure.
@@ -1007,6 +1020,43 @@ impl SessionView {
     /// unknown-height `None` as at the tail.
     pub fn bench_list_end(&self) -> bool {
         self.list_state.is_scrolled_to_end().unwrap_or(true)
+    }
+
+    /// An unsent composer's movable content: the text plus whatever is waiting
+    /// to go out with the next turn. Moved between sessions when a draft is
+    /// retargeted at another project, never cloned.
+    pub(crate) fn take_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Draft {
+        let draft = Draft {
+            text: self.composer.read(cx).value().to_string(),
+            images: std::mem::take(&mut self.images),
+            files: std::mem::take(&mut self.files),
+        };
+        self.composer.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.on_draft_changed(cx);
+        draft
+    }
+
+    /// Receive a moved-in draft. The images and files land first so the
+    /// composer's own write sees the state the next send will read.
+    pub(crate) fn put_draft(&mut self, draft: Draft, window: &mut Window, cx: &mut Context<Self>) {
+        self.images = draft.images;
+        self.files = draft.files;
+        self.set_draft(draft.text, window, cx);
+        self.on_draft_changed(cx);
+    }
+
+    /// Whether a turn is in flight on this view: submitted and no
+    /// `turn/started` yet, or the server says it runs. A sending view is no
+    /// draft, even before its row exists.
+    pub(crate) fn is_sending(&self) -> bool {
+        self.submitting || self.running.is_some()
+    }
+
+    /// Whether this view holds no movable content: nothing typed, nothing
+    /// attached. What decides a retargeted draft may land here without
+    /// clobbering anything.
+    pub(crate) fn draft_content_empty(&self, cx: &gpui::App) -> bool {
+        self.images.is_empty() && self.files.is_empty() && self.composer.read(cx).value().trim().is_empty()
     }
 
     /// Put text in the composer. Only the scripted `--send` uses this; a person

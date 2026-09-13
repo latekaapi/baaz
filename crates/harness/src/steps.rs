@@ -92,6 +92,8 @@
 //! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
 //! | `remove-project:<name>` | raise the project removal dialog |
 //! | `remove-confirm` | confirm it |
+//! | `new` | the same as ⌘N |
+//! | `new:<project>` | the group row's `+` for the project named |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -180,6 +182,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "group-by", run: |this, rest, _, cx| this.step_group_by(rest, cx) },
     WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
+    WindowVerb { verb: "new", run: |this, rest, window, cx| this.step_new(rest, window, cx) },
 ];
 
 /// The open session's `--steps` verbs.
