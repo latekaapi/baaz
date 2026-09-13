@@ -388,6 +388,15 @@ pub fn grouping_by_project(
             None => other.push(entry),
         }
     }
+    // D4: the project the open session belongs to wears the accent bar. With
+    // no session open the store's current project wears it instead — that is
+    // the project the header crumb names and the one a new session would land
+    // in, so the bar keeps pointing at the same place either way.
+    let current_project: Option<&str> = view
+        .active
+        .and_then(|open| entries.iter().find(|e| e.id == open))
+        .and_then(|e| e.project.as_deref())
+        .or(projects.current.as_deref());
     let mut groups = Vec::new();
     for project in projects.sorted(&activity) {
         let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
@@ -440,6 +449,9 @@ pub fn grouping_by_project(
         }
         if held > 0 {
             group = group.folded(held, is_expanded);
+        }
+        if current_project == Some(project.id.as_str()) {
+            group = group.current(true);
         }
         groups.push(group);
     }

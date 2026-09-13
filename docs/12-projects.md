@@ -225,3 +225,28 @@ codebase and bent.
   `acme-web` sessions so the captures show "Show 2 more", and `s-web-1`
   went idle: a running row's pulse ring animates on wall-clock time and no
   capture containing one can be byte-identical run to run.
+
+## 8a. Owner round 3 (2026-09-13)
+
+- **A project's rows end where the project row ends, at any sidebar width.**
+  The indent wrapper between `rows` and the reveal had no width, and
+  `collapse` lays its child out as a root, where `width: auto` is fit-content
+  rather than stretch — so the whole indented block sized to its content: the
+  rows stopped short of the project row at a wide sidebar and spilled past its
+  right margin at a narrow one. The library's `sidebar/views` gallery card now
+  carries the grouping at 240 px and 520 px so the edge is checkable without
+  the app. Note that the shell clamps the sidebar to `SIDEBAR_MAX_WIDTH` =
+  420, so 520 is reachable only in the gallery.
+- **The current project wears a 2 px accent bar** at the row's left edge, and
+  keeps `ink` at semibold even when the group is muted
+  (`ProjectGroup::current`). It marks the project of the open session; with no
+  session open, the store's `current` — the project the header crumb names and
+  the one ⌘N would land in.
+- **The hover tray hides what it covers.** The branch and the count fade out
+  as the tray fades in, on the one tween, opacity only.
+- **Ordering counts adoption.** `Projects::sorted` keyed on session activity
+  alone, so a folder adopted a moment ago — which has no sessions, hence no
+  activity — sorted below every project that had ever been used. It now keys
+  on the newest of session activity, `last_opened_at` and `added_at`.
+  Consequence: adopting several folders in one go ties them all at "now", so
+  they order by name until they are used.

@@ -100,21 +100,16 @@ impl Tier {
     /// matters. `/status` keeps the full name.
     pub fn footer_label(&self) -> String {
         match self {
-            Tier::Subscription { plan, weekly_pct, .. } => {
-                let plan = plan.strip_prefix("Muse Code ").unwrap_or(plan);
-                match weekly_pct {
-                    Some(pct) => format!("{plan} · {pct}% weekly"),
-                    None => plan.to_owned(),
-                }
-            }
+            Tier::Subscription { plan, .. } => plan.strip_prefix("Muse Code ").unwrap_or(plan).to_owned(),
             Tier::PayAsYouGo => "Pay-as-you-go".to_owned(),
             Tier::Unavailable(_) => "Plan unknown".to_owned(),
         }
     }
 
     /// The sidebar footer's usage meter: the weekly window's fraction in
-    /// `0..=1`, or `None` when the probe said nothing usable. The label's
-    /// "12% weekly" and the meter's 0.12 are the same number in two clothes.
+    /// `0..=1`, or `None` when the probe said nothing usable. This is the only
+    /// place the weekly number is drawn — [`Self::footer_label`] above it
+    /// names the plan and stops there (D5).
     pub fn weekly_fraction(&self) -> Option<f32> {
         match self {
             Tier::Subscription { weekly_pct: Some(pct), .. } => Some((*pct as f32 / 100.0).clamp(0.0, 1.0)),
@@ -994,7 +989,12 @@ mod tests {
             weekly_pct: Some(2),
             resets: vec![],
         };
-        assert_eq!(plan.footer_label(), "High Usage · 2% weekly");
+        // D5: the label is the plan's name and nothing else. The weekly
+        // percentage belongs to the meter row under it, which reads the same
+        // number from `weekly_fraction`; printing it twice said one fact in
+        // two places and made the row look like two readings.
+        assert_eq!(plan.footer_label(), "High Usage");
+        assert_eq!(plan.weekly_fraction(), Some(0.02), "the number moved to the meter, it did not vanish");
         assert!(!plan.is_warning());
         assert_eq!(Tier::PayAsYouGo.footer_label(), "Pay-as-you-go");
         assert!(Tier::PayAsYouGo.is_warning());

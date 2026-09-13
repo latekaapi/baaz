@@ -41,7 +41,7 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 | `--screenshot-delay <ms>` | how long to wait first (default 600). |
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
 | `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
-| `--bench <capture.jsonl> [--bench-cadence-ms <ms>] [--bench-scroll top\|mid\|tail\|sweep] [--bench-frames <n>] [--bench-out <file.json>]` | stream the capture through the fold on a timer while driving the transcript list, and print element / frame / fold-apply timing plus peak RSS (§6). Free: no child, no server. Cadence defaults to 4 ms, scroll to `sweep`, frames to 600. Implies `HARNESS_FRAME_STATS`. |
+| `--bench <capture.jsonl> [--bench-cadence-ms <ms>] [--bench-scroll top\|mid\|tail\|sweep\|wheel] [--bench-frames <n>] [--bench-out <file.json>]` | stream the capture through the fold on a timer while driving the transcript list, and print element / frame / fold-apply timing plus peak RSS (§6). Free: no child, no server. Cadence defaults to 4 ms, scroll to `sweep`, frames to 600. Implies `HARNESS_FRAME_STATS`. |
 | `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). Scripting only — its full verb table, with which steps cost a turn, lives in `main.rs`'s `Args::steps` doc comment; only `send:` and `steer:` bill. |
 | `--login <state>` | which login-screen state `--no-connect` boots into for a capture: `choose` (the default), `device`, `apikey`, `apikey-error`, `validating` or `error`. Sample data only. |
 | `--login-steps <a;b;c>` | drive the login screen from the command line, once the login screen is up on a live connection (never with `--no-connect` / `--replay`). After sign-in the ordinary `--steps` run as today. |
@@ -451,6 +451,23 @@ item). The library draws the footer from `TurnMeta` with no per-cell hook,
 so a silent turn carries no library footer and the harness draws the row
 itself, mirroring the library's cells. A turn with a visible thinking card
 keeps the library's plain `419 reasoning` cell.
+
+**The wheel does not go through `list()`.** A zero-size canvas over the list
+takes every `ScrollWheelEvent` in the *capture* phase and drives
+`ListState::scroll_by` with that one event's delta
+(`session/render.rs`, `wheel_capture`). `list()`'s own handler sums a frame's
+deltas with `ScrollDelta::coalesce` and applies the running sum against the
+offset it captured at paint; `coalesce` overrides rather than sums on a sign
+change, and an exactly-zero delta counts as positive, so a zero sample —
+which AppKit emits constantly — discarded a frame's accumulated upward travel
+and none of its downward travel. Capture is the only phase that can win:
+`Interactivity::paint` registers a container's listeners before painting its
+children, and bubble runs in reverse registration order, so the list always
+beats anything wrapping it there. The hitbox is gpui's own, so an `occlude()`
+overlay above the transcript takes the wheel instead; a gesture more
+horizontal than vertical is left alone, so a wide markdown table still
+scrolls sideways. Measured before and after in
+`docs/diagnosis/scroll-research-2026-09-13.md`.
 
 Auto-scroll is tail-follow, the same rule the block terminal uses: anything new
 scrolls the list to the bottom, but only for a reader who was already within a
