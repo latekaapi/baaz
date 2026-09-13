@@ -365,6 +365,14 @@ impl SessionView {
                     .flex_col()
                     .max_w(px(TRANSCRIPT_MEASURE))
                     .mx_auto()
+                    // `relative` is load-bearing for `wheel_capture` below:
+                    // its canvas is absolute and `size_full`, and an absolute
+                    // box resolves against its nearest *positioned* ancestor.
+                    // Without a positioned wrapper here that ancestor is the
+                    // window, and the transcript's wheel handler would sit
+                    // over the sidebar and the composer too — taking their
+                    // scroll events and scrolling the transcript instead.
+                    .relative()
                     // The list's width, for the re-hint after a change.
                     .on_children_prepainted(move |bounds, _, cx| {
                         if let Some(first) = bounds.first() {
