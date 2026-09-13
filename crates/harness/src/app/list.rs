@@ -38,7 +38,7 @@ impl Harness {
     /// it happens on a gesture rather than in a loop, and a background write
     /// can lose a rename to a window that closed a moment later — which is the
     /// one outcome a store exists to prevent.
-    pub(super) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
+    pub(crate) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
         edit(self.overrides.entry(session_id.to_owned()).or_default());
         self.settle_overrides(cx);
     }
@@ -74,6 +74,19 @@ impl Harness {
         cx.notify();
     }
 
+    /// Forget `project_id` on every session that carries it, settled once:
+    /// project removal re-resolves the rows by root, so a later re-add finds
+    /// them again.
+    pub(crate) fn clear_session_projects(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.project.as_deref() == Some(project_id))
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.set_overrides(&ids, |meta| meta.project = None, cx);
+    }
+
     /// `/name`, and the row's inline field: rename the active session.
     pub(super) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
         let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
@@ -95,8 +108,14 @@ impl Harness {
         cx.notify();
     }
 
-    /// Commit whatever is in the rename field.
+    /// Commit whatever is in the rename field: the project when a project
+    /// rename is active, else the session row.
     pub(crate) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming_project.is_some() {
+            self.commit_project_rename(cx);
+            let _ = window;
+            return;
+        }
         let Some(session_id) = self.renaming.clone() else { return };
         let text = self.rename.read(cx).value().to_string();
         self.rename_session(session_id, Some(text), cx);

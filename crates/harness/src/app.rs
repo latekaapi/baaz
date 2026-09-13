@@ -48,6 +48,8 @@ use std::sync::Arc;
 
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
+use aui::nav::project_mark;
+use aui::util::{interaction, TrackInteraction};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
@@ -55,7 +57,7 @@ use aui::shell::{
     RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
 };
-use aui_icons::{provider_mark, IconName, Provider};
+use aui_icons::{icon, provider_mark, IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
@@ -98,6 +100,8 @@ actions!(
         Interrupt,
         /// Start a new session in this workspace (⌘N).
         NewSession,
+        /// Open the Projects palette (⌘⇧O).
+        AddProject,
         /// Toggle plan mode (Shift+Tab).
         TogglePlan,
         /// Open the model picker (⌘⇧M).
@@ -220,6 +224,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-tab", TogglePlan, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("ctrl-c", Interrupt, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-n", NewSession, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-shift-o", AddProject, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-m", OpenModelMenu, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-e", OpenEffortMenu, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-shift-p", OpenModeMenu, Some(aui::keys::ROOT_CONTEXT)),
@@ -282,6 +287,7 @@ pub fn set_menus(cx: &mut App) {
             gpui::MenuItem::action("Quit Harness", QuitApp),
         ]),
         gpui::Menu::new("File").items([
+            gpui::MenuItem::action("Add Project…", AddProject),
             gpui::MenuItem::action("New Session", NewSession),
             gpui::MenuItem::action("Close Window", CloseWindow),
         ]),
@@ -337,8 +343,9 @@ enum UndoBatch {
 }
 
 /// What decides the search card's status line: whether the query is blank,
-/// and how many sessions and files came back (finding `performance-9`).
-type SearchStatusKey = (bool, usize, usize);
+/// how many sessions and files came back (finding `performance-9`), and the
+/// scope it was queried in — a narrowed palette names its project.
+type SearchStatusKey = (bool, usize, usize, bool, String);
 
 /// The whole application.
 pub struct Harness {
@@ -357,7 +364,7 @@ pub struct Harness {
     list_epoch: u64,
     /// One sorted visible list and one grouping per change, not per frame.
     list_cache: RefCell<ListCache>,
-    index: HashMap<String, IndexEntry>,
+    pub(crate) index: HashMap<String, IndexEntry>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// The session the UI is pointed at: the sidebar click's target, set the
     /// moment `resume` runs. The centre swaps synchronously, so this usually
@@ -396,7 +403,7 @@ pub struct Harness {
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
-    focus_composer: bool,
+    pub(crate) focus_composer: bool,
     /// What the billing probe said, or `None` while it has not said it yet
     /// (spec §3.2, Phase 5 A1). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
@@ -443,6 +450,16 @@ pub struct Harness {
     /// The session whose row is being renamed in place, and the field doing it.
     pub(crate) renaming: Option<String>,
     pub(crate) rename: Entity<TextareaState>,
+    /// The project being renamed through the header crumb's field: the same
+    /// `rename` field does it, and `ConfirmRename` commits the project when
+    /// this is set rather than the session row.
+    pub(crate) renaming_project: Option<String>,
+    /// Whether the project menu's Colour submenu hangs open.
+    pub(crate) project_colour_open: bool,
+    /// The Projects palette's query field: the query filters both sections
+    /// by name and path, synchronously — a dozen adopted roots and a dozen
+    /// recent workspaces need no background task.
+    pub(crate) projects_query: Entity<TextareaState>,
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
@@ -464,7 +481,7 @@ pub struct Harness {
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
     /// accepted the bill this morning should be asked again tomorrow.
     pub(crate) send_anyway: bool,
-    tasks: Vec<Task<()>>,
+    pub(crate) tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
 
@@ -485,6 +502,7 @@ impl Harness {
             state
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
+        let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
         // The API-key field: masked, with the capture-safe placeholder. Enter
         // inside it submits (single-line inputs always emit `PressEnter`).
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
@@ -531,6 +549,9 @@ impl Harness {
             search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
+            renaming_project: None,
+            project_colour_open: false,
+            projects_query: projects_query.clone(),
             titled: std::collections::HashSet::new(),
             undo_stack: Vec::new(),
             window_title: None,
@@ -550,6 +571,15 @@ impl Harness {
         this.subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.refresh_search(cx);
+            }
+        }));
+        // Typing in the Projects palette's query only redraws: both sections
+        // are filtered synchronously at render, so the selection is clamped
+        // to the filtered rows here.
+        this.subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.clamp_projects_selection(cx);
+                cx.notify();
             }
         }));
         // The API-key field: Enter submits, and any change re-renders the
@@ -586,6 +616,14 @@ impl Harness {
             this.auth = Auth::SignedOut;
             this.wire = Wire::Down("not connected".into());
             this.apply_login_sample(window, cx);
+            // A scripted sidebar draws without a list reply — but only when
+            // one was asked for, so the login captures draw as they did.
+            if this.args.sidebar_fixture.is_some() {
+                this.apply_sidebar_fixture();
+                this.sessions_loaded = true;
+                this.index_loaded = true;
+                this.invalidate_list();
+            }
             return this;
         }
         this.connect(cx);
@@ -640,6 +678,12 @@ impl Harness {
     /// `$HOME`, where the window opens with no project and the hero owns the
     /// empty state. The file is written when anything above changed it.
     pub(super) fn boot_projects(&mut self) {
+        // `--no-project` boots the hero: nothing adopted, nothing current.
+        if self.args.no_project {
+            self.projects = Projects::default();
+            self.current_project = None;
+            return;
+        }
         self.projects = projects::read();
         let scripted = self.args.replay.is_some()
             || self.args.offline
@@ -851,8 +895,9 @@ impl Harness {
         cx.notify();
     }
 
-    /// The centre header: the active session's label ("Harness" with nothing
-    /// open), the provider mark, and the overflow menu — and nothing else.
+    /// The centre header: the current project's crumb (`mark project ▾`),
+    /// a `·` separator, the active session's label with the provider mark,
+    /// and the overflow menu — and nothing else.
     /// The library's `centre_header` always paints the right-pane toggle and
     /// the right header always paints its close button, so the shell gets a
     /// plain cell with the same title construction instead. The shell's own
@@ -863,48 +908,100 @@ impl Harness {
         // header answers on the click's own frame, before any page arrives.
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        let label = target
-            .and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()))
-            .unwrap_or_else(|| "Harness".to_owned());
+        let label = target.and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()));
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        // The title flexes inside the header cell and clips to one line, so
-        // a whole first prompt as the derived title can never push the
-        // overflow button out; the provider mark is flex-none so it stays
-        // painted. There is no width token in aui-tokens, so the flex
-        // leftover — not a fixed max — is the constraint, which also holds
-        // on narrow windows.
-        let title = h_flex()
+        // The project crumb: mark, name and chevron as one click target that
+        // opens the project menu under it. With no current project it reads
+        // "Add a project…" and opens the Projects palette instead.
+        let renaming_project_here =
+            self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
+        let crumb: AnyElement = if renaming_project_here {
+            div().flex_none().child(self.rename_field(window, cx)).into_any_element()
+        } else if let Some(project) = self.current_project() {
+            let initial = project
+                .name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "?".to_owned());
+            let id = project.id.clone();
+            let name = project.name.clone();
+            let colour = cx.aui().colors.label(project.colour.saturating_sub(1));
+            let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                if this.renaming_project.is_some() {
+                    return;
+                }
+                this.open_project_menu(Some(id.clone()), true, cx);
+            });
+            let state = interaction("hd-project", window, cx);
+            h_flex()
+                .id("hd-project")
+                .flex_none()
+                .items_center()
+                .gap(px(5.0))
+                .track_interaction(&state)
+                .on_click(open)
+                .child(project_mark(initial, colour).size(px(18.0)))
+                .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
+                .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.ink_3))
+                .into_any_element()
+        } else {
+            let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.open_projects(false, window, cx);
+            });
+            let state = interaction("hd-project", window, cx);
+            h_flex()
+                .id("hd-project")
+                .flex_none()
+                .items_center()
+                .track_interaction(&state)
+                .on_click(open)
+                .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child("Add a project…"))
+                .into_any_element()
+        };
+        // The session half keeps today's construction — provider mark, then
+        // the label — moved after the `·` separator. The title flexes inside
+        // the header cell and clips to one line, so a whole first prompt as
+        // the derived title can never push the overflow button out; the
+        // provider mark is flex-none so it stays painted. There is no width
+        // token in aui-tokens, so the flex leftover — not a fixed max — is
+        // the constraint, which also holds on narrow windows.
+        let mut title = h_flex()
             .flex_1()
             .min_w(px(0.0))
             .overflow_hidden()
+            .items_center()
             .gap(px(7.0))
             .text_color(p.ink)
             .ui(scale::FS_13)
             .semibold()
-            .child(div().flex_none().child(provider_mark(Provider::Muse)))
-            .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
-        // Renaming the open session swaps the header title for the same
-        // dense field the sidebar row uses (Task A); the commit path is the
-        // same `ConfirmRename`, Escape the same `cancel`.
-        let renaming_here = self
-            .active
-            .as_ref()
-            .map(|view| view.read(cx).session_id.clone())
-            .is_some_and(|id| self.renaming.as_deref() == Some(id.as_str()));
-        let title: AnyElement = if renaming_here {
-            // The field's own root is `w_full`, so the flex item clips: the
-            // overflow button keeps its slot instead of being pushed out.
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(self.rename_field(window, cx))
-                .into_any_element()
-        } else {
-            title.into_any_element()
-        };
-        let _ = window;
+            .child(crumb);
+        if let Some(label) = label {
+            // Renaming the open session swaps the session label for the same
+            // dense field the sidebar row uses (Task A); the commit path is
+            // the same `ConfirmRename`, Escape the same `cancel`.
+            let renaming_here = self
+                .active
+                .as_ref()
+                .map(|view| view.read(cx).session_id.clone())
+                .is_some_and(|id| self.renaming.as_deref() == Some(id.as_str()));
+            title = title.child(div().flex_none().text_color(p.ink_4).child("·"));
+            if renaming_here {
+                // The field's own root is `w_full`, so the flex item clips:
+                // the overflow button keeps its slot instead of being pushed
+                // out.
+                title = title.child(
+                    div().flex_1().min_w(px(0.0)).overflow_hidden().child(self.rename_field(window, cx)),
+                );
+            } else {
+                title = title
+                    .child(div().flex_none().child(provider_mark(Provider::Muse)))
+                    .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+            }
+        }
+        let title: AnyElement = title.into_any_element();
         // No expand button: the header row stands still while the sidebar
         // collapses, so the toggle in the sidebar header stays put and the
         // centre cell never slides under the native lights.
@@ -967,6 +1064,9 @@ impl Harness {
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
         self.sessions =
             vec![SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects)];
+        // A scripted sidebar joins the replayed row, as if the wire had
+        // listed it beside the capture.
+        self.apply_sidebar_fixture();
         // The replay's one row is the whole list, and there is no index
         // to wait for: both have landed.
         self.sessions_loaded = true;
@@ -993,7 +1093,7 @@ impl Harness {
         let banner = self.render_wire_banner(cx);
         let body = match self.active.clone() {
             Some(view) => view.update(cx, |view, cx| view.render_centre(window, cx)),
-            None => self.render_no_session(cx),
+            None => self.render_no_session(window, cx),
         };
         v_flex()
             .size_full()
@@ -1096,9 +1196,37 @@ impl Harness {
         }
     }
 
-    /// No session open: the one thing to do is start one.
-    fn render_no_session(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// No session open: with no project at all the hero owns the state —
+    /// Muse works inside a folder, and the two ways in both open the
+    /// Projects palette. Otherwise the one thing to do is start one.
+    fn render_no_session(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
+        if self.current_project().is_none() {
+            let choose = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.choose_project_folder(cx));
+            let recents = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.open_projects(true, window, cx);
+            });
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap(px(scale::SP_3))
+                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Add a project"))
+                .child(
+                    div()
+                        .ui(scale::FS_12)
+                        .text_color(p.ink_3)
+                        .child("Muse works inside a folder. Add one to start."),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(scale::SP_2))
+                        .mt(px(scale::SP_2))
+                        .child(button("hero-choose", "Choose folder…").primary().icon(IconName::Folder).on_click(choose))
+                        .child(button("hero-recents", "Recent workspaces").icon(IconName::Clock).on_click(recents)),
+                )
+                .into_any_element();
+        }
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
         v_flex()
             .size_full()
@@ -1148,16 +1276,23 @@ impl Harness {
     /// and not on every frame the palette is open (finding `performance-9`).
     pub(crate) fn search_status(&self, cx: &gpui::App) -> SharedString {
         let blank = self.search_query.read(cx).value().trim().is_empty();
-        let key = (blank, self.search_sessions.len(), self.search_files.len());
+        let scoped = !self.layout.search_all_projects;
+        let project = self.current_project().map(|p| p.name.clone()).unwrap_or_default();
+        let key = (blank, self.search_sessions.len(), self.search_files.len(), scoped, project.clone());
         let mut cache = self.search_status.borrow_mut();
         if let Some((cached, status)) = cache.as_ref() {
             if *cached == key {
                 return status.clone();
             }
         }
-        let (_, sessions, files) = key;
+        let (_, sessions, files, _, _) = key;
         let status: SharedString = if blank {
-            "Search sessions and created files".into()
+            // A palette narrowed to the current project says whose.
+            if scoped && !project.is_empty() {
+                format!("Search {project}…").into()
+            } else {
+                "Search sessions and created files".into()
+            }
         } else if sessions + files == 0 {
             "No matches".into()
         } else {
@@ -1340,14 +1475,22 @@ impl Render for Harness {
         let overflow = self.render_overflow_menu(cx);
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
+        let project_menu = self.render_project_menu(cx);
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the
         // arrows and the return reach the list through the overlay's own menu
-        // context.
+        // context. The Projects palette is the same, with its own field.
         let searching = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search);
+        let projecting =
+            self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Projects);
         if searching {
             let query = self.search_query.focus_handle(cx);
+            if !query.is_focused(window) {
+                window.focus(&query, cx);
+            }
+        } else if projecting {
+            let query = self.projects_query.focus_handle(cx);
             if !query.is_focused(window) {
                 window.focus(&query, cx);
             }
@@ -1365,6 +1508,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
                 .on_action(cx.listener(|this, _: &NewSession, _, cx| this.new_session(cx)))
+                .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
                 .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)))
@@ -1391,7 +1535,8 @@ impl Render for Harness {
                 .children(dialog)
                 .children(overflow)
                 .children(view_options)
-                .children(account),
+                .children(account)
+                .children(project_menu),
         )
     }
 }
@@ -1475,9 +1620,15 @@ impl Harness {
             self.login_escape(window, cx);
             return;
         }
-        // An open rename is the next thing Escape takes back. (There is no
-        // sidebar search field left to clear: ⌘⇧F owns search now, and its
-        // palette closes through the overlay stack above.)
+        // An open rename is the next thing Escape takes back — a project
+        // rename first, then a session row's. (There is no sidebar search
+        // field left to clear: ⌘⇧F owns search now, and its palette closes
+        // through the overlay stack above.)
+        if self.renaming_project.take().is_some() {
+            self.focus_composer = true;
+            cx.notify();
+            return;
+        }
         if self.renaming.take().is_some() {
             self.focus_composer = true;
             cx.notify();

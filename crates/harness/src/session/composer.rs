@@ -98,7 +98,7 @@ impl SessionView {
             }
             // The shell's own menus are rendered and driven by the window,
             // not by the composer: no rows here, no Enter here.
-            Some(MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account) => 0,
+            Some(MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project) => 0,
             None => 0,
         }
     }
@@ -146,7 +146,7 @@ impl SessionView {
                 }
             }
             // Click-driven by the window; Enter stays with the composer.
-            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account => {}
+            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project => {}
         }
     }
 
@@ -178,6 +178,12 @@ impl SessionView {
         self.effort = effort;
         cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
         self.close_menu(cx);
+    }
+
+    /// The session's project display name, for the empty state. Synced by
+    /// the window on every activation, so a rename lands without reopening.
+    pub(crate) fn set_project_name(&mut self, name: Option<String>) {
+        self.project_name = name;
     }
 
     /// A new session's starting effort, from its project's defaults: applied
@@ -256,6 +262,7 @@ impl SessionView {
             Command::Empty => cx.emit(SessionEvent::ToggleEmpty),
             Command::Resume => cx.emit(SessionEvent::Resume),
             Command::Search => cx.emit(SessionEvent::Search),
+            Command::Project => cx.emit(SessionEvent::Projects),
         }
     }
 

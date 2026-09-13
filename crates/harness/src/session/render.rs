@@ -137,7 +137,15 @@ impl SessionView {
             }) as transcript::PickSuggestion
         });
         let _ = window;
-        transcript::empty_state(&self.workspace, pick, cx)
+        // The project's display name, not the folder's: a rename changes one
+        // without touching the other.
+        let display = self.project_name.clone().unwrap_or_else(|| {
+            std::path::Path::new(&self.workspace)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.workspace.clone())
+        });
+        transcript::empty_state(&display, pick, cx)
     }
 
     /// Every intent a card can raise, bound once per frame.
@@ -1079,7 +1087,7 @@ impl SessionView {
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
             MenuKind::Model | MenuKind::Effort | MenuKind::Mode => return None,
-            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account => return None,
+            MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project => return None,
         };
         Some(
             popover_layer(
@@ -1378,7 +1386,8 @@ impl SessionView {
             | MenuKind::Mention
             | MenuKind::Overflow
             | MenuKind::ViewOptions
-            | MenuKind::Account => Vec::new(),
+            | MenuKind::Account
+            | MenuKind::Project => Vec::new(),
         }
     }
 }

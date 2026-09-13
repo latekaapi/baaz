@@ -162,3 +162,41 @@ reads. Nothing in this feature sends a turn.
 Worktree per session (D31), custom groups or Spaces, an attention inbox across projects,
 multi-folder projects, clone-from-URL, per-project scripts, split and pop-out windows,
 notifications. Each is a later slice; none is blocked by the model above.
+
+## 8. As built (package 2, 2026-09-13)
+
+Everything in §5 landed. The deviations below are where the brief met the
+codebase and bent.
+
+- **Group-row menu anchor.** The brief wanted the menu measured under the
+  row's `…` button. The library reports no per-row geometry for a group row,
+  and the harness does not fork the library for it — so the row menu anchors
+  right-aligned to the sidebar's content edge under the header, by the same
+  scroll-bounds math as the view menu, clamped into the window. Deterministic
+  in captures; one step removed from the row in life.
+- **`MenuKind::Project` carries neither id nor anchor.** The kind stays
+  `Copy` (every menu match relies on it): the target id lives on
+  `Menu::project` (`None` is "Other workspaces") and the header-vs-row anchor
+  on `Menu::project_header`.
+- **Colour is click-toggled, not hover-opened.** The submenu hangs off the
+  menu's right edge while `project_colour_open` is set; picking a swatch
+  writes the project and regroups, leaving the menu open like the view menu's
+  toggles.
+- **Renaming from the menu switches to that project.** The field lives in the
+  header crumb, which shows the current project — so the menu's project
+  becomes current (touched, written, no session started) before the field is
+  seeded.
+- **Two capture-only additions.** No `--login` state showed the shell, so
+  `--login signed-in` boots the signed-in chrome on sample identity with no
+  child behind it; and every scripted run adopts its launch directory, so
+  `--no-project` boots with nothing adopted and nothing current. Together
+  they are the "Add a project" hero. Neither touches a live path.
+- **Fixture rows read as replayed.** No index or store source speaks for a
+  scripted id, so a later `rejoin` would blank the fixture's label back to
+  the fallback; marking the row `replayed` keeps it, exactly as a capture's
+  own row is kept. They never flip the grouping default on their own, and
+  with no client behind them `resume` stays a no-op.
+- **The search capture reads the real index.** `search.db` rebuilds from it,
+  so `search:acme` shows whatever this machine holds — byte-identical run to
+  run, machine-specific across machines. The badge and scope rules it
+  exercises are index-independent.

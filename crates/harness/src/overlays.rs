@@ -31,9 +31,10 @@ pub struct Dialog {
     pub primary: &'static str,
     /// What the primary button does.
     pub action: DialogAction,
-    /// When the action archives, the session it archives. The target lives on
-    /// the dialog so dismissing it — Escape, the scrim, Cancel — drops the
-    /// target with it and nothing can confirm afterwards.
+    /// When the action archives, the session it archives; when it removes a
+    /// project, that project's id. The target lives on the dialog so
+    /// dismissing it — Escape, the scrim, Cancel — drops the target with it
+    /// and nothing can confirm afterwards.
     pub archive_target: Option<String>,
 }
 
@@ -48,6 +49,9 @@ pub enum DialogAction {
     SignIn,
     /// Archive the dialog's `archive_target` out of the sidebar.
     Archive,
+    /// Remove the dialog's `archive_target` project from the sidebar (its
+    /// sessions stay on disk and move to "Other workspaces").
+    RemoveProject,
 }
 
 /// Which popover is open over the composer.
@@ -69,6 +73,10 @@ pub enum MenuKind {
     ViewOptions,
     /// The footer's account menu: Sign out.
     Account,
+    /// A project's menu: the header crumb's, or a group row's `…` tray.
+    /// The target project id lives on [`Menu::project`] (`None` is "Other
+    /// workspaces"), because the kind itself stays `Copy`.
+    Project,
 }
 
 /// An open menu: which one, where the keyboard is, and what has been typed.
@@ -83,17 +91,29 @@ pub struct Menu {
     /// Byte offset in the draft where the `/` or `@` sits, so the caret popovers
     /// know exactly what to replace when a row is picked.
     pub at: usize,
+    /// For [`MenuKind::Project`]: the menu's project id, or `None` for the
+    /// "Other workspaces" group. Meaningless for every other kind.
+    pub project: Option<String>,
+    /// For [`MenuKind::Project`]: opened from the header crumb rather than a
+    /// group row, so the menu anchors under the crumb instead of the
+    /// sidebar's content edge.
+    pub project_header: bool,
 }
 
 impl Menu {
     /// A chip picker with the selection on `selected`.
     pub fn picker(kind: MenuKind, selected: usize) -> Self {
-        Self { kind, selected, filter: String::new(), at: 0 }
+        Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false }
     }
 
     /// A caret popover that started at byte `at` in the draft.
     pub fn caret(kind: MenuKind, at: usize) -> Self {
-        Self { kind, selected: 0, filter: String::new(), at }
+        Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false }
+    }
+
+    /// A project menu for `project` (`None` is "Other workspaces").
+    pub fn project(project: Option<String>, from_header: bool) -> Self {
+        Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header }
     }
 }
 
@@ -110,6 +130,9 @@ pub enum PaletteKind {
     /// `/search`, the sidebar search icon and Cmd+Shift+F: full-text matches
     /// over past sessions plus the files this workspace's turns created.
     Search,
+    /// ⌘⇧O, File › Add Project…, the sidebar row, `/project`: adopted
+    /// projects to switch to, then recent Muse workspaces to adopt.
+    Projects,
 }
 
 /// The open command palette: which list, and where the keyboard is in it.
@@ -307,6 +330,8 @@ pub enum Command {
     Usage,
     /// Start a new session in this workspace.
     Clear,
+    /// Open the Projects palette: adopt a folder or switch project.
+    Project,
     /// `account/logout`.
     Logout,
     /// Show this menu, unfiltered.
@@ -315,7 +340,7 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Command; 16] = [
+    pub const ALL: [Command; 17] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -324,6 +349,7 @@ impl Command {
         Command::Status,
         Command::Usage,
         Command::Clear,
+        Command::Project,
         Command::Fork,
         Command::Name,
         Command::Resume,
@@ -351,6 +377,7 @@ impl Command {
             Command::Status => "/status",
             Command::Usage => "/usage",
             Command::Clear => "/clear",
+            Command::Project => "/project",
             Command::Logout => "/logout",
             Command::Help => "/help",
         }
@@ -373,6 +400,7 @@ impl Command {
             Command::Status => "Show current session status",
             Command::Usage => "Show session usage",
             Command::Clear => "Start a new session in this workspace",
+            Command::Project => "Add or switch project",
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
         }

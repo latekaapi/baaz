@@ -18,7 +18,7 @@
 //! [`Grouping`]: aui::nav::Grouping
 
 use aui::data::{icon_button, ButtonSize};
-use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, MenuRow, RailItem, RowAction};
+use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem, RowAction};
 use aui::overlay::popover_layer;
 use aui_icons::{IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
@@ -49,10 +49,12 @@ enum ViewAction {
 }
 
 impl Harness {
-    /// The two rows above the Sessions caption: New session, and Automations
-    /// behind a Soon tag until it has somewhere to go.
+    /// The rows above the Sessions caption: New session, Add project, and
+    /// Automations behind a Soon tag until it has somewhere to go.
     fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
+        let add_project =
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.open_projects(false, window, cx));
         let automations = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.overlays.update(cx, |overlays, _| {
                 overlays.toast("Automations", "Automations are not wired up yet.");
@@ -65,6 +67,7 @@ impl Harness {
             .px(px(scale::SP_2))
             .pt(px(scale::SP_2))
             .child(nav_item("nav-new", IconName::Plus, "New session").on_click(new_session))
+            .child(nav_item("nav-projects", IconName::Folder, "Add project").on_click(add_project))
             .child(nav_item("nav-automations", IconName::Zap, "Automations").count("Soon").on_click(automations))
             .into_any_element()
     }
@@ -110,15 +113,35 @@ impl Harness {
         let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
             this.toggle_group(id.to_string(), cx);
         });
+        // A group row's hover tray: `+` starts a session in that project
+        // (and makes it current), `…` opens its project menu. On "Other
+        // workspaces" `+` has nowhere to start, so it offers adoption, and
+        // `…` carries the one row that does the same.
+        let group = cx.listener(
+            |this: &mut Self, (id, action): &(SharedString, GroupAction), window, cx| match action {
+                GroupAction::New => {
+                    if id.as_ref() == crate::sidebar::OTHER_GROUP {
+                        this.open_projects(false, window, cx);
+                    } else {
+                        this.new_session_in(Some(id.to_string()), cx);
+                    }
+                }
+                GroupAction::Menu => {
+                    if id.as_ref() == crate::sidebar::OTHER_GROUP {
+                        this.open_project_menu(None, false, cx);
+                    } else {
+                        this.open_project_menu(Some(id.to_string()), false, cx);
+                    }
+                }
+            },
+        );
         let mut view = sidebar_view("sessions", grouping)
             .caption("Sessions")
             .on_view_options(move |w, cx| open_view(&(), w, cx))
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_toggle(move |id, w, cx| toggle(id, w, cx))
-            // Group-row trays arrive in package 2; for now the tap lands
-            // here and is ignored, deliberately logging nothing.
-            .on_group_action(move |_, _, _, _| {})
+            .on_group_action(move |id, action, w, cx| group(&(id.clone(), action), w, cx))
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
         if let Some(renaming) = self.renaming.clone() {
             view = view.editing(renaming, self.rename_field(window, cx));
@@ -291,6 +314,7 @@ impl Harness {
         let mut items = vec![
             RailItem::nav("new", IconName::Plus),
             RailItem::nav("search", IconName::Search),
+            RailItem::nav("projects", IconName::Folder),
             RailItem::separator(),
         ];
         // The visible list is already newest-first; pinned rows lead it so
@@ -309,6 +333,16 @@ impl Harness {
         for entry in shown {
             let state = if entry.running { AgentState::Running } else { AgentState::Idle };
             let mut cell = RailItem::session(entry.id.clone(), state).label(entry.label.clone());
+            // A tile wears its project's label colour; sessions in Other
+            // workspaces keep the default ink.
+            if let Some(colour) = entry
+                .project
+                .as_deref()
+                .and_then(|id| self.projects.find(id))
+                .map(|p| cx.aui().colors.label(p.colour.saturating_sub(1)))
+            {
+                cell = cell.tint(colour);
+            }
             if entry.running {
                 cell = cell.pulse();
             }
@@ -329,6 +363,7 @@ impl Harness {
             // Task E has landed: the rail cell opens the full-text search
             // palette, like the header search icon and ⌘⇧F.
             "search" => this.open_search(window, cx),
+            "projects" => this.open_projects(false, window, cx),
             "account" => this.open_menu(MenuKind::Account, cx),
             _ => {}
         });

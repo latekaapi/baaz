@@ -85,6 +85,13 @@
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
+//! | `projects` | open the Projects palette |
+//! | `project:<path>` | adopt `path` as a project and make it current (no panel, no session) |
+//! | `project-menu` | open the header's project menu (`project-menu:<name>` opens the group row menu for the project named) |
+//! | `project-colour:<n>` | set the current project's colour slot (1–8) |
+//! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
+//! | `remove-project:<name>` | raise the project removal dialog |
+//! | `remove-confirm` | confirm it |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -166,6 +173,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| this.confirm_archive_dialog(window, cx) },
     WindowVerb { verb: "show-archived", run: |this, _, _, cx| this.step_toggle_archived(cx) },
+    WindowVerb { verb: "projects", run: |this, _, window, cx| this.step_projects(window, cx) },
+    WindowVerb { verb: "project", run: |this, rest, _, cx| this.step_adopt(rest, cx) },
+    WindowVerb { verb: "project-menu", run: |this, rest, _, cx| this.step_project_menu(rest, cx) },
+    WindowVerb { verb: "project-colour", run: |this, rest, _, cx| this.step_project_colour(rest, cx) },
+    WindowVerb { verb: "group-by", run: |this, rest, _, cx| this.step_group_by(rest, cx) },
+    WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
+    WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
 ];
 
 /// The open session's `--steps` verbs.

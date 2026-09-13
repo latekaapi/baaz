@@ -284,6 +284,8 @@ pub enum SessionEvent {
     Resume,
     /// `/search`: open the full-text search palette.
     Search,
+    /// `/project`: open the Projects palette.
+    Projects,
     /// `/fork` with nothing named: open the turn picker over the session's
     /// completed assistant turns.
     ForkPicker,
@@ -343,6 +345,10 @@ pub struct SessionView {
     provider_id: String,
     /// The workspace the session runs in, for the header and the empty state.
     workspace: String,
+    /// The session's project display name for the empty state ("Muse runs
+    /// in …"): a rename changes it without touching the folder, so the
+    /// folder name alone is not it. The window syncs it on every activation.
+    project_name: Option<String>,
     composer: Entity<TextareaState>,
     /// The window's floating state: menus, toasts, the modal, and the lists the
     /// menus are built from. Shared with [`crate::app::Harness`], which renders
@@ -578,6 +584,7 @@ impl SessionView {
             replay: false,
             provider_id,
             workspace,
+            project_name: None,
             composer,
             overlays,
             toggled: Rc::new(HashSet::new()),

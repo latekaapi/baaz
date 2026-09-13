@@ -1,5 +1,58 @@
 # Harness changelog
 
+## 2026-09-13 — Projects, package 2
+
+The surface over package 1's model (`docs/12-projects.md` §5, §8 for what
+bent): project groups with their trays, the header crumb and its menu, the
+Projects palette and the folder panel, removal, tinted rail tiles, the hero,
+scoped search, scripted verbs with a sidebar fixture, and eight captures —
+each run twice and `cmp`'d byte-identical.
+
+- **U1 — Group rows act.** `+` starts a session in that project (making it
+  current); on Other it opens the Projects palette. `…` opens the project
+  menu; on Other the menu carries only "Add as project…".
+- **U2 — The crumb and the menu.** The header reads `mark project ▾ ·
+  session` (provider mark before the session label); the crumb opens
+  `MenuKind::Project` under it ("Add a project…" with no current project).
+  The menu lists the projects checked for its own, New session here, Rename
+  (the crumb's dense field; empty reverts to the folder name), a Colour
+  submenu of eight named swatches, Pin/Unpin, Reveal in Finder, Remove.
+- **U3 — The Projects palette (⌘⇧O).** Section Projects (mark, `~`-root,
+  visible session count; pick starts a session there), section Add ("Choose
+  folder…" with the ⌘⇧O hint, then recent Muse workspaces minus adopted
+  roots, existing dirs only, newest first, at most 12; adopting never starts
+  a session). Entry points: the key, File › Add Project…, the nav row, the
+  rail cell, `/project`.
+- **U4 — Remove from sidebar.** Archive-shaped danger dialog, no Undo;
+  sessions keep their rows under Other, current passes to the most recently
+  opened remaining adoption.
+- **U5 — Rail tint.** Tiles wear their project's label colour; Other keeps
+  the default ink.
+- **U6 — Empty states.** No project: the "Add a project" hero with its two
+  ways in. Otherwise the empty transcript reads "Muse runs in {project
+  name}."
+- **U7 — Search.** Hits badged with the project name (the folder name for
+  Other); narrowed palettes read "Search {project}…".
+- **U8 — Verbs, fixture, captures.** `projects`, `project:<path>`,
+  `project-menu[:<name>]`, `project-colour:<n>`, `group-by:<date|project>`,
+  `remove-project:<name>`, `remove-confirm`; `--sidebar-fixture` merges nine
+  scripted rows through `join` (`fixtures/sidebar/projects.json`);
+  `--login signed-in` and `--no-project` exist for the hero capture alone.
+- **Audit (Fable).** The Projects palette's recent workspaces skip the harness's own
+  state directory (the tier probe's throwaway workspace lived there and was offered as a
+  project); the palette capture retaken. The library's collapse was found to paint no rows
+  on its first frame in a quiet window and fixed there (agentic-ui `07d684e`), which is why
+  the grouped sidebar captures hold.
+- **U9 — Docs.** `02-app.md` §5 is "Projects and sessions", §9 gains the
+  File item; `08-keymap.md` gains ⌘⇧O; `12-projects.md` §8 records the build
+  deviations; `05-handoff.md` names worktrees next.
+
+`docs/images/projects-sidebar-dark.png`, `projects-sidebar-light.png`,
+`projects-header-menu-dark.png`, `projects-group-menu-dark.png`,
+`projects-palette-dark.png`, `projects-rail-dark.png`,
+`projects-remove-dark.png`, `projects-hero-dark.png`,
+`projects-search-dark.png`.
+
 ## 2026-09-13 — Projects, package 1
 
 The model under the Projects design (`docs/12-projects.md` §4): adopted roots with

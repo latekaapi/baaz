@@ -388,9 +388,10 @@ pub fn grouping_by_project(
 }
 
 /// The last path component of a workspace root, for the "Other workspaces"
-/// rows' repo tag. A root with no final component names itself whole rather
-/// than tagging nothing.
-fn workspace_folder(workspace: &str) -> String {
+/// rows' repo tag — and the search palette's badge for sessions no project
+/// holds. A root with no final component names itself whole rather than
+/// tagging nothing.
+pub(crate) fn workspace_folder(workspace: &str) -> String {
     std::path::Path::new(workspace)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

@@ -10,6 +10,70 @@ use super::*;
 /// too, so a parked view's own fold never grows past it either).
 const SESSION_CACHE_LIMIT: usize = 8;
 
+/// One `--sidebar-fixture` row: the wire's shape, spelled as JSON.
+///
+/// `label` stands in for the index title a live row would carry.
+#[derive(serde::Deserialize)]
+struct FixtureSession {
+    /// The Muse session id.
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    /// The session's workspace root; relative roots resolve against the
+    /// launch directory at load.
+    #[serde(rename = "workspaceRoot")]
+    workspace_root: String,
+    /// The row's label.
+    label: String,
+    /// RFC3339 last activity.
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    /// Completed turns.
+    #[serde(rename = "turnCount", default)]
+    turn_count: u64,
+    /// `running` for a live session, anything else for a settled one.
+    #[serde(default = "fixture_settled")]
+    status: String,
+}
+
+/// [`FixtureSession::status`] without the field: settled, never running.
+fn fixture_settled() -> String {
+    "idle".to_owned()
+}
+
+/// A fixture row as the wire would have listed it: joined through
+/// [`SessionEntry::join`] with a synthetic `Session`, so resolution and
+/// grouping read exactly what a live list would have given them — then
+/// labelled with the fixture's own label.
+fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Projects) -> SessionEntry {
+    let root = std::path::PathBuf::from(&row.workspace_root);
+    let root = if root.is_absolute() { root } else { launch.join(root) };
+    let session = muse_client::schema::Session {
+        active_turn_id: None,
+        approval_mode: None,
+        created_at: row.updated_at.clone(),
+        forked_from: None,
+        model_id: None,
+        path: String::new(),
+        provider_id: None,
+        session_id: row.session_id.clone(),
+        status: if row.status == "running" {
+            muse_client::schema::SessionStatus::Running
+        } else {
+            muse_client::schema::SessionStatus::Idle
+        },
+        turn_count: row.turn_count,
+        updated_at: row.updated_at.clone(),
+        workspace_root: Some(root.to_string_lossy().into_owned()),
+    };
+    let mut entry = SessionEntry::join(&session, None, None, projects);
+    // The fixture's own label, kept like a replayed row's: no index or
+    // store source speaks for a scripted id, so a later `rejoin` must not
+    // blank it back to the fallback.
+    entry.label = row.label.clone();
+    entry.replayed = true;
+    entry
+}
+
 impl Harness {
     // -------------------------------------------------------------- sessions
 
@@ -84,6 +148,22 @@ impl Harness {
             this.open_boot_session(window, cx);
             cx.notify();
         });
+    }
+
+    /// `--sidebar-fixture`: merge scripted rows into the session list as if
+    /// the wire had listed them. A missing or unparseable file is no rows,
+    /// like an empty list reply — a capture aid must never fail a boot.
+    pub(super) fn apply_sidebar_fixture(&mut self) {
+        let Some(path) = self.args.sidebar_fixture.clone() else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let Ok(rows) = serde_json::from_str::<Vec<FixtureSession>>(&text) else { return };
+        let launch = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        for row in &rows {
+            let entry = fixture_entry(row, &launch, &self.projects);
+            self.sessions.retain(|e| e.id != entry.id);
+            self.sessions.push(entry);
+        }
+        self.invalidate_list();
     }
 
     /// `--session <id>` (or `latest`): open one session at boot, once the list
@@ -208,7 +288,7 @@ impl Harness {
     /// but the order is not guaranteed) or after an override changed.
     ///
     /// The same precedence [`SessionEntry::join`] documents, in one place.
-    pub(super) fn rejoin(&mut self) {
+    pub(crate) fn rejoin(&mut self) {
         self.invalidate_list();
         for entry in &mut self.sessions {
             // The adoption may have changed under the row: re-resolve every
@@ -275,6 +355,21 @@ impl Harness {
     /// path that was deleted an hour ago. With no adoption there is nowhere
     /// to start, so nothing starts — package 2's hero owns that state.
     pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
+        let current = self.current_project_id();
+        self.new_session_in(current, cx);
+    }
+
+    /// `session/start` in `project`, which becomes current first so the new
+    /// view, its workspace and the next ⌘N all agree about where it started.
+    /// A `None` or unknown project is [`Self::new_session`] with no adoption:
+    /// nothing starts.
+    pub(crate) fn new_session_in(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        if let Some(id) = project.as_deref().filter(|id| self.projects.find(id).is_some()) {
+            self.projects.touch(id);
+            self.projects.current = Some(id.to_owned());
+            self.current_project = Some(id.to_owned());
+            projects::write(&self.projects);
+        }
         let Some(client) = self.client.clone() else { return };
         let current = self.current_project_id();
         // `session/start` is the only surface that declares a session's
@@ -322,6 +417,12 @@ impl Harness {
                 // The session groups under the project it started in, even
                 // when its folder later proves to be a worktree of that root.
                 this.set_override(&session_id, |meta| meta.project = current.clone(), cx);
+                // The local row did not exist when the view activated, so
+                // its project name arrives now.
+                let name = this.project_name_for(&session_id);
+                if let Some(view) = this.active.clone() {
+                    view.update(cx, |view, _| view.set_project_name(name));
+                }
                 // The project's effort rides along before the first turn.
                 if let Some(effort) = effort {
                     if let Some(view) = this.active.clone() {
@@ -442,10 +543,26 @@ impl Harness {
         cx.notify();
     }
 
+    /// The session's project display name, for the empty state: the row's
+    /// project resolved to a name, so a rename shows without reopening.
+    pub(crate) fn project_name_for(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .iter()
+            .find(|e| e.id == session_id)
+            .and_then(|e| e.project.as_deref())
+            .and_then(|id| self.projects.find(id))
+            .map(|p| p.name.clone())
+    }
+
     /// Make `view` the centre pane now: park the outgoing view in the MRU,
     /// point the event subscription at the new one, refresh its context, and
     /// run anything scripted. The frame after this draws the new view.
     fn activate(&mut self, view: Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
+        let project_name = {
+            let id = view.read(cx).session_id.clone();
+            self.project_name_for(&id)
+        };
+        view.update(cx, |view, _| view.set_project_name(project_name));
         self.park_active(cx);
         // A parked view's client predates a reconnect; the current child is
         // the one that can page.
@@ -702,6 +819,11 @@ impl Harness {
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
+            SessionEvent::Projects => {
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.open_projects(false, window, cx));
+                }));
+            }
             SessionEvent::Search => {
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.open_search(window, cx));
@@ -729,5 +851,50 @@ impl Harness {
             archive_target: None,
         };
         self.set_dialog(cx, dialog);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_row() -> FixtureSession {
+        serde_json::from_str(
+            r#"{"sessionId": "s1", "workspaceRoot": "fixtures/ws/acme-web", "label": "Fix the header",
+                "updatedAt": "2026-09-13T10:00:00Z", "turnCount": 3, "status": "running"}"#,
+        )
+        .expect("the documented fixture shape parses")
+    }
+
+    #[test]
+    fn a_fixture_row_joins_like_a_wire_row() {
+        let row = fixture_row();
+        assert_eq!(row.turn_count, 3);
+        assert_eq!(row.status, "running");
+        let launch = std::env::temp_dir().join(format!("harness-fixture-{}", std::process::id()));
+        let mut projects = Projects::default();
+        let root = launch.join("fixtures/ws/acme-web");
+        std::fs::create_dir_all(&root).expect("temp workspace");
+        let id = projects.add(&root).id.clone();
+        let entry = fixture_entry(&row, &launch, &projects);
+        // The label is the fixture's own; the workspace and project are
+        // what `join` resolved, exactly as for a listed session.
+        assert_eq!(entry.id, "s1");
+        assert_eq!(entry.label, "Fix the header");
+        assert!(entry.running);
+        assert_eq!(entry.turns, 3);
+        assert_eq!(entry.project.as_deref(), Some(id.as_str()));
+        // Kept like a replayed row's, so a later `rejoin` keeps it.
+        assert!(entry.replayed);
+        let _ = std::fs::remove_dir_all(&launch);
+    }
+
+    #[test]
+    fn an_absolute_root_survives_and_a_relative_one_joins_the_launch_dir() {
+        let mut row = fixture_row();
+        row.workspace_root = "/private/tmp/h4ws".into();
+        let entry = fixture_entry(&row, std::path::Path::new("/repo"), &Projects::default());
+        assert_eq!(entry.workspace.as_deref(), Some("/private/tmp/h4ws"));
+        assert!(entry.project.is_none());
     }
 }

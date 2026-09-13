@@ -89,7 +89,7 @@ impl Harness {
     /// touched here, so recorded files survive a rebuild. When the rebuild
     /// lands while the palette is open, the open query runs again against
     /// the fresh index.
-    pub(super) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
         let rows: Vec<crate::search::SessionRow> = self
             .index
             .iter()
@@ -123,6 +123,16 @@ impl Harness {
         self.wire_call(cx, work, |this: &mut Self, (), cx| {
             this.refresh_search(cx);
         });
+    }
+
+    /// The badge a search row wears: its project's display name, or the
+    /// folder name when no project holds the session.
+    pub(crate) fn search_badge(&self, session_id: &str) -> Option<String> {
+        let entry = self.sessions.iter().find(|e| e.id == session_id)?;
+        match entry.project.as_deref().and_then(|id| self.projects.find(id)) {
+            Some(project) => Some(project.name.clone()),
+            None => entry.workspace.as_deref().map(crate::sidebar::workspace_folder),
+        }
     }
 
     /// The search palette's rows: session hits, then file hits, in the order
