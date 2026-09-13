@@ -62,8 +62,8 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding,
-    ScrollHandle, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable,
+    KeyBinding, ScrollHandle, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -1274,6 +1274,8 @@ impl Harness {
     /// No session open: with no project at all the hero owns the state —
     /// Muse works inside a folder, and the two ways in both open the
     /// Projects palette. Otherwise the one thing to do is start one.
+    /// The hero column also takes a drop: every dropped directory is
+    /// adopted, the first becoming current.
     fn render_no_session(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         if self.current_project().is_none() {
@@ -1281,11 +1283,15 @@ impl Harness {
             let recents = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.open_projects(true, window, cx);
             });
+            let drop = cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
+                this.adopt_dropped(paths.paths().to_vec(), cx);
+            });
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .gap(px(scale::SP_3))
+                .on_drop(drop)
                 .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Add a project"))
                 .child(
                     div()

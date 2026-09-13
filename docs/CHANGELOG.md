@@ -1,5 +1,70 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 2, surface
+
+Eight items from the owner's screenshots, on the `owner-round-2-2026-09-13`
+branch. The wire package below landed first on the same branch.
+
+- **P1 — "Choose folder…" does nothing.** Two faults: palette row clicks
+  never reached their row (the scrim dismissed on mouse-down, so the release
+  found no row — every palette row's click only dismissed), and the folder
+  panel could open behind everything (`cx.activate(true)` first). The scrim
+  now dismisses on click; three `harness:` log lines (select, entry,
+  resolution) stay for the next regression.
+- **P2 — The folder card.** The Add section's head is the library's
+  `folder_drop_card` (click → the panel, drop → every dropped directory is
+  adopted, the first becoming current); the "Choose folder…" row is gone, so
+  the keyboard walks past the card, and ↩ on an empty Projects palette opens
+  the panel. The hero keeps its two buttons and takes a drop anywhere.
+- **P3 — Nesting and five recent per project.** Pinned rows, then the five
+  most recent others; the rest fold behind "Show N more" / "Show less"
+  (`expanded_groups`, persisted like `closed_groups`); the open session
+  always survives the cut. Nine → five plus "4 hidden" is unit-tested.
+- **P4 — Any open menu closes on a click outside.** The project menu (and its
+  colour submenu), the overflow menu, the view menu and the account menu all
+  gained the catchers the chip pickers already had. (The brief's
+  `.on_dismiss` does not exist on `popover_layer`; none of the four had any
+  outside handling.)
+- **P5 — Pinned rows show it.** `summary` already set `.pinned()`; the
+  meta-line glyph and the `PinOff` tray button are the library's, the rail is
+  unchanged, and a test pins the flag to the row.
+- **P6 — The plan label sits beside the name.** Already so: the footer uses
+  the library's inline `.plan(..)` and renders two rows, never three.
+- **P7 — Room under the last block.** One fixed-height `SP_7` row below the
+  final block, counted and hinted like any row. Wheel bench
+  `frame.series_us`: before p50=520 p90=732 max=7982, after p50=517 p90=616
+  max=6152 — no regression.
+- **P8 — Captures and docs.** `projects-sidebar-{dark,light}.png` and
+  `projects-palette-dark.png` retaken (fixture: seven `acme-web` sessions, so
+  "Show 2 more" shows; `s-web-1` went idle — a running row's pulse ring
+  animates on wall-clock and can never be byte-identical), plus
+  `round2-pinned-dark.png` (`…;pin`) and `round2-session-in-use-dark.png`.
+
+## 2026-09-13 — Owner round 2, wire
+
+The wire package (schema 1.2.1, two errors, the tier probe), also on
+`owner-round-2-2026-09-13`.
+
+- **S1 — Schema 1.2.1.** Fixtures re-exported from the CLI and mirrored
+  (pending requests now carry full approval and user-input payloads;
+  `Session` gains `name`, `title`, `firstUserPrompt`, `branch`, which the
+  sidebar cascade reads before the index); a capture of the new shapes with
+  its snapshot; round-trips green.
+- **S2 — Stale-sidecar retry.** The backfill page waits for the resume
+  lease; a `-32603` naming a stale sidecar retries once, `derive_titles`
+  treats it as no title.
+- **S3 — Session-in-use never downs the wire.** A reconnect is `Ready` on
+  the handshake; a session-scoped resume rejection (`-32021`) becomes a
+  banner on that view ("This session is open in another window…") with the
+  view read-only, and the sidebar, palette and ⌘N keep working. Proven
+  live: `docs/images/round2-session-in-use-dark.png`.
+- **S4 — The probe reads the 1.2.1 card.** The plan sentence draws before
+  the percentages, so a plan without them is "not yet", not an answer
+  (verbatim redacted card in the tier tests); one probe at a time across
+  windows (`probe.lock`, bounded wait) with a fresh-under-an-hour cache
+  reused; "Check again" reads "Checking…" while probing and toasts the
+  result; the banner leaves once the plan is known.
+
 ## 2026-09-13 — Projects, package 2
 
 The surface over package 1's model (`docs/12-projects.md` §5, §8 for what

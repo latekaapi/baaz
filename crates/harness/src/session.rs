@@ -178,6 +178,14 @@ pub const TRANSCRIPT_COPY_KEYS: &str =
 /// turn, so the hint is a block's, and the error on any one row is small
 /// enough that a flick over unmeasured rows lands where it should.
 pub(crate) const ROW_HEIGHT_HINT: f32 = 72.0;
+/// The trailing spacer's row id in `row_counts`: one fixed-height row below
+/// the final block (owner round 2, P7). No turn carries this id, so the one
+/// frame where the list runs ahead of its cache still renders it as the
+/// spacer rather than as a turn.
+pub(crate) const TAIL_SPACER_ID: &str = "tail-spacer";
+/// The trailing spacer's height: room under the last block before the status
+/// row or banner.
+pub(crate) const TAIL_SPACER_H: f32 = scale::SP_7;
 /// The gap the caret popovers leave above the composer, matching the
 /// library's own `.pop{margin-bottom:8px}`.
 const POPOVER_GAP: f32 = 8.0;
@@ -311,6 +319,9 @@ pub struct TierBanner {
     pub text: String,
     /// Whether a turn is refused until the person presses "Send anyway".
     pub blocking: bool,
+    /// A probe is in flight: the unknown-plan banner's "Check again" reads
+    /// "Checking…" and pressing it again is a no-op (owner round 2, S4).
+    pub checking: bool,
 }
 
 /// A turn the server says is running.

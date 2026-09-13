@@ -385,6 +385,16 @@ impl SessionView {
                                 return div().into_any_element();
                             };
                             let Some(turn) = turns.get(turn_ix) else {
+                                // The trailing spacer below the final block
+                                // (P7): the one row no turn owns. Anything
+                                // else unresolvable is an empty row, as
+                                // before.
+                                if turn_ix == turns.len() {
+                                    return div()
+                                        .w_full()
+                                        .h(px(super::TAIL_SPACER_H))
+                                        .into_any_element();
+                                }
                                 return div().into_any_element();
                             };
                             let last_of_turn = ix == last_row || rows.get(ix + 1).is_some_and(|(t, _)| *t != turn_ix);
@@ -442,14 +452,22 @@ impl SessionView {
             self.cached_turns = Rc::new(turns);
         }
         // The list's rows, one per block, and the per-turn counts the next
-        // `sync_virtual_list` diffs against.
-        let mut rows = Vec::with_capacity(self.rows.len());
-        let mut row_counts = Vec::with_capacity(self.cached_turns.len());
+        // `sync_virtual_list` diffs against — plus one trailing spacer below
+        // the final block, so the last block never sits against the status
+        // row or a banner. A real list item (not padding), hinted like any
+        // row, so the virtual list's measurement rules hold: it counts in
+        // the totals, splices and hints exactly like a block row, and
+        // renders as one fixed-height row (`TAIL_SPACER_H`) in
+        // `transcript_list`.
+        let mut rows = Vec::with_capacity(self.rows.len() + 1);
+        let mut row_counts = Vec::with_capacity(self.cached_turns.len() + 1);
         for (turn_ix, turn) in self.cached_turns.iter().enumerate() {
             let n = transcript::turn_rows(turn);
             rows.extend((0..n).map(|row| (turn_ix, row)));
             row_counts.push((turn.id().to_owned(), n));
         }
+        rows.push((self.cached_turns.len(), 0));
+        row_counts.push((TAIL_SPACER_ID.to_owned(), 1));
         self.rows = Rc::new(rows);
         self.row_counts = row_counts;
         let mut full_output = HashMap::new();
@@ -936,6 +954,12 @@ impl SessionView {
                 .on_secondary(move |window, cx| sign_out(&(), window, cx))
                 .action("Send anyway", BannerActionStyle::Secondary)
                 .on_action(move |window, cx| through(&(), window, cx))
+        } else if guard.checking {
+            // The probe is already running — pressing again reaches
+            // `probe_tier`, which refuses a second probe, so the button only
+            // says what is happening (owner round 2, S4).
+            row.action("Checking…", BannerActionStyle::Ghost)
+                .on_action(move |window, cx| recheck(&(), window, cx))
         } else {
             row.action("Check again", BannerActionStyle::Ghost)
                 .on_action(move |window, cx| recheck(&(), window, cx))

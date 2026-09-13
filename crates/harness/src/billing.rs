@@ -43,20 +43,38 @@ impl Harness {
             return;
         }
         self.tier_probing = true;
+        // The banner answers at once: "Check again" reads "Checking…"
+        // while the probe runs (owner round 2, S4).
+        self.push_tier(cx);
         let program = self.args.program.clone();
-        self.wire_call(cx, move || tier::probe(&program), |this, result, cx| {
+        self.wire_call(cx, move || tier::probe(&program), move |this, result, cx| {
             this.tier_probing = false;
             // The reason is the module's own words, never the terminal's.
             let tier = result.unwrap_or_else(Tier::Unavailable);
             tier::remember(&tier);
-            this.tier = Some(tier);
+            this.tier = Some(tier.clone());
             this.push_tier(cx);
+            // An asked-for probe reports back; a boot probe that found the
+            // plan simply clears its banner.
+            if force {
+                let (title, detail) = match &tier {
+                    Tier::Subscription { plan, .. } => ("Plan checked", format!("Plan: {plan}")),
+                    Tier::PayAsYouGo => {
+                        ("Plan checked", "Plan: pay-as-you-go — every turn bills API usage".to_owned())
+                    }
+                    Tier::Unavailable(reason) => ("Still unknown", format!("Still unknown: {reason}")),
+                };
+                this.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
+            }
             cx.notify();
         });
     }
 
     /// The banner the open session should be drawing, given the tier and
-    /// whether "Send anyway" has been pressed.
+    /// whether "Send anyway" has been pressed. A known subscription draws
+    /// nothing — the banner leaves once the plan is known (owner round 2,
+    /// S4) — and while a probe runs the unknown-plan banner's button reads
+    /// "Checking…".
     pub(crate) fn tier_banner(&self) -> Option<TierBanner> {
         match self.tier.as_ref()? {
             Tier::Subscription { .. } => None,
@@ -65,12 +83,14 @@ impl Harness {
                        Sign out and back in after subscribing, or send anyway."
                     .to_owned(),
                 blocking: !self.send_anyway,
+                checking: false,
             }),
             Tier::Unavailable(_) => Some(TierBanner {
                 text: "Muse did not say which plan this login is on, so the harness cannot tell \
                        whether turns bill API usage."
                     .to_owned(),
                 blocking: false,
+                checking: self.tier_probing,
             }),
         }
     }

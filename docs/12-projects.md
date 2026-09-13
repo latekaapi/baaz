@@ -200,3 +200,27 @@ codebase and bent.
   so `search:acme` shows whatever this machine holds — byte-identical run to
   run, machine-specific across machines. The badge and scope rules it
   exercises are index-independent.
+
+### Owner round 2, surface (2026-09-13)
+
+- **The "Choose folder…" row is a card, not a row.** The Add section's head
+  is the library's `folder_drop_card`, which is not a `PaletteItem`, so it
+  is drawn above the rows' card (width-matched to it) rather than inside a
+  section. The keyboard walks past it; ↩ on an empty Projects palette opens
+  the panel.
+- **The panel needed two fixes, found by log.** Clicks never reached any
+  palette row — the scrim dismissed on mouse-down, so the release found no
+  row — and the panel could open behind an inactive app (`cx.activate(true)`
+  first). The scrim now dismisses on click. The three `harness:` lines
+  (select, entry, resolution) stay.
+- **Folding holds back past five, not past the open session.** Pinned rows
+  never count toward the five; the open session appends past the cut rather
+  than displacing a newer row; "Other workspaces" never folds.
+- **No menu had click-outside handling.** The brief's `.on_dismiss` does not
+  exist on `popover_layer` — the view, account, project (+ colour) and
+  overflow menus all gained catcher siblings in the same deferred draw, the
+  shape the composer's chip pickers already used.
+- **The fixture folds.** `fixtures/sidebar/projects.json` holds seven
+  `acme-web` sessions so the captures show "Show 2 more", and `s-web-1`
+  went idle: a running row's pulse ring animates on wall-clock time and no
+  capture containing one can be byte-identical run to run.

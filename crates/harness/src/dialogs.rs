@@ -15,12 +15,12 @@
 //! enter presence never lands on the same frame twice.
 
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
-use aui::nav::{view_menu, MenuRow};
+use aui::nav::{folder_drop_card, view_menu, MenuRow};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui};
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, Focusable, SharedString, Window,
+    div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
 };
 use gpui_kit::component::input::Textarea;
 
@@ -184,7 +184,18 @@ impl Harness {
 
     /// The native folder panel, directories only: a chosen folder is adopted
     /// exactly like a recent workspace. Cancel does nothing.
+    ///
+    /// The three `harness:` lines are the owner-round-2 diagnosis for "Choose
+    /// folder… does nothing": the select line says the row fired, the entry
+    /// line says the panel was asked for, and the resolution line says what
+    /// the panel answered. They stay because this will regress.
     pub(crate) fn choose_project_folder(&mut self, cx: &mut Context<Self>) {
+        crate::harness_log!("choose_project_folder: opening the folder panel");
+        // The panel is app-modal but opens behind everything when this app is
+        // not active (launched from a script, or the palette's scrim press
+        // deactivated it): brought forward first so "nothing happens" is
+        // never a hidden panel.
+        cx.activate(true);
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -192,23 +203,35 @@ impl Harness {
             prompt: Some("Add".into()),
         });
         self.tasks.push(cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                if let Some(root) = paths.first() {
-                    this.adopt_root(root, cx);
+            match paths.await {
+                Ok(Ok(Some(paths))) => {
+                    crate::harness_log!(
+                        "choose_project_folder: panel chose {}",
+                        paths.first().map(|p| p.display().to_string()).unwrap_or_default()
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(root) = paths.first() {
+                            this.adopt_root(root, cx);
+                        }
+                    });
                 }
-            });
+                Ok(Ok(None)) => crate::harness_log!("choose_project_folder: panel cancelled"),
+                Ok(Err(error)) => crate::harness_log!("choose_project_folder: panel errored: {error:#}"),
+                Err(_) => crate::harness_log!("choose_project_folder: panel future dropped"),
+            }
         }));
     }
 
     /// One ordered vec feeds the Projects palette's keyboard, click and
     /// drawn sections, so the three agree about what row 3 is. Section
     /// "Projects" holds every adoption in sidebar order (mark, root with `~`
-    /// for home, visible session count); section "Add" holds "Choose
-    /// folder…" then recent Muse workspaces from the index — minus adopted
-    /// roots, only paths that still exist as directories, newest first, at
-    /// most twelve, badged with their session count. The query filters both
-    /// sections by name and path.
+    /// for home, visible session count); section "Add" holds recent Muse
+    /// workspaces from the index — minus adopted roots, only paths that
+    /// still exist as directories, newest first, at most twelve, badged
+    /// with their session count. The "Choose folder…" row is gone: the Add
+    /// section's head is the library's `folder_drop_card`, drawn above the
+    /// card (it is not a `PaletteItem` and takes no keyboard selection).
+    /// The query filters both sections by name and path.
     fn projects_rows(&self, cx: &gpui::App) -> Vec<ProjectsRow> {
         let p = cx.aui().colors;
         let query = self.projects_query.read(cx).value().trim().to_owned();
@@ -246,20 +269,9 @@ impl Harness {
             );
             rows.push(ProjectsRow { id: SharedString::from(format!("p:{}", project.id)), add: false, item });
         }
-        if matches("Choose folder…", "") {
-            rows.push(ProjectsRow {
-                id: "choose".into(),
-                add: true,
-                item: emphasise(PaletteItem::new(
-                    "choose",
-                    PaletteIcon::Glyph(IconName::Folder),
-                    "Choose folder…",
-                ))
-                .key("⌘⇧O"),
-            });
-        }
         // Recent Muse workspaces, newest first: what the index saw sessions
-        // in, minus the roots this window already holds.
+        // in, minus the roots this window already holds. ("Choose folder…"
+        // lives above the card as the `folder_drop_card`, not as a row.)
         let adopted: std::collections::HashSet<String> = self
             .projects
             .projects
@@ -357,7 +369,16 @@ impl Harness {
             return;
         };
         let rows = self.palette_rows(kind, cx);
-        let Some((id, _, _)) = rows.get(selected).cloned() else { return };
+        let Some((id, _, _)) = rows.get(selected).cloned() else {
+            crate::harness_log!("palette confirm: nothing at {selected} of {} rows", rows.len());
+            // The Add section's head is a card, not a row, so an empty
+            // Projects palette still offers the panel on ↩.
+            if kind == PaletteKind::Projects {
+                self.choose_project_folder(cx);
+            }
+            return;
+        };
+        crate::harness_log!("palette select (keyboard): {kind:?} {id}");
         self.run_palette_row(kind, id, window, cx);
     }
 
@@ -453,13 +474,29 @@ impl Harness {
                 None => {}
             }
         });
+        // A click anywhere outside closes it: the catcher is a sibling of
+        // the menu inside the same deferred draw (owner round 2, P4).
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            cx.notify();
+        });
+        let catcher = div()
+            .id("overflow-scrim")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
             popover_layer(
-                div()
-                    .absolute()
-                    .top(px(48.0))
-                    .right(px(8.0))
-                    .child(view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx))),
+                div().absolute().inset_0().child(catcher).child(
+                    div()
+                        .absolute()
+                        .top(px(48.0))
+                        .right(px(8.0))
+                        .child(view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| {
+                            activate(&i, w, cx)
+                        })),
+                ),
             )
             .into_any_element(),
         )
@@ -590,6 +627,7 @@ impl Harness {
         // of rebuilding every row to map the id back to a position and the
         // position back to the same id (finding `performance-7`).
         let select = cx.listener(move |this: &mut Self, id: &SharedString, window, cx| {
+            crate::harness_log!("palette select (click): {kind:?} {id}");
             this.run_palette_row(kind, id.clone(), window, cx);
         });
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
@@ -614,6 +652,32 @@ impl Harness {
         if self.still() {
             card = card.at_rest();
         }
+        // The Projects palette's Add head: the library's folder card above
+        // the rows' card. It is not a row — the keyboard walks past it — so
+        // a click chooses through P1's panel and a drop adopts every dropped
+        // directory, the first becoming current.
+        let centred: AnyElement = if kind == PaletteKind::Projects {
+            let entity = cx.entity().downgrade();
+            let choose = move |_: &mut Window, cx: &mut App| {
+                entity.update(cx, |this, cx| this.choose_project_folder(cx)).ok();
+            };
+            let entity = cx.entity().downgrade();
+            let drop = move |paths: Vec<std::path::PathBuf>, _: &mut Window, cx: &mut App| {
+                entity.update(cx, |this, cx| this.adopt_dropped(paths, cx)).ok();
+            };
+            let drop = folder_drop_card("projects-drop").key("⌘⇧O").on_click(choose).on_drop(drop);
+            // The rows' card is 560 wide (`PAL_W`, private to the library's
+            // palette), so the head matches it exactly rather than filling
+            // the column.
+            gpui_kit::base::v_flex()
+                .w(px(560.0))
+                .gap(px(scale::SP_3))
+                .child(drop)
+                .child(card)
+                .into_any_element()
+        } else {
+            card.into_any_element()
+        };
         Some(
             popover_layer(
                 div()
@@ -632,12 +696,20 @@ impl Harness {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
+                    .id("palette-scrim")
                     .absolute()
                     .inset_0()
                     .bg(gpui::black().opacity(PALETTE_SCRIM))
-                    // A press on the dimmed ground closes it, which is the
+                    // A click on the dimmed ground closes it, which is the
                     // gesture every overlay in this window already answers to.
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    // On the *release*, not the press: gpui fires a row's
+                    // `on_click` on mouse-up against the frame the release
+                    // sees, so dismissing on mouse-down closed the palette
+                    // under the press and the release found no row — every
+                    // palette row's click silently did nothing but dismiss
+                    // (owner round 2, P1). The row's own click runs first on
+                    // the way up and this runs after it, idempotently.
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
                         cx.notify();
                     }))
@@ -646,7 +718,7 @@ impl Harness {
                             .w_full()
                             .justify_center()
                             .pt(px(PALETTE_TOP))
-                            .child(card),
+                            .child(centred),
                     ),
             )
             .into_any_element(),

@@ -323,6 +323,24 @@ pub fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
 /// holds. Always last, muted, and closed until the person opens it.
 pub const OTHER_GROUP: &str = "other";
 
+/// How many of a project's newest unpinned sessions a folded group shows.
+///
+/// Pinned rows always show and never count toward this; the open session is
+/// appended past it when it would otherwise be cut (owner round 2, P3).
+pub const VISIBLE_RECENT: usize = 5;
+
+/// What the project grouping shows beyond the rows: which groups stand
+/// closed, which folded groups stand expanded, and which session is open
+/// (it is never held back).
+pub struct GroupView<'a> {
+    /// Group ids standing closed (`"other"` starts closed).
+    pub closed: &'a HashSet<String>,
+    /// Project-group ids whose held-back rows stand shown.
+    pub expanded: &'a HashSet<String>,
+    /// The open session's id, if any.
+    pub active: Option<&'a str>,
+}
+
 /// Group the entries by project, against an explicit clock.
 ///
 /// One group per adoption in [`Projects::sorted`] order — pinned projects
@@ -339,12 +357,20 @@ pub const OTHER_GROUP: &str = "other";
 ///
 /// `entries` arrive already filtered: the empty/hidden/archived filters hide
 /// rows, never groups.
+///
+/// A project group shows its pinned rows, then the [`VISIBLE_RECENT`] most
+/// recent others; the rest are held back and the group is
+/// [folded](aui::nav::ProjectGroup::folded) until its id lands in `expanded`.
+/// The open session (`active`) is always among the visible ones even when it
+/// is older than the fifth — it appends past the five rather than displacing
+/// a newer row. "Other workspaces" never folds: it is closed until opened
+/// and usually short.
 pub fn grouping_by_project(
     entries: &[SessionEntry],
     projects: &Projects,
     palette: &aui_tokens::Palette,
     branches: &HashMap<String, String>,
-    closed: &HashSet<String>,
+    view: &GroupView<'_>,
     now: DateTime<Local>,
 ) -> Grouping {
     let mut activity: HashMap<String, i64> = HashMap::new();
@@ -366,8 +392,34 @@ pub fn grouping_by_project(
     for project in projects.sorted(&activity) {
         let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
         rows.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
-        let sessions: Vec<SessionSummary> = rows.iter().map(|e| e.summary(now)).collect();
-        let count = sessions.len().to_string();
+        // Pinned rows always show and never count toward the five; the open
+        // session appends past the cut when it would otherwise be held back.
+        // The walk is in group order, so the rescued row keeps its place.
+        let mut visible: Vec<&SessionEntry> = Vec::with_capacity(rows.len().min(VISIBLE_RECENT + 1));
+        let mut recent = 0usize;
+        for entry in &rows {
+            if entry.pinned {
+                visible.push(entry);
+            } else if recent < VISIBLE_RECENT {
+                visible.push(entry);
+                recent += 1;
+            }
+        }
+        if let Some(open) = view.active {
+            if !visible.iter().any(|e| e.id == open) {
+                if let Some(entry) = rows.iter().find(|e| e.id == open) {
+                    visible.push(entry);
+                }
+            }
+        }
+        let held = rows.len().saturating_sub(visible.len());
+        let is_expanded = view.expanded.contains(&project.id);
+        let shown: Vec<SessionSummary> = if is_expanded {
+            rows.iter().map(|e| e.summary(now)).collect()
+        } else {
+            visible.into_iter().map(|e| e.summary(now)).collect()
+        };
+        let count = rows.len().to_string();
         let initial = project
             .name
             .chars()
@@ -383,8 +435,11 @@ pub fn grouping_by_project(
         if rows.iter().any(|e| e.running) {
             group = group.state(AgentState::Running);
         }
-        if !closed.contains(&project.id) {
-            group = group.open(sessions);
+        if !view.closed.contains(&project.id) {
+            group = group.open(shown);
+        }
+        if held > 0 {
+            group = group.folded(held, is_expanded);
         }
         groups.push(group);
     }
@@ -402,7 +457,7 @@ pub fn grouping_by_project(
             .collect();
         let count = sessions.len().to_string();
         let mut group = ProjectGroup::new(OTHER_GROUP, "Other workspaces", count).muted();
-        if closed.contains(OTHER_GROUP) {
+        if view.closed.contains(OTHER_GROUP) {
             group = group.open(sessions);
         }
         groups.push(group);
@@ -741,7 +796,30 @@ mod tests {
     }
 
     fn by_project(entries: &[SessionEntry], projects: &crate::projects::Projects) -> Grouping {
-        grouping_by_project(entries, projects, &dark_palette(), &HashMap::new(), &HashSet::new(), Local::now())
+        by_project_view(entries, projects, &HashSet::new(), &HashSet::new(), None)
+    }
+
+    fn by_project_view(
+        entries: &[SessionEntry],
+        projects: &crate::projects::Projects,
+        closed: &HashSet<String>,
+        expanded: &HashSet<String>,
+        active: Option<&str>,
+    ) -> Grouping {
+        let view = GroupView { closed, expanded, active };
+        grouping_by_project(entries, projects, &dark_palette(), &HashMap::new(), &view, Local::now())
+    }
+
+    /// Nine sessions in one project, newest first: `s0` is today, `s8` eight
+    /// days ago.
+    fn nine_sessions(project: &str) -> Vec<SessionEntry> {
+        (0..9)
+            .map(|i| grouped_entry(&format!("s{i}"), Some(project), Some("/work/p-big"), i as i64))
+            .collect()
+    }
+
+    fn folded_group<'a>(groups: &'a [ProjectGroup], id: &str) -> &'a ProjectGroup {
+        groups.iter().find(|g| g.id.as_ref() == id).expect("the group")
     }
 
     #[test]
@@ -806,14 +884,10 @@ mod tests {
         entries[0].running = true;
         let mut branches = HashMap::new();
         branches.insert("p-harness".to_owned(), "main".to_owned());
-        let Grouping::Project(groups) = grouping_by_project(
-            &entries,
-            &projects,
-            &dark_palette(),
-            &branches,
-            &HashSet::new(),
-            Local::now(),
-        ) else {
+        let view = GroupView { closed: &HashSet::new(), expanded: &HashSet::new(), active: None };
+        let Grouping::Project(groups) =
+            grouping_by_project(&entries, &projects, &dark_palette(), &branches, &view, Local::now())
+        else {
             panic!("project grouping must yield project groups");
         };
         assert_eq!(groups[0].state, Some(AgentState::Running));
@@ -826,8 +900,7 @@ mod tests {
         let entries = vec![grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0)];
         let mut closed = HashSet::new();
         closed.insert("p-harness".to_owned());
-        let Grouping::Project(groups) =
-            grouping_by_project(&entries, &projects, &dark_palette(), &HashMap::new(), &closed, Local::now())
+        let Grouping::Project(groups) = by_project_view(&entries, &projects, &closed, &HashSet::new(), None)
         else {
             panic!("project grouping must yield project groups");
         };
@@ -841,8 +914,7 @@ mod tests {
             grouped_entry("s4", None, Some("/tmp/stray"), 0),
             grouped_entry("s5", None, Some("/tmp/stray-two"), 3),
         ];
-        let Grouping::Project(groups) =
-            grouping_by_project(&entries, &projects, &dark_palette(), &HashMap::new(), &closed, Local::now())
+        let Grouping::Project(groups) = by_project_view(&entries, &projects, &closed, &HashSet::new(), None)
         else {
             panic!("project grouping must yield project groups");
         };
@@ -868,6 +940,79 @@ mod tests {
         };
         let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_ref()).collect();
         assert_eq!(ids, vec!["s2", "s1"]);
+        // The pin flag reaches the library row, which is what draws the
+        // meta-line glyph and flips the tray button to `PinOff` (P5).
+        assert!(groups[0].sessions[0].pinned);
+        assert!(!groups[0].sessions[1].pinned);
+    }
+
+    /// Owner round 2, P3: nine sessions fold to the five newest, holding
+    /// four back. The count still names all nine.
+    #[test]
+    fn nine_sessions_fold_to_five_plus_four_hidden() {
+        let projects = grouped_projects();
+        let entries = nine_sessions("p-harness");
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        assert_eq!(group.count.as_ref(), "9");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s0", "s1", "s2", "s3", "s4"]);
+        assert_eq!(group.fold, Some((4, false)));
+    }
+
+    /// …and an expanded group shows all nine, with the fold row reading
+    /// "Show less".
+    #[test]
+    fn an_expanded_group_shows_all_nine() {
+        let projects = grouped_projects();
+        let entries = nine_sessions("p-harness");
+        let mut expanded = HashSet::new();
+        expanded.insert("p-harness".to_owned());
+        let Grouping::Project(groups) = by_project_view(&entries, &projects, &HashSet::new(), &expanded, None)
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        assert_eq!(group.sessions.len(), 9);
+        assert_eq!(group.sessions[8].id.as_ref(), "s8");
+        assert_eq!(group.fold, Some((4, true)));
+    }
+
+    /// …while the open session survives the cut even when it is the oldest
+    /// of the nine: it appends past the five rather than displacing a newer
+    /// row.
+    #[test]
+    fn the_open_session_survives_the_cut() {
+        let projects = grouped_projects();
+        let entries = nine_sessions("p-harness");
+        let Grouping::Project(groups) =
+            by_project_view(&entries, &projects, &HashSet::new(), &HashSet::new(), Some("s8"))
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s0", "s1", "s2", "s3", "s4", "s8"]);
+        assert_eq!(group.fold, Some((3, false)));
+    }
+
+    /// Pinned rows always show and never count toward the five: two pinned
+    /// ancients plus the five newest make seven visible, two held back.
+    #[test]
+    fn pinned_rows_never_count_toward_the_five() {
+        let projects = grouped_projects();
+        let mut entries = nine_sessions("p-harness");
+        entries[7].pinned = true;
+        entries[8].pinned = true;
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s7", "s8", "s0", "s1", "s2", "s3", "s4"]);
+        assert_eq!(group.fold, Some((2, false)));
     }
 
     /// The project-grouping twin of
@@ -895,26 +1040,15 @@ mod tests {
             })
             .collect();
         let palette = dark_palette();
+        let empty = HashSet::new();
+        let view = GroupView { closed: &empty, expanded: &empty, active: None };
         let cold = std::time::Instant::now();
         for _ in 0..FRAMES {
-            std::hint::black_box(grouping_by_project(
-                &entries,
-                &projects,
-                &palette,
-                &HashMap::new(),
-                &HashSet::new(),
-                now,
-            ));
+            std::hint::black_box(grouping_by_project(&entries, &projects, &palette, &HashMap::new(), &view, now));
         }
         let cold = cold.elapsed() / FRAMES as u32;
-        let grouping = std::rc::Rc::new(grouping_by_project(
-            &entries,
-            &projects,
-            &palette,
-            &HashMap::new(),
-            &HashSet::new(),
-            now,
-        ));
+        let grouping =
+            std::rc::Rc::new(grouping_by_project(&entries, &projects, &palette, &HashMap::new(), &view, now));
         let warm = std::time::Instant::now();
         for _ in 0..FRAMES {
             std::hint::black_box(std::rc::Rc::clone(&grouping));
