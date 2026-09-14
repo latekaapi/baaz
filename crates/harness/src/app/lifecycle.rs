@@ -337,6 +337,47 @@ impl Harness {
         crate::harness_log!("wheel dy={dy} list_px={before}->{after}");
     }
 
+    /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument (owner round
+    /// 5 §A1.6). Dispatch n synthetic wheel events (default 1) at a sidebar
+    /// point — x = 100 sits in the sessions list at the default width, y =
+    /// 40 % of the window height — synchronously, so one step lands between
+    /// two frames: the burst shape a trackpad really delivers, which
+    /// `--steps wheel:` (window centre, transcript) can never hit. Logs the
+    /// sidebar offset before/after plus the pane and root renders drained
+    /// since the last call — pair with `wait:<ms>` and a trailing
+    /// `sidebar-wheel:0,0` to read a burst's renders after its frames paint
+    /// (renders land on frames, not inside the dispatch). Free: no turn, no
+    /// wire.
+    pub(crate) fn step_sidebar_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (dy_text, n_text) = rest.split_once(',').unwrap_or((rest, "1"));
+        let dy: f32 = dy_text.trim().parse().unwrap_or(0.0);
+        let n: usize = n_text.trim().parse().unwrap_or(1);
+        // Drained first: what this line reports is everything since the
+        // previous drain, i.e. the earlier burst's frames once a `wait:`
+        // separates the two calls.
+        let pane = crate::sidebar_view::take_sidebar_pane_renders();
+        let root = crate::sidebar_view::take_harness_root_renders();
+        let drains = crate::sidebar_view::take_sidebar_wheel_drains();
+        let before = self.sidebar_px();
+        let size = window.bounds().size;
+        let at = point(px(100.0), size.height * 0.4);
+        for _ in 0..n {
+            window.dispatch_event(
+                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: at,
+                    delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        }
+        let after = self.sidebar_px();
+        let max = f32::from(self.sessions_scroll.max_offset().y);
+        crate::harness_log!(
+            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} pane={pane} root={root} drains={drains}"
+        );
+    }
+
     /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
     /// clamped and settled exactly like a released drag, minus the pointer.
     pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
@@ -728,6 +769,9 @@ impl Harness {
         self.pending_id = Some(session_id.clone());
         self.reveal = Some(session_id.clone());
         self.reveal_stable = false;
+        // A fresh arm owns the list again: the next user scroll disarms it
+        // (owner round 5 §A1).
+        self.sidebar_user_scrolled = false;
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`) has no child to
             // resume from: the row opens as a local view, so a capture can
@@ -905,6 +949,9 @@ impl Harness {
         self.pending_id = Some(session_id.clone());
         self.reveal = Some(session_id.clone());
         self.reveal_stable = false;
+        // A fresh arm owns the list again: the next user scroll disarms it
+        // (owner round 5 §A1).
+        self.sidebar_user_scrolled = false;
         let project_name = self.project_name_for(&session_id);
         view.update(cx, |view, _| view.set_project_name(project_name));
         self.park_active(cx);

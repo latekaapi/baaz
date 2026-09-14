@@ -99,6 +99,7 @@
 //! | `new` | the same as ⌘N |
 //! | `new:<project>` | the group row's `+` for the project named |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `harness: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
+//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_px=<before>-><after> max=<max> pane=<pane> root=<root> drains=<drains>` (the sidebar-scroll instrument; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders) |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -193,6 +194,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
     WindowVerb { verb: "new", run: |this, rest, window, cx| this.step_new(rest, window, cx) },
     WindowVerb { verb: "wheel", run: |this, rest, window, cx| this.step_wheel(rest, window, cx) },
+    WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
 ];
 
 /// The open session's `--steps` verbs.

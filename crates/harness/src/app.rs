@@ -85,7 +85,7 @@ use crate::sessions::{self, SessionMeta};
 use crate::projects::{self, Project, Projects};
 use crate::app::list::ListCache;
 use crate::sidebar::{self, SessionEntry};
-use crate::sidebar_view::{SidebarKey, SidebarPane};
+use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarWheelState};
 use crate::search::{FileHit, SessionHit};
 use crate::wire::WireCall;
 use crate::{layout, Args};
@@ -425,6 +425,22 @@ pub struct Harness {
     /// back when the caption scrolled with the list; the caption is fixed
     /// now, so the menu seats from `sessions_caption` instead.)
     pub(crate) sessions_scroll: ScrollHandle,
+    /// The sidebar wheel's input-side state (owner round 5 §A1): what the
+    /// capture handler writes, shared behind [`RefCell`] rather than kept
+    /// on the entity. A wheel event can arrive inside a `Harness` update
+    /// (a scripted `sidebar-wheel:` step dispatches from one), and updating
+    /// the entity re-entrantly panics — the shared cell never borrows it,
+    /// so the push is synchronous in every dispatch context and N events
+    /// between paints still coalesce into one drain. `render_sidebar`
+    /// applies it (drains the travel, disarms the reveal, re-arms the
+    /// horizon). Deliberately outside [`crate::sidebar_view::SidebarKey`]:
+    /// keyed travel would re-arm the pane per event through `on_frame`.
+    pub(crate) sidebar_wheel: Rc<RefCell<SidebarWheelState>>,
+    /// Whether the user has scrolled the sidebar since the reveal was last
+    /// armed (owner round 5 §A1). A reveal never moves a user-scrolled list:
+    /// the capture handler records the scroll, `render_sidebar` sets this,
+    /// arming clears it, and no reveal installs while it holds.
+    pub(crate) sidebar_user_scrolled: bool,
     /// The two flags a `--screenshot` wait reads out of this window (see
     /// [`crate::shot::CaptureToken`]). Handed to every session view this
     /// window opens and to `capture_and_quit`, so a second window would wait
@@ -597,6 +613,8 @@ impl Harness {
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
             sessions_scroll: ScrollHandle::new(),
+            sidebar_wheel: Rc::new(RefCell::new(SidebarWheelState::default())),
+            sidebar_user_scrolled: false,
             capture,
             user_shell: true,
             focus_root: cx.focus_handle(),
@@ -1633,6 +1651,7 @@ impl Render for Harness {
         // The whole-frame instrument's start; the trailing marker below
         // closes it after paint (see `session::draw_end_marker`).
         session::note_draw_start();
+        crate::sidebar_view::note_harness_render();
         self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.

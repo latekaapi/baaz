@@ -1,5 +1,33 @@
 # Harness changelog
 
+## 2026-09-14 — Owner round 5: sidebar scroll + alignment/colour
+
+- **The sidebar scrolls like the transcript.** A capture-phase canvas over
+  the sessions list (`sidebar_wheel_capture`) takes the wheel ahead of the
+  scroll div's own per-event listener, accumulates travel into the shared
+  `sidebar_wheel` cell (shared, not on the entity, so a push never borrows
+  `Harness` re-entrantly), and the pane drains exactly one clamped offset
+  write per frame (`clamp_sidebar_offset`, unit-tested), notifying only the
+  sidebar pane. A 150 ms gesture horizon keeps presenting through the
+  momentum tail. Measured on the stress fixture (6 × −40 burst): travel
+  conserved exactly, 1 drain instead of 6 per-event writes; the div's old
+  path stays for whatever the canvas yields (overlays, sideways gestures).
+- **The reveal can never move a user-scrolled list.** A wheel disarms any
+  armed reveal, no reveal installs mid-gesture or once scrolled-since-armed,
+  and a reveal with no group to show clears instead of waiting forever.
+- **Project labels sit on the icon line and stay muted** (library
+  `owner-round-5-2026-09-14`). The plain label's first glyph starts at the
+  leading centre (x = 18, where the nav icons and session dots sit); the
+  chevron flag keeps putting the label at `NAV_LABEL_X`. `current` alone no
+  longer brightens anything — every label is muted `ink-3`, and only the
+  accent-bar flag marks the current project.
+- **Instruments kept:** `sidebar-wheel:<dy>[,n]` (wheel at a sidebar point,
+  logs offset, pane/root renders and drains), the pane/root render counters,
+  `fixtures/sidebar/stress.json` (36 rows that overflow the list). Transcript
+  bench unchanged (hetero wheel debug shell p50 1825 µs vs 1857, phase
+  indices sample-identical, drains 744); `bench-idle` reads 19 in shell and
+  bare alike on this machine — environmental drift, not the change.
+
 ## 2026-09-14 — Owner round 4 fixup: the Sessions header stays fixed
 
 - **The Sessions caption no longer scrolls with the list.** `render_sidebar`
