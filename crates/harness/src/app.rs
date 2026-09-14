@@ -61,8 +61,9 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable,
-    KeyBinding, ScrollHandle, SharedString, Subscription, Task, Window,
+    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, actions, div, point, prelude::*, px,
+    AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding, ScrollHandle,
+    SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -472,6 +473,28 @@ pub struct Harness {
     pub(crate) renaming_project: Option<String>,
     /// Whether the project menu's Colour submenu hangs open.
     pub(crate) project_colour_open: bool,
+    /// Shell trigger bounds in window coordinates, recorded once per frame
+    /// by `on_children_prepainted` wrappers on the triggers themselves — what
+    /// every shell menu seats at through `aui::overlay::anchored_menu`
+    /// (owner round 4: menus anchored to their triggers, never constants).
+    /// Each wrapper notifies only on its first bounds (nothing → something),
+    /// so a menu opened before the first prepaint appears on the next frame
+    /// instead of flashing at a wrong seat, and nothing repaints afterwards.
+    /// The sidebar footer row: the account menu's trigger.
+    pub(crate) footer_bounds: Option<Bounds<Pixels>>,
+    /// The header project crumb: the header project menu's trigger.
+    pub(crate) crumb_bounds: Option<Bounds<Pixels>>,
+    /// The header overflow `…` button: the overflow menu's trigger.
+    pub(crate) overflow_bounds: Option<Bounds<Pixels>>,
+    /// The open project menu's own rect: the Colour submenu's anchor is
+    /// computed off its right edge at the Colour row's height.
+    pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
+    /// Every rendered project group row's tray `…` button bounds, keyed by
+    /// group id, from `SidebarView::on_group_menu_prepainted` — what a group
+    /// row's project menu seats at. Entries are refreshed while their row is
+    /// rendered and kept afterwards, so a menu opened for a rendered-then-
+    /// scrolled group still seats where the row was.
+    pub(crate) group_menu_bounds: HashMap<String, Bounds<Pixels>>,
     /// The Projects palette's query field: the query filters both sections
     /// by name and path, synchronously — a dozen adopted roots and a dozen
     /// recent workspaces need no background task.
@@ -569,6 +592,11 @@ impl Harness {
             rename: rename.clone(),
             renaming_project: None,
             project_colour_open: false,
+            footer_bounds: None,
+            crumb_bounds: None,
+            overflow_bounds: None,
+            project_menu_bounds: None,
+            group_menu_bounds: HashMap::new(),
             projects_query: projects_query.clone(),
             titled: std::collections::HashSet::new(),
             undo_stack: Vec::new(),
@@ -661,6 +689,22 @@ impl Harness {
     /// The current project's id, when one is current.
     pub(crate) fn current_project_id(&self) -> Option<String> {
         self.current_project.clone()
+    }
+
+    /// Record one shell trigger's window bounds, notifying only when they
+    /// arrive for the first time: a menu opened before the first prepaint
+    /// appears on the next frame instead of flashing at a wrong seat, and
+    /// steady bounds never schedule work of their own.
+    pub(crate) fn note_trigger_bounds(
+        slot: &mut Option<Bounds<Pixels>>,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Harness>,
+    ) {
+        let had = slot.is_some();
+        *slot = Some(bounds);
+        if !had {
+            cx.notify();
+        }
     }
 
     /// The current project: the open session's project, else the last used.
@@ -1022,15 +1066,32 @@ impl Harness {
                 this.open_project_menu(Some(id.clone()), true, cx);
             });
             let state = interaction("hd-project", window, cx);
-            h_flex()
-                .id("hd-project")
+            // The wrapper reports the crumb's own rect: `on_children_prepainted`
+            // fires with the children's bounds, and the crumb is this wrapper's
+            // only child, so its first bounds are the trigger the header
+            // project menu seats at.
+            let crumb_report = cx.entity().downgrade();
+            div()
                 .flex_none()
-                .items_center()
-                .gap(px(5.0))
-                .track_interaction(&state)
-                .on_click(open)
-                .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
-                .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.ink_3))
+                .on_children_prepainted(move |bounds, _, cx| {
+                    if let Some(first) = bounds.first() {
+                        let bounds = *first;
+                        let _ = crumb_report.update(cx, |this, cx| {
+                            Harness::note_trigger_bounds(&mut this.crumb_bounds, bounds, cx);
+                        });
+                    }
+                })
+                .child(
+                    h_flex()
+                        .id("hd-project")
+                        .flex_none()
+                        .items_center()
+                        .gap(px(5.0))
+                        .track_interaction(&state)
+                        .on_click(open)
+                        .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
+                        .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.ink_3)),
+                )
                 .into_any_element()
         } else {
             let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
@@ -1089,14 +1150,29 @@ impl Harness {
         // collapses, so the toggle in the sidebar header stays put and the
         // centre cell never slides under the native lights.
         let cell = header_cell("hd-centre");
+        // The wrapper reports the overflow button's own rect (its only
+        // child), which is what the overflow menu seats at.
+        let overflow_report = cx.entity().downgrade();
         cell
             .child(title)
             .child(
-                icon_button("hd-centre-overflow", IconName::Dots)
-                    .ghost()
-                    .muted()
-                    .size(ButtonSize::Sm)
-                    .on_click(overflow),
+                div()
+                    .flex_none()
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        if let Some(first) = bounds.first() {
+                            let bounds = *first;
+                            let _ = overflow_report.update(cx, |this, cx| {
+                                Harness::note_trigger_bounds(&mut this.overflow_bounds, bounds, cx);
+                            });
+                        }
+                    })
+                    .child(
+                        icon_button("hd-centre-overflow", IconName::Dots)
+                            .ghost()
+                            .muted()
+                            .size(ButtonSize::Sm)
+                            .on_click(overflow),
+                    ),
             )
             .into_any_element()
     }

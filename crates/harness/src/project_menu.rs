@@ -2,11 +2,12 @@
 //!
 //! Part of the [`Harness`] entity; see [`crate::app`]
 //! for what it owns. The menu wears the Sessions view menu's shape (`view_menu`,
-//! 250 wide) and anchors like it does: under the header crumb when the crumb
-//! opened it, otherwise right-aligned to the sidebar's content edge. The
-//! library reports no per-row geometry for a group row's `…` button and the
-//! harness may not fork the library for it, so the row menu sits below the
-//! header rather than under the row itself.
+//! 250 wide) and seats through `aui::overlay::anchored_menu` at the trigger
+//! that opened it: below-start of the header crumb, or below-start of the
+//! group row's tray `…` button (whose window bounds the library reports per
+//! frame via `SidebarView::on_group_menu_prepainted`). The Colour submenu
+//! hangs off the menu's right edge at the Colour row's height through a
+//! second `anchored_menu`, so it flips left near the window edge.
 //!
 //! One [`MenuRow::Toggle`] per project in sidebar order, checked for the
 //! menu's project; picking one replaces a still-empty unnamed active session
@@ -15,9 +16,9 @@
 //! a "Colour" submenu of eight swatches, pin, reveal, and removal.
 
 use aui::nav::{view_menu, view_submenu_rows, MenuRow};
-use aui::overlay::popover_layer;
+use aui::overlay::{anchored_menu, MenuAlign, MenuSide};
 use aui_tokens::ActiveAui;
-use gpui::{div, prelude::*, px, AnyElement, Context, Focusable, Window};
+use gpui::{div, prelude::*, AnyElement, Context, Focusable, Window};
 
 use crate::app::Harness;
 use crate::overlays::{Menu, MenuKind};
@@ -264,8 +265,21 @@ impl Harness {
     }
 
     /// `project-colour:<n>`: the current project's colour slot, 1–8.
-    /// Anything else is not a slot and does nothing.
+    /// Anything else is not a slot and does nothing. With no payload, open
+    /// the Colour submenu instead (opening the header menu first when no
+    /// project menu is open), so the submenu has a scripted entry for its
+    /// screenshots.
     pub(crate) fn step_project_colour(&mut self, rest: &str, cx: &mut Context<Self>) {
+        if rest.trim().is_empty() {
+            if !self.overlays.read(cx).is_open(MenuKind::Project) {
+                if let Some(id) = self.current_project_id() {
+                    self.open_project_menu(Some(id), true, cx);
+                }
+            }
+            self.project_colour_open = true;
+            cx.notify();
+            return;
+        }
         let Ok(slot) = rest.trim().parse::<u8>() else { return };
         if !(1..=8).contains(&slot) {
             return;
@@ -353,6 +367,10 @@ impl Harness {
             rows.push(row);
             actions.push(action);
         };
+        // The project rows in sidebar order, hoisted: the Colour submenu's
+        // height inside the menu counts them.
+        let listed = self.ordered_projects();
+        let listed_len = listed.len();
         match target.clone() {
             // "Other workspaces" carries one row: adopting starts in the
             // Projects palette.
@@ -361,7 +379,7 @@ impl Harness {
                 Some(ProjectMenuAction::AddAsProject),
             ),
             Some(id) => {
-                for project in self.ordered_projects() {
+                for project in listed {
                     let checked = project.id == id;
                     let pid = project.id.clone();
                     push(
@@ -449,23 +467,28 @@ impl Harness {
                 None => {}
             }
         });
-        // The menu is a fixed 250 px (`aui::nav::view_menu`): the header
-        // menu hangs under the crumb at the centre column's left edge, the
-        // row menu right-aligns to the sidebar's content edge under the
-        // header, clamped into the window.
-        const MENU_W: f32 = 250.0;
-        const MENU_GAP: f32 = 4.0;
-        const HEADER_H: f32 = 48.0;
-        let (top, left) = if from_header {
-            (HEADER_H + MENU_GAP, self.resize.width + 12.0)
+        // The seat: below-start of whatever opened the menu — the header
+        // crumb's rect, or the group row's tray `…` bounds (`None` is the
+        // "Other workspaces" row, keyed under its group id). `anchored_menu`
+        // flips the side and slides inside the window on overflow. No bounds
+        // yet: no menu this frame, never the old `top(52)` seat; the rail
+        // guard keeps a scripted group menu there from repainting forever
+        // (the crumb is always rendered, so the header menu always notifies).
+        let trigger = if from_header {
+            self.crumb_bounds
         } else {
-            let viewport = self.sessions_scroll.bounds();
-            let right = if f32::from(viewport.size.width) > 0.0 {
-                f32::from(viewport.origin.x) + f32::from(viewport.size.width) - 12.0
-            } else {
-                self.resize.width - 12.0
-            };
-            (HEADER_H + MENU_GAP, (right - MENU_W).max(8.0))
+            let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
+            self.group_menu_bounds.get(&key).copied()
+        };
+        let Some(trigger) = trigger else {
+            if !from_header {
+                let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
+                crate::harness_log!("project menu: no trigger bounds for {key}");
+            }
+            if from_header || self.sidebar_open {
+                cx.notify();
+            }
+            return None;
         };
         // A click anywhere outside closes the menu and its colour submenu:
         // the catcher is a sibling of the menu inside the same deferred
@@ -482,15 +505,51 @@ impl Harness {
             .absolute()
             .inset_0()
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
-        let mut stack = div()
+        // The menu reports its own rect (its only child): the Colour submenu
+        // anchors off the menu's right edge at the Colour row's height.
+        let menu_report = cx.entity().downgrade();
+        let menu = div()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = menu_report.update(cx, |this, cx| {
+                        Harness::note_trigger_bounds(&mut this.project_menu_bounds, bounds, cx);
+                    });
+                }
+            })
+            .child(view_menu("project-menu", rows).at_rest().on_activate(move |i, w, cx| {
+                activate(&i, w, cx)
+            }));
+        let mut overlay = div()
             .absolute()
-            .top(px(top))
-            .left(px(left))
-            .child(view_menu("project-menu", rows).at_rest().on_activate(move |i, w, cx| activate(&i, w, cx)));
-        // The Colour submenu (170 wide) hangs off the menu's right edge.
+            .inset_0()
+            .child(catcher)
+            .child(anchored_menu(trigger, MenuSide::Below, MenuAlign::Start, menu));
+        // The Colour submenu hangs off the menu's right edge at the Colour
+        // row's height: a zero-size trigger there seats the submenu's
+        // top-left corner one gap right and down, and `SwitchAnchor` flips it
+        // left near the window edge. The row offset is the menu's top padding
+        // plus every row above the Colour row — project toggles at the theme
+        // row height, the separator at its 1 px + 2 × 6 px margins, then New
+        // and Rename (the menu padding and separator metrics are
+        // `aui::nav::view_menu` privates, read off
+        // `crates/aui/src/nav/view_menu.rs`: `MENU_PAD`, `SEP_H`,
+        // `SEP_MARGIN_Y`).
         if colour_open {
-            if let Some(id) = target {
+            if let (Some(id), Some(menu_bounds)) = (target, self.project_menu_bounds) {
                 if let Some(current) = self.projects.find(&id).map(|p| p.colour) {
+                    let row_h = f32::from(cx.aui().metrics.row);
+                    let row_top = f32::from(menu_bounds.origin.y)
+                        + 6.0
+                        + listed_len as f32 * row_h
+                        + 13.0
+                        + 2.0 * row_h;
+                    let right =
+                        f32::from(menu_bounds.origin.x) + f32::from(menu_bounds.size.width);
+                    let sub_trigger = gpui::Bounds::new(
+                        gpui::point(gpui::px(right), gpui::px(row_top)),
+                        gpui::size(gpui::px(0.0), gpui::px(0.0)),
+                    );
                     let p = cx.aui().colors;
                     let swatches: Vec<MenuRow> = (1u8..=8)
                         .map(|slot| MenuRow::Swatch {
@@ -509,19 +568,18 @@ impl Harness {
                             cx.notify();
                         }
                     });
-                    stack = stack.child(
-                        div()
-                            .absolute()
-                            .top(px(0.0))
-                            .left(px(MENU_W + MENU_GAP))
-                            .child(view_submenu_rows("project-colour", swatches).at_rest().on_activate(
-                                move |i, w, cx| pick(&i, w, cx),
-                            )),
-                    );
+                    overlay = overlay.child(anchored_menu(
+                        sub_trigger,
+                        MenuSide::Below,
+                        MenuAlign::Start,
+                        view_submenu_rows("project-colour", swatches)
+                            .at_rest()
+                            .on_activate(move |i, w, cx| pick(&i, w, cx)),
+                    ));
                 }
             }
         }
-        Some(popover_layer(div().absolute().inset_0().child(catcher).child(stack)).into_any_element())
+        Some(overlay.into_any_element())
     }
 }
 
