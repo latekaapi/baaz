@@ -21,12 +21,18 @@ use aui_tokens::ActiveAui;
 ///
 /// The composer band deliberately lives OUTSIDE this entity, composed live
 /// by the application root (`Harness::render_centre`): the library composer
-/// embeds its textarea state as a stateful child view, and gpui-base's
-/// input element unconditionally notifies that state on every paint — which
-/// marks every ancestor dirty, so a cached entity containing the composer
-/// rebuilds on every requested frame after its first paint and the cache
-/// never reuses. The transcript column holds no such self-notifying paint,
-/// so it stays clean across sidebar-only frames.
+/// embeds its textarea state as a stateful child view, and gpui-base's input
+/// element rewrites that state at the end of every paint
+/// (`gpui-base-0.6.0/src/input/base/element.rs:2374-2385`). An in-draw notify
+/// schedules no frame — gpui-pre only wakes the platform outside the draw
+/// phase (`gpui-pre-0.3.3/src/window.rs:167-193`, `invalidate_view`) and
+/// clears the dirty set at draw end — so the paint write never self-drives;
+/// the band stays out of the cached column anyway, so typing and caret
+/// blinks rebuild one row instead of the transcript. The column's own
+/// per-tick work is the running animations (status-row braille/shimmer and
+/// running activity rows, all infinite while a turn runs) plus the 1 Hz
+/// turn ticker — legitimate running work, never an idle loop — so a settled
+/// transcript stays clean across sidebar-only frames.
 impl gpui::Render for SessionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         self.render_transcript_column(window, cx)

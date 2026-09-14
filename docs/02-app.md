@@ -621,7 +621,23 @@ is the interval between consecutive paints while frames are requested, and
 `--bench-out` also carries the intervals in frame order as `frame.series_us`,
 so the stream's frames and a wheel phase's can be told apart) —
 plus `bench-rss` (peak RSS) and `bench-idle`: the frames a settled
-transcript requests over the next 2 s, which must be none.
+transcript requests over the next 2 s, which must be none. The window opens
+only after 500 ms with no transcript constructions (bounded 5 s, so a true
+loop fails loudly instead of hanging): trailing async work after the driver
+stops — list measure, enter presences, a tier answer — lands in the first
+~0.3 s and counting it flakes 0–32 run to run on the same binary. The line
+also carries `root_2s`, the window's root renders (`--bench-bare` counts the
+bench root, which is the window's root there), and `idle_root_2s` in
+`--bench-out`. A settled transcript reads `0/0`; an open turn ticks its
+1 Hz elapsed clock through both (≈2), and its running animations (braille
+lead, label shimmer, activity spinners — all infinite while mounted) rebuild
+the transcript every tick they paint, which is legitimate animation work,
+not an idle loop: on a settled capture every commit since round 3 reads
+steady `0/0` (owner round 6 bisection). The registry input element's
+paint-end state rewrite (`gpui-base-0.6.0/.../input/base/element.rs:2374`)
+never self-drives: gpui-pre only wakes the platform outside the draw phase
+(`gpui-pre-0.3.3/.../window.rs:167-193`) and clears the dirty set at draw
+end, so an in-draw notify schedules nothing.
 `--bench` drives the normal shell: the `Harness` root with the replayed
 session active, so `bench-draw` covers the sidebar, header and composer.
 The sidebar column is its own cached view (`Entity<SidebarPane>`, embedded

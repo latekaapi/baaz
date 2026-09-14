@@ -1,5 +1,41 @@
 # Harness changelog
 
+## 2026-09-14 — Owner round 6, part C1: the idle loop that was not one
+
+- **Bisected idle frames across five commits, each in a `/tmp/r6c-*` worktree
+  with its date-faithful library pair** (`c14819d`+aui `0e8f708`,
+  `93914fb`/`3be7d5b`+aui `61b7695`, `b2d82e2`+aui `987318a`, head+`e8a47c6`;
+  shell `--bench synthetic-stress-300 --bench-scroll tail`): deterministic
+  `bench-idle` is 0 on all five; live reads 7–8 on the four older commits
+  (and flakes 0/8/32 run to run on one binary). No commit pair introduces
+  a never-idles loop — traces show ~0.3 s of settle frames then 1.7 s of
+  true silence on every commit.
+- **Named mechanism with file:line, then exonerated it.** The registry input
+  element rewrites its state at the end of every paint
+  (`gpui-base-0.6.0/src/input/base/element.rs:2374-2385`), but an in-draw
+  notify schedules no frame: gpui-pre wakes the platform only outside the
+  draw phase (`gpui-pre-0.3.3/src/window.rs:167-193`, `invalidate_view`) and
+  clears `dirty_views` at draw end, so the paint write never self-drives
+  (this corrects the part-4 message's "rebuild → paint → notify → rebuild
+  never stops"). The remaining per-tick drivers all gate themselves:
+  gesture horizons (150 ms), first-only bounds intents (`app.rs:747-757`),
+  `SidebarKey` compare (`sidebar_view.rs:215-221`, stable cached `Rc`s),
+  the 1 Hz turn ticker and countdown (only while running/counting), caret
+  blink (500 ms, only focused) and the running animations (braille/shimmer/
+  spinners, infinite while a turn runs — legitimate work, and the reason an
+  open turn rebuilds the transcript every tick it paints).
+- **`bench-idle` now settles before it counts, and reports the root.**
+  The window opens after 500 ms with no transcript constructions (bounded
+  5 s so a true loop fails loudly); the line carries `root_2s` and
+  `--bench-out` carries `idle_root_2s`. Settled stress-300 reads steady
+  `0/0` shell and bare, 4/4 runs (old metric across the bisection runs:
+  7–8, flaking 0–32). Open-turn
+  `synthetic-finishing` reads ~2 deterministic (ticker) and the running
+  storm live (animation ticks, carve-out).
+- **Instrument kept:** `render_counters_drain_what_they_counted`
+  (`sidebar_view` unit test — the `take_*` drain contract `root_2s`
+  depends on).
+
 ## 2026-09-14 — Owner round 6, part 4: cached transcript, live composer
 
 - **Sidebar-only frames reuse the retained transcript.** The root embeds the
