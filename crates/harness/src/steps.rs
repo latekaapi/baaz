@@ -104,7 +104,7 @@
 //! | `new` | the same as ⌘N |
 //! | `new:<project>` | the group row's `+` for the project named |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `harness: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
-//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_px=<before>-><after> max=<max> vh=<viewport> content=<content> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
+//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument, owner round 6: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `harness: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!

@@ -63,7 +63,7 @@ use futures::StreamExt;
 use gpui::{
     Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, actions, div, point,
     prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding,
-    ScrollHandle, SharedString, Subscription, Task, Window,
+    ListState, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -84,8 +84,10 @@ use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
 use crate::projects::{self, Project, Projects};
 use crate::app::list::ListCache;
-use crate::sidebar::{self, SessionEntry};
-use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarWheelState};
+use aui::nav::{sidebar_list_state, SidebarRow};
+
+use crate::sidebar::{self, Grouping, SessionEntry};
+use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState};
 use crate::search::{FileHit, SessionHit};
 use crate::wire::WireCall;
 use crate::{layout, Args};
@@ -416,12 +418,24 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
-    /// The sessions list's scroll state: what the reveal reads and moves
-    /// (`reveal_scroll`), persisting across frames on one handle for the
-    /// window's life. (The Sessions view menu used to anchor off this too,
-    /// back when the caption scrolled with the list; the caption is fixed
-    /// now, so the menu seats from `sessions_caption` instead.)
-    pub(crate) sessions_scroll: ScrollHandle,
+    /// The sessions list's scroll state: the caller-owned `ListState` the
+    /// virtualised sidebar lays out through (owner round 6). A cheap
+    /// handle; the component itself stays stateless. Kept in sync with the
+    /// flattened rows every frame by `sync_sidebar_list`: `reset` after a
+    /// regroup or filter change, `splice` after a local insert or remove,
+    /// `remeasure_items` after a text-only height change — `item_count`
+    /// always equals the flattened length.
+    pub(crate) sidebar_list: ListState,
+    /// The flattened rows the list state was last synced to, and the
+    /// regroup key it was last reset for. `render_sidebar` re-flattens per
+    /// frame (an index walk, no summaries cloned) and splices the
+    /// difference, so a regroup is the only sync that drops the offset.
+    pub(crate) prev_sidebar_rows: Vec<SidebarRow>,
+    /// The grouping the rows above were flattened from, behind its cached
+    /// `Rc`: a new pointer with equal rows means text changed under stable
+    /// rows, which is what asks for `remeasure_items`.
+    pub(crate) prev_sidebar_grouping: Option<Rc<Grouping>>,
+    pub(crate) prev_sidebar_regroup: Option<SidebarRegroupKey>,
     /// The sidebar wheel's input-side state (owner round 5 §A1): what the
     /// capture handler writes, shared behind [`RefCell`] rather than kept
     /// on the entity. A wheel event can arrive inside a `Harness` update
@@ -608,7 +622,10 @@ impl Harness {
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
-            sessions_scroll: ScrollHandle::new(),
+            sidebar_list: sidebar_list_state(0),
+            prev_sidebar_rows: Vec::new(),
+            prev_sidebar_grouping: None,
+            prev_sidebar_regroup: None,
             sidebar_wheel: Rc::new(RefCell::new(SidebarWheelState::default())),
             sidebar_user_scrolled: false,
             capture,

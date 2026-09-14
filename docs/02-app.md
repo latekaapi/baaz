@@ -319,20 +319,37 @@ destination yet, so it answers with a toast saying so.
 The Sessions caption is fixed above the scrolling list: the rows clip at the
 list's own top edge, so the header and its spacing stay put at any scroll
 offset — including after a reveal-on-activation scrolls the list — and no row
-ever reaches the nav rows (owner round 4 fixup). The list scrolls like the
-transcript now does (owner round 5): a capture-phase canvas over the list
-takes the wheel, accumulates it into the shared `sidebar_wheel` cell, and
-the pane drains
-exactly one clamped offset write per frame, notifying only the sidebar pane;
-a 150 ms gesture horizon keeps presenting through the momentum tail. A wheel
-disarms any armed reveal and no reveal installs mid-gesture or after the user
-has scrolled, so the list never moves under the hand. `sidebar-wheel:<dy>[,n]`
-is the scripted instrument (dispatches at a sidebar point and logs offset
-plus pane/root renders and drains); the render counters behind it are the
-sidebar analogue of the transcript's wheel instruments. The `sbwheel` line
-also carries `centre=`: transcript-column rebuilds since the last drain, so
-a sidebar burst reads `centre=0` while the cached transcript reuses its
-retained subtree (owner round 6, part 4).
+ever reaches the nav rows (owner round 4 fixup). The sessions area is the
+library's virtualised list (`aui::nav::virtual_sidebar_view`, owner round 6
+part C2): `render_sidebar` re-flattens the grouping into `SidebarRow`s every
+frame (an index walk, no summaries cloned) and keeps a harness-owned
+`ListState` in sync — `reset` after a regroup or filter change (the only sync
+that drops the offset), `splice` after a local insert or remove (open/close,
+fold expand, sessions arriving or leaving), `remeasure_items` after a
+text-only height change under stable rows — so only the rows near the
+viewport, plus a small overdraw runway, are ever built; a 200-session stress
+sidebar builds the same handful of rows a 20-session one does. The list
+scrolls like the transcript (owner round 5): a capture-phase canvas over the
+list takes the wheel, accumulates it into the shared `sidebar_wheel` cell,
+and the pane drains exactly one `ListState::scroll_by` per frame, notifying
+only the sidebar pane; a 150 ms gesture horizon keeps presenting through the
+momentum tail. Reveal-on-activation now steers the list itself
+(`row_index_for_session` finds the flattened row, `ensure_row_visible` moves
+the minimum to show it whole, or its group head when the row is folded away
+or its group closed — never auto-expanded); a wheel or a resize drag disarms
+any armed reveal and no reveal installs mid-gesture, mid-drag, or after the
+user has scrolled, so the list never moves under the hand, and a sidebar
+click never arms one at all. A scroll that lands under an open group menu
+dismisses it (the calm option — the header menu, seated from the fixed
+caption, is never touched); folds and group open/close snap instead of
+springing under the virtual path, which reads as acceptable.
+`sidebar-wheel:<dy>[,n]` is the scripted instrument (dispatches at a sidebar
+point and logs the list's `item_ix`+`offset_in_item` plus pane/root renders
+and drains); the render counters behind it are the sidebar analogue of the
+transcript's wheel instruments. The `sbwheel` line also carries `centre=`:
+transcript-column rebuilds since the last drain, so a sidebar burst reads
+`centre=0` while the cached transcript reuses its retained subtree (owner
+round 6, part 4).
 The caption's sliders icon opens the **view menu**: Group by project
 (toggle), Show empty (n) / Hide empty, Show hidden (n) / Hide hidden (the
 legacy `/hide` rows), Clear empty, Show archived (n) / Hide archived, and
