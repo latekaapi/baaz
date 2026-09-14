@@ -55,7 +55,7 @@ use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEff
 use aui_tokens::scale;
 use gpui::{
     div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, ListAlignment, ListState, Pixels, SharedString,
     Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, Position, TextareaState};
@@ -415,6 +415,22 @@ pub struct SessionView {
     /// traced paint; both stay untouched unless the trace is on.
     trace_wheel_pending: usize,
     trace_last_wheel: Option<Instant>,
+    /// Wheel travel accumulated since the last frame, in pixels (owner round
+    /// 4 §2: one offset per frame). The capture handler only adds to this;
+    /// `render_transcript` drains it into exactly one `scroll_by` per frame,
+    /// so per-frame work no longer grows with the event rate and the main
+    /// queue is free for the display-link tick between events.
+    pending_wheel: Pixels,
+    /// How long the current wheel gesture stays open after its last event
+    /// (owner round 4 §2/§4). The momentum tail arrives at 60 Hz, so 150 ms
+    /// covers a missed sample; while it is in the future the transcript
+    /// keeps presenting every tick, never re-hints, and never re-anchors
+    /// the tail under the gesture.
+    gesture_until: Option<Instant>,
+    /// A re-hint owed but deferred past an in-flight gesture (owner round 4
+    /// §4): a page landing or a width change while `gesture_until` is armed.
+    /// The next frame after the gesture lapses pays it.
+    rehint_deferred: bool,
     /// What `render_transcript` reads every frame (C1): one snapshot shared
     /// by steady-state frames, refreshed only when the fold changes (length
     /// drift or `follow`), so per-frame cost stays bounded as the transcript
@@ -648,6 +664,9 @@ impl SessionView {
             synced_counts: Vec::new(),
             trace_wheel_pending: 0,
             trace_last_wheel: None,
+            pending_wheel: px(0.0),
+            gesture_until: None,
+            rehint_deferred: false,
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: Rc::new(HashMap::new()),
             cached_pending_approval: None,
@@ -1480,6 +1499,22 @@ fn frame_trace_enabled() -> bool {
 /// missed sample (owner round 4 §2 arms the same horizon).
 const TRACE_GESTURE_MS: u128 = 150;
 
+/// How long after a wheel event its gesture stays open (owner round 4 §2):
+/// the momentum tail arrives at 60 Hz, so 150 ms covers a missed sample.
+/// Deliberately the same horizon the frame trace displays above.
+const GESTURE_HORIZON: Duration = Duration::from_millis(150);
+
+/// Wheel drains actually applied since process start (owner round 4 §2):
+/// one per frame that had accumulated travel, against one `scroll_by` per
+/// event before. The bench drains it for its report; the count is what shows
+/// per-frame work no longer growing with the event rate.
+static WHEEL_SCROLL_BYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Drain the applied-drain count above, for the bench's end-of-run report.
+pub(crate) fn take_wheel_scroll_bys() -> u64 {
+    WHEEL_SCROLL_BYS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 struct FrameTrace {
     out: std::io::BufWriter<std::fs::File>,
     start: Instant,
@@ -1515,6 +1550,41 @@ fn frame_trace_slot() -> Option<std::sync::MutexGuard<'static, Option<FrameTrace
 }
 
 impl SessionView {
+    /// Accumulate one capture-phase wheel delta (owner round 4 §2). The
+    /// handler applies nothing: `render_transcript` drains the sum into one
+    /// `scroll_by` per frame. An upward delta leaves the tail, as everywhere
+    /// else; every event re-arms the gesture horizon for the momentum tail.
+    fn push_wheel(&mut self, dy: Pixels) {
+        self.pending_wheel += dy;
+        if dy > px(0.0) {
+            self.follow = false;
+        }
+        self.gesture_until = Some(Instant::now() + GESTURE_HORIZON);
+        self.note_wheel_event();
+    }
+
+    /// Whether a wheel gesture is in flight (owner round 4 §4): an event
+    /// landed within the horizon. While this holds the transcript presents
+    /// every tick and neither re-hints nor re-anchors under the gesture.
+    fn gesture_active(&self) -> bool {
+        self.gesture_until.is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Drain the accumulated wheel travel into exactly one `scroll_by`
+    /// (owner round 4 §2). Called once per frame from `render_transcript`,
+    /// before the cache sync, so N events between paints become one SumTree
+    /// seek with their full travel. A zero delta is gpui's own early-return,
+    /// so an idle frame pays one comparison; only applied drains count.
+    /// `pub(crate)` for the `--steps wheel:` verb, which applies eagerly so
+    /// its before/after log stays a movement check.
+    pub(crate) fn drain_pending_wheel(&mut self) {
+        let pending = std::mem::replace(&mut self.pending_wheel, px(0.0));
+        self.list_state.scroll_by(-pending);
+        if pending != px(0.0) {
+            WHEEL_SCROLL_BYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Count one applied wheel event for the frame trace. Called from the
     /// capture handler's view update, beside the `follow` bookkeeping.
     fn note_wheel_event(&mut self) {

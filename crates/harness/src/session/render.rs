@@ -92,6 +92,17 @@ impl SessionView {
         crate::log::trace_first_frame();
         self.note_frame_trace();
         let frame_start = std::time::Instant::now();
+        // Owner round 4 §2: one offset per frame. The capture handler only
+        // accumulates; this drain is the frame's single `scroll_by`.
+        self.drain_pending_wheel();
+        // Owner round 4 §4: keep presenting through the tail. A frame every
+        // tick while the gesture is open — what `InputRateTracker` does for
+        // a second after ≥ 60 inputs/s, but the 60 Hz momentum tail sits on
+        // its threshold. A settled transcript requests nothing once it
+        // lapses, which is what `bench-idle` asserts.
+        if self.gesture_active() {
+            window.request_animation_frame();
+        }
         self.sync_render_cache();
         if self.cached_turns.is_empty() {
             return self.empty_or_loading(window, cx);
@@ -276,6 +287,10 @@ impl SessionView {
     pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)]) {
         let count: usize = counts.iter().map(|(_, n)| n).sum();
         let changed = count != self.list_len || counts != self.synced_counts.as_slice();
+        // Owner round 4 §4: never re-anchor under a gesture. While one is in
+        // flight no `reset` runs and the tail does not re-engage; whatever
+        // is owed lands on the first frame after it lapses.
+        let gesture = self.gesture_active();
         if changed {
             let old = self.list_len;
             // The first row of the first turn whose `(id, rows)` differs from
@@ -290,14 +305,33 @@ impl SessionView {
             self.list_len = count;
             self.synced_counts = counts.to_vec();
             if old == 0 || self.loading_history {
-                self.rehint_rows(count);
+                if gesture {
+                    // The count still moves (a splice never resets), but the
+                    // re-hint waits: new rows ride no hint for a few frames
+                    // rather than paying a `reset`'s dropped wheel events
+                    // mid-gesture.
+                    self.list_state.splice(from..old, count - from);
+                    self.rehint_deferred = true;
+                } else {
+                    self.rehint_rows(count);
+                }
             } else {
                 self.list_state.splice(from..old, count - from);
             }
         } else if std::mem::take(&mut self.rehint) {
+            if gesture {
+                self.rehint_deferred = true;
+            } else {
+                self.rehint_rows(count);
+            }
+        }
+        if !gesture && std::mem::take(&mut self.rehint_deferred) {
             self.rehint_rows(count);
         }
-        if std::mem::take(&mut self.follow) && self.list_state.is_scrolled_to_end().unwrap_or(true) {
+        // Tail-follow re-engages only at the end, and never under a gesture:
+        // a downward flick the reader started stays theirs until it lapses.
+        // A swallowed `follow` is re-raised by the next fold change.
+        if std::mem::take(&mut self.follow) && !gesture && self.list_state.is_scrolled_to_end().unwrap_or(true) {
             self.list_state.scroll_to_end();
         }
     }
@@ -307,6 +341,12 @@ impl SessionView {
     /// scroll position and the wheel events until the next paint, so the
     /// position is put back by hand; one frame of dropped wheel events is the
     /// price, paid only on a page landing or a width change.
+    ///
+    /// The hint stays uniform (owner round 4 §5): gpui-pre 0.3.3 exposes no
+    /// per-item hint — `ListItem` is a private enum, and `splice` and
+    /// `splice_focusable` both build `Unmeasured { size_hint: None }`, so
+    /// only `reset_with_uniform_height` can hint at all. Per-kind estimates
+    /// would need a gpui fork, which the round rules out.
     fn rehint_rows(&mut self, count: usize) {
         let at_end = self.list_state.is_scrolled_to_end().unwrap_or(true);
         let top = self.list_state.logical_scroll_top();
@@ -381,8 +421,10 @@ impl SessionView {
                             let _ = width_report.update(cx, |view, _| view.note_list_width(width));
                         }
                     })
-                    // D7. The wheel goes to `ListState::scroll_by` here, in the
-                    // capture phase, and never reaches `list()`'s own handler.
+                    // D7. The wheel accumulates on the view here, in the
+                    // capture phase, and never reaches `list()`'s own handler;
+                    // `render_transcript` drains the sum into one `scroll_by`
+                    // per frame (owner round 4 §2).
                     //
                     // `list()` accumulates a frame's wheel deltas with
                     // `ScrollDelta::coalesce` and applies the running sum
@@ -410,7 +452,7 @@ impl SessionView {
                     // hardcoded 20 px; and a gesture that is more horizontal
                     // than vertical is left alone, so a wide markdown table
                     // still scrolls sideways.
-                    .child(wheel_capture(self.list_state.clone(), cx))
+                    .child(wheel_capture(cx))
                     .child(
                         list(self.list_state.clone(), move |ix, window, cx| {
                             // One item per row of a turn: only visible rows are
@@ -1490,8 +1532,10 @@ pub(super) fn resolve_workspace_path(workspace: &Path, raw: &str) -> Result<Path
 }
 
 /// The transcript's wheel handler: a zero-size canvas over the list that
-/// takes every scroll event in the **capture** phase and drives the list with
-/// [`gpui::ListState::scroll_by`], one event at a time.
+/// takes every scroll event in the **capture** phase and accumulates its
+/// vertical delta on the view (owner round 4 §2). `render_transcript` drains
+/// the sum into exactly one [`gpui::ListState::scroll_by`] per frame, so one
+/// frame's work no longer grows with the event rate.
 ///
 /// Capture, not bubble, is the only phase that can win here. `list()`
 /// registers its own handler during its paint, and `Interactivity::paint`
@@ -1503,7 +1547,7 @@ pub(super) fn resolve_workspace_path(workspace: &Path, raw: &str) -> Result<Path
 /// stops the event before `list()` ever sees it.
 ///
 /// See the call site for why `list()`'s own arithmetic had to go.
-fn wheel_capture(list_state: gpui::ListState, cx: &mut Context<SessionView>) -> gpui::AnyElement {
+fn wheel_capture(cx: &mut Context<SessionView>) -> gpui::AnyElement {
     let view = cx.entity().downgrade();
     gpui::canvas(
         // Prepaint: gpui's own hitbox, so the wheel goes to whatever is
@@ -1523,22 +1567,13 @@ fn wheel_capture(list_state: gpui::ListState, cx: &mut Context<SessionView>) -> 
                 if delta.y.abs() < delta.x.abs() {
                     return;
                 }
-                // The list counts pixels from the top, the wheel counts
-                // travel, and they run opposite ways. `scroll_by` reads the
-                // current position fresh, so nothing accumulates and nothing
-                // is rebased against a stale frame.
-                list_state.scroll_by(-delta.y);
-                // Taken whether or not it moved us: a zero sample that
+                // Taken whether or not it moves us: a zero sample that
                 // reaches `list()` is exactly what resets its accumulator.
+                // The list counts pixels from the top, the wheel counts
+                // travel, and they run opposite ways; the drain negates.
                 cx.stop_propagation();
                 let _ = view.update(cx, |view, cx| {
-                    // An upward scroll leaves the tail, as it does everywhere
-                    // else; `scroll_by` has already stopped the list
-                    // following, and this keeps the view's own flag in step.
-                    if delta.y > gpui::px(0.0) {
-                        view.follow = false;
-                    }
-                    view.note_wheel_event();
+                    view.push_wheel(delta.y);
                     cx.notify();
                 });
             });

@@ -61,9 +61,9 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, actions, div, point, prelude::*, px,
-    AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding, ScrollHandle,
-    SharedString, Subscription, Task, Window,
+    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, actions, div, point,
+    prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding,
+    ScrollHandle, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -85,6 +85,7 @@ use crate::sessions::{self, SessionMeta};
 use crate::projects::{self, Project, Projects};
 use crate::app::list::ListCache;
 use crate::sidebar::{self, SessionEntry};
+use crate::sidebar_view::{SidebarKey, SidebarPane};
 use crate::search::{FileHit, SessionHit};
 use crate::wire::WireCall;
 use crate::{layout, Args};
@@ -388,6 +389,15 @@ pub struct Harness {
     /// consumed only on two consecutive inside readings, or once a scroll
     /// lands whole. Reset every time `reveal` is armed.
     pub(crate) reveal_stable: bool,
+    /// The sidebar column as its own view (owner round 4 §3): embedded with
+    /// gpui's `.cached(size_full)`, a clean pane reuses its retained subtree
+    /// instead of rebuilding the column on a transcript notify.
+    /// [`Harness::sync_sidebar_pane`] re-arms it from `on_frame` whenever
+    /// [`SidebarKey`] changes.
+    pub(crate) sidebar_pane: Entity<SidebarPane>,
+    /// The [`SidebarKey`] the pane last rendered for. `None` until the first
+    /// frame, so the pane renders at least once.
+    pub(crate) sidebar_key: Option<SidebarKey>,
     /// Parked session views, most-recently-opened first: an MRU of eight.
     /// Switching away parks the view (its event subscription dropped, its
     /// fold, scroll position and draft kept); reopening shows it at once and
@@ -550,6 +560,11 @@ impl Harness {
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
+        // The sidebar column's own view (owner round 4 §3): the weak handle
+        // is this harness under construction, which `cx.entity()` already
+        // names inside the builder.
+        let harness_weak = cx.entity().downgrade();
+        let sidebar_pane = cx.new(move |_| SidebarPane::new(harness_weak));
         // The API-key field: masked, with the capture-safe placeholder. Enter
         // inside it submits (single-line inputs always emit `PressEnter`).
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
@@ -569,6 +584,8 @@ impl Harness {
             pending_id: None,
             reveal: None,
             reveal_stable: false,
+            sidebar_pane,
+            sidebar_key: None,
             session_cache: Vec::new(),
             drafts: HashMap::new(),
             pending_draft: None,
@@ -617,9 +634,12 @@ impl Harness {
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
-        // Typing in the rename field redraws the row being renamed.
-        this.subscriptions.push(cx.subscribe(&rename, |_: &mut Self, _, event: &InputEvent, cx| {
+        // Typing in the rename field redraws the row being renamed — in the
+        // sidebar pane, which owns that element, as well as here for the
+        // header title that shares the field (owner round 4 §3).
+        this.subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                this.sidebar_pane.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
         }));
@@ -1582,6 +1602,11 @@ impl Harness {
             self.resize.active = false;
             self.resize.persist();
         }
+        // The sidebar pane's inputs may have changed without a notify of its
+        // own (a session event, a probe answer, the minute rollover): re-arm
+        // it here, before anything draws, so a transcript notify alone never
+        // rebuilds the column (owner round 4 §3).
+        self.sync_sidebar_pane(cx);
         // The shell's lifecycle only: the login screen owns the whole window
         // and has no session behind it.
         if !matches!(self.auth, Auth::SignedIn(_)) {
@@ -1608,7 +1633,13 @@ impl Render for Harness {
         // it, so nothing of the signed-in state can leak into a capture.
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
         let body: AnyElement = if signed_in {
-            let sidebar = self.render_sidebar(window, cx);
+            // The column is its own cached view (owner round 4 §3): clean,
+            // gpui reuses its retained subtree and only the centre rebuilds.
+            // `size_full` is what the column wears itself (`render_sidebar`
+            // fills its cell), so the cached layout resolves to the same
+            // bounds the shell offers and any resize re-renders through the
+            // bounds key.
+            let sidebar = self.sidebar_pane.clone().cached(StyleRefinement::default().size_full());
             let centre = self.render_centre(window, cx);
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
