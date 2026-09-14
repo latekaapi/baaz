@@ -267,7 +267,13 @@ case-insensitively, never recency, no drag reorder — owner round 4, O1), each
 a plain muted label with the count, a running dot when any of its sessions
 runs, and hover `+` and `…`; sessions inside run newest-first with pinned
 first; then the muted "Other workspaces" group, always last and closed until
-opened. The collapse chevron, the current-project accent bar and the trailing
+opened. The plain label's first glyph starts at the leading centre (x = 18,
+the line the nav icons and the session dots sit on); with the chevron flag
+the chevron takes that box and the label follows at `NAV_LABEL_X` like every
+other label. Every project label reads the same muted `ink-3` — the current
+project is never brighter (owner round 5); only the accent bar marks it, and
+the bar alone never moves or recolours the label. The collapse chevron, the
+current-project accent bar and the trailing
 branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
 default off — owner round 4, O4). The Settings dialog owns the switches:
 ⌘, (File → Settings…), the account footer menu's "Settings…" row, or
@@ -313,7 +319,17 @@ destination yet, so it answers with a toast saying so.
 The Sessions caption is fixed above the scrolling list: the rows clip at the
 list's own top edge, so the header and its spacing stay put at any scroll
 offset — including after a reveal-on-activation scrolls the list — and no row
-ever reaches the nav rows (owner round 4 fixup).
+ever reaches the nav rows (owner round 4 fixup). The list scrolls like the
+transcript now does (owner round 5): a capture-phase canvas over the list
+takes the wheel, accumulates it into the shared `sidebar_wheel` cell, and
+the pane drains
+exactly one clamped offset write per frame, notifying only the sidebar pane;
+a 150 ms gesture horizon keeps presenting through the momentum tail. A wheel
+disarms any armed reveal and no reveal installs mid-gesture or after the user
+has scrolled, so the list never moves under the hand. `sidebar-wheel:<dy>[,n]`
+is the scripted instrument (dispatches at a sidebar point and logs offset
+plus pane/root renders and drains); the render counters behind it are the
+sidebar analogue of the transcript's wheel instruments.
 The caption's sliders icon opens the **view menu**: Group by project
 (toggle), Show empty (n) / Hide empty, Show hidden (n) / Hide hidden (the
 legacy `/hide` rows), Clear empty, Show archived (n) / Hide archived, and

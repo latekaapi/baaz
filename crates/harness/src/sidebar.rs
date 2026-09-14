@@ -549,6 +549,16 @@ pub(crate) fn reveal_offset(viewport: Bounds<Pixels>, row: Bounds<Pixels>, offse
     }
 }
 
+/// The frame's one sidebar offset write (owner round 5 §A1): the accumulated
+/// wheel travel applied to the handle's y offset, clamped to the content
+/// bounds. All three in pixels, with the handle's sign (≤ 0, growing
+/// negative down the list): a downward `pending` is negative, like the
+/// wheel delta the capture handler accumulated verbatim. Pure so the drain
+/// stays testable without a window.
+pub(crate) fn clamp_sidebar_offset(offset_y: f32, pending: f32, max_y: f32) -> f32 {
+    (offset_y + pending).clamp(-max_y, 0.0)
+}
+
 /// The last path component of a workspace root, for the "Other workspaces"
 /// rows' repo tag — and the search palette's badge for sessions no project
 /// holds. A root with no final component names itself whole rather than
@@ -1426,5 +1436,22 @@ mod tests {
         // …while a tall row whose top already shows stays put: the top is
         // the most the viewport can keep.
         assert_eq!(reveal_offset(viewport, row(400.0, 300.0), gpui::px(-300.0)), None);
+    }
+
+    /// The frame's one offset write (owner round 5 §A1): accumulated travel
+    /// adds verbatim — downward is negative, the handle's sign — and both
+    /// ends clamp.
+    #[test]
+    fn the_drain_applies_travel_verbatim_inside_the_bounds() {
+        assert_eq!(clamp_sidebar_offset(0.0, -240.0, 310.5), -240.0);
+        assert_eq!(clamp_sidebar_offset(-240.0, 40.0, 310.5), -200.0);
+        assert_eq!(clamp_sidebar_offset(-240.0, 0.0, 310.5), -240.0);
+    }
+
+    #[test]
+    fn the_drain_clamps_at_both_ends() {
+        // Past the tail sticks at the tail; past the head sticks at zero.
+        assert_eq!(clamp_sidebar_offset(-300.0, -40.0, 310.5), -310.5);
+        assert_eq!(clamp_sidebar_offset(-40.0, 80.0, 310.5), 0.0);
     }
 }

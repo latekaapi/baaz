@@ -78,8 +78,66 @@ impl SidebarPane {
     }
 }
 
+/// Sidebar-pane renders since process start (owner round 5 §A1.6): the
+/// sidebar analogue of `WHEEL_SCROLL_BYS`. Relaxed atomics, drained per
+/// `sidebar-wheel:` log line, so a burst's pane/root renders per event are
+/// readable off a scripted run.
+static SIDEBAR_PANE_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HARNESS_ROOT_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Drain the pane-render count above, for the `sidebar-wheel:` report.
+pub(crate) fn take_sidebar_pane_renders() -> u64 {
+    SIDEBAR_PANE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Drain the root-render count below, for the `sidebar-wheel:` report.
+pub(crate) fn take_harness_root_renders() -> u64 {
+    HARNESS_ROOT_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How long a sidebar wheel gesture stays open after its last event
+/// (owner round 5 §A1): the momentum tail arrives at 60 Hz, so 150 ms
+/// covers a missed sample. Deliberately the same 150 ms the transcript
+/// keeps; while it is in the future the pane presents every tick and no
+/// reveal may move the list.
+const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Sidebar drains actually applied since process start (owner round 5 §A1):
+/// one per frame that had accumulated travel, against one offset write per
+/// event before. Drained per `sidebar-wheel:` line, like `take_wheel_scroll_bys`.
+static SIDEBAR_WHEEL_DRAINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Drain the applied-drain count above, for the `sidebar-wheel:` report.
+pub(crate) fn take_sidebar_wheel_drains() -> u64 {
+    SIDEBAR_WHEEL_DRAINS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The sidebar wheel's input-side state (owner round 5 §A1): what the
+/// capture handler writes and `render_sidebar` applies. Shared behind
+/// `RefCell` (see `Harness::sidebar_wheel`) so the push never borrows the
+/// entity — a wheel event can arrive inside a `Harness` update, where an
+/// entity update panics.
+#[derive(Debug, Default)]
+pub(crate) struct SidebarWheelState {
+    /// Wheel travel accumulated since the last sidebar frame, in pixels.
+    /// The capture handler only adds; the drain takes it whole.
+    pending: Pixels,
+    /// How long the current gesture stays open after its last event.
+    gesture_until: Option<std::time::Instant>,
+    /// A wheel landed since the last frame: the armed reveal (if any) is
+    /// stale and the scrolled-since-armed bit wants setting.
+    scrolled: bool,
+}
+
+/// Count one `Harness::render`. Called first in the root render, beside the
+/// whole-frame instrument's start.
+pub(crate) fn note_harness_render() {
+    HARNESS_ROOT_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Render for SidebarPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match self.harness.upgrade() {
             Some(harness) => harness.update(cx, |harness, cx| harness.render_sidebar(window, cx)),
             None => div().into_any_element(),
@@ -164,6 +222,47 @@ impl Harness {
         }
     }
 
+    /// The sessions list's current scroll offset in pixels (owner round 5
+    /// §A1.6): what `sidebar-wheel:` samples. Negative downward, like the
+    /// handle's own offset — the sidebar analogue of
+    /// `SessionView::bench_list_px`.
+    pub(crate) fn sidebar_px(&self) -> f32 {
+        f32::from(self.sessions_scroll.offset().y)
+    }
+
+    /// Whether a sidebar wheel gesture is in flight (owner round 5 §A1):
+    /// an event landed within the horizon. While this holds the pane
+    /// presents every tick and no reveal installs.
+    pub(crate) fn sidebar_gesture_active(&self) -> bool {
+        self.sidebar_wheel.borrow().gesture_until.is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Apply the capture handler's input (owner round 5 §A1): take the
+    /// accumulated travel into exactly one clamped offset write, disarm
+    /// any armed reveal (the user's scroll wins), and mark scrolled-since-
+    /// armed so none reinstalls until the next activation. Called once per
+    /// pane render from `render_sidebar`, before anything reads the offset
+    /// — the sidebar twin of `SessionView::drain_pending_wheel`.
+    pub(crate) fn drain_sidebar_wheel(&mut self) {
+        let (pending, scrolled) = {
+            let mut state = self.sidebar_wheel.borrow_mut();
+            (std::mem::replace(&mut state.pending, px(0.0)), std::mem::replace(&mut state.scrolled, false))
+        };
+        if scrolled {
+            self.reveal = None;
+            self.reveal_stable = false;
+            self.sidebar_user_scrolled = true;
+        }
+        if pending == px(0.0) {
+            return;
+        }
+        let offset = self.sessions_scroll.offset();
+        let max = self.sessions_scroll.max_offset();
+        let next_y = crate::sidebar::clamp_sidebar_offset(f32::from(offset.y), f32::from(pending), f32::from(max.y));
+        self.sessions_scroll.set_offset(point(offset.x, px(next_y)));
+        SIDEBAR_WHEEL_DRAINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The rows above the Sessions caption: New session, Add project, and
     /// Automations behind a Soon tag until it has somewhere to go. No side
     /// inset of its own: the library's gutter positions the nav rows, and
@@ -220,7 +319,17 @@ impl Harness {
             .into_any_element()
     }
 
-    pub(crate) fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Owner round 5 §A1: one offset per frame. The capture handler only
+        // accumulates; this drain is the frame's single offset write.
+        self.drain_sidebar_wheel();
+        // Keep presenting through the tail: a frame every tick while the
+        // gesture is open, so the momentum tail is never cut — what the
+        // transcript does for its own gesture. A settled sidebar requests
+        // nothing and the cached pane is reused untouched.
+        if self.sidebar_gesture_active() {
+            window.request_animation_frame();
+        }
         let visible = self.visible_sessions(cx);
         let empty = self.render_sidebar_empty(&visible, cx);
         // Both come from the window's cache: built once per change and once
@@ -315,12 +424,16 @@ impl Harness {
         if let Some(selected) = selected {
             view = view.selected(selected);
         }
-        // The one-shot reveal (owner round 4, O6): armed in `activate` for
-        // every activation path, consumed on the first prepaint after it.
-        // Never from a list refresh, a regroup, or while the user scrolls —
-        // the flag only exists between an activation and its prepaint.
-        if let Some(reveal_id) = self.reveal.clone() {
-            view = self.install_reveal(view, &grouping, &reveal_id, cx);
+        // The one-shot reveal (owner round 4, O6; owner round 5 §A1): armed
+        // in `activate` for every activation path, consumed on the first
+        // prepaint after it. Never from a list refresh, a regroup, during
+        // a wheel gesture, or after the user has scrolled — the flag only
+        // exists between an activation and its prepaint, and a wheel
+        // disarms it outright (`push_sidebar_wheel`).
+        if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() {
+            if let Some(reveal_id) = self.reveal.clone() {
+                view = self.install_reveal(view, &grouping, &reveal_id, cx);
+            }
         }
         // No quick-filter field: ⌘⇧F and the sidebar search icon open the
         // full-text search palette instead, so the two can never share the
@@ -329,20 +442,32 @@ impl Harness {
             .size_full()
             .child(self.render_nav_block(cx))
             .child(self.render_sessions_caption(cx))
+            // The list's positioned wrapper (owner round 5 §A1): `relative`
+            // only establishes the containing block — the capture canvas
+            // below resolves against this instead of the window (the same
+            // load-bearing `relative` the transcript wrapper wears for its
+            // own `wheel_capture`). A plain box otherwise: layout and paint
+            // are unchanged.
             .child(
                 div()
-                    .id("sessions-scroll")
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    // Tracked so the reveal can read the viewport and move
-                    // the offset; observing changes nothing about the
-                    // scrolling itself. The fixed caption above is outside
-                    // this div, so the list clips at the div's own top edge
-                    // and nothing from it ever reaches the nav rows.
-                    .track_scroll(&self.sessions_scroll)
-                    .child(view)
-                    .children(empty),
+                    .relative()
+                    .child(sidebar_wheel_capture(self))
+                    .child(
+                        div()
+                            .id("sessions-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            // Tracked so the reveal can read the viewport and move
+                            // the offset; observing changes nothing about the
+                            // scrolling itself. The fixed caption above is outside
+                            // this div, so the list clips at the div's own top edge
+                            // and nothing from it ever reaches the nav rows.
+                            .track_scroll(&self.sessions_scroll)
+                            .child(view)
+                            .children(empty),
+                    ),
             )
             .child(self.render_footer(cx))
             .into_any_element()
@@ -393,7 +518,7 @@ impl Harness {
     /// which is what finally consumes the flag, so a later user scroll
     /// never fights a stale reveal.
     fn install_reveal(
-        &self,
+        &mut self,
         view: SidebarView,
         grouping: &Grouping,
         reveal_id: &str,
@@ -439,7 +564,9 @@ impl Harness {
             // The row is not on screen: reveal its group instead. The
             // session's own project when it names one still adopted, else
             // the current project — with neither, there is no group to
-            // reveal and the flag waits for the row.
+            // reveal and the flag clears instead of waiting (owner round 5
+            // §A1: a waiting flag outlives its activation and can move a
+            // list the user scrolled meanwhile).
             let group_id = self
                 .sessions
                 .iter()
@@ -447,7 +574,11 @@ impl Harness {
                 .and_then(|e| e.project.clone())
                 .filter(|id| self.projects.find(id).is_some())
                 .or_else(|| self.current_project.clone());
-            let Some(group_id) = group_id else { return view };
+            let Some(group_id) = group_id else {
+                self.reveal = None;
+                self.reveal_stable = false;
+                return view;
+            };
             view.on_current_prepainted(move |id, bounds, _window, app| {
                 if id.as_ref() != group_id {
                     return;
@@ -878,6 +1009,62 @@ impl Harness {
             .into_any_element(),
         )
     }
+}
+
+/// The sidebar's wheel, taken in the capture phase (owner round 5 §A1):
+/// the transcript's `wheel_capture` twin. Capture runs in registration
+/// order ahead of every bubble handler, so this stops the event before the
+/// scroll div's own listener can apply it per event; the div keeps its
+/// handler for whatever this yields (an overlay on top, a mostly
+/// horizontal gesture — the sidebar has no horizontal scroller, but
+/// yielding keeps a diagonal gesture's x with the platform). The canvas is
+/// the wrapper's first child, so it paints under the rows — clicks still
+/// land on them — while its own hitbox covers the list's viewport rect and
+/// `should_handle_scroll` yields to whatever occludes it (the palette
+/// scrim, a group menu), exactly like the transcript's. Taken events
+/// accumulate into `sidebar_pending` and notify ONLY the pane;
+/// `render_sidebar` drains one offset write per frame.
+fn sidebar_wheel_capture(harness: &Harness) -> gpui::AnyElement {
+    // The shared input cell, not the entity: a wheel event can arrive
+    // inside a `Harness` update (a scripted `sidebar-wheel:` step dispatches
+    // from one), and updating the entity re-entrantly panics — the cell
+    // never borrows it, so the push stays synchronous and N events between
+    // paints coalesce into one drain. The pane is never borrowed during a
+    // dispatch either (events dispatch outside updates and renders), so its
+    // notify is direct too: ONLY the pane, never the root.
+    let state = Rc::clone(&harness.sidebar_wheel);
+    let pane = harness.sidebar_pane.clone();
+    gpui::canvas(
+        // Prepaint: gpui's own hitbox, so the wheel goes to whatever is
+        // actually on top. An open palette or menu over the list owns the
+        // pointer, and `should_handle_scroll` is the same test the scroll
+        // div itself uses.
+        move |bounds, window, _cx| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_bounds, hitbox, window, _cx| {
+            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(window.line_height());
+                // A gesture that is more sideways than not belongs to
+                // whatever is under it.
+                if delta.y.abs() < delta.x.abs() {
+                    return;
+                }
+                cx.stop_propagation();
+                {
+                    let mut state = state.borrow_mut();
+                    state.pending += delta.y;
+                    state.gesture_until = Some(std::time::Instant::now() + SIDEBAR_GESTURE_HORIZON);
+                    state.scrolled = true;
+                }
+                pane.update(cx, |_, cx| cx.notify());
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// What one reveal prepaint found: the scroll div not yet measured
