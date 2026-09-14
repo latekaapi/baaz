@@ -200,6 +200,17 @@ impl SessionView {
     /// it that way. Each page folds in its own update, so frames interleave
     /// with the paging instead of waiting for the whole transcript; page 1
     /// already draws before page 2 is requested.
+    /// A view opened for an existing session starts loading its history on
+    /// its very first frame — never the new-session hero (owner round 6).
+    /// Called synchronously on the open path before any paint (the resume
+    /// ack and its `backfill` land frames later); the hero stays reachable
+    /// only for proven-new sessions and for backfills that complete with
+    /// zero turns.
+    pub fn mark_history_loading(&mut self, cx: &mut Context<Self>) {
+        self.loading_history = true;
+        cx.notify();
+    }
+
     pub fn backfill(&mut self, cx: &mut Context<Self>) {
         if self.loading_history {
             // A chain is already in flight (the view was parked and reopened

@@ -133,8 +133,10 @@ impl SessionView {
     /// first frames.
     pub(super) fn empty_or_loading(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.loading_history {
+            super::note_centre_loading_paint();
             return Self::loading_row();
         }
+        super::note_centre_hero_paint();
         // A replayed capture is read-only, so its empty state offers
         // nothing to type: the chips would be three buttons that refuse.
         let pick = (!self.replay).then(|| {

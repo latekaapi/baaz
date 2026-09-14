@@ -1536,6 +1536,31 @@ pub(crate) fn take_wheel_scroll_bys() -> u64 {
     WHEEL_SCROLL_BYS.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Hero vs loading paints since process start (owner round 6): what the
+/// empty transcript showed, per render. Relaxed atomics, drained per
+/// `centre` log line, so a scripted open's first frames read as
+/// `hero=0 loading=N` (fixed) rather than `hero=N` (the flicker).
+static CENTRE_HERO_PAINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CENTRE_LOADING_PAINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count one new-session hero paint, for the `centre` report.
+pub(crate) fn note_centre_hero_paint() {
+    CENTRE_HERO_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Count one loading-row paint, for the `centre` report.
+pub(crate) fn note_centre_loading_paint() {
+    CENTRE_LOADING_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drain both counts above, for the `centre` report.
+pub(crate) fn take_centre_paints() -> (u64, u64) {
+    (
+        CENTRE_HERO_PAINTS.swap(0, std::sync::atomic::Ordering::Relaxed),
+        CENTRE_LOADING_PAINTS.swap(0, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 struct FrameTrace {
     out: std::io::BufWriter<std::fs::File>,
     start: Instant,
