@@ -1,7 +1,47 @@
 # Harness changelog
 
-## 2026-09-15 — Owner round 6, part C4: review fixes
+## 2026-09-15 — Owner round 7, tasks 1–2: the rename builder and the 20 Hz pulse loop
 
+- **Task 1 (library change, harness follows): the rename editor rebuilds on
+  every row build.** The virtual sidebar's inline rename editor arrived as
+  one element in a take-once slot, so whichever row build ran first in a
+  frame claimed it — on a multi-build frame (the list's autoscroll retry
+  lays every visible row out twice) the discarded first pass stole the
+  editor and the painted pass drew the plain row. Both sidebar views now
+  take an `EditorBuilder` the row calls on every build; the harness passes
+  a builder that resolves the field's pieces once per pane render and
+  builds per row build (the confirm action upgrades a weak handle, since
+  layout has no `Context` to bind a listener with). Library check:
+  `sidebar_virtual.rs::renaming_editor_reaches_the_painted_row_across_remeasure`
+  — the renaming row builds 2× in the forced frame, the editor painted 0
+  times before, 1 after — plus a free `rename:` screenshot showing the
+  field.
+- **Task 2 (option b): a running dot ticks at 20 Hz instead of display
+  rate.** A looping pulse ring asks gpui for another frame on every render
+  (`aui-motion` `looping` → `animate_keyframes`, gpui-base-0.6.0
+  `motion.rs:380-388` → `request_animation_frame`, gpui-pre-0.3.3
+  `window.rs:2525-2528`), and the request notifies the enclosing view —
+  the whole cached `SidebarPane` — whose ancestors `mark_view_dirty`
+  (`window.rs:2103-2112`) dirties too, so a running session held the pane
+  and the root at full display rate. Option (a) is killed by
+  `view.rs`'s `.cached` reuse rule (`!dirty_views.contains(entity_id)`):
+  a child-entity notify still walks ancestors into the dirty set, so an
+  isolated dot would rebuild the pane anyway. Sidebar dots (session rows,
+  project heads, rail cells) now sample a caller-owned phase
+  (`aui_motion::pulse_phase`, the exact loop curve) and request no frames;
+  `Harness::pulse_task` notifies the pane at 20 Hz only while
+  `pulse_needed` (a session running *and* its row, head or rail cell
+  visible), and ends itself otherwise. Unset phases loop as before, so the
+  gallery and transcript are untouched; reduced motion rests the dots and
+  runs no timer. Numbers: library `sampled_phase_dot_requests_no_frames`
+  reads `frames=0` over 10 draws (legacy `running_dot_…` still `20/10`,
+  and the test fails if the render ignores the phase); idle replay +
+  running stress row: 17.8 pane ticks/s with `centre=0` on all but boot
+  rows, 5 boot rows and silence with an all-idle fixture; two screenshots
+  1 s apart show the ring tight+bright, then wide+faint. Colour and size
+  unchanged.
+
+## 2026-09-15 — Owner round 6, part C4: review fixes
 A read-only review of `b2d82e2..d5a10b7` (harness) / `987318a..73bc480`
 (agentic-ui), found and fixed (numbers from the review report):
 

@@ -532,6 +532,12 @@ pub struct Harness {
     /// The session whose row is being renamed in place, and the field doing it.
     pub(crate) renaming: Option<String>,
     pub(crate) rename: Entity<TextareaState>,
+    /// The pulse rings' timebase: sampled phases count cycles since here, so
+    /// every dot in a frame agrees and restarts never jump.
+    pub(crate) pulse_epoch: std::time::Instant,
+    /// The 20 Hz pulse loop while a sampled dot is on screen; self-clearing
+    /// when no dot is visible and running.
+    pub(crate) pulse_task: Option<Task<()>>,
     /// The project being renamed through the header crumb's field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
@@ -675,6 +681,8 @@ impl Harness {
             search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
+            pulse_epoch: std::time::Instant::now(),
+            pulse_task: None,
             renaming_project: None,
             project_colour_open: false,
             footer_bounds: None,
@@ -1680,6 +1688,11 @@ impl Harness {
     /// forward by however long that composition takes, and the reference
     /// captures are taken at a fixed delay into that stream.
     fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A running dot advances on the pulse loop's ticks, not on animation
+        // frames: make sure the loop is up exactly while a sampled dot is on
+        // screen. Cheap when it is already running (one `is_some`) and when
+        // nobody runs (one scan).
+        self.ensure_pulse_task(cx);
         // The window's title is the session's, so a person with three harness
         // windows open can tell them apart in Mission Control. It is built
         // only when the list or the open session changed: the scan and the
