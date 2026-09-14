@@ -337,6 +337,16 @@ impl Harness {
         crate::harness_log!("wheel dy={dy} list_px={before}->{after}");
     }
 
+    /// `centre`: the open-flicker instrument (owner round 6). Log
+    /// `harness: centre hero=<hero> loading=<loading>`: the new-session
+    /// hero vs loading-row paints since the last call. An existing session
+    /// opened through `open:`/`click:` must read `hero=0`; a draft opened
+    /// through `new` still reads `hero>0`. Free: no turn, no wire.
+    pub(crate) fn step_centre(&mut self) {
+        let (hero, loading) = crate::session::take_centre_paints();
+        crate::harness_log!("centre hero={hero} loading={loading}");
+    }
+
     /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument (owner round
     /// 5 §A1.6). Dispatch n synthetic wheel events (default 1) at a sidebar
     /// point — x = 100 sits in the sessions list at the default width, y =
@@ -858,6 +868,11 @@ impl Harness {
                     self.activate(view, quiet, window, cx);
                 } else {
                     self.open(session_id.clone(), false, quiet, window, cx);
+                    // An existing session opens loading, never the hero —
+                    // even with no client behind it (owner round 6).
+                    if let Some(view) = self.active.clone() {
+                        view.update(cx, |view, cx| view.mark_history_loading(cx));
+                    }
                 }
             }
             return;
@@ -878,6 +893,13 @@ impl Harness {
         // stale `.msp-view-v1` sidecar (muse 1.2.1, #29473); a page fired
         // before it reads the stale generation and fails `-32603`.
         self.open(session_id.clone(), false, quiet, window, cx);
+        // The fresh view is for an existing session: it renders the quiet
+        // loading state on its very first frame — never the new-session
+        // hero — until the resume ack below starts its backfill (owner
+        // round 6). Same frame as the swap, so no paint lands between.
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.mark_history_loading(cx));
+        }
         crate::log::trace_mark("swap");
         crate::log::trace_arm_first_frame();
         let resumed = session_id.clone();
