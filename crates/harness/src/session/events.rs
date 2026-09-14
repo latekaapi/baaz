@@ -212,13 +212,14 @@ impl SessionView {
     }
 
     pub fn backfill(&mut self, cx: &mut Context<Self>) {
-        if self.loading_history {
+        if self.backfill_running {
             // A chain is already in flight (the view was parked and reopened
             // mid-backfill): it keeps filling this same fold, so a second
             // chain would page everything twice.
             return;
         }
         self.loading_history = true;
+        self.backfill_running = true;
         self.backfill_stale_retried = false;
         cx.notify();
         self.backfill_page(None, FIRST_PAGE_LIMIT, true, cx);
@@ -231,6 +232,7 @@ impl SessionView {
     fn backfill_page(&mut self, cursor: Option<String>, limit: u32, first: bool, cx: &mut Context<Self>) {
         let Some(client) = self.wire_client(cx) else {
             self.loading_history = false;
+            self.backfill_running = false;
             return;
         };
         let session_id = self.session_id.clone();
@@ -272,6 +274,7 @@ impl SessionView {
                             Some(next) if n > 0 => this.backfill_page(Some(next), PAGE_LIMIT, false, cx),
                             _ => {
                                 this.loading_history = false;
+                                this.backfill_running = false;
                                 this.follow = true;
                                 cx.notify();
                             }
@@ -299,6 +302,7 @@ impl SessionView {
                             crate::harness_log!("backfill page failed: {error}");
                         }
                         this.loading_history = false;
+                        this.backfill_running = false;
                         this.follow = true;
                         cx.notify();
                         if first {
