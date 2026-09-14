@@ -538,6 +538,11 @@ pub struct Harness {
     /// The 20 Hz pulse loop while a sampled dot is on screen; self-clearing
     /// when no dot is visible and running.
     pub(crate) pulse_task: Option<Task<()>>,
+    /// A `new:` step's session is still opening: its `session/start`
+    /// round-trip lands after the following steps would run. Session verbs
+    /// wait for the switch (bounded) instead of acting on the session that
+    /// is still open; any activation clears it.
+    pub(crate) session_switch_pending: bool,
     /// The project being renamed through the header crumb's field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
@@ -683,6 +688,7 @@ impl Harness {
             rename: rename.clone(),
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
+            session_switch_pending: false,
             renaming_project: None,
             project_colour_open: false,
             footer_bounds: None,

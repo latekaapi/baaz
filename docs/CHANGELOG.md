@@ -40,6 +40,36 @@
   rows, 5 boot rows and silence with an all-idle fixture; two screenshots
   1 s apart show the ring tight+bright, then wide+faint. Colour and size
   unchanged.
+- **Task 3: the one billed turn misfired on a step race — check FAILED, no
+  resend.** Free probes confirmed the setup (project grouping, five adopted
+  projects, the empty `reckoner` group second-to-last and below the
+  viewport). But `new:` opens on the `session/start` round-trip while
+  `run_steps` dispatches every step synchronously, so `name:` and `send:`
+  ran against the session that was still open (`01a09b58…`, "list the files
+  here"): it was renamed "round-7 reveal check" and billed the "Reply with
+  the single word OK." turn there (accepted 21:31:12 UTC, `turn_started`
+  next, terminal completed in 11 s). The new reckoner session opened right
+  after with no turn, so the `turn/started` reveal path went unexercised —
+  the round-6 fix stays live-untested (unit-tested only). No second send.
+  Damage repaired free: `name:list the files here` restored the title
+  (header + sessions.json verified). Fix: session verbs wait, bounded at
+  10 s, for a `new:` switch (`session_switch_pending`, cleared by any
+  activation or a failed start) instead of acting on the stale session.
+  Proved free: `new:reckoner;name:round-7 step-order probe` names the new
+  session (header + sessions.json) and leaves the old one alone, with no
+  timeout log. Spend, from Muse's own logs: the recipe counts lines
+  *mentioning* the string, which my own counting commands pollute (their
+  output lands in my session log: +8 there), so the true count is records
+  with `payload_type == runtime.user_intent.accepted`: exactly one new
+  one from this round — the misdirected OK turn (21:31:12 UTC on
+  `01a09b58…`, the only true intent in the run window; my own session log
+  holds exactly one true intent, the brief itself). Recipe numbers for the
+  record: 373 live before, 377 snapshotted a minute later, 386 after —
+  the +4 and +8 around the one real turn are mention-lines, not turns
+  (other sessions' machinery lines, and my own counting commands' echoes
+  landing in my log).
+  Two empty sessions remain for the owner to archive: the unnamed reckoner
+  "New session" and "round-7 step-order probe".
 
 ## 2026-09-15 — Owner round 6, part C4: review fixes
 A read-only review of `b2d82e2..d5a10b7` (harness) / `987318a..73bc480`

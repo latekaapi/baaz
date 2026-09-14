@@ -297,8 +297,15 @@ one session per project: the draft is per project (see `docs/03-composer.md`),
 and the parked draft view is never evicted from the MRU.
 
 A group row's `+` starts a session in that project (making it current); on
-Other it opens the Projects palette. Its `…` opens the project menu for that
+Other it opens the Projects palette. Scripted, `new:<project>` opens on the
+`session/start` round-trip, after the following steps would run — so session
+verbs (`name:`, `draft:`, `send:`) wait for the switch, bounded at 10 s,
+instead of acting on the session that is still open; any activation clears
+the wait, as does a failed start. Its `…` opens the project menu for that
 project; on Other the menu carries the single row "Add as project…".
+Owner round 7 proved the need for the wait: without it, `new:reckoner`
+followed at once by `send:` billed its turn on the session that was open
+before.
 
 Session rows carry no provider mark: each row reads title, then the preview
 line, with the elapsed time at the right (owner round 4, O3/O4). Every row

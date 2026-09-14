@@ -104,7 +104,7 @@
 //! | `remove-project:<name>` | raise the project removal dialog |
 //! | `remove-confirm` | confirm it |
 //! | `new` | the same as ⌘N |
-//! | `new:<project>` | the group row's `+` for the project named |
+//! | `new:<project>` | the group row's `+` for the project named; the session opens on the `session/start` round-trip, so following session verbs (`name:`, `draft:`, `send:`) wait for the switch (bounded, 10 s) instead of acting on the session that is still open |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `harness: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument, owner round 6: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `harness: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
@@ -326,6 +326,20 @@ pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Wind
     }
 }
 
+/// Whether a `--steps` item runs against the open session (as opposed to
+/// the window): mirrors [`window_step`]'s lookup without running anything.
+fn is_session_step(step: &str) -> bool {
+    let (head, _) = split(step);
+    WINDOW_VERBS.iter().all(|v| v.verb != head)
+}
+
+/// How long session verbs wait for a `new:` switch: the `session/start`
+/// round-trip is usually far under a second; the bound only fires when the
+/// switch never comes, and then the step runs against whatever is open
+/// (today's behaviour) with a log line.
+const SWITCH_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const SWITCH_WAIT_POLLS: usize = 200;
+
 /// One `--login-steps` item. Returns whether the run continues; a failed or
 /// unknown step ends it with a stderr line.
 pub(crate) fn login_step(this: &mut Harness, step: &str, window: &mut Window, cx: &mut Context<Harness>) -> bool {
@@ -358,6 +372,35 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                 let ms: u64 = ms.parse().unwrap_or(0);
                 cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
                 continue;
+            }
+            // A `new:` step's session opens on the `session/start`
+            // round-trip, after the following steps would run: session
+            // verbs wait for the switch (bounded) so `name:`/`draft:`/
+            // `send:` reach the session the script meant, not the one
+            // still open. Owner round 7: without this, `new:reckoner`
+            // followed at once by `send:` billed the turn on the session
+            // that was open before.
+            if is_session_step(&step) {
+                for _ in 0..SWITCH_WAIT_POLLS {
+                    let pending = this
+                        .read_with(cx, |this, _| this.session_switch_pending)
+                        .unwrap_or(false);
+                    if !pending {
+                        break;
+                    }
+                    cx.background_executor().timer(SWITCH_POLL).await;
+                }
+                let still_pending = this
+                    .read_with(cx, |this, _| this.session_switch_pending)
+                    .unwrap_or(false);
+                if still_pending {
+                    let active = this
+                        .read_with(cx, |this, cx| this.active_id(cx))
+                        .unwrap_or(None);
+                    crate::harness_log!(
+                        "session switch never arrived; `{step}` runs against {active:?}"
+                    );
+                }
             }
             let ran = this.update_in(cx, |this, window, cx| {
                 if !window_step(this, &step, window, cx) {

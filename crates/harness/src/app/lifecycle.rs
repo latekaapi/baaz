@@ -674,6 +674,10 @@ impl Harness {
             .and_then(projects::parse_effort);
         let started_project = current.clone();
         self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
+        // The switch lands on the round-trip below, after the following
+        // steps would run: session verbs wait for it (see `run_steps`)
+        // instead of acting on the session that is still open.
+        self.session_switch_pending = true;
         let work = move || client.session_start(&params);
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(started) => {
@@ -733,7 +737,12 @@ impl Harness {
                 }
                 this.load_sessions(cx);
             }
-            Err(error) => this.report(&error, cx),
+            Err(error) => {
+                // No switch is coming: release the session verbs waiting on
+                // it rather than holding them for the whole bound.
+                this.session_switch_pending = false;
+                this.report(&error, cx);
+            }
         });
     }
 
@@ -1108,6 +1117,9 @@ impl Harness {
     /// comes through here with `quiet == true` and never arms: the clicked
     /// row is under the cursor, hence visible, and any stale arm is dropped.
     fn activate(&mut self, view: Entity<SessionView>, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Whatever switch the scripts were waiting for has landed: session
+        // verbs run against this view from here on.
+        self.session_switch_pending = false;
         // The UI points at what is open: the row highlight and the header
         // label read this, never the view, so every swap refreshes it here
         // rather than at each call site.
