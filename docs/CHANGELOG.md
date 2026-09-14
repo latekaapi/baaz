@@ -1,5 +1,33 @@
 # Harness changelog
 
+## 2026-09-14 — Owner round 6, part 4: cached transcript, live composer
+
+- **Sidebar-only frames reuse the retained transcript.** The root embeds the
+  active `SessionView` through gpui's `.cached` (flex-fill above the
+  composer), so wheel, reveal and resize ticks no longer rebuild the
+  transcript. Measured deterministic (`HARNESS_DETERMINISTIC=1`,
+  `--tier subscription`, hetero replay + 37-row scripted sidebar,
+  `wait:800;sidebar-wheel:0,0;sidebar-wheel:-240,8;wait:400;sidebar-wheel:0,0;wait:400;sidebar-wheel:0,0`):
+  burst/drain/idle read `centre=0/0/0` where main reads `1/2/1` — every root
+  frame rebuilt the 160-turn transcript there. Screenshots byte-identical
+  across the split.
+- **The composer band composes live at the root, outside the cached entity.**
+  The library composer embeds its textarea state as a stateful child view
+  and the input element notifies it on every paint, which marks every
+  ancestor dirty — a cached entity containing the composer rebuilds on every
+  requested frame after its first paint, so the cache could never reuse.
+  The textarea's per-paint notify now lands on the never-cached root, where
+  it is harmless; typing, streaming and switching still notify the view and
+  rebuild the transcript as before.
+- **The drop overlay mounts only mid-drag.** Hidden it still sampled its
+  exit presence every render, asking for the next frame while it ran; now it
+  mounts only while a drag is over the pane (absolute, so no layout moves),
+  static via `at_rest` in deterministic captures — the last per-frame
+  dirtier of the cached column.
+- **Instrument kept:** `centre=` on the `sbwheel` line (transcript-column
+  rebuilds since the last drain; pair a burst with `wait:` and a trailing
+  `sidebar-wheel:0,0` to read it).
+
 ## 2026-09-14 — Owner round 5: sidebar scroll + alignment/colour
 
 - **The sidebar scrolls like the transcript.** A capture-phase canvas over

@@ -385,8 +385,9 @@ impl Harness {
         let max = f32::from(self.sessions_scroll.max_offset().y);
         let viewport_h = f32::from(self.sessions_scroll.bounds().size.height);
         let rows = self.visible_sessions(cx).len();
+        let centre = crate::session::take_centre_renders();
         crate::harness_log!(
-            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} vh={viewport_h} content={} rows={rows} pane={pane} root={root} drains={drains}",
+            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} vh={viewport_h} content={} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
             max + viewport_h
         );
     }
@@ -651,7 +652,12 @@ impl Harness {
                 // project name arrives now.
                 let name = this.project_name_for(&session_id);
                 if let Some(view) = this.active.clone() {
-                    view.update(cx, |view, _| view.set_project_name(name));
+                    view.update(cx, |view, cx| {
+                        view.set_project_name(name);
+                        // The cached centre reuses a clean view: push the
+                        // repaint with the name (owner round 6, part 4).
+                        cx.notify();
+                    });
                 }
                 // The project's effort rides along before the first turn.
                 if let Some(effort) = effort {
@@ -791,7 +797,12 @@ impl Harness {
             .and_then(|p| p.defaults.effort.as_deref())
             .and_then(projects::parse_effort);
         if let Some(view) = self.active.clone() {
-            view.update(cx, |view, _| view.set_project_name(name));
+            view.update(cx, |view, cx| {
+                view.set_project_name(name);
+                // The cached centre reuses a clean view: push the repaint
+                // with the name (owner round 6, part 4).
+                cx.notify();
+            });
             if let Some(effort) = effort {
                 view.update(cx, |view, vc| view.set_initial_effort(Some(effort), vc));
             }
@@ -1067,7 +1078,7 @@ impl Harness {
         // A parked view's client predates a reconnect; the current child is
         // the one that can page.
         if let Some(client) = self.client.clone() {
-            view.update(cx, |view, _| view.reconnected(client));
+            view.update(cx, |view, cx| view.reconnected(client, cx));
         }
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
@@ -1079,6 +1090,10 @@ impl Harness {
             view.set_at_rest(self.still());
             view.set_tier_banner(tier_banner, cx);
         });
+        // The swap must repaint the centre even when every push above was
+        // `set` without `notify`: a parked view reuses its retained subtree
+        // unless it is dirty (owner round 6, part 4).
+        view.update(cx, |_, cx| cx.notify());
         self.active = Some(view);
         self.focus_composer = true;
         self.send_scripted(window, cx);

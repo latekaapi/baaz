@@ -1,5 +1,5 @@
-//! One frame of the centre pane: the transcript, the status row, the
-//! banner and the composer.
+//! One frame of the centre pane: the transcript column (cached) and the
+//! composer band (live, composed by the application root).
 //!
 //! Part of [`SessionView`]; see [`crate::session`] for what
 //! the entity owns and why these are its own files.
@@ -8,15 +8,38 @@ use super::*;
 use std::path::Path;
 use aui_tokens::ActiveAui;
 
+/// The transcript column as its own cached entity (owner round 6, part 4):
+/// the root embeds the active [`SessionView`] through gpui's `.cached`, so
+/// a sidebar-only frame (wheel, reveal, resize tick) reuses the retained
+/// transcript instead of rebuilding it. The cache reuses only while the
+/// view is clean — every state change that must repaint the transcript
+/// notifies the view (streaming deltas, approvals, the loading mark,
+/// context pushes in `activate`), while the wire banner, the header and
+/// the no-session screen stay inline in the root and paint fresh every
+/// frame. Window resize and theme bust through the bounds/style part of
+/// the cache key.
+///
+/// The composer band deliberately lives OUTSIDE this entity, composed live
+/// by the application root (`Harness::render_centre`): the library composer
+/// embeds its textarea state as a stateful child view, and gpui-base's
+/// input element unconditionally notifies that state on every paint — which
+/// marks every ancestor dirty, so a cached entity containing the composer
+/// rebuilds on every requested frame after its first paint and the cache
+/// never reuses. The transcript column holds no such self-notifying paint,
+/// so it stays clean across sidebar-only frames.
+impl gpui::Render for SessionView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        self.render_transcript_column(window, cx)
+    }
+}
+
 impl SessionView {
     // ----------------------------------------------------------------- render
 
-    /// The centre pane: transcript, status row, banner, composer.
-    pub fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(text) = self.pending_prompt.take() {
-            self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
-            self.note_draft(cx);
-        }
+    /// The transcript column: transcript, status row, banners, queue, caret
+    /// menus. What [`gpui::Render`] builds, and what the root caches.
+    pub fn render_transcript_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        super::note_centre_render();
         let transcript = self.render_transcript(window, cx);
         // A `--screenshot` run that asked for an approval waits for one; this
         // is where the capture learns that it arrived (finding F9). After the
@@ -29,12 +52,8 @@ impl SessionView {
         let tier_banner = self.render_tier_banner(cx);
         let queue = self.render_queue(cx);
         let caret_menu = self.render_caret_menu(cx);
-        let composer = self.render_composer(cx);
-        let drop = self.dragging;
-        let p = cx.aui().colors;
         v_flex()
             .size_full()
-            .relative()
             .child(transcript)
             .children(status)
             .children(needs_you)
@@ -54,30 +73,63 @@ impl SessionView {
                         .children(caret_menu),
                 ),
             )
-            // The docked band spans the pane, hairline included; only the
-            // composer's content is bound to the measure, as in the design.
-            // The library's docked composer draws its own top hairline, which
-            // would stop at the measure's edges: the band draws the pane-wide
-            // one and the composer is pulled up a pixel so its own lies on it.
-            .child(
-                div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
-                    div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().mt(px(-1.0)).child(composer),
-                ),
-            )
-            .child(aui::composer::drop_overlay("drop", drop))
-            // gpui reports an external drag only while it moves, so that is
-            // what raises the overlay; the drop takes it down again.
-            .on_drag_move(cx.listener(|this: &mut Self, _: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
-                if !this.dragging {
-                    this.dragging = true;
-                    cx.notify();
-                }
-            }))
-            .on_drop(cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
-                this.dragging = false;
-                this.attach_paths(paths.paths().to_vec(), cx);
-            }))
             .into_any_element()
+    }
+
+    /// The docked composer band, built live by the application root on every
+    /// frame — never inside the cached transcript column (see the
+    /// [`gpui::Render`] impl above for why). Cheap next to the transcript:
+    /// one textarea element plus closed menus.
+    pub fn render_composer_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(text) = self.pending_prompt.take() {
+            self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
+            self.note_draft(cx);
+        }
+        let composer = self.render_composer(cx);
+        let p = cx.aui().colors;
+        // The docked band spans the pane, hairline included; only the
+        // composer's content is bound to the measure, as in the design.
+        // The library's docked composer draws its own top hairline, which
+        // would stop at the measure's edges: the band draws the pane-wide
+        // one and the composer is pulled up a pixel so its own lies on it.
+        div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
+            div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().mt(px(-1.0)).child(composer),
+        ).into_any_element()
+    }
+
+    /// The file-drop overlay, mounted only while a drag is over the pane:
+    /// hidden it still samples its exit presence every render, and a running
+    /// presence asks for the next frame — notifying the session view, so the
+    /// cached transcript rebuilds on every frame. Absolute positioning means
+    /// mounting moves no layout; a deterministic drag capture still draws it
+    /// statically through `at_rest`. Composed live by the application root
+    /// beside the composer band, so the overlay covers the whole pane.
+    pub fn render_drop_overlay(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.dragging.then(|| {
+            let overlay = aui::composer::drop_overlay("drop", true);
+            if crate::clock::deterministic() {
+                overlay.at_rest()
+            } else {
+                overlay
+            }
+            .into_any_element()
+        })
+    }
+
+    /// An external drag started moving over the pane: raise the overlay.
+    /// Called by the application root's drag listener, which owns the pane
+    /// edge the transcript column never sees.
+    pub(crate) fn note_drag_over(&mut self, cx: &mut Context<Self>) {
+        if !self.dragging {
+            self.dragging = true;
+            cx.notify();
+        }
+    }
+
+    /// An external drop landed: take the overlay down and attach the paths.
+    pub(crate) fn drop_external(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        self.dragging = false;
+        self.attach_paths(paths.paths().to_vec(), cx);
     }
 
     /// One frame of the transcript: sync the cache, then compose from it.

@@ -915,11 +915,14 @@ impl SessionView {
 
     /// Point the view at the respawned child after a reconnect. The fold and
     /// the transcript are untouched: the resume streamed only the suffix.
-    pub fn reconnected(&mut self, client: Arc<MuseClient>) {
+    /// Notifies: the cached centre reuses a clean view (owner round 6,
+    /// part 4).
+    pub fn reconnected(&mut self, client: Arc<MuseClient>, cx: &mut Context<Self>) {
         self.client = Some(client);
         // A reconnect can have missed an `approval/request`, and the server does
         // not re-issue one it has already sent. The pull dual closes that hole.
         self.refresh_pending = true;
+        cx.notify();
     }
 
     /// The child, or the banner explaining why there isn't one.
@@ -1559,6 +1562,22 @@ pub(crate) fn take_centre_paints() -> (u64, u64) {
         CENTRE_HERO_PAINTS.swap(0, std::sync::atomic::Ordering::Relaxed),
         CENTRE_LOADING_PAINTS.swap(0, std::sync::atomic::Ordering::Relaxed),
     )
+}
+
+/// Centre builds since process start (owner round 6, part 4): how many
+/// times the cached centre actually rebuilt, per render. Relaxed atomic,
+/// drained per `sbwheel` log line, so a sidebar wheel burst reads
+/// `centre=0` (reused) while typing, streaming and switching bump it.
+static CENTRE_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count one centre build, for the `sbwheel` report.
+pub(crate) fn note_centre_render() {
+    CENTRE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drain the count above, for the `sbwheel` report.
+pub(crate) fn take_centre_renders() -> u64 {
+    CENTRE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 struct FrameTrace {
