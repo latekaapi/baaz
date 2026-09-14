@@ -754,6 +754,32 @@ respects vsync (`window.request_animation_frame()` per tick) rather than
 applying a burst's whole travel synchronously the way `wheel:`/
 `sidebar-wheel:` do.
 
+### The running dot ticks at 20 Hz, not display rate (owner round 7, task 2)
+
+A looping pulse ring asks gpui for another frame on every render, and the
+request notifies the enclosing view — the whole cached `SidebarPane` —
+whose ancestors `mark_view_dirty` dirties too, so while any session ran
+the pane and the root rebuilt on every display tick. Isolating the dot as
+its own entity cannot help (a child notify still walks ancestors into the
+dirty set, which busts the pane's `.cached` reuse), so the sidebar takes
+option (b): its dots sample one caller-owned phase per frame
+(`aui_motion::pulse_phase`, the exact loop curve) and request no frames of
+their own. `Harness::pulse_task` notifies the pane every 50 ms, and only
+while `pulse_needed` — some session running *and* its row, its project's
+rolled-up head, or its rail cell visible — ending itself on the first tick
+that answers no; `on_frame` restarts it when a need appears. Reduced
+motion samples the resting phase and starts no timer. Unset phases loop as
+before, so the gallery and the transcript are untouched.
+
+Measured free, idle replay plus the running stress row
+(`--replay fixtures/msp/synthetic-stress-hetero.jsonl --sidebar-fixture
+fixtures/sidebar/stress.json`, `HARNESS_FRAME_TRACE=1`, 10 s): 184 root
+ticks (17.8/s, the 20 Hz design rate minus scheduling slack), pane rebuilt
+on 181, the cached transcript column on 4 boot rows only. The same run
+with an all-idle fixture reads 5 boot rows and then silence — the timer
+never starts. Two screenshots a second apart show the ring tight+bright,
+then wide+faint: the dot still animates. Colour and size unchanged.
+
 ### Real-window cadence (owner round 6, part C3)
 
 For the owner's two complaints — sidebar scroll and divider-drag jank, both

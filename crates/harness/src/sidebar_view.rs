@@ -26,11 +26,13 @@ use aui::nav::{
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
-use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
+use aui_motion::pulse_phase;
+use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
-    div, prelude::*, px, AnyElement, Bounds, Context, Focusable, ListOffset, Pixels, Render, SharedString,
-    WeakEntity, Window,
+    div, prelude::*, px, AnyElement, Bounds, Context, Entity, Focusable, ListOffset, Pixels, Render,
+    SharedString, WeakEntity, Window,
 };
+use gpui_kit::base::input::TextareaState;
 use gpui_kit::base::v_flex;
 use muse_client::schema::AccountStateKind;
 
@@ -510,10 +512,28 @@ impl Harness {
             })
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
         if let Some(renaming) = self.renaming.clone() {
-            view = view.editing(renaming, self.rename_field(window, cx));
+            // The library builds the renaming row more than once per frame,
+            // so the editor arrives as a builder it calls on every build —
+            // never as one element the first build would claim. Everything
+            // the builder needs is resolved here, once per pane render; the
+            // per-build closure only builds.
+            let rename = self.rename.clone();
+            let palette = cx.aui().colors;
+            let focused = rename.focus_handle(cx).is_focused(window);
+            let harness = cx.entity().downgrade();
+            view = view.editing(renaming, move |_, _| {
+                Self::rename_editor(&rename, palette, focused, harness.clone())
+            });
         }
         if let Some(selected) = selected {
             view = view.selected(selected);
+        }
+        // The running dots sample one phase per frame and request no frames
+        // of their own: the pulse loop's ticks (see `ensure_pulse_task`) are
+        // what re-render the pane while a dot is on screen. Unset under
+        // reduced motion, where the dots rest as plain dots.
+        if let Some(phase) = self.pulse_phase_value(cx) {
+            view = view.pulse_phase(phase);
         }
         // The one-shot reveal (owner round 4, O6; owner round 5 §A1; owner
         // round 6: armed only by outside-the-sidebar activations, steering
@@ -771,15 +791,37 @@ impl Harness {
     /// list below jumped. Clipping is horizontal only, so a long name scrolls
     /// under the caret instead of spilling a second line, and the row keeps
     /// its own height while a rename is open, so siblings never move. The
-    /// commit path is unchanged. The same element serves the sidebar row and
-    /// the header title.
+    /// commit path is unchanged. The header title takes one element built
+    /// here; the sidebar row takes a builder (see the `editing` call in
+    /// `render_sidebar`) because the library builds that row more than once
+    /// per frame.
     pub(crate) fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let focused = self.rename.focus_handle(cx).is_focused(window);
+        Self::rename_editor(
+            &self.rename,
+            cx.aui().colors,
+            self.rename.focus_handle(cx).is_focused(window),
+            cx.entity().downgrade(),
+        )
+    }
+
+    /// One rename editor, built from its pieces with no view context: the
+    /// per-build half of [`Self::rename_field`]. Entity-agnostic on purpose —
+    /// the virtual list calls the row's builder with `(&mut Window, &mut
+    /// App)` inside layout, where there is no `Context` to bind a listener
+    /// with, so the confirm action upgrades the weak handle instead. Builds
+    /// only, never notifies: a builder runs inside layout.
+    fn rename_editor(
+        rename: &Entity<TextareaState>,
+        p: Palette,
+        focused: bool,
+        harness: WeakEntity<Self>,
+    ) -> AnyElement {
         div()
             .w_full()
             .key_context(RENAME_CONTEXT)
-            .on_action(cx.listener(|this, _: &ConfirmRename, window, cx| this.commit_rename(window, cx)))
+            .on_action(move |_: &ConfirmRename, window, cx| {
+                let _ = harness.update(cx, |this, cx| this.commit_rename(window, cx));
+            })
             .child(
                 div()
                     .w_full()
@@ -799,9 +841,115 @@ impl Harness {
                     // wrapper is the fixed box that keeps the row's height;
                     // the editor centres in it and may overhang the border by
                     // a pixel or two of line box, which draws nothing.
-                    .child(dense_field(&self.rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
+                    .child(dense_field(rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
             )
             .into_any_element()
+    }
+
+    /// One tick of the pulse loop: 20 Hz, so a running dot's ring advances in
+    /// 50 ms steps — smooth to the eye over its 2 s cycle, at a sixth of the
+    /// display rate it used to cost as a looping animation.
+    const PULSE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// The sampled pulse phase for this pane render, or `None` under reduced
+    /// motion (the dots' own resting state then shows the plain dot, and no
+    /// timer runs). Sampled once per render and shared by every dot, so the
+    /// frame agrees with itself.
+    pub(crate) fn pulse_phase_value(&self, cx: &gpui::App) -> Option<f32> {
+        if cx.reduce_motion() {
+            return None;
+        }
+        Some(pulse_phase(self.pulse_epoch, cx.background_executor().now()))
+    }
+
+    /// Whether a sampled pulse dot is on screen: some session is running and
+    /// its row, its project's rolled-up head, or its rail cell is visible.
+    /// A row counts as visible while the list has no viewport yet (pre-layout
+    /// reports `None`): tick until the first layout says otherwise.
+    pub(crate) fn pulse_needed(&self, cx: &gpui::App) -> bool {
+        if cx.reduce_motion() {
+            return false;
+        }
+        let running: Vec<String> =
+            self.sessions.iter().filter(|e| e.running).map(|e| e.id.clone()).collect();
+        if running.is_empty() {
+            return false;
+        }
+        let grouping = self.sidebar_grouping(cx);
+        let rows = flatten_sidebar(&grouping, false);
+        let visible = |ix: usize| {
+            !matches!(self.sidebar_list.item_is_above_viewport(ix), Some(true))
+                && !matches!(self.sidebar_list.item_is_below_viewport(ix), Some(true))
+        };
+        for id in &running {
+            let id: SharedString = id.clone().into();
+            if let Some(ix) = row_index_for_session(&rows, &grouping, &id) {
+                if visible(ix) {
+                    return true;
+                }
+            }
+        }
+        // The rolled-up head dot of a project with a running session.
+        if let Grouping::Project(groups) = &*grouping {
+            for (ix, row) in rows.iter().enumerate() {
+                if let SidebarRow::ProjectHead { group } = row {
+                    if groups.get(*group).is_some_and(|g| g.state == Some(AgentState::Running))
+                        && visible(ix)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        // The rail's cells are on screen whenever the rail renders: mirror
+        // its shown set (pinned first, then newest, plus the open session).
+        let visible = self.visible_sessions(cx);
+        let mut ordered: Vec<&SessionEntry> = visible.iter().filter(|e| e.pinned).collect();
+        ordered.extend(visible.iter().filter(|e| !e.pinned));
+        let mut shown: Vec<&SessionEntry> = ordered.into_iter().take(RAIL_SESSIONS).collect();
+        if let Some(open) = self.active_id(cx) {
+            if !shown.iter().any(|e| e.id == open) {
+                if let Some(entry) = visible.iter().find(|e| e.id == open) {
+                    shown.insert(0, entry);
+                }
+            }
+        }
+        shown.iter().any(|e| e.running)
+    }
+
+    /// Starts the pulse loop while a sampled dot is on screen. The loop
+    /// notifies the sidebar pane once per [`Self::PULSE_TICK`] and ends
+    /// itself the first tick nothing needs it, clearing the handle so a
+    /// later need restarts it. Called from `on_frame`: one `is_some` while
+    /// running, one scan while nobody runs.
+    pub(crate) fn ensure_pulse_task(&mut self, cx: &mut Context<Self>) {
+        if self.pulse_task.is_some() {
+            return;
+        }
+        if !self.pulse_needed(cx) {
+            return;
+        }
+        self.pulse_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Self::PULSE_TICK).await;
+                let ticking = this
+                    .update(cx, |this, cx| {
+                        if this.pulse_needed(cx) {
+                            this.sidebar_pane.update(cx, |_, cx| cx.notify());
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !ticking {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                this.pulse_task = None;
+            });
+        }));
     }
 
     /// What the list says when it has nothing to show, and why (spec §5).
@@ -947,6 +1095,11 @@ impl Harness {
             items.push(cell);
         }
         let mut rail = rail("rail", items).flat(true);
+        // Sampled with the sidebar's phase: the rail's running cells pulse
+        // on the same ticks, and request no frames of their own either.
+        if let Some(phase) = self.pulse_phase_value(cx) {
+            rail = rail.pulse_phase(phase);
+        }
         if let Auth::SignedIn(identity) = &self.auth {
             rail = rail.avatar(identity.initial());
         }
