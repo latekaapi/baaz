@@ -162,7 +162,6 @@ pub(crate) struct SidebarKey {
     selected: Option<String>,
     renaming: Option<String>,
     reveal: Option<String>,
-    reveal_stable: bool,
     auth: (u8, String, String, String, bool),
     tier_args: bool,
     tier: Option<(String, bool, Option<u32>)>,
@@ -198,7 +197,6 @@ impl SidebarKey {
             selected,
             renaming: harness.renaming.clone(),
             reveal: harness.reveal.clone(),
-            reveal_stable: harness.reveal_stable,
             auth,
             tier_args: harness.args.tier.is_some(),
             tier,
@@ -250,7 +248,6 @@ impl Harness {
         };
         if scrolled {
             self.reveal = None;
-            self.reveal_stable = false;
             self.sidebar_user_scrolled = true;
         }
         if pending == px(0.0) {
@@ -343,7 +340,10 @@ impl Harness {
         let selected =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()));
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-            this.resume(id.to_string(), window, cx);
+            // A sidebar click never arms the reveal: the clicked row is
+            // under the cursor, hence painted inside the viewport (owner
+            // round 6).
+            this.resume_quiet(id.to_string(), window, cx);
         });
         let act = cx.listener(|this: &mut Self, (id, action): &(SharedString, RowAction), window, cx| {
             match action {
@@ -424,12 +424,12 @@ impl Harness {
         if let Some(selected) = selected {
             view = view.selected(selected);
         }
-        // The one-shot reveal (owner round 4, O6; owner round 5 §A1): armed
-        // in `activate` for every activation path, consumed on the first
-        // prepaint after it. Never from a list refresh, a regroup, during
-        // a wheel gesture, or after the user has scrolled — the flag only
-        // exists between an activation and its prepaint, and a wheel
-        // disarms it outright (`push_sidebar_wheel`).
+        // The one-shot reveal (owner round 4, O6; owner round 5 §A1; owner
+        // round 6: armed only by outside-the-sidebar activations, consumed
+        // on the first prepaint after it). Never from a sidebar click, a
+        // list refresh, a regroup, during a wheel gesture, or after the
+        // user has scrolled — the flag only exists between an outside
+        // activation and its prepaint, and a wheel disarms it outright.
         if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() {
             if let Some(reveal_id) = self.reveal.clone() {
                 view = self.install_reveal(view, &grouping, &reveal_id, cx);
@@ -473,36 +473,22 @@ impl Harness {
             .into_any_element()
     }
 
-    /// Fold one reveal prepaint's [`RevealProgress`] into the flag.
+    /// Fold one reveal prepaint's [`RevealProgress`] into the flag (owner
+    /// round 6: consume once — the offset math reads painted bounds, so an
+    /// inside reading is trustworthy on its first occurrence).
     ///
-    /// A scroll that landed whole consumes the flag at once. An inside
-    /// reading consumes it only when the previous prepaint read inside too:
-    /// a single inside reading can come from a frame whose layout has not
-    /// settled, and consuming on it strands the scroll wherever that frame
-    /// left it. Anything else leaves the flag (and the confirmation bit)
-    /// for the next prepaint.
+    /// A scroll that landed whole and a row already inside both consume the
+    /// flag at once. Anything else leaves the flag for the next prepaint:
+    /// poke the pane directly, because a cached pane would otherwise never
+    /// re-run the prepaint whose layout has not settled (owner round 4 §3).
+    /// The flag change reaches the key on the next frame.
     fn settle_reveal(&mut self, progress: RevealProgress, cx: &mut Context<Self>) {
         match progress {
-            // The flag is kept, so the intent must be re-installed: poke the
-            // pane directly, because a cached pane would otherwise never
-            // re-run the prepaint whose layout has not settled (owner
-            // round 4 §3). The terminal arms consume the flag, which the key
-            // picks up on the next frame.
             RevealProgress::NotReady => {
                 self.sidebar_pane.update(cx, |_, cx| cx.notify());
             }
-            RevealProgress::Inside => {
-                if self.reveal_stable {
-                    self.reveal = None;
-                    self.reveal_stable = false;
-                } else {
-                    self.reveal_stable = true;
-                }
-                cx.notify();
-            }
-            RevealProgress::Landed => {
+            RevealProgress::Inside | RevealProgress::Landed => {
                 self.reveal = None;
-                self.reveal_stable = false;
                 cx.notify();
             }
         }
@@ -576,7 +562,6 @@ impl Harness {
                 .or_else(|| self.current_project.clone());
             let Some(group_id) = group_id else {
                 self.reveal = None;
-                self.reveal_stable = false;
                 return view;
             };
             view.on_current_prepainted(move |id, bounds, _window, app| {
@@ -788,7 +773,9 @@ impl Harness {
             rail = rail.avatar(identity.initial());
         }
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-            this.resume(id.to_string(), window, cx);
+            // The rail's rows are visible by definition, like the sidebar's:
+            // no reveal (owner round 6).
+            this.resume_quiet(id.to_string(), window, cx);
         });
         let action = cx.listener(|this: &mut Self, name: &str, window, cx| match name {
             "new" => this.new_session(window, cx),

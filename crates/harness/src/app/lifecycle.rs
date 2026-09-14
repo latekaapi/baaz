@@ -373,8 +373,11 @@ impl Harness {
         }
         let after = self.sidebar_px();
         let max = f32::from(self.sessions_scroll.max_offset().y);
+        let viewport_h = f32::from(self.sessions_scroll.bounds().size.height);
+        let rows = self.visible_sessions(cx).len();
         crate::harness_log!(
-            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} pane={pane} root={root} drains={drains}"
+            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} vh={viewport_h} content={} rows={rows} pane={pane} root={root} drains={drains}",
+            max + viewport_h
         );
     }
 
@@ -566,7 +569,7 @@ impl Harness {
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(started) => {
                 let session_id = started.session.session_id.clone();
-                this.open(session_id.clone(), false, window, cx);
+                this.open(session_id.clone(), false, false, window, cx);
                 // The result carries the session object `session/started`
                 // would have carried, and it is the only place a mode set
                 // at start-up is reported: `session/start` with an
@@ -664,7 +667,7 @@ impl Harness {
             return false;
         };
         Self::land_moving_draft(&view, moving, window, cx);
-        self.activate(view, window, cx);
+        self.activate(view, false, window, cx);
         true
     }
 
@@ -718,7 +721,7 @@ impl Harness {
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), None, host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
-        self.activate(view, window, cx);
+        self.activate(view, false, window, cx);
         // No row exists for a draft, so the empty state and the later
         // `turn/started` row read the project straight from the store.
         self.set_override(&draft_id, |meta| meta.project = Some(id.clone()), cx);
@@ -751,7 +754,24 @@ impl Harness {
     /// instantly and tops up from its last cursor, otherwise a fresh view
     /// opens on its loading row and pages stream in behind it. Either way a
     /// failed `session/resume` keeps the new view and reports.
+    ///
+    /// This is the outside-the-sidebar path (palette, `open:` step, boot
+    /// `--session`): it arms the one-shot reveal. A sidebar or rail click
+    /// reaches [`Self::resume_quiet`] instead and never moves the list.
     pub(crate) fn resume(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.resume_inner(session_id, false, window, cx);
+    }
+
+    /// A sidebar or rail click on a session: [`Self::resume`] without the
+    /// one-shot reveal. The clicked row is under the cursor, hence painted
+    /// inside the viewport by definition, so there is nothing to ensure —
+    /// and any stale arm from an earlier outside activation is dropped
+    /// rather than served (owner round 6).
+    pub(crate) fn resume_quiet(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.resume_inner(session_id, true, window, cx);
+    }
+
+    fn resume_inner(&mut self, session_id: String, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
         // A hidden session is never loaded. Hiding is a decision about this
         // window's list, and a list that still opened what it refuses to show
         // would be a list that means nothing. Archived sessions are the same.
@@ -763,15 +783,20 @@ impl Harness {
         }
         self.adopt_session_project(&session_id);
         // The click's target first: the row highlights on the click's own
-        // frame and the reveal arms, even when there is no client to open
-        // with (a `--replay` capture, the `open:` step's screenshots).
-        // `activate` below sets both again on the paths that reach it.
+        // frame, even when there is no client to open with (a `--replay`
+        // capture, the `open:` step's screenshots). `activate` below sets
+        // the highlight again on the paths that reach it. Only an outside
+        // activation arms the reveal; a quiet click clears any stale arm
+        // instead (owner round 6).
         self.pending_id = Some(session_id.clone());
-        self.reveal = Some(session_id.clone());
-        self.reveal_stable = false;
-        // A fresh arm owns the list again: the next user scroll disarms it
-        // (owner round 5 §A1).
-        self.sidebar_user_scrolled = false;
+        if quiet {
+            self.reveal = None;
+        } else {
+            self.reveal = Some(session_id.clone());
+            // A fresh arm owns the list again: the next user scroll disarms
+            // it (owner round 5 §A1).
+            self.sidebar_user_scrolled = false;
+        }
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`) has no child to
             // resume from: the row opens as a local view, so a capture can
@@ -780,9 +805,9 @@ impl Harness {
             // because `args.offline` is false for them.
             if self.args.offline {
                 if let Some(view) = self.cache_take(&session_id) {
-                    self.activate(view, window, cx);
+                    self.activate(view, quiet, window, cx);
                 } else {
-                    self.open(session_id.clone(), false, window, cx);
+                    self.open(session_id.clone(), false, quiet, window, cx);
                 }
             }
             return;
@@ -791,7 +816,7 @@ impl Harness {
         crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
         if let Some(view) = self.cache_take(&session_id) {
             crate::log::trace_mark("cache-hit");
-            self.activate(view, window, cx);
+            self.activate(view, quiet, window, cx);
             crate::log::trace_mark("swap");
             crate::log::trace_arm_first_frame();
             self.top_up(cx);
@@ -802,7 +827,7 @@ impl Harness {
         // round-trip below. The resume is the leased touch that regenerates a
         // stale `.msp-view-v1` sidecar (muse 1.2.1, #29473); a page fired
         // before it reads the stale generation and fails `-32603`.
-        self.open(session_id.clone(), false, window, cx);
+        self.open(session_id.clone(), false, quiet, window, cx);
         crate::log::trace_mark("swap");
         crate::log::trace_arm_first_frame();
         let resumed = session_id.clone();
@@ -895,8 +920,16 @@ impl Harness {
     /// Put a fresh session view in the centre pane now and subscribe to what
     /// it needs help with. The swap is immediate — the view, or its loading
     /// row while the first page is still on the wire — never the old view
-    /// held past its switch.
-    pub(super) fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// held past its switch. `quiet` is the sidebar click (see
+    /// [`Self::resume_quiet`): the swap happens, the reveal does not arm.
+    pub(super) fn open(
+        &mut self,
+        session_id: String,
+        backfill: bool,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The client rides along when there is one; scripted chrome
         // (`--no-connect` / `--replay`) opens the row as a local view with
         // none, which is what lets a capture drive drafts and switching.
@@ -907,7 +940,7 @@ impl Harness {
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
-        self.activate(view, window, cx);
+        self.activate(view, quiet, window, cx);
         self.adopt_session_project(&session_id);
         if backfill && client.is_some() {
             if let Some(view) = self.active.clone() {
@@ -932,26 +965,30 @@ impl Harness {
     /// point the event subscription at the new one, refresh its context, and
     /// run anything scripted. The frame after this draws the new view.
     ///
-    /// Every activation path (⌘N, a group `+`, the palette, the `open:` step,
-    /// fork, boot `--session`) comes through here, so this is where the
-    /// sidebar's one-shot reveal is armed: the next prepaint scrolls the
-    /// least distance that brings the row (or, when its group is closed or
-    /// folded past the cut, the group) into view, then consumes the flag
-    /// (owner round 4, O6). A sidebar click comes through here too, already
-    /// visible, so the same rule is a no-op there.
-    fn activate(&mut self, view: Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Every outside activation path (⌘N, a group `+`, the palette, the
+    /// `open:` step, fork, boot `--session`) comes through here with
+    /// `quiet == false`, so this is where the sidebar's one-shot reveal is
+    /// armed: the next prepaint scrolls the least distance that brings the
+    /// row (or, when its group is closed or folded past the cut, the group)
+    /// into view, then consumes the flag (owner round 4, O6; owner round 6:
+    /// `scrollIntoView({ block: "nearest" })`). A sidebar or rail click
+    /// comes through here with `quiet == true` and never arms: the clicked
+    /// row is under the cursor, hence visible, and any stale arm is dropped.
+    fn activate(&mut self, view: Entity<SessionView>, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The UI points at what is open: the row highlight and the header
         // label read this, never the view, so every swap refreshes it here
-        // rather than at each call site — and the sidebar's one-shot reveal
-        // arms on the same swap (a sidebar click is already visible, so the
-        // same rule is a no-op there).
+        // rather than at each call site.
         let session_id = view.read(cx).session_id.clone();
         self.pending_id = Some(session_id.clone());
-        self.reveal = Some(session_id.clone());
-        self.reveal_stable = false;
-        // A fresh arm owns the list again: the next user scroll disarms it
-        // (owner round 5 §A1).
-        self.sidebar_user_scrolled = false;
+        if quiet {
+            self.reveal = None;
+        } else {
+            // The sidebar's one-shot reveal arms on the same swap — and a
+            // fresh arm owns the list again: the next user scroll disarms it
+            // (owner round 5 §A1).
+            self.reveal = Some(session_id.clone());
+            self.sidebar_user_scrolled = false;
+        }
         let project_name = self.project_name_for(&session_id);
         view.update(cx, |view, _| view.set_project_name(project_name));
         self.park_active(cx);
@@ -1165,7 +1202,7 @@ impl Harness {
                     let _ = this.update_in(cx, |this, window, cx| {
                         // `open` swaps synchronously, so the fork view is the
                         // active one by the time its envelope is seeded.
-                        this.open(session_id, true, window, cx);
+                        this.open(session_id, true, false, window, cx);
                         if let Some(view) = this.active.clone() {
                             view.update(cx, |view, cx| view.seed_session(envelope, cx));
                         }
