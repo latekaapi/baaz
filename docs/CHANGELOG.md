@@ -1,5 +1,56 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 4, scroll cadence
+
+- **One offset per frame (§2).** `wheel_capture` no longer calls `scroll_by`
+  per event: it accumulates `delta.y` into `SessionView::pending_wheel` (and
+  re-arms `gesture_until` = now + 150 ms), and `render_transcript` drains the
+  sum into exactly one `scroll_by` per frame. A wheel run's ~1008 `scroll_by`
+  calls become 744 drains (696 one-event frames plus one per 6–7-event burst
+  repeat, 6.5× fewer applications where events share a frame), with
+  sample-identical travel: every phase index, burst kept-share and offset
+  sample matches the pre-fix run. `bench-wheeldrain` prints the drain count
+  and `scroll.scroll_bys` carries it in `--bench-out`.
+- **The sidebar is its own cached view (§3).** `Entity<SidebarPane>` renders
+  exactly what `Harness::render_sidebar` renders, embedded with gpui's
+  `.cached(size_full)` so a clean pane reuses its retained subtree; a plain
+  entity embed re-renders every frame (measured: 1430 renders for 1422
+  frames), so the cache call is the whole point. `Harness::sync_sidebar_pane`
+  re-arms it from `on_frame` whenever `SidebarKey` changes (cached rows and
+  grouping pointers, selection, rename, reveal, footer identity/tier, current
+  project); hover, the sidebar scroll, the rename editor and the reveal
+  prepaint intents dirty it through the view tree, and an unsettled reveal
+  re-pokes it directly. Shell ≈ bare + ≤ 0.6 ms p50 in all 8 cells (before:
+  up to 0.6 ms; the gap is now header, rail and composer chrome — the
+  `ComposerPane` split the brief conditions on cost is not needed). Captures
+  are byte-identical.
+- **The tail is never cut (§4).** While `gesture_until` is in the future the
+  transcript requests a frame every tick, `rehint_rows` defers to the first
+  frame after (the count still moves through a `splice`), and tail-follow
+  re-engages only at the end with no gesture armed. `bench-idle` is 0 in all
+  16 cells: a settled transcript still requests no frames 200 ms after the
+  last event. A burst into the end stops at the end and the next upward event
+  moves at once (phase indices, zero stalls/clamps).
+- **Per-kind height hints (§5): not possible without a gpui fork.**
+  `ListItem` is a private enum in gpui-pre 0.3.3 and `splice` /
+  `splice_focusable` both build `Unmeasured { size_hint: None }` — only
+  `reset_with_uniform_height` can hint at all. The uniform 72 px hint stays;
+  the offset series still shows the H-1 re-base steps (1062 px hetero,
+  111 px stress-300, sample-identical before/after), travel conserved.
+- **Numbers.** Full before/after table (debug and release, shell and bare,
+  both captures: `bench-draw`/`bench-frame` p50/p90/max, `bench-scroll`,
+  `bench-burst` kept, `bench-idle`, drains, offset discontinuity) in
+  `docs/02-app.md` §6. Shell frames improve 84–236 µs p50 in all 8 cells
+  (same-day, same-machine before/after); bare wheel frames move −44…+80 µs
+  (the fewer seeks, inside run noise); bare sweep controls ±44 µs, as
+  predicted — that path touches neither change. What the bench cannot
+  show is the cadence itself — the owner's hand gesture is still the verdict:
+  `HARNESS_FRAME_TRACE=1 cargo run -p harness -- --replay
+  fixtures/msp/synthetic-stress-hetero.jsonl`, scroll up for 2 s, lift, wait
+  for the tail, then `python3 scripts/frame-trace.py`; the round passes at ≥
+  55 paints/s in the tail and ≥ 110 in the finger phase on the 120 Hz panel,
+  no gap > 2 ticks, last applied event = last delivered.
+
 ## 2026-09-13 — Owner round 4, settings
 
 - **The Settings dialog.** ⌘, (File → Settings…), the account footer menu's

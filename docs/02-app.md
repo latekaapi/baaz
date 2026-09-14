@@ -584,10 +584,15 @@ so the stream's frames and a wheel phase's can be told apart) —
 plus `bench-rss` (peak RSS) and `bench-idle`: the frames a settled
 transcript requests over the next 2 s, which must be none.
 `--bench` drives the normal shell: the `Harness` root with the replayed
-session active, so `bench-draw` covers the sidebar, header and composer
-(the per-event notify rebuilds them, which is the cost under test).
+session active, so `bench-draw` covers the sidebar, header and composer.
+The sidebar column is its own cached view (`Entity<SidebarPane>`, embedded
+with gpui's `.cached(size_full)` and re-armed by `SidebarKey` from
+`on_frame`), so a transcript notify rebuilds the centre but never the
+column — a plain entity embed would re-render every frame, which is why the
+cache call is there.
 `--bench-bare` keeps the old `BenchRoot` — the transcript alone — for the
-transcript-only number; shell ≈ bare + ≤ 1 ms is the round-4 goal.
+transcript-only number; shell ≈ bare + ≤ 1 ms is the round-4 goal (after
+the fixes: ≤ 0.6 ms p50 in all 8 cells).
 `--bench-scroll wheel` is the scroll-jank instrument rather than a frame
 driver: the stream lands head-pinned (so, as after a real backfill, every
 row above the tail is still unmeasured), the list is then pinned at the
@@ -596,7 +601,14 @@ transcript's centre, one per frame — (a) a flick up of 6 × +600 px, (b) 90 ×
 trackpad climb of 300 × +20 px, (d) its 300 × −20 px mirror — sampling the
 list's `logical_scroll_top` after each. Each event waits at most 50 ms for
 its frame (a settled transcript requests none, so the wait never sits out
-the old 2 s timeout and its artifact). Every dispatched event and every
+the old 2 s timeout and its artifact). The capture handler never applies:
+it accumulates the delta into `pending_wheel` and re-arms a 150 ms gesture
+horizon, and `render_transcript` drains the sum into exactly one `scroll_by`
+per frame — `bench-wheeldrain` prints the applied drains (`scroll.scroll_bys`
+in `--bench-out`), 744 per wheel run against ~1008 per-event `scroll_by`s
+before. While the horizon is open the transcript also requests a frame every
+tick, defers any re-hint past the gesture, and never re-engages tail-follow.
+Every dispatched event and every
 frame also appends the absolute pixel offset (`bench_list_px`) to
 `scroll.offset_px` in `--bench-out`: the per-frame series whose
 first differences tell hint re-basing (steps as rows measure) apart from
@@ -672,6 +684,49 @@ burst tail (all profiles, both roots; `dropped=48`, sweep runs 0) — the
 synchronous batch-dispatch pattern meets no frame within the 50 ms wait, so
 each repeat's gap spans the timeout; the old 2 s timeout masked it.
 Mechanism unresolved; p50/p90 are unaffected.
+
+After the fixes (owner round 4 §§2–5, same-day same-machine before/after on
+the branch head, each run with its own throwaway `HARNESS_STATE_DIR`;
+`bench-draw` and `bench-frame` are p50/p90/max, draw in µs, frame in ms):
+
+| fixture | scroll | debug shell | debug bare | release shell | release bare |
+|---|---|---|---|---|---|
+| hetero | wheel | 1857/2962/17902 (was 2092) · frame 2/8/61 | 1559/2765/10801 (was 1601) · frame 1/8/61 | 1554/2778/17245 (was 1790) · frame 2/8/61 | 1343/2690/9293 (was 1338) · frame 1/8/60 |
+| hetero | sweep | 2107/2504/12789 (was 2269) · frame 7/7/8 | 2046/2498/8382 (was 2036) · frame 7/7/8 | 1911/2320/12392 (was 2067) · frame 7/7/8 | 1969/2585/7950 (was 1925) · frame 7/7/8 |
+| stress-300 | wheel | 2039/2762/14824 (was 2233) · frame 6/8/60 | 1798/2747/8149 (was 1842) · frame 6/8/59 | 1935/2778/13358 (was 2019) · frame 6/8/59 | 1672/2560/7836 (was 1592) · frame 6/8/58 |
+| stress-300 | sweep | 2314/2758/14771 (was 2455) · frame 7/8/9 | 1740/2130/8126 (was 1770) · frame 6/7/8 | 2165/2613/13367 (was 2285) · frame 7/8/11 | 1589/2013/7984 (was 1607) · frame 6/7/10 |
+
+Shell frames improve 84–236 µs p50 in all 8 cells (the cached column);
+bare wheel frames move −44…+80 µs (fewer seeks, inside run noise); bare
+sweep controls move ±44 µs at most — that path touches neither change, so
+the methodology reads clean. Shell ≈ bare + ≤ 0.6 ms p50 everywhere; the
+`ComposerPane` split is not needed. `bench-frame` is unchanged before/after
+in every cell (the 53–62 ms maxes are the 48 burst-timeout gaps, the known
+instrument artifact). `bench-scroll` phase indices are sample-identical
+before/after on both captures and both roots (hetero `239 230 239 224 239`,
+stress shell `622 581 622 554 622`, bare `621 581 621 553 621` — the one-row
+shell/bare difference is the narrower transcript column wrapping
+differently); every burst keeps what it kept before, including stress-300
+`down-clean` at 90.5 %. `bench-idle` is 0 in all 32 runs. The offset
+series is sample-identical too: phase (c) still steps 1062.0 px (hetero) /
+111.0 px (stress-300) at the same sample, phase (d) a clean 20.0 px — H-1
+re-basing is untouched, as it must be while gpui exposes no per-item hint
+(§5), and travel is conserved. The bottom clamp needs no code: a burst into
+the end stops at the end and the next upward event moves at once (zero
+stalls/clamps across all phases).
+
+What the bench cannot show is the cadence itself — one synthetic event per
+frame earns one drain by construction, so the 6.5× application saving only
+materialises where events share a frame (bursts, and any real gesture). The
+owner's hand gesture is the verdict: `HARNESS_FRAME_TRACE=1 cargo run -p
+harness -- --replay fixtures/msp/synthetic-stress-hetero.jsonl`, scroll up
+for 2 s, lift, wait for the tail; then `python3 scripts/frame-trace.py`.
+The round passes at paints/s ≥ 55 during the tail and ≥ 110 during the
+finger phase on the 120 Hz panel, no gap > 2 ticks, last applied event =
+last delivered. The trace plumbing is verified: a scripted
+`--steps "wait:…;wheel:600;…"` run writes one row per paint with the wheel
+events on their own rows (`events_applied=3 paints_with_events=3`), and the
+script parses it.
 
 A session switch answers on the click's own frame: `resume` records the
 target id at once (the sidebar row highlights and the centre header labels

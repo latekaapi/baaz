@@ -353,6 +353,9 @@ struct WheelOutcome {
     phases: Vec<WheelPhaseStats>,
     bursts: Vec<BurstStats>,
     offsets: Vec<f32>,
+    /// Applied wheel drains (owner round 4 §2): one per frame that carried
+    /// accumulated travel, against one `scroll_by` per event before.
+    scroll_bys: u64,
 }
 
 /// The wheel instrument: pin the tail, then dispatch real `ScrollWheelEvent`s
@@ -625,8 +628,12 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
             // The per-frame offset series (§1): one sample after every
             // dispatched event and every frame, for the H-1 analysis.
             let mut offsets = Vec::with_capacity(4096);
+            // Drains before the first wheel event are none (the stream never
+            // pushes wheel deltas), so the take after is this run's count.
+            session::take_wheel_scroll_bys();
             let (tail_ix, phases, bursts) = drive_wheel(&_window, &view, cx, &mut offsets).await;
-            wheel_stats = Some(WheelOutcome { tail_ix, phases, bursts, offsets });
+            let scroll_bys = session::take_wheel_scroll_bys();
+            wheel_stats = Some(WheelOutcome { tail_ix, phases, bursts, offsets, scroll_bys });
         }
         // The frames: a small capture streams in milliseconds, so keep
         // sweeping until the asked frame count renders. Every scroll update
@@ -721,7 +728,8 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         println!("bench-rss peak_mb={rss_mb:.1}");
         println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
         let scroll_json = match wheel_stats.as_ref() {
-            Some(WheelOutcome { tail_ix, phases, bursts, offsets }) => {
+            Some(WheelOutcome { tail_ix, phases, bursts, offsets, scroll_bys }) => {
+                println!("bench-wheeldrain drains={scroll_bys}");
                 let events: usize = phases.iter().map(|p| p.events).sum();
                 let frames: usize = phases.iter().map(|p| p.frames).sum();
                 let jumps: usize = phases.iter().map(|p| p.jumps).sum();
@@ -766,6 +774,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                     "jumps": jumps,
                     "stalls": stalls,
                     "clamped": clamped,
+                    "scroll_bys": scroll_bys,
                     "tail_ix": tail_ix,
                     "phases": phases.iter().map(|p| serde_json::json!({
                         "name": p.name,

@@ -325,6 +325,14 @@ impl Harness {
             }),
             cx,
         );
+        // Owner round 4 §2: the handler only accumulates, so without this
+        // the read below would always equal `before` and the log could no
+        // longer tell a moved transcript from an occluded one. Apply the
+        // frame's drain eagerly — with nothing pending it is gpui's own
+        // early-return, so over the palette this still logs X->X.
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, _| view.drain_pending_wheel());
+        }
         let after = self.active.as_ref().map(|view| view.read(cx).bench_list_px()).unwrap_or(0.0);
         crate::harness_log!("wheel dy={dy} list_px={before}->{after}");
     }

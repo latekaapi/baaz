@@ -28,8 +28,8 @@ use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
 use gpui::{
-    div, point, prelude::*, px, AnyElement, Bounds, Context, Focusable, Pixels, Point, ScrollHandle, SharedString,
-    Window,
+    div, point, prelude::*, px, AnyElement, Bounds, Context, Focusable, Pixels, Point, Render, ScrollHandle,
+    SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::v_flex;
 use muse_client::schema::AccountStateKind;
@@ -54,7 +54,116 @@ enum ViewAction {
     SearchAllProjects,
 }
 
+/// The sidebar column as its own view (owner round 4 §3).
+///
+/// `Harness::render` used to rebuild the sidebar element on every frame —
+/// including every wheel notify, whose transcript centre is the only thing
+/// that moved. Embedded with gpui's `.cached(size_full)`, a clean pane
+/// reuses its retained subtree, so a transcript notify re-renders `Harness`
+/// (composition only) and the `SessionView` centre, not the column. The pane
+/// reads the harness live through a weak handle and renders exactly what
+/// `Harness::render_sidebar` renders — that method keeps its shape and its
+/// listeners, so what the column draws cannot drift. [`SidebarKey`] is what
+/// re-arms it: [`Harness::sync_sidebar_pane`] notifies it from `on_frame`
+/// whenever its inputs change, and notifies from inside its own subtree
+/// (hover, its scroll container, the rename editor, the reveal prepaint
+/// intents) dirty it directly through the view tree.
+pub(crate) struct SidebarPane {
+    harness: WeakEntity<Harness>,
+}
+
+impl SidebarPane {
+    pub(crate) fn new(harness: WeakEntity<Harness>) -> Self {
+        Self { harness }
+    }
+}
+
+impl Render for SidebarPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.harness.upgrade() {
+            Some(harness) => harness.update(cx, |harness, cx| harness.render_sidebar(window, cx)),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+/// What the sidebar pane shows, as an equality key (owner round 4 §3).
+///
+/// Every input `render_sidebar` reads: the cached rows and grouping behind
+/// their `Rc` pointers (this comparison calls both getters every frame, so
+/// an `invalidate_list` rebuild — or the minute rollover regrouping — shows
+/// up as a new pointer here), the selection, the rename, the one-shot
+/// reveal, the footer's identity and tier, and the current project. Compared
+/// in `on_frame`, before anything draws; a few small clones per frame, no
+/// rebuild. Nested entities inside the column (the rename editor, hover and
+/// scroll state) notify through the view tree on their own and need no key.
+#[derive(PartialEq, Eq)]
+pub(crate) struct SidebarKey {
+    visible: usize,
+    grouping: usize,
+    selected: Option<String>,
+    renaming: Option<String>,
+    reveal: Option<String>,
+    reveal_stable: bool,
+    auth: (u8, String, String, String, bool),
+    tier_args: bool,
+    tier: Option<(String, bool, Option<u32>)>,
+    current_project: Option<String>,
+}
+
+impl SidebarKey {
+    /// The key the pane would render this frame.
+    pub(crate) fn current(harness: &Harness, cx: &gpui::App) -> Self {
+        let visible = harness.visible_sessions(cx);
+        let grouping = harness.sidebar_grouping(cx);
+        let selected = harness
+            .pending_id
+            .clone()
+            .or_else(|| harness.active.as_ref().map(|a| a.read(cx).session_id.clone()));
+        let auth = match &harness.auth {
+            Auth::Probing => (0, String::new(), String::new(), String::new(), false),
+            Auth::SignedOut => (1, String::new(), String::new(), String::new(), false),
+            Auth::SignedIn(identity) => (
+                2,
+                identity.initial(),
+                identity.footer_name(),
+                identity.email.clone(),
+                identity.is_api_key(),
+            ),
+        };
+        let tier = harness.tier.as_ref().map(|tier| {
+            (tier.footer_label(), tier.is_warning(), tier.weekly_fraction().map(f32::to_bits))
+        });
+        Self {
+            visible: Rc::as_ptr(&visible) as usize,
+            grouping: Rc::as_ptr(&grouping) as usize,
+            selected,
+            renaming: harness.renaming.clone(),
+            reveal: harness.reveal.clone(),
+            reveal_stable: harness.reveal_stable,
+            auth,
+            tier_args: harness.args.tier.is_some(),
+            tier,
+            current_project: harness.current_project.clone(),
+        }
+    }
+}
+
 impl Harness {
+    /// Re-arm the sidebar pane when its inputs changed (owner round 4 §3).
+    ///
+    /// Called from `on_frame`, before anything draws: while the key matches,
+    /// wheel notifies leave the pane clean and gpui reuses its cached
+    /// element instead of rebuilding the column. The comparison itself is a
+    /// few pointer reads and small clones — no list rebuild.
+    pub(crate) fn sync_sidebar_pane(&mut self, cx: &mut Context<Self>) {
+        let key = SidebarKey::current(self, cx);
+        if self.sidebar_key.as_ref() != Some(&key) {
+            self.sidebar_key = Some(key);
+            self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     /// The rows above the Sessions caption: New session, Add project, and
     /// Automations behind a Soon tag until it has somewhere to go. No side
     /// inset of its own: the library's gutter positions the nav rows, and
@@ -220,7 +329,14 @@ impl Harness {
     /// for the next prepaint.
     fn settle_reveal(&mut self, progress: RevealProgress, cx: &mut Context<Self>) {
         match progress {
-            RevealProgress::NotReady => {}
+            // The flag is kept, so the intent must be re-installed: poke the
+            // pane directly, because a cached pane would otherwise never
+            // re-run the prepaint whose layout has not settled (owner
+            // round 4 §3). The terminal arms consume the flag, which the key
+            // picks up on the next frame.
+            RevealProgress::NotReady => {
+                self.sidebar_pane.update(cx, |_, cx| cx.notify());
+            }
             RevealProgress::Inside => {
                 if self.reveal_stable {
                     self.reveal = None;
