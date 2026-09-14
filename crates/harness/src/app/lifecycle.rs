@@ -368,7 +368,7 @@ impl Harness {
         let pane = crate::sidebar_view::take_sidebar_pane_renders();
         let root = crate::sidebar_view::take_harness_root_renders();
         let drains = crate::sidebar_view::take_sidebar_wheel_drains();
-        let before = self.sidebar_px();
+        let before = self.sidebar_list_top();
         let size = window.bounds().size;
         let at = point(px(100.0), size.height * 0.4);
         for _ in 0..n {
@@ -381,14 +381,18 @@ impl Harness {
                 cx,
             );
         }
-        let after = self.sidebar_px();
-        let max = f32::from(self.sessions_scroll.max_offset().y);
-        let viewport_h = f32::from(self.sessions_scroll.bounds().size.height);
+        let after = self.sidebar_list_top();
         let rows = self.visible_sessions(cx).len();
         let centre = crate::session::take_centre_renders();
+        // The list walks down as `item_ix` grows; a click that moves
+        // nothing reads the same index twice, an outside open the minimum
+        // travel to its row — the probe semantics the div offset had.
         crate::harness_log!(
-            "sbwheel dy={dy} n={n} sidebar_px={before}->{after} max={max} vh={viewport_h} content={} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
-            max + viewport_h
+            "sbwheel dy={dy} n={n} sidebar_ix={bix}+{boff:.1}->{aix}+{aoff:.1} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
+            bix = before.item_ix,
+            boff = f32::from(before.offset_in_item),
+            aix = after.item_ix,
+            aoff = f32::from(after.offset_in_item),
         );
     }
 
@@ -398,9 +402,9 @@ impl Harness {
     /// `end_resize` — so an overlap probe (a press with an outside open
     /// still armed, moves with frames interleaved) exercises the real press
     /// disarm and the in-flight install gate. Each logs `harness: rsdrag`
-    /// with the width, the sidebar offset, the reveal arm, the scrolled
+    /// with the width, the sidebar list index, the reveal arm, the scrolled
     /// flag and the drag: a probe the drag must not move keeps every
-    /// line's `sidebar_px` equal.
+    /// line's `sidebar_ix` equal.
     /// `resize-sweep:<to_w,step_px>`: march the divider toward `to_w` one
     /// `step_px` per rendered frame (scripting only, owner round 6) — the
     /// display link's pace on a real display — logging
@@ -432,10 +436,14 @@ impl Harness {
             "move" => self.drag_resize(x, cx),
             _ => self.end_resize(cx),
         }
+        // A probe the drag must not move keeps every line's index equal;
+        // the list walks down as `item_ix` grows.
+        let top = self.sidebar_list_top();
         crate::harness_log!(
-            "rsdrag {phase} w={} sidebar_px={} reveal={:?} scrolled={} ract={}",
+            "rsdrag {phase} w={} sidebar_ix={}+{:.1} reveal={:?} scrolled={} ract={}",
             self.resize.width,
-            self.sidebar_px(),
+            top.item_ix,
+            f32::from(top.offset_in_item),
             self.reveal,
             self.sidebar_user_scrolled,
             self.resize.active

@@ -1,5 +1,70 @@
 # Harness changelog
 
+## 2026-09-14 — Owner round 6, part C2: the virtualised sidebar adopted
+
+- **Sessions area moved to `aui::nav::virtual_sidebar_view`** over a
+  harness-owned `ListState` (`aui-ui` `owner-round-6-c` `73bc480`, off
+  `e8a47c6` "virtualised sidebar session list"; row-margin fixup already in
+  `73bc480`). `render_sidebar` re-flattens the grouping into `SidebarRow`s
+  every frame (an index walk, no summaries cloned) and `sync_sidebar_list`
+  keeps the list state in step: `reset` after a regroup or filter change
+  (the only sync that drops the offset), `splice` after a local insert or
+  remove (open/close, fold expand, sessions arriving/leaving — a
+  prefix/suffix diff, so a mid-list swap degrades to remove-plus-insert),
+  `remeasure_items` after a text-only height change under stable rows
+  (a new cached-grouping `Rc` with equal rows). A debug assertion holds
+  `item_count == rows.len()` every frame. Check: the library's stress test
+  (`sidebar_view::tests::virtual_sidebar_builds_only_visible_rows_for_a_stress_sidebar`,
+  200 sessions/8 projects, flattened model >48 rows) reads cold/warm/scrolled
+  frames all ≤48 rows built (visible + the library's 120px overdraw runway) —
+  a div-scroll frame would have built every row.
+- **The wheel drain now writes `ListState::scroll_by`** instead of a clamped
+  `ScrollHandle` offset — still one write per frame, still 150 ms gesture
+  horizon, still capture-phase stop-propagation; `drain_sidebar_wheel`
+  additionally reports whether the user scrolled this frame, which now
+  dismisses an open group-row project menu (the calm option — a list that
+  moved under it would leave it mis-seated; the header menu, seated from the
+  fixed caption, is untouched).
+- **Reveal rebuilt on the list's own coordinates.** `reveal_offset`,
+  `clamp_sidebar_offset`, `reveal_scroll`, `RevealProgress` and
+  `install_reveal` (the painted-coordinates fix from round 6's reveal
+  package) are gone with their unit tests; `reveal_sidebar_row` finds the
+  target's row with the library's `row_index_for_session` — falling back to
+  `reveal_head_row` for a closed group's head, then giving up and clearing
+  the flag — and steers with `ensure_row_visible`, staged for the next
+  frame's layout and woken by the same outside-the-draw notify task the old
+  reveal used. Package A's rules hold under the new mechanics, re-probed
+  live (`--replay fixtures/msp/synthetic-stress-hetero.jsonl --sidebar-fixture
+  fixtures/sidebar/stress.json`, 37 rows): a `click:` on an off-screen row
+  never moves the list (`sidebar_ix=0+0.0->0+0.0`); an `open:` from outside
+  the sidebar scrolls the minimum, deterministically (fresh state →
+  `26+41.0`, twice); a wheel mid-reveal disarms it (final position reflects
+  the user's own small scroll, `3+2.5`, not the pending target); a resize
+  drag disarms it before its first move (`reveal=None` already at `rsdrag
+  begin`, list frozen through the whole drag).
+- **Old div-scroll path deleted**: `sessions_scroll: ScrollHandle` (now
+  `sidebar_list: ListState` plus the flattened-rows/grouping/regroup-key
+  cache `sync_sidebar_list` reads), the `#[id("sessions-scroll")]
+  .overflow_y_scroll().track_scroll(...)` wrapper (the virtual view now
+  fills the same flex rect directly), and the reveal helpers above. Group
+  and header menus still seat from live row bounds every frame
+  (`on_group_menu_prepainted`), which is what keeps a menu seated at its own
+  row through a scroll. `steps.rs`'s `sidebar-wheel:` doc line updated to
+  the list's `item_ix`+`offset_in_item` in place of the old pixel offset.
+- **Captures** (`HARNESS_DETERMINISTIC=1`, same fixtures, built against
+  `916aacd` pre-Part-2 as "before"): flags-off, flags-on
+  (bar/branch/chevron), a wheel-scrolled list bottomed at max, and a
+  project-grouped list scrolled with a non-current project's group menu
+  open (current + non-current project both visible, "Other workspaces"
+  below) — all four byte-identical before/after. Folds and group open/close
+  snap instead of springing under the virtual path (the library's own
+  choice); not exercised in these captures.
+- **Library gates** (branch `owner-round-6-c`, `73bc480`): build,
+  all-features build, test (`sidebar_virtual.rs` included), clippy,
+  rustdoc, `python3 scripts/api-doc.py` (no diff — already committed),
+  gallery entry (`aui-gallery/src/cards/sidebar_virtual.rs`, already
+  present) — all clean, no further library change needed.
+
 ## 2026-09-14 — Owner round 6, part C1: the idle loop that was not one
 
 - **Bisected idle frames across five commits, each in a `/tmp/r6c-*` worktree

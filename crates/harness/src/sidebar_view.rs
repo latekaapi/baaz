@@ -21,15 +21,15 @@ use std::rc::Rc;
 
 use aui::data::{icon_button, ButtonSize};
 use aui::nav::{
-    dense_field, group_row, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem,
-    RowAction, SidebarView,
+    dense_field, ensure_row_visible, flatten_sidebar, group_row, nav_item, rail, row_index_for_session,
+    sidebar_footer, view_menu, virtual_sidebar_view, GroupAction, MenuRow, RailItem, RowAction, SidebarRow,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
 use gpui::{
-    div, point, prelude::*, px, AnyElement, Bounds, Context, Focusable, Pixels, Point, Render, ScrollHandle,
-    SharedString, WeakEntity, Window,
+    div, prelude::*, px, AnyElement, Bounds, Context, Focusable, ListOffset, Pixels, Render, SharedString,
+    WeakEntity, Window,
 };
 use gpui_kit::base::v_flex;
 use muse_client::schema::AccountStateKind;
@@ -205,6 +205,19 @@ impl SidebarKey {
     }
 }
 
+/// What a regroup or filter change looks like to the virtual list (owner
+/// round 6): the grouping mode and the three list-management toggles.
+/// [`Harness::sync_sidebar_list`] resets the list state when this changes
+/// and splices everything else, so group open/close and fold expand keep
+/// the offset.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct SidebarRegroupKey {
+    group_by: crate::layout::GroupBy,
+    show_hidden: bool,
+    show_empty: bool,
+    show_archived: bool,
+}
+
 impl Harness {
     /// Re-arm the sidebar pane when its inputs changed (owner round 4 §3).
     ///
@@ -220,12 +233,12 @@ impl Harness {
         }
     }
 
-    /// The sessions list's current scroll offset in pixels (owner round 5
-    /// §A1.6): what `sidebar-wheel:` samples. Negative downward, like the
-    /// handle's own offset — the sidebar analogue of
-    /// `SessionView::bench_list_px`.
-    pub(crate) fn sidebar_px(&self) -> f32 {
-        f32::from(self.sessions_scroll.offset().y)
+    /// The sessions list's current scroll position (owner round 6): what
+    /// `sidebar-wheel:` and the resize drag log sample. The list walks down
+    /// as `item_ix` grows, with `offset_in_item` the pixels into that row —
+    /// the sidebar analogue of `SessionView::bench_list_top`.
+    pub(crate) fn sidebar_list_top(&self) -> ListOffset {
+        self.sidebar_list.logical_scroll_top()
     }
 
     /// Whether a sidebar wheel gesture is in flight (owner round 5 §A1):
@@ -235,13 +248,16 @@ impl Harness {
         self.sidebar_wheel.borrow().gesture_until.is_some_and(|until| std::time::Instant::now() < until)
     }
 
-    /// Apply the capture handler's input (owner round 5 §A1): take the
-    /// accumulated travel into exactly one clamped offset write, disarm
-    /// any armed reveal (the user's scroll wins), and mark scrolled-since-
-    /// armed so none reinstalls until the next activation. Called once per
-    /// pane render from `render_sidebar`, before anything reads the offset
-    /// — the sidebar twin of `SessionView::drain_pending_wheel`.
-    pub(crate) fn drain_sidebar_wheel(&mut self) {
+    /// Apply the capture handler's input (owner round 5 §A1, owner round 6):
+    /// take the accumulated travel into exactly one `ListState::scroll_by`
+    /// per frame, disarm any armed reveal (the user's scroll wins), and mark
+    /// scrolled-since-armed so none reinstalls until the next activation.
+    /// Called once per pane render from `render_sidebar`, before the list
+    /// lays out — the sidebar twin of `SessionView::drain_pending_wheel`.
+    /// Returns whether the user scrolled this frame: a scroll dismisses an
+    /// open group menu (the calm option) and is what the `sbwheel` probe
+    /// line reports.
+    pub(crate) fn drain_sidebar_wheel(&mut self) -> bool {
         let (pending, scrolled) = {
             let mut state = self.sidebar_wheel.borrow_mut();
             (std::mem::replace(&mut state.pending, px(0.0)), std::mem::replace(&mut state.scrolled, false))
@@ -251,13 +267,13 @@ impl Harness {
             self.sidebar_user_scrolled = true;
         }
         if pending == px(0.0) {
-            return;
+            return scrolled;
         }
-        let offset = self.sessions_scroll.offset();
-        let max = self.sessions_scroll.max_offset();
-        let next_y = crate::sidebar::clamp_sidebar_offset(f32::from(offset.y), f32::from(pending), f32::from(max.y));
-        self.sessions_scroll.set_offset(point(offset.x, px(next_y)));
+        // The transcript's sign: a positive wheel delta climbs toward the
+        // head, so the pixel walk takes it negated.
+        self.sidebar_list.scroll_by(-pending);
         SIDEBAR_WHEEL_DRAINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        scrolled
     }
 
     /// The rows above the Sessions caption: New session, Add project, and
@@ -317,9 +333,19 @@ impl Harness {
     }
 
     pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Owner round 5 §A1: one offset per frame. The capture handler only
-        // accumulates; this drain is the frame's single offset write.
-        self.drain_sidebar_wheel();
+        // Owner round 5 §A1, owner round 6: one travel per frame. The capture
+        // handler only accumulates; this drain is the frame's single
+        // `scroll_by`, before the list lays out.
+        let user_scrolled = self.drain_sidebar_wheel();
+        // A list that moved under an open group menu leaves it mis-seated:
+        // group menus dismiss on scroll (owner round 6, the calm option —
+        // the bounds intents re-seat a reopened menu on the next frame).
+        // The header menu seats from the fixed crumb and stays. Mid-render
+        // the close needs no notify: the overlay reads it below on this
+        // same frame.
+        if user_scrolled {
+            self.dismiss_group_menu(cx);
+        }
         // Keep presenting through the tail: a frame every tick while the
         // gesture is open, so the momentum tail is never cut — what the
         // transcript does for its own gesture. A settled sidebar requests
@@ -335,6 +361,13 @@ impl Harness {
         // (finding `performance-13`), so the frame hands the cached one
         // straight over and clones nothing.
         let grouping = self.sidebar_grouping(cx);
+        // The flattened rows, re-derived every frame (an index walk, no
+        // summaries cloned), with the caller-owned list state synced to
+        // their length: `reset` after a regroup or filter change, `splice`
+        // after a local insert or remove, `remeasure_items` after a
+        // text-only height change.
+        let rows = flatten_sidebar(&grouping, false);
+        self.sync_sidebar_list(&rows, &grouping);
         // The click's target first: the row highlights on the click's own
         // frame, before the new view (or any page) exists.
         let selected =
@@ -400,9 +433,11 @@ impl Harness {
         // never schedule work of their own.
         let menu_report = cx.entity().downgrade();
         // No caption on the view: the Sessions header is fixed above the
-        // scroll div (see `render_sessions_caption`), so it never scrolls
-        // away and the list always starts below it.
-        let mut view = sidebar_view("sessions", Rc::clone(&grouping))
+        // list (see `render_sessions_caption`), so it never scrolls away —
+        // the flattened rows start at the first group. Row bounds follow
+        // scrolled rows through the per-frame menu intents below, which is
+        // what seats a group menu at its own `…` at any offset.
+        let mut view = virtual_sidebar_view("sessions", Rc::clone(&grouping), self.sidebar_list.clone())
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_toggle(move |id, w, cx| toggle(id, w, cx))
@@ -425,16 +460,16 @@ impl Harness {
             view = view.selected(selected);
         }
         // The one-shot reveal (owner round 4, O6; owner round 5 §A1; owner
-        // round 6: armed only by outside-the-sidebar activations, consumed
-        // on the first prepaint after it). Never from a sidebar click, a
-        // list refresh, a regroup, during a wheel gesture, or after the
-        // user has scrolled — the flag only exists between an outside
-        // activation and its prepaint, and a wheel disarms it outright. A
-        // resize drag owns the list the same way: nothing installs while
-        // one is in flight (owner round 6).
+        // round 6: armed only by outside-the-sidebar activations, steering
+        // the virtual list to the row with the least move). Never from a
+        // sidebar click, a list refresh, a regroup, during a wheel gesture,
+        // or after the user has scrolled — the flag only exists between an
+        // outside activation and the row reporting visible, and a wheel
+        // disarms it outright. A resize drag owns the list the same way:
+        // nothing steers while one is in flight (owner round 6).
         if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
             if let Some(reveal_id) = self.reveal.clone() {
-                view = self.install_reveal(view, &grouping, &reveal_id, cx);
+                self.reveal_sidebar_row(&rows, &grouping, &reveal_id, cx);
             }
         }
         // No quick-filter field: ⌘⇧F and the sidebar search icon open the
@@ -444,144 +479,196 @@ impl Harness {
             .size_full()
             .child(self.render_nav_block(cx))
             .child(self.render_sessions_caption(cx))
-            // The list's positioned wrapper (owner round 5 §A1): `relative`
-            // only establishes the containing block — the capture canvas
-            // below resolves against this instead of the window (the same
-            // load-bearing `relative` the transcript wrapper wears for its
-            // own `wheel_capture`). A plain box otherwise: layout and paint
-            // are unchanged.
+            // The list's positioned wrapper (owner round 5 §A1, owner round
+            // 6): `relative` only establishes the containing block — the
+            // capture canvas below resolves against this instead of the
+            // window (the same load-bearing `relative` the transcript
+            // wrapper wears for its own `wheel_capture`). A flex column
+            // otherwise, so the virtual list's `flex_1` fills exactly the
+            // rect the scroll div filled before: the fixed caption above is
+            // outside it, so the list clips at its own top edge and nothing
+            // from it ever reaches the nav rows.
             .child(
                 div()
                     .flex_1()
                     .min_h(px(0.0))
                     .relative()
+                    .flex()
+                    .flex_col()
                     .child(sidebar_wheel_capture(self))
-                    .child(
-                        div()
-                            .id("sessions-scroll")
-                            .size_full()
-                            .overflow_y_scroll()
-                            // Tracked so the reveal can read the viewport and move
-                            // the offset; observing changes nothing about the
-                            // scrolling itself. The fixed caption above is outside
-                            // this div, so the list clips at the div's own top edge
-                            // and nothing from it ever reaches the nav rows.
-                            .track_scroll(&self.sessions_scroll)
-                            .child(view)
-                            .children(empty),
-                    ),
+                    .child(view)
+                    .children(empty),
             )
             .child(self.render_footer(cx))
             .into_any_element()
     }
 
-    /// Fold one reveal prepaint's [`RevealProgress`] into the flag (owner
-    /// round 6: consume once — the offset math reads painted bounds, so an
-    /// inside reading is trustworthy on its first occurrence).
-    ///
-    /// A scroll that landed whole and a row already inside both consume the
-    /// flag at once. Anything else leaves the flag for the next prepaint:
-    /// poke the pane directly, because a cached pane would otherwise never
-    /// re-run the prepaint whose layout has not settled (owner round 4 §3).
-    /// The flag change reaches the key on the next frame.
-    fn settle_reveal(&mut self, progress: RevealProgress, cx: &mut Context<Self>) {
-        match progress {
-            RevealProgress::NotReady => {
-                self.sidebar_pane.update(cx, |_, cx| cx.notify());
+    /// What a regroup or filter change looks like to the virtual list
+    /// (owner round 6): the mode and the three list-management toggles.
+    /// Group open/close and fold expand are NOT in the key — they splice
+    /// like any other local insert or remove, so the offset survives them.
+    /// Compared in `render_sidebar` before anything draws; a change resets
+    /// the list state to the flattened length.
+    pub(crate) fn regroup_key(&self) -> SidebarRegroupKey {
+        SidebarRegroupKey {
+            group_by: self.effective_group_by(),
+            show_hidden: self.show_hidden,
+            show_empty: self.show_empty,
+            show_archived: self.show_archived,
+        }
+    }
+
+    /// Keep the caller-owned list state on the flattened rows (owner round
+    /// 6, the library's adoption guide): re-flattened per frame by the
+    /// caller; `reset` after a regroup or filter change (the one sync that
+    /// drops the offset — the old offset is meaningless against a rebuilt
+    /// model), `splice` after a local insert or remove (open/close, fold
+    /// expand, sessions arriving or leaving), `remeasure_items` after a
+    /// text-only height change (same rows, new grouping pointer). A
+    /// mismatch never panics in the list — it paints blanks past the model
+    /// — so the debug assertion below is the contract, not a guardrail.
+    pub(crate) fn sync_sidebar_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>) {
+        let key = self.regroup_key();
+        if self.prev_sidebar_regroup.as_ref() != Some(&key) {
+            self.sidebar_list.reset(rows.len());
+            self.prev_sidebar_regroup = Some(key);
+        } else if rows != self.prev_sidebar_rows.as_slice() {
+            // The common prefix and suffix stay; the middle was swapped.
+            // Moves degrade to remove-plus-insert, which still lands the
+            // count exactly — only the preserved offset approximates.
+            let prev = &self.prev_sidebar_rows;
+            let mut prefix = 0usize;
+            while prefix < prev.len() && prefix < rows.len() && prev[prefix] == rows[prefix] {
+                prefix += 1;
             }
-            RevealProgress::Inside | RevealProgress::Landed => {
-                self.reveal = None;
-                cx.notify();
+            let mut suffix = 0usize;
+            while suffix < prev.len() - prefix
+                && suffix < rows.len() - prefix
+                && prev[prev.len() - 1 - suffix] == rows[rows.len() - 1 - suffix]
+            {
+                suffix += 1;
+            }
+            self.sidebar_list
+                .splice(prefix..prev.len() - suffix, rows.len() - prefix - suffix);
+        } else if self
+            .prev_sidebar_grouping
+            .as_ref()
+            .is_none_or(|cached| !Rc::ptr_eq(cached, grouping))
+        {
+            // Same rows, rebuilt grouping: text moved under stable rows
+            // (a rename, a new left line, a branch appearing), so cached
+            // heights may lie. Remeasure the window the list asks for.
+            if !rows.is_empty() {
+                self.sidebar_list.remeasure_items(0..rows.len());
+            }
+        }
+        self.prev_sidebar_rows = rows.to_vec();
+        self.prev_sidebar_grouping = Some(Rc::clone(grouping));
+        debug_assert_eq!(
+            self.sidebar_list.item_count(),
+            rows.len(),
+            "sidebar list out of sync: {} items for {} rows",
+            self.sidebar_list.item_count(),
+            rows.len()
+        );
+    }
+
+    /// Steer the virtual list to the outside-activated session, moving the
+    /// least distance that shows its row whole (owner round 6): the row
+    /// itself when the flattened model has one — folds rescue held-back
+    /// rows for the pending target, so no expansion dance — else its group
+    /// head for a closed group (never auto-expanded, like before), else
+    /// clear a flag with nowhere to go. A sidebar click never sets the
+    /// flag; wheel and resize disarm it. Called on selection change and
+    /// the frames after, until the row reports visible: before the first
+    /// layout the viewport is unknown and the steer is a no-op, and a
+    /// fully visible row moves nothing.
+    fn reveal_sidebar_row(
+        &mut self,
+        rows: &[SidebarRow],
+        grouping: &Grouping,
+        reveal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let wanted = SharedString::from(reveal_id);
+        let target = row_index_for_session(rows, grouping, &wanted)
+            .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
+        let Some(ix) = target else {
+            // Nowhere to go (owner round 5 §A1): a waiting flag outlives its
+            // activation and can move a list the user scrolled meanwhile.
+            self.reveal = None;
+            return;
+        };
+        // A steer that moves the list under an open group menu mis-seats
+        // it: dismiss first, like a user scroll does.
+        let steers = self.sidebar_list.item_is_above_viewport(ix) == Some(true)
+            || self.sidebar_list.item_is_below_viewport(ix) == Some(true);
+        if steers {
+            self.dismiss_group_menu(cx);
+        }
+        ensure_row_visible(&self.sidebar_list, ix);
+        if self.sidebar_list.item_is_above_viewport(ix) == Some(false)
+            && self.sidebar_list.item_is_below_viewport(ix) == Some(false)
+        {
+            self.reveal = None;
+        } else {
+            // The steer above only stages the list's pending scroll: no
+            // frame applies it on its own (a cached pane runs none), and a
+            // notify from inside the draw schedules nothing — so wake the
+            // pane from a task outside the draw, the old reveal's poke in
+            // new clothes. The poke stops the frame the row reports visible
+            // (the flag consumes above), so a settled list never spins.
+            let pane = self.sidebar_pane.clone();
+            self.tasks.push(cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |_, cx| {
+                    pane.update(cx, |_, cx| cx.notify());
+                });
+            }));
+        }
+    }
+
+    /// The group head (or header) row for a session with no session row: a
+    /// closed group holds its sessions out of the flattened model. Mirrors
+    /// the old current-group fallback — reveal the head, never auto-expand.
+    fn reveal_head_row(&self, rows: &[SidebarRow], grouping: &Grouping, reveal_id: &str) -> Option<usize> {
+        match grouping {
+            Grouping::Project(groups) => {
+                let entry = self.sessions.iter().find(|e| e.id == reveal_id)?;
+                let project = entry.project.as_deref()?;
+                let group = groups.iter().position(|g| g.id.as_ref() == project)?;
+                rows.iter().position(|row| matches!(row, SidebarRow::ProjectHead { group: g } if *g == group))
+            }
+            Grouping::Date(groups) => {
+                let bucket = groups
+                    .iter()
+                    .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
+                let pinned = groups[bucket].sessions.iter().all(|s| s.pinned);
+                rows.iter().position(|row| match row {
+                    SidebarRow::DateHeader { group: g, .. } if *g == bucket => true,
+                    SidebarRow::PinnedHeader if pinned => true,
+                    _ => false,
+                })
+            }
+            Grouping::Status(groups) => {
+                let group = groups
+                    .iter()
+                    .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
+                rows.iter().position(|row| matches!(row, SidebarRow::StatusHeader { group: g } if *g == group))
             }
         }
     }
 
-    /// Install the one-shot reveal for `reveal_id` on the sidebar view.
-    ///
-    /// When the row is rendered this frame, the selected-row intent scrolls
-    /// the minimum distance that brings it into view and consumes the flag.
-    /// When it is not rendered — its group is closed or folded past the cut
-    /// — the current-group intent does the same for the group row and never
-    /// auto-expands. Both intents settle through [`Self::settle_reveal`],
-    /// which is what finally consumes the flag, so a later user scroll
-    /// never fights a stale reveal.
-    fn install_reveal(
-        &mut self,
-        view: SidebarView,
-        grouping: &Grouping,
-        reveal_id: &str,
-        cx: &mut Context<Self>,
-    ) -> SidebarView {
-        let rendered = match grouping {
-            Grouping::Project(groups) => {
-                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
-            }
-            Grouping::Date(groups) => {
-                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
-            }
-            Grouping::Status(groups) => {
-                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
-            }
-        };
-        let scroll = self.sessions_scroll.clone();
-        let harness = cx.entity();
-        if rendered {
-            let reveal_id = reveal_id.to_owned();
-            view.on_selected_prepainted(move |id, bounds, _window, app| {
-                if id.as_ref() != reveal_id {
-                    return;
-                }
-                let (progress, applied) = reveal_scroll(&scroll, bounds);
-                if applied.is_some() {
-                    // The write above lands too late for this frame's paint
-                    // (the scroll div already threaded the old offset through
-                    // the prepaint walk) and invalidating from inside draw
-                    // schedules nothing — so notify from a task outside the
-                    // draw, which schedules the frame that paints it. The
-                    // flag is already consumed and the clamp keeps the point,
-                    // so that frame is a plain repaint.
-                    let notify = harness.clone();
-                    app.spawn(async move |cx| {
-                        cx.update(|cx| notify.update(cx, |_, cx| cx.notify()));
-                    })
-                    .detach();
-                }
-                harness.update(app, |this: &mut Harness, cx| this.settle_reveal(progress, cx));
-            })
-        } else {
-            // The row is not on screen: reveal its group instead. The
-            // session's own project when it names one still adopted, else
-            // the current project — with neither, there is no group to
-            // reveal and the flag clears instead of waiting (owner round 5
-            // §A1: a waiting flag outlives its activation and can move a
-            // list the user scrolled meanwhile).
-            let group_id = self
-                .sessions
-                .iter()
-                .find(|e| e.id == reveal_id)
-                .and_then(|e| e.project.clone())
-                .filter(|id| self.projects.find(id).is_some())
-                .or_else(|| self.current_project.clone());
-            let Some(group_id) = group_id else {
-                self.reveal = None;
-                return view;
-            };
-            view.on_current_prepainted(move |id, bounds, _window, app| {
-                if id.as_ref() != group_id {
-                    return;
-                }
-                let (progress, applied) = reveal_scroll(&scroll, bounds);
-                if applied.is_some() {
-                    // Same late-write as the selected-row intent above: wake
-                    // the painting frame from outside the draw.
-                    let notify = harness.clone();
-                    app.spawn(async move |cx| {
-                        cx.update(|cx| notify.update(cx, |_, cx| cx.notify()));
-                    })
-                    .detach();
-                }
-                harness.update(app, |this: &mut Harness, cx| this.settle_reveal(progress, cx));
-            })
+    /// Dismiss an open group-row project menu, if any. The header menu
+    /// seats from the fixed crumb and is never dismissed by list movement.
+    fn dismiss_group_menu(&mut self, cx: &mut Context<Self>) {
+        if self
+            .overlays
+            .read(cx)
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.kind == MenuKind::Project && !menu.project_header)
+        {
+            self.overlays.update(cx, |overlays, _| overlays.menu = None);
         }
     }
 
@@ -1056,58 +1143,6 @@ fn sidebar_wheel_capture(harness: &Harness) -> gpui::AnyElement {
     .into_any_element()
 }
 
-/// What one reveal prepaint found: the scroll div not yet measured
-/// ([`RevealProgress::NotReady`]), the row already inside
-/// ([`RevealProgress::Inside`]), or a scroll that landed whole
-/// ([`RevealProgress::Landed`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RevealProgress {
-    NotReady,
-    Inside,
-    Landed,
-}
-
-/// Move the scroll offset by the minimum that brings `row` into the scroll
-/// viewport, and nothing when it is already inside (owner round 4, O6).
-///
-/// The offset is ≤ 0 and grows negative as the list scrolls down, so the
-/// answer is clamped into `[−max_offset.y, 0]`. Anything less than a whole
-/// landing — a viewport or row with no height yet, a zero maximum offset,
-/// or a clamp that cut the target short — reads [`RevealProgress::NotReady`]:
-/// the scroll div has not measured yet and the flag must survive for the
-/// next prepaint instead of dying on a stale maximum.
-///
-/// Returns the point written on a landing, so the caller can re-apply the
-/// same point on the next frame: a write from inside a prepaint callback
-/// lands too late for that frame's paint (the scroll div already threaded
-/// the old offset through the walk), and only a pre-draw write paints.
-fn reveal_scroll(scroll: &ScrollHandle, row: Bounds<Pixels>) -> (RevealProgress, Option<Point<Pixels>>) {
-    let viewport = scroll.bounds();
-    let offset = scroll.offset();
-    let max = scroll.max_offset();
-    let target = crate::sidebar::reveal_offset(viewport, row, offset.y);
-    if f32::from(viewport.size.height) <= 0.0 {
-        return (RevealProgress::NotReady, None);
-    }
-    if f32::from(row.size.height) <= 0.0 {
-        return (RevealProgress::NotReady, None);
-    }
-    let Some(target) = target else { return (RevealProgress::Inside, None) };
-    let max = f32::from(max.y);
-    if max <= 0.0 {
-        return (RevealProgress::NotReady, None);
-    }
-    let target = f32::from(target);
-    let clamped = target.clamp(-max, 0.0);
-    let applied = point(offset.x, px(clamped));
-    scroll.set_offset(applied);
-    if clamped == target {
-        (RevealProgress::Landed, Some(applied))
-    } else {
-        (RevealProgress::NotReady, None)
-    }
-}
-
 /// The Sessions view menu's seat for a fixed caption (owner round 4 fixup):
 /// 4 px under the caption's bottom edge, right edge aligned to the caption's
 /// right edge under its 12 px of row padding; the menu is a fixed 250 px
@@ -1127,6 +1162,18 @@ fn view_menu_seat(caption: Bounds<Pixels>) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::point;
+    use gpui::TestAppContext;
+
+    use std::cell::Cell;
+    use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+
+    use aui::nav::{ensure_row_visible, row_index_for_session, sidebar_list_state, virtual_sidebar_view};
+
+    use crate::layout::Layout;
+    use crate::projects::Projects;
+    use crate::sidebar::{grouping_by_project, GroupView, SessionEntry};
 
     fn caption(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
@@ -1144,6 +1191,113 @@ mod tests {
         // A 200 px sidebar is narrower than the 250 px menu: the seat's left
         // stops at 8 px instead of running off the window's left edge.
         assert_eq!(view_menu_seat(caption(0.0, 100.0, 200.0, 28.0)), (132.0, 8.0));
+    }
+
+    /// The virtual sidebar builds only visible rows for a stress sidebar
+    /// (owner round 6): 200 sessions across 8 projects through the
+    /// harness's own grouping (flags, folds, rescue) into the library's
+    /// virtual view — the per-frame build budget the div-scroll path could
+    /// never keep. Reverting the sessions area to div-scroll builds all
+    /// 100+ rows and fails this test.
+    struct VirtualProbe {
+        grouping: Grouping,
+        state: gpui::ListState,
+        built: Rc<Cell<usize>>,
+    }
+
+    impl Render for VirtualProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let built = self.built.clone();
+            v_flex().w(px(300.)).h(px(700.)).child(
+                virtual_sidebar_view("probe", self.grouping.clone(), self.state.clone())
+                    .on_row_built(move |_| {
+                        built.set(built.get() + 1);
+                    }),
+            )
+        }
+    }
+
+    fn draw_probe(
+        vc: &mut gpui::VisualTestContext,
+        grouping: &Grouping,
+        state: &gpui::ListState,
+        built: &Rc<Cell<usize>>,
+    ) -> usize {
+        built.set(0);
+        let host = VirtualProbe { grouping: grouping.clone(), state: state.clone(), built: built.clone() };
+        vc.draw(point(px(0.), px(0.)), gpui::size(px(300.), px(700.)), |_, cx| {
+            cx.new(|_| host).into_any_element()
+        });
+        built.get()
+    }
+
+    #[gpui::test]
+    fn virtual_sidebar_builds_only_visible_rows_for_a_stress_sidebar(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let mut projects = Projects::default();
+        let ids: Vec<String> = (0..8)
+            .map(|i| projects.add(Path::new(&format!("/tmp/r6c-probe-{i}"))).id.clone())
+            .collect();
+        let now = chrono::Local::now();
+        let entries: Vec<SessionEntry> = ids
+            .iter()
+            .enumerate()
+            .flat_map(|(p, id)| {
+                (0..25).map(move |s| SessionEntry {
+                    id: format!("p{p}-s{s}"),
+                    label: "x".into(),
+                    updated: now,
+                    running: false,
+                    turns: 0,
+                    hidden: false,
+                    pinned: false,
+                    archived: false,
+                    description: String::new(),
+                    replayed: false,
+                    named: false,
+                    needs_title: false,
+                    local: false,
+                    workspace: None,
+                    project: Some(id.clone()),
+                    branch: None,
+                })
+            })
+            .collect();
+        let closed = HashSet::new();
+        let expanded: HashSet<String> = [ids[7].clone()].into_iter().collect();
+        let view = GroupView { closed: &closed, expanded: &expanded, active: Some("p6-s12"), pending: None };
+        let grouping = grouping_by_project(&entries, &projects, &HashMap::new(), &view, &Layout::default(), now);
+        let rows = flatten_sidebar(&grouping, false);
+        let total = rows.len();
+        assert!(total > 48, "the stress model must stay large enough to prove virtualisation: {total}");
+        let deep = row_index_for_session(&rows, &grouping, &"p6-s12".into());
+        assert!(deep.is_some_and(|ix| ix > total / 2), "a deep row exists: {deep:?}");
+
+        let state = sidebar_list_state(total);
+        let built = Rc::new(Cell::new(0usize));
+        let vc = cx.add_empty_window();
+
+        // Same budget as the library's own test: ~24 rows visible, the
+        // overdraw runway, one boundary row — under a quarter of what a
+        // non-virtualised frame builds.
+        let cold = draw_probe(vc, &grouping, &state, &built);
+        assert!(cold <= 48, "cold frame built {cold} rows of {total}");
+        assert!(cold > 10, "cold frame built suspiciously few rows: {cold}");
+
+        let warm = draw_probe(vc, &grouping, &state, &built);
+        assert!(warm <= 48, "warm frame built {warm} rows of {total}");
+
+        state.scroll_by(px(2000.));
+        let scrolled = draw_probe(vc, &grouping, &state, &built);
+        assert!(scrolled <= 48, "scrolled frame built {scrolled} rows of {total}");
+        assert!(state.logical_scroll_top().item_ix > 0, "scroll_by moved the list");
+
+        let last = row_index_for_session(&rows, &grouping, &"p7-s24".into()).expect("last session has a row");
+        ensure_row_visible(&state, last);
+        draw_probe(vc, &grouping, &state, &built);
+        draw_probe(vc, &grouping, &state, &built);
+        assert!(state.bounds_for_item(last).is_some(), "revealed row has bounds");
+        assert_eq!(state.item_is_below_viewport(last), Some(false), "revealed row is on screen");
     }
 
     #[test]

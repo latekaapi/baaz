@@ -12,7 +12,6 @@
 use std::collections::{HashMap, HashSet};
 
 use aui_tokens::AgentState;
-use gpui::{Bounds, Pixels};
 pub use aui::nav::Grouping;
 
 use aui::nav::{DateGroup, ProjectGroup, SessionSummary};
@@ -522,46 +521,6 @@ pub fn grouping_by_project(
         groups.push(group);
     }
     Grouping::Project(groups)
-}
-
-/// The scroll offset that reveals `row` in `viewport`, or `None` when it is
-/// already fully inside (owner round 4, O6; owner round 6: painted
-/// coordinates, `scrollIntoView({ block: "nearest" })`).
-///
-/// `row` is the row's **painted** bounds — what the prepaint intent hands
-/// over, which already includes the scroll element-offset — and `offset` the
-/// scroll div's current y offset (≤ 0, growing negative as the list scrolls
-/// down). Adding `offset` to the painted position again double-counts it and
-/// reads every visible row as `|offset|` px above the viewport (owner round
-/// 6: a visible bottom-row click teleported `-1262 → -602.5`). The move is
-/// the minimum from where the row paints: a row above the viewport puts its
-/// top at the viewport's top; a row below puts its bottom at the viewport's
-/// bottom. A row taller than the viewport aligns its top, the way gpui's own
-/// `scroll_to_item` does. The caller clamps the answer into `[−max_offset.y,
-/// 0]` and writes it with `set_offset`.
-pub(crate) fn reveal_offset(viewport: Bounds<Pixels>, row: Bounds<Pixels>, offset: Pixels) -> Option<Pixels> {
-    let top = row.origin.y;
-    let bottom = top + row.size.height;
-    let viewport_top = viewport.origin.y;
-    let viewport_bottom = viewport_top + viewport.size.height;
-    if row.size.height > viewport.size.height || top < viewport_top {
-        let aligned = offset + (viewport_top - top);
-        (aligned != offset).then_some(aligned)
-    } else if bottom > viewport_bottom {
-        Some(offset - (bottom - viewport_bottom))
-    } else {
-        None
-    }
-}
-
-/// The frame's one sidebar offset write (owner round 5 §A1): the accumulated
-/// wheel travel applied to the handle's y offset, clamped to the content
-/// bounds. All three in pixels, with the handle's sign (≤ 0, growing
-/// negative down the list): a downward `pending` is negative, like the
-/// wheel delta the capture handler accumulated verbatim. Pure so the drain
-/// stays testable without a window.
-pub(crate) fn clamp_sidebar_offset(offset_y: f32, pending: f32, max_y: f32) -> f32 {
-    (offset_y + pending).clamp(-max_y, 0.0)
 }
 
 /// The last path component of a workspace root, for the "Other workspaces"
@@ -1393,83 +1352,4 @@ mod tests {
         assert_eq!(describe(Some(&meta), None, "x", false).chars().count(), 80);
     }
 
-    /// The [`reveal_offset`] geometry, in painted coordinates: the viewport
-    /// is the scroll div's bounds, the row its painted bounds (what the
-    /// prepaint intent reports — the scroll offset already applied), the
-    /// offset the handle's current y (≤ 0, growing negative down the list).
-    fn viewport(top: f32, height: f32) -> Bounds<Pixels> {
-        Bounds::new(gpui::point(gpui::px(0.0), gpui::px(top)), gpui::size(gpui::px(200.0), gpui::px(height)))
-    }
-
-    fn row(top: f32, height: f32) -> Bounds<Pixels> {
-        Bounds::new(gpui::point(gpui::px(0.0), gpui::px(top)), gpui::size(gpui::px(200.0), gpui::px(height)))
-    }
-
-    #[test]
-    fn a_row_above_the_viewport_aligns_its_top() {
-        // Viewport 100..300; the row paints at -100..-70 (above) with the
-        // list scrolled 500 down.
-        let viewport = viewport(100.0, 200.0);
-        let row = row(-100.0, 30.0);
-        assert_eq!(reveal_offset(viewport, row, gpui::px(-500.0)), Some(gpui::px(-300.0)));
-    }
-
-    #[test]
-    fn a_row_below_the_viewport_aligns_its_bottom() {
-        // Same viewport; the row paints at 700..730 (below) with the list
-        // at the top.
-        let viewport = viewport(100.0, 200.0);
-        let row = row(700.0, 30.0);
-        assert_eq!(reveal_offset(viewport, row, gpui::px(0.0)), Some(gpui::px(-430.0)));
-    }
-
-    #[test]
-    fn a_row_inside_the_viewport_moves_nothing() {
-        let viewport = viewport(100.0, 200.0);
-        // Fully inside: paints at 100..130.
-        assert_eq!(reveal_offset(viewport, row(100.0, 30.0), gpui::px(-300.0)), None);
-        // A top edge exactly on the viewport's counts as inside: 100..130.
-        assert_eq!(reveal_offset(viewport, row(100.0, 30.0), gpui::px(-350.0)), None);
-        // …and so does a bottom edge exactly on it: 270..300.
-        assert_eq!(reveal_offset(viewport, row(270.0, 30.0), gpui::px(-230.0)), None);
-    }
-
-    #[test]
-    fn a_visible_row_at_a_scrolled_offset_moves_nothing() {
-        // Owner round 6: the clicked row paints fully inside the viewport
-        // while the list sits far down. The old laid-out-coordinates math
-        // added the offset again and teleported `-1262 → -602.5`; painted
-        // coordinates read it where it shows and move nothing.
-        let viewport = viewport(0.0, 600.0);
-        assert_eq!(reveal_offset(viewport, row(570.0, 30.0), gpui::px(-1262.0)), None);
-        assert_eq!(reveal_offset(viewport, row(0.0, 30.0), gpui::px(-1262.0)), None);
-        assert_eq!(reveal_offset(viewport, row(300.0, 30.0), gpui::px(-1262.0)), None);
-    }
-
-    #[test]
-    fn a_row_taller_than_the_viewport_aligns_its_top() {
-        let viewport = viewport(100.0, 200.0);
-        // 300 px of row in a 200 px viewport, top cut off above.
-        assert_eq!(reveal_offset(viewport, row(-100.0, 300.0), gpui::px(-500.0)), Some(gpui::px(-300.0)));
-        // …while a tall row whose top already shows stays put: the top is
-        // the most the viewport can keep.
-        assert_eq!(reveal_offset(viewport, row(100.0, 300.0), gpui::px(-300.0)), None);
-    }
-
-    /// The frame's one offset write (owner round 5 §A1): accumulated travel
-    /// adds verbatim — downward is negative, the handle's sign — and both
-    /// ends clamp.
-    #[test]
-    fn the_drain_applies_travel_verbatim_inside_the_bounds() {
-        assert_eq!(clamp_sidebar_offset(0.0, -240.0, 310.5), -240.0);
-        assert_eq!(clamp_sidebar_offset(-240.0, 40.0, 310.5), -200.0);
-        assert_eq!(clamp_sidebar_offset(-240.0, 0.0, 310.5), -240.0);
-    }
-
-    #[test]
-    fn the_drain_clamps_at_both_ends() {
-        // Past the tail sticks at the tail; past the head sticks at zero.
-        assert_eq!(clamp_sidebar_offset(-300.0, -40.0, 310.5), -310.5);
-        assert_eq!(clamp_sidebar_offset(-40.0, 80.0, 310.5), 0.0);
-    }
 }
