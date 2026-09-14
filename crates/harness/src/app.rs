@@ -141,6 +141,8 @@ actions!(
         ZoomWindow,
         /// Flip the theme between light and dark.
         ToggleTheme,
+        /// Open the Settings dialog (⌘,).
+        OpenSettings,
         /// Show the About dialog.
         ShowAbout,
         /// Reveal the docs folder in Finder.
@@ -231,6 +233,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseWindow, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-q", QuitApp, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-m", MinimizeWindow, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("enter", ConfirmRename, Some(RENAME_CONTEXT)),
         // The transcript list wears `TRANSCRIPT_CONTEXT`; the predicate keeps
         // this off the composer and every field, so copy there stays native.
@@ -288,6 +291,7 @@ pub fn set_menus(cx: &mut App) {
         gpui::Menu::new("File").items([
             gpui::MenuItem::action("Add Project…", AddProject),
             gpui::MenuItem::action("New Session", NewSession),
+            gpui::MenuItem::action("Settings…", OpenSettings),
             gpui::MenuItem::action("Close Window", CloseWindow),
         ]),
         gpui::Menu::new("Edit").items([
@@ -1541,6 +1545,7 @@ impl Render for Harness {
             self.render_login(cx).into_any_element()
         };
         let dialog = self.render_dialog(cx);
+        let settings = self.render_settings(cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
@@ -1601,6 +1606,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
                 .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
                 .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
+                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(0, cx)))
                 .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
@@ -1618,6 +1624,7 @@ impl Render for Harness {
                 .children(toasts)
                 .children(palette)
                 .children(dialog)
+                .children(settings)
                 .children(overflow)
                 .children(view_options)
                 .children(account)

@@ -1,5 +1,17 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 4, settings
+
+- **The Settings dialog.** ⌘, (File → Settings…), the account footer menu's
+  "Settings…" row, and `--steps settings[:<section>]` open it; `esc` and the
+  scrim close it. Its Sidebar section holds the three `layout.json` switches
+  (collapse chevron, current-project bar, branch name — all default off),
+  flipped through `on_switch` into `layout::write` + `invalidate_list`.
+  Sections come from the one `Harness::settings_sections`
+  (`crate::settings`): a later section is one more arm there and one more
+  `on_switch` id. Opening Settings closes menus, the palette and the plain
+  modal first, and vice versa — only one modal is ever open.
+
 ## 2026-09-13 — Owner round 4, sidebar
 
 - **O1 — Stable project order.** `Projects::sorted` is pinned first, then name

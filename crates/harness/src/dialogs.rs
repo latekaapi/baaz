@@ -78,7 +78,10 @@ impl Harness {
     /// Put a modal up. Only one at a time, which is what makes Escape's order
     /// (menu, then modal) a single rule.
     pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
-        self.overlays.update(cx, |overlays, _| overlays.dialog = Some(dialog));
+        self.overlays.update(cx, |overlays, _| {
+            overlays.dialog = Some(dialog);
+            overlays.settings = None;
+        });
         cx.notify();
     }
 

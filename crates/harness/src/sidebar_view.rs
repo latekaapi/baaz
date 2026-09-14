@@ -658,9 +658,9 @@ impl Harness {
         )
     }
 
-    /// The footer's account menu: Sign out, and nothing else. The environment
-    /// lane names itself: `META_API_KEY` survives a sign-out, so the row says
-    /// where the credential really comes from (D28).
+    /// The footer's account menu: Settings at the top, then Sign out. The
+    /// environment lane names itself: `META_API_KEY` survives a sign-out, so
+    /// the row says where the credential really comes from (D28).
     pub(crate) fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
@@ -671,9 +671,15 @@ impl Harness {
             }
             _ => "Sign out",
         };
-        let rows = vec![MenuRow::Toggle { label: label.into(), checked: false }];
+        let rows = vec![
+            MenuRow::Toggle { label: "Settings…".into(), checked: false },
+            MenuRow::Toggle { label: label.into(), checked: false },
+        ];
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
             if *index == 0 {
+                this.overlays.update(cx, |overlays, _| overlays.menu = None);
+                this.open_settings(0, cx);
+            } else if *index == 1 {
                 this.overlays.update(cx, |overlays, _| overlays.menu = None);
                 this.logout(cx);
             }

@@ -54,17 +54,18 @@ pub struct Layout {
     pub search_all_projects: bool,
     /// Whether project group rows draw the collapse chevron in the leading
     /// box. Off by default: the row is a plain label (owner round 4, O4).
-    /// No UI yet — the Settings dialog (⌘,) owns the switch; `--steps
+    /// The Settings dialog's Sidebar section (⌘,) owns the switch; `--steps
     /// group-chevron` flips it for captures meanwhile.
     #[serde(rename = "groupChevron", default)]
     pub group_chevron: bool,
     /// Whether the current project wears its 2 px accent bar. Off by
     /// default: `current(true)` alone keeps only the semibold ink name (O4).
-    /// No UI yet — see [`Self::group_chevron`].
+    /// Owned by the Settings dialog — see [`Self::group_chevron`].
     #[serde(rename = "groupBar", default)]
     pub group_bar: bool,
     /// Whether project group rows trail the workspace branch in mono. Off
-    /// by default (O4). No UI yet — see [`Self::group_chevron`].
+    /// by default (O4). Owned by the Settings dialog — see
+    /// [`Self::group_chevron`].
     #[serde(rename = "groupBranch", default)]
     pub group_branch: bool,
 }
