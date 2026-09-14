@@ -66,8 +66,11 @@ enum ViewAction {
 /// listeners, so what the column draws cannot drift. [`SidebarKey`] is what
 /// re-arms it: [`Harness::sync_sidebar_pane`] notifies it from `on_frame`
 /// whenever its inputs change, and notifies from inside its own subtree
-/// (hover, its scroll container, the rename editor, the reveal prepaint
-/// intents) dirty it directly through the view tree.
+/// (hover, its scroll container, the rename editor, and — since owner
+/// round 6 replaced the old reveal prepaint intents with `ListState`
+/// steering — the reveal's own outside-the-draw pane-notify task in
+/// [`Harness::reveal_sidebar_row`]) dirty it directly through the view
+/// tree.
 pub(crate) struct SidebarPane {
     harness: WeakEntity<Harness>,
 }
@@ -112,6 +115,26 @@ pub(crate) fn take_harness_root_renders() -> u64 {
 /// keeps; while it is in the future the pane presents every tick and no
 /// reveal may move the list.
 const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How many consecutive `reveal_sidebar_row` misses an id with no row yet
+/// gets before the reveal gives up (owner round 6, part C4 review #1): a
+/// bound, not a real deadline — the row-birth sites (the `turn/started`
+/// local-row insert, a `load_sessions` reply) already notify, so a normal
+/// wait is one or two attempts; this only guards against an id that never
+/// arrives at all (a failed fork, a send that never lands).
+pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
+
+/// The bookkeeping [`Harness::reveal_sidebar_row`] does for an unknown
+/// reveal id, pulled out pure so it is unit-testable without a window
+/// (owner round 6, part C4 review #1): a miss for the *same* id the
+/// previous call saw extends its streak; a miss for a *different* id (a
+/// fresh arm since) starts a new one at 1.
+fn next_reveal_unknown_streak(current: Option<(String, u32)>, reveal_id: &str) -> (String, u32) {
+    match current {
+        Some((id, streak)) if id == reveal_id => (id, streak + 1),
+        _ => (reveal_id.to_owned(), 1),
+    }
+}
 
 /// Sidebar drains actually applied since process start (owner round 5 §A1):
 /// one per frame that had accumulated travel, against one offset write per
@@ -296,6 +319,7 @@ impl Harness {
         };
         if scrolled {
             self.reveal = None;
+            self.reveal_unknown = None;
             self.sidebar_user_scrolled = true;
         }
         if pending == px(0.0) {
@@ -610,11 +634,16 @@ impl Harness {
     /// itself when the flattened model has one — folds rescue held-back
     /// rows for the pending target, so no expansion dance — else its group
     /// head for a closed group (never auto-expanded, like before), else
-    /// clear a flag with nowhere to go. A sidebar click never sets the
-    /// flag; wheel and resize disarm it. Called on selection change and
-    /// the frames after, until the row reports visible: before the first
-    /// layout the viewport is unknown and the steer is a no-op, and a
-    /// fully visible row moves nothing.
+    /// wait for an id with no row yet (a draft before its first send, a
+    /// fork before `load_sessions`'s reply lands) up to
+    /// [`REVEAL_UNKNOWN_FRAMES`] attempts, else clear a flag with nowhere
+    /// to go (owner round 6, part C4 review #1: a *known* session that
+    /// still has no landing row gives up on the first miss, same as
+    /// before — only an unrecognised id gets the grace period). A sidebar
+    /// click never sets the flag; wheel and resize disarm it. Called on
+    /// selection change and the frames after, until the row reports
+    /// visible: before the first layout the viewport is unknown and the
+    /// steer is a no-op, and a fully visible row moves nothing.
     fn reveal_sidebar_row(
         &mut self,
         rows: &[SidebarRow],
@@ -626,11 +655,31 @@ impl Harness {
         let target = row_index_for_session(rows, grouping, &wanted)
             .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
         let Some(ix) = target else {
-            // Nowhere to go (owner round 5 §A1): a waiting flag outlives its
-            // activation and can move a list the user scrolled meanwhile.
-            self.reveal = None;
+            if self.sessions.iter().any(|e| e.id == reveal_id) {
+                // A known session with nowhere to go (owner round 5 §A1): a
+                // waiting flag outlives its activation and can move a list
+                // the user scrolled meanwhile.
+                self.reveal = None;
+                self.reveal_unknown = None;
+                return;
+            }
+            // An id this window has never listed: most likely its row is
+            // simply not born yet. The sites that create it (the
+            // `turn/started` local-row insert, a `load_sessions` reply)
+            // already `invalidate_list`/notify, which is what brings this
+            // function around again with fresh rows — so waiting here
+            // costs nothing extra, just a bound so a reveal for an id that
+            // never arrives (a failed fork, a send that never lands)
+            // cannot spin forever.
+            let (id, streak) = next_reveal_unknown_streak(self.reveal_unknown.take(), reveal_id);
+            self.reveal_unknown = Some((id, streak));
+            if streak > REVEAL_UNKNOWN_FRAMES {
+                self.reveal = None;
+                self.reveal_unknown = None;
+            }
             return;
         };
+        self.reveal_unknown = None;
         // A steer that moves the list under an open group menu mis-seats
         // it: dismiss first, like a user scroll does.
         let steers = self.sidebar_list.item_is_above_viewport(ix) == Some(true)
@@ -639,10 +688,18 @@ impl Harness {
             self.dismiss_group_menu(cx);
         }
         ensure_row_visible(&self.sidebar_list, ix);
-        if self.sidebar_list.item_is_above_viewport(ix) == Some(false)
-            && self.sidebar_list.item_is_below_viewport(ix) == Some(false)
-        {
+        let above = self.sidebar_list.item_is_above_viewport(ix);
+        let below = self.sidebar_list.item_is_below_viewport(ix);
+        if above == Some(false) && below == Some(false) {
             self.reveal = None;
+        } else if above.is_none() || below.is_none() {
+            // The list has not laid out yet (owner round 6, part C4 review
+            // #4): a degenerate zero-height sidebar rect would otherwise
+            // have every pane render spawn another pane-notify task, which
+            // renders, which pokes again, forever — `bench-idle` never
+            // settling. Leave the flag armed with nothing scheduled;
+            // whatever eventually lays the list out (a resize, a normal
+            // render) brings this function around again for a fresh read.
         } else {
             // The steer above only stages the list's pending scroll: no
             // frame applies it on its own (a cached pane runs none), and a
@@ -1354,5 +1411,35 @@ mod tests {
         // narrower than the 250 px menu). The seat takes no scroll offset,
         // so it stays under the sliders icon at any scroll position.
         assert_eq!(view_menu_seat(caption(0.0, 146.0, 252.0, 28.0)), (178.0, 8.0));
+    }
+
+    /// An id with no row yet keeps its reveal armed across misses instead
+    /// of dropping it on the first one (owner round 6, part C4 review #1):
+    /// a draft before its first send, a fork before `load_sessions`'s
+    /// reply lands. The streak counts up for the same id and past
+    /// `REVEAL_UNKNOWN_FRAMES` the caller gives up.
+    #[test]
+    fn an_unknown_reveal_id_streaks_instead_of_dropping_on_the_first_miss() {
+        let mut state = None;
+        for _ in 0..5 {
+            state = Some(next_reveal_unknown_streak(state, "s-draft"));
+        }
+        assert_eq!(state, Some(("s-draft".to_owned(), 5)));
+    }
+
+    #[test]
+    fn a_fresh_id_resets_the_streak_instead_of_extending_the_old_one() {
+        let after_old = next_reveal_unknown_streak(Some(("s-old".to_owned(), 40)), "s-new");
+        assert_eq!(after_old, ("s-new".to_owned(), 1));
+    }
+
+    #[test]
+    fn the_streak_eventually_passes_the_bound() {
+        let mut state = None;
+        for _ in 0..=REVEAL_UNKNOWN_FRAMES {
+            state = Some(next_reveal_unknown_streak(state, "s-never-arrives"));
+        }
+        let (_, streak) = state.expect("streak recorded");
+        assert!(streak > REVEAL_UNKNOWN_FRAMES, "streak {streak} did not pass the bound");
     }
 }

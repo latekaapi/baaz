@@ -388,6 +388,17 @@ pub struct Harness {
     /// clicked row is under the cursor, hence visible), and neither does a
     /// list refresh, a regroup, a user scroll or a resize drag.
     pub(crate) reveal: Option<String>,
+    /// An id [`Self::reveal`] named that has no row yet, and how many
+    /// consecutive `reveal_sidebar_row` attempts it has missed on (owner
+    /// round 6, part C4 review #1): a draft before its first send, a fork
+    /// before `load_sessions`'s reply lands. Distinct from "nowhere to
+    /// go" (a known session whose landing row genuinely cannot be found),
+    /// which still gives up on the first miss — this one waits up to
+    /// [`crate::sidebar_view::REVEAL_UNKNOWN_FRAMES`] attempts for the row
+    /// to be born, since the sites that create it (the `turn/started`
+    /// local-row insert, a `load_sessions` reply) already notify and would
+    /// otherwise race a reveal armed moments earlier every time.
+    pub(crate) reveal_unknown: Option<(String, u32)>,
     /// The sidebar column as its own view (owner round 4 §3): embedded with
     /// gpui's `.cached(size_full)`, a clean pane reuses its retained subtree
     /// instead of rebuilding the column on a transcript notify.
@@ -623,6 +634,7 @@ impl Harness {
             active: None,
             pending_id: None,
             reveal: None,
+            reveal_unknown: None,
             sidebar_pane,
             sidebar_key: None,
             session_cache: Vec::new(),
