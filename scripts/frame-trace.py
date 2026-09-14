@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Summarise a `frame-trace.log` from a `HARNESS_FRAME_TRACE=1` run.
 
-Each row is `t_us,list_px,events_since_last_paint,gesture_active` (one per
-paint; see `docs/02-app.md` §6). Prints:
+Each row is `t_us,list_px,events_since_last_paint,gesture_active` (v1) or
+that plus `centre_w,rehint,draw_us` (v2, one per paint; see `docs/02-app.md`
+§6). Prints:
 
 - paints/s over the gesture (first to last `gesture_active=1` row),
 - the gap histogram in display ticks, where one tick is 1/refresh and the
@@ -29,10 +30,23 @@ def load(path):
             if not line or line.startswith("#"):
                 continue
             parts = line.split(",")
-            if len(parts) != 4:
+            if len(parts) not in (4, 7):
                 continue
             try:
-                rows.append((int(parts[0]), float(parts[1]), int(parts[2]), int(parts[3])))
+                if len(parts) == 7:
+                    rows.append(
+                        (
+                            int(parts[0]),
+                            float(parts[1]),
+                            int(parts[2]),
+                            int(parts[3]),
+                            float(parts[4]),
+                            int(parts[5]),
+                            int(parts[6]),
+                        )
+                    )
+                else:
+                    rows.append((int(parts[0]), float(parts[1]), int(parts[2]), int(parts[3])))
             except ValueError:
                 continue
     return rows
@@ -88,6 +102,17 @@ def main():
     events = sum(r[2] for r in rows)
     with_events = sum(1 for r in rows if r[2] > 0)
     print(f"events_applied={events} paints_with_events={with_events} paints={len(rows)}")
+    if rows and len(rows[0]) == 7:
+        widths = [r[4] for r in rows]
+        width_ticks = sum(1 for a, b in zip(widths, widths[1:]) if abs(b - a) > 0.5)
+        rehints = sum(r[5] for r in rows)
+        draws = sorted(r[6] for r in rows if r[6] > 0)
+        if draws:
+            p50 = draws[len(draws) // 2]
+            p90 = draws[min(len(draws) - 1, int(len(draws) * 0.9))]
+            print(f"width_changing_ticks={width_ticks}/{len(rows) - 1} rehint_paints={rehints} draw_us_p50={p50} draw_us_p90={p90} draw_us_max={draws[-1]}")
+        else:
+            print(f"width_changing_ticks={width_ticks}/{len(rows) - 1} rehint_paints={rehints} draw_us=none")
     last_event_ix = max((i for i, r in enumerate(rows) if r[2] > 0), default=None)
     if last_event_ix is None:
         print("tail=no wheel events in this log")

@@ -1628,9 +1628,44 @@ impl Harness {
         // A release outside the window never reaches the overlay: a drag that
         // is still armed while the window is inactive is over, settled where
         // it stands. One write, on the transition; the frame renders clean.
-        if self.resize.active && !window.is_window_active() {
+        // A scripted drag has no pointer to release, so only its own
+        // `resize-end` settles it — otherwise a headless (never active)
+        // window could never hold one across frames.
+        if self.resize.active && !self.resize.scripted && !window.is_window_active() {
             self.resize.active = false;
             self.resize.persist();
+        }
+        // A frame-paced width sweep marches the divider one step per
+        // rendered frame (scripting only, owner round 6): each tick logs
+        // its width plus the renders and re-hints it cost, so per-tick
+        // resize cost is readable off a scripted run. Like a real drag it
+        // owns the list (no reveal installs while active); unlike one it
+        // never persists — a measurement, not a choice.
+        if self.resize.sweep.is_some() {
+            let from = self.resize.width;
+            let next = self.resize.sweep.as_mut().map(|sweep| sweep.advance(from)).unwrap_or(from);
+            self.resize.width = next;
+            let ticks = self.resize.sweep.as_ref().map(|sweep| sweep.ticks).unwrap_or(0);
+            let pane = crate::sidebar_view::take_sidebar_pane_renders();
+            let root = crate::sidebar_view::take_harness_root_renders();
+            let rehint = self
+                .active
+                .clone()
+                .map(|view| view.update(cx, |view, _| view.take_trace_rehint()))
+                .unwrap_or(false);
+            crate::harness_log!("rssweep w={next:.1} pane={pane} root={root} rehint={}", rehint as u8);
+            // Done at the target, when the clamp stops all progress, or
+            // past any reasonable drag: settle without persisting.
+            if next == from || (self.resize.sweep.as_ref().is_some_and(|sweep| next == sweep.target)) || ticks > 10_000
+            {
+                let done = self.resize.width;
+                self.resize.sweep = None;
+                self.resize.active = false;
+                self.resize.scripted = false;
+                crate::harness_log!("rssweep done w={done:.1}");
+            } else {
+                cx.notify();
+            }
         }
         // The sidebar pane's inputs may have changed without a notify of its
         // own (a session event, a probe answer, the minute rollover): re-arm

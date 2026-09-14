@@ -314,6 +314,7 @@ impl SessionView {
                     self.rehint_deferred = true;
                 } else {
                     self.rehint_rows(count);
+                    self.note_trace_rehint();
                 }
             } else {
                 self.list_state.splice(from..old, count - from);
@@ -323,10 +324,12 @@ impl SessionView {
                 self.rehint_deferred = true;
             } else {
                 self.rehint_rows(count);
+                self.note_trace_rehint();
             }
         }
         if !gesture && std::mem::take(&mut self.rehint_deferred) {
             self.rehint_rows(count);
+            self.note_trace_rehint();
         }
         // Tail-follow re-engages only at the end, and never under a gesture:
         // a downward flick the reader started stays theirs until it lapses.

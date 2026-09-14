@@ -429,8 +429,10 @@ impl Harness {
         // on the first prepaint after it). Never from a sidebar click, a
         // list refresh, a regroup, during a wheel gesture, or after the
         // user has scrolled — the flag only exists between an outside
-        // activation and its prepaint, and a wheel disarms it outright.
-        if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() {
+        // activation and its prepaint, and a wheel disarms it outright. A
+        // resize drag owns the list the same way: nothing installs while
+        // one is in flight (owner round 6).
+        if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
             if let Some(reveal_id) = self.reveal.clone() {
                 view = self.install_reveal(view, &grouping, &reveal_id, cx);
             }
