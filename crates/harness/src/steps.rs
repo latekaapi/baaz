@@ -80,6 +80,10 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
+//! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `harness: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
+//! | `resize-move:<x>` | move a scripted resize drag through the real divider handler (same log) |
+//! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
+//! | `resize-sweep:<to_w,step_px>` | march the divider toward `to_w` one `step_px` per rendered frame, logging `harness: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per tick |
 //! | `overflow` | open the header's overflow menu |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
@@ -175,6 +179,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "hidden", run: |this, _, _, cx| this.step_toggle_hidden(cx) },
     WindowVerb { verb: "empty", run: |this, _, _, cx| this.step_toggle_empty(cx) },
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
+    WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
+    WindowVerb { verb: "resize-move", run: |this, rest, _, cx| this.step_resize_drag("move", rest, cx) },
+    WindowVerb { verb: "resize-end", run: |this, rest, _, cx| this.step_resize_drag("end", rest, cx) },
+    WindowVerb { verb: "resize-sweep", run: |this, rest, _, cx| this.step_resize_sweep(rest, cx) },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| this.toggle_sidebar(cx) },
     WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },

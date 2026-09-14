@@ -415,6 +415,11 @@ pub struct SessionView {
     /// traced paint; both stay untouched unless the trace is on.
     trace_wheel_pending: usize,
     trace_last_wheel: Option<Instant>,
+    /// A re-hint ran since the last traced paint (`HARNESS_FRAME_TRACE`,
+    /// owner round 6: the resize instrument). Set beside the `rehint_rows`
+    /// call, drained by the next traced paint; untouched unless the trace
+    /// is on.
+    trace_rehint: bool,
     /// Wheel travel accumulated since the last frame, in pixels (owner round
     /// 4 §2: one offset per frame). The capture handler only adds to this;
     /// `render_transcript` drains it into exactly one `scroll_by` per frame,
@@ -664,6 +669,7 @@ impl SessionView {
             synced_counts: Vec::new(),
             trace_wheel_pending: 0,
             trace_last_wheel: None,
+            trace_rehint: false,
             pending_wheel: px(0.0),
             gesture_until: None,
             rehint_deferred: false,
@@ -1440,8 +1446,17 @@ static DRAW_SAMPLES: std::sync::OnceLock<std::sync::Mutex<Vec<u128>>> = std::syn
 /// (`Harness::render`, `BenchRoot::render`); recorded only while frame stats
 /// are on (`HARNESS_FRAME_STATS=1` or `--bench`), so a disabled build pays
 /// one relaxed load per frame.
+/// The previous frame's render-to-paint micros, for the frame trace's
+/// `draw_us` column. Written by the paint marker below, read by the next
+/// traced paint; zero until the first paint lands.
+static LAST_DRAW_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn last_draw_us() -> u64 {
+    LAST_DRAW_US.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn note_draw_start() {
-    if !frame_stats_enabled() {
+    if !(frame_stats_enabled() || frame_trace_enabled()) {
         return;
     }
     if let Ok(mut start) = DRAW_START.get_or_init(|| std::sync::Mutex::new(None)).lock() {
@@ -1462,7 +1477,7 @@ pub(crate) fn draw_end_marker() -> AnyElement {
 }
 
 fn note_draw_end() {
-    if !frame_stats_enabled() {
+    if !(frame_stats_enabled() || frame_trace_enabled()) {
         return;
     }
     let start = DRAW_START
@@ -1471,8 +1486,14 @@ fn note_draw_end() {
         .map(|mut start| start.take())
         .unwrap_or(None);
     if let Some(start) = start {
-        if let Ok(mut samples) = DRAW_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock() {
-            samples.push(start.elapsed().as_micros());
+        let micros = start.elapsed().as_micros();
+        LAST_DRAW_US.store(micros.min(u128::from(u64::MAX)) as u64, std::sync::atomic::Ordering::Relaxed);
+        // The bench's end-of-run table only: a trace-only run must not grow
+        // this vec forever.
+        if frame_stats_enabled() {
+            if let Ok(mut samples) = DRAW_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock() {
+                samples.push(micros);
+            }
         }
     }
 }
@@ -1541,7 +1562,10 @@ fn frame_trace_slot() -> Option<std::sync::MutexGuard<'static, Option<FrameTrace
                     .ok()?;
                 let mut out = std::io::BufWriter::new(file);
                 use std::io::Write as _;
-                let _ = writeln!(out, "# harness frame trace v1: t_us,list_px,events_since_last_paint,gesture_active");
+                let _ = writeln!(
+                    out,
+                    "# harness frame trace v2: t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us"
+                );
                 Some(FrameTrace { out, start: Instant::now() })
             })(),
         )
@@ -1595,26 +1619,52 @@ impl SessionView {
         self.trace_last_wheel = Some(Instant::now());
     }
 
-    /// Append one `t_us,list_px,events_since_last_paint,gesture_active` row
-    /// for this paint: micros since the trace opened, the absolute pixel
-    /// offset a scrollbar would draw, the wheel events applied since the
-    /// last traced paint, and whether a wheel event landed in the last
-    /// [`TRACE_GESTURE_MS`] milliseconds. Called first in
-    /// `render_transcript`, so even an empty transcript's paints trace.
+    /// Count one applied re-hint for the frame trace. Called beside every
+    /// `rehint_rows` run; drained by the next traced paint.
+    fn note_trace_rehint(&mut self) {
+        if frame_trace_enabled() {
+            self.trace_rehint = true;
+        }
+    }
+
+    /// Take the traced re-hint flag above, for the resize sweep's per-tick
+    /// log. A resize tick that re-hints re-measures its visible rows; one
+    /// that does not rides the old measurements.
+    pub(crate) fn take_trace_rehint(&mut self) -> bool {
+        std::mem::take(&mut self.trace_rehint)
+    }
+
+    /// Append one
+    /// `t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us`
+    /// row for this paint (v2; v1 stops after `gesture_active`): micros
+    /// since the trace opened, the absolute pixel offset a scrollbar would
+    /// draw, the wheel events applied since the last traced paint, whether
+    /// a wheel event landed in the last [`TRACE_GESTURE_MS`] milliseconds,
+    /// the transcript list's laid-out width (tracks the sidebar width
+    /// inversely — the window minus the sidebar minus the chrome), whether
+    /// a re-hint ran since the last traced paint, and the previous frame's
+    /// render-to-paint micros. Called first in `render_transcript`, so even
+    /// an empty transcript's paints trace.
     fn note_frame_trace(&mut self) {
         let Some(mut slot) = frame_trace_slot() else { return };
         let Some(trace) = slot.as_mut() else { return };
         let list_px = self.bench_list_px();
         let events = std::mem::take(&mut self.trace_wheel_pending);
         let gesture = self.trace_last_wheel.is_some_and(|at| at.elapsed().as_millis() < TRACE_GESTURE_MS);
+        let centre_w = self.list_width.unwrap_or(0.0);
+        let rehint = std::mem::take(&mut self.trace_rehint);
+        let draw_us = last_draw_us();
         use std::io::Write as _;
         let _ = writeln!(
             trace.out,
-            "{},{:.1},{},{}",
+            "{},{:.1},{},{},{:.1},{},{}",
             trace.start.elapsed().as_micros(),
             list_px,
             events,
-            gesture as u8
+            gesture as u8,
+            centre_w,
+            rehint as u8,
+            draw_us
         );
         let _ = trace.out.flush();
     }

@@ -381,6 +381,56 @@ impl Harness {
         );
     }
 
+    /// `resize-begin:<x>` / `resize-move:<x>` / `resize-end`: the scripted
+    /// resize drag (owner round 6). They drive the same [`Harness`] handlers
+    /// the divider strip calls — `begin_resize` / `drag_resize` /
+    /// `end_resize` — so an overlap probe (a press with an outside open
+    /// still armed, moves with frames interleaved) exercises the real press
+    /// disarm and the in-flight install gate. Each logs `harness: rsdrag`
+    /// with the width, the sidebar offset, the reveal arm, the scrolled
+    /// flag and the drag: a probe the drag must not move keeps every
+    /// line's `sidebar_px` equal.
+    /// `resize-sweep:<to_w,step_px>`: march the divider toward `to_w` one
+    /// `step_px` per rendered frame (scripting only, owner round 6) — the
+    /// display link's pace on a real display — logging
+    /// `harness: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per
+    /// tick. Like a press it disarms the reveal and owns the list while it
+    /// runs; it never persists.
+    pub(crate) fn step_resize_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let (to, step) = rest.split_once(',').unwrap_or((rest, "4"));
+        let to: f32 = to.trim().parse().unwrap_or(aui::shell::SIDEBAR_WIDTH);
+        let step: f32 = step.trim().parse().unwrap_or(4.0);
+        self.reveal = None;
+        self.sidebar_user_scrolled = true;
+        self.resize.sweep = Some(crate::resize::ResizeSweep::new(to, step));
+        self.resize.active = true;
+        self.resize.scripted = true;
+        cx.notify();
+    }
+
+    pub(crate) fn step_resize_drag(&mut self, phase: &str, rest: &str, cx: &mut Context<Self>) {
+        let x: f32 = rest.trim().parse().unwrap_or(0.0);
+        match phase {
+            "begin" => {
+                self.begin_resize(x, cx);
+                // No pointer behind a scripted drag, so `on_frame`'s
+                // release-outside-the-window rule must not end it between
+                // steps (a headless window is never active).
+                self.resize.scripted = true;
+            }
+            "move" => self.drag_resize(x, cx),
+            _ => self.end_resize(cx),
+        }
+        crate::harness_log!(
+            "rsdrag {phase} w={} sidebar_px={} reveal={:?} scrolled={} ract={}",
+            self.resize.width,
+            self.sidebar_px(),
+            self.reveal,
+            self.sidebar_user_scrolled,
+            self.resize.active
+        );
+    }
+
     /// `sidebar-width:<px>`: a scripted width for the resize screenshots,
     /// clamped and settled exactly like a released drag, minus the pointer.
     pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) {
