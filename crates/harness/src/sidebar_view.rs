@@ -90,6 +90,17 @@ pub(crate) fn take_sidebar_pane_renders() -> u64 {
     SIDEBAR_PANE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Pane rebuilds since the last traced root tick (owner round 6, part C3):
+/// a dedicated counter so the frame trace's per-row drain never steals from
+/// the `sidebar-wheel:`/`resize-sweep:` steps' own accumulation, which spans
+/// many ticks between their own explicit drains.
+static TRACE_PANE_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Drain the trace-only pane count above, for one frame-trace row.
+pub(crate) fn take_trace_pane_ticks() -> u64 {
+    TRACE_PANE_TICKS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Drain the root-render count below, for the `sidebar-wheel:` report.
 pub(crate) fn take_harness_root_renders() -> u64 {
     HARNESS_ROOT_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
@@ -138,6 +149,9 @@ pub(crate) fn note_harness_render() {
 impl Render for SidebarPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if crate::session::frame_trace_enabled() {
+            TRACE_PANE_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         match self.harness.upgrade() {
             Some(harness) => harness.update(cx, |harness, cx| harness.render_sidebar(window, cx)),
             None => div().into_any_element(),
@@ -246,6 +260,24 @@ impl Harness {
     /// presents every tick and no reveal installs.
     pub(crate) fn sidebar_gesture_active(&self) -> bool {
         self.sidebar_wheel.borrow().gesture_until.is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Push one frame-paced sweep delta into the sidebar's accumulator
+    /// (owner round 6, part C3): the same three writes
+    /// [`sidebar_wheel_capture`]'s real event handler makes — accumulate,
+    /// re-arm the gesture horizon, mark scrolled — so a `sidebar-scroll-
+    /// sweep:` tick is indistinguishable from a real wheel event to
+    /// everything downstream (the drain, the reveal disarm, the trace).
+    /// Called once per tick from `on_frame`, never from a dispatched event,
+    /// so it never borrows the entity.
+    pub(crate) fn push_sidebar_scroll_sweep(&mut self, dy: f32, cx: &mut Context<Self>) {
+        {
+            let mut state = self.sidebar_wheel.borrow_mut();
+            state.pending += px(dy);
+            state.gesture_until = Some(std::time::Instant::now() + SIDEBAR_GESTURE_HORIZON);
+            state.scrolled = true;
+        }
+        self.sidebar_pane.update(cx, |_, cx| cx.notify());
     }
 
     /// Apply the capture handler's input (owner round 5 §A1, owner round 6):

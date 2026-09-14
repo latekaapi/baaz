@@ -84,6 +84,8 @@
 //! | `resize-move:<x>` | move a scripted resize drag through the real divider handler (same log) |
 //! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
 //! | `resize-sweep:<to_w,step_px>` | march the divider toward `to_w` one `step_px` per rendered frame, logging `harness: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per tick |
+//! | `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>` | a frame-paced sidebar wheel gesture: `dy` for `finger_ticks` rendered frames, then decaying to 5% of `dy` over `tail_ticks` more, one push per tick (owner round 6, part C3 — the in-process fallback for a real `CGEvent` gesture on a machine that cannot confirm one's landing window; pair with `HARNESS_FRAME_TRACE=1`) |
+//! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
 //! | `overflow` | open the header's overflow menu |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
@@ -184,6 +186,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "resize-move", run: |this, rest, _, cx| this.step_resize_drag("move", rest, cx) },
     WindowVerb { verb: "resize-end", run: |this, rest, _, cx| this.step_resize_drag("end", rest, cx) },
     WindowVerb { verb: "resize-sweep", run: |this, rest, _, cx| this.step_resize_sweep(rest, cx) },
+    WindowVerb { verb: "sidebar-scroll-sweep", run: |this, rest, _, cx| this.step_sidebar_scroll_sweep(rest, cx) },
+    WindowVerb {
+        verb: "transcript-scroll-sweep",
+        run: |this, rest, _, cx| this.step_transcript_scroll_sweep(rest, cx),
+    },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| this.toggle_sidebar(cx) },
     WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },

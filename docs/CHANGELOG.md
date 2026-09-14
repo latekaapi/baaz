@@ -1,5 +1,61 @@
 # Harness changelog
 
+## 2026-09-15 — Owner round 6, part C3: real cadence for sidebar scroll and resize
+
+- **`HARNESS_FRAME_TRACE` moved from v2 to v3**: one row per root render
+  (`Harness::on_frame`) instead of one row per cached-transcript-column
+  paint. The old trace went silent through a sidebar-only or resize-only
+  gesture once parts 4/C1/C2 stopped those from touching the cached centre
+  at all — v3 sees every display tick that renders anything, matching
+  part C1's zero-idle-frames fix. New columns: `root`, `pane`, `centre`
+  (rebuild counts since the last row), `sidebar_ix`/`sidebar_off`
+  (the sidebar `ListOffset`), `sidebar_w`, `resize_active`. `scripts/
+  frame-trace.py` rewritten for the new format and a new `--metric
+  sidebar|transcript|resize` mode; it now excludes ticks pinned at the
+  list's own head/tail boundary from the "should have changed" count (the
+  `bench-scroll` "clamped, not stalled" distinction) and reports the
+  longest silent gap in both display ticks and raw wall-clock milliseconds
+  — the wall-clock number needs no tick-size calibration, which matters on
+  a machine with no real display link (see below).
+- **Two new free scripted steps**, `sidebar-scroll-sweep:<dy,finger_ticks,
+  tail_ticks>` and `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>`
+  (`crates/harness/src/resize.rs`'s new `ScrollSweep`, mirroring the
+  existing `resize-sweep:`): push one wheel delta per rendered frame into
+  the same accumulator a real event fills, finger phase at a constant `dy`
+  then a tail decaying exponentially to 5% of `dy` — the in-process,
+  vsync-paced fallback the brief allows for a machine that cannot confirm
+  a posted `CGEvent`'s landing window.
+- **Real-`CGEvent` cadence attempted, environment-limited.** On this
+  machine, `NSRunningApplication.activate()` for the target window
+  intermittently returns `false`, `screencapture` returns solid black
+  (no attached compositor), and two `harness` windows were found reporting
+  identical, exactly overlapping screen bounds — no on-screen way to
+  confirm which one a posted event reached. Where activation and a small
+  control nudge did land cleanly, real-`CGEvent` numbers were taken
+  alongside the in-process sweep's; full detail and both numbers are in
+  `docs/02-app.md`'s new "Real-window cadence" section. On this machine,
+  branch head passes cleanly by the in-process sweep (sidebar scroll
+  100%/1-tick-gap, divider drag 100%/1-tick-gap, transcript scroll
+  98.2%/matches the pre-existing round-4 tail-gap note) and, by the more
+  trustworthy wall-clock reading, tracks the real pointer smoothly with no
+  multi-frame freeze — the opposite of the owner's own real-machine
+  evidence, which this environment could not reproduce by either this
+  round's method or package A's earlier in-process rig.
+- **Not done**: the three-build (`c14819d`/`b2d82e2`/head) comparison table
+  the brief asked for — neither older commit carries comparable per-tick
+  instrumentation, and porting a scratch patch to two structurally
+  different historical codebases was out of this round's time. The
+  existing `docs/diagnosis/round6-sidebar-scroll.md`/`round6-resize.md`
+  bisections remain the "before" evidence.
+- **Found, not fixed**: a real, unconditional-repaint mechanism
+  (`gpui-base-0.6.0 motion.rs:380-388`'s `animate_keyframes`, called by
+  every pulsing status dot) that would force a full sidebar rebuild every
+  tick whenever a running session's dot is visible, independent of any
+  gesture — confirmed by source, **not** the cause of an unrelated
+  continuous-rebuild observation made while investigating (no session was
+  running in the test fixture); filed as a follow-up, not chased further.
+  See `docs/02-app.md` for the full trail.
+
 ## 2026-09-14 — Owner round 6, part C2: the virtualised sidebar adopted
 
 - **Sessions area moved to `aui::nav::virtual_sidebar_view`** over a

@@ -418,6 +418,15 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
+    /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
+    /// step, owner round 6 part C3): the in-process fallback for a real
+    /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
+    /// it never persists.
+    pub(crate) sidebar_scroll_sweep: Option<crate::resize::ScrollSweep>,
+    /// A frame-paced transcript-wheel sweep in flight (`transcript-scroll-
+    /// sweep:` step, owner round 6 part C3): the transcript's twin of
+    /// [`Self::sidebar_scroll_sweep`].
+    pub(crate) transcript_scroll_sweep: Option<crate::resize::ScrollSweep>,
     /// The sessions list's scroll state: the caller-owned `ListState` the
     /// virtualised sidebar lays out through (owner round 6). A cheap
     /// handle; the component itself stays stateless. Kept in sync with the
@@ -622,6 +631,8 @@ impl Harness {
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
+            sidebar_scroll_sweep: None,
+            transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
             prev_sidebar_rows: Vec::new(),
             prev_sidebar_grouping: None,
@@ -1717,11 +1728,81 @@ impl Harness {
                 cx.notify();
             }
         }
+        // A frame-paced sidebar-wheel sweep (`sidebar-scroll-sweep:` step,
+        // owner round 6 part C3): the same push the real capture handler
+        // makes (`sidebar_view::sidebar_wheel_capture`), once per rendered
+        // frame instead of once per posted `CGEvent` — the in-process
+        // fallback this machine's screen session forced (see
+        // `docs/02-app.md`). Re-arms itself via `request_animation_frame`
+        // through `push_sidebar_scroll_sweep`'s own notify; drops itself
+        // when the sweep reports done.
+        if self.sidebar_scroll_sweep.is_some() {
+            let dy = self.sidebar_scroll_sweep.as_mut().and_then(|sweep| sweep.advance());
+            match dy {
+                Some(dy) => {
+                    self.push_sidebar_scroll_sweep(dy, cx);
+                    window.request_animation_frame();
+                }
+                None => self.sidebar_scroll_sweep = None,
+            }
+        }
+        // A frame-paced transcript-wheel sweep (`transcript-scroll-sweep:`
+        // step, owner round 6 part C3): the transcript's twin of the
+        // sidebar sweep above, pushing into the active session's own
+        // accumulator (`SessionView::push_wheel`) instead of the sidebar's.
+        if self.transcript_scroll_sweep.is_some() {
+            let dy = self.transcript_scroll_sweep.as_mut().and_then(|sweep| sweep.advance());
+            match dy {
+                Some(dy) => {
+                    if let Some(view) = self.active.clone() {
+                        view.update(cx, |view, cx| {
+                            view.push_wheel(px(dy));
+                            cx.notify();
+                        });
+                    }
+                    window.request_animation_frame();
+                }
+                None => self.transcript_scroll_sweep = None,
+            }
+        }
         // The sidebar pane's inputs may have changed without a notify of its
         // own (a session event, a probe answer, the minute rollover): re-arm
         // it here, before anything draws, so a transcript notify alone never
         // rebuilds the column (owner round 4 §3).
         self.sync_sidebar_pane(cx);
+        // The frame trace's per-tick row (owner round 6, part C3): written
+        // here, not from `render_transcript`, because this runs once per
+        // `Harness::render` regardless of which subtree actually rebuilt —
+        // the true per-display-tick hook, where the old centre-scoped trace
+        // went silent through a sidebar-only or resize-only gesture (parts
+        // 4/C1/C2 stopped those from touching the cached transcript at
+        // all). Gated up front so a disabled build pays nothing beyond the
+        // one flag check; `sidebar_list`/`resize.width` are read straight
+        // off `self` so nothing about the sidebar needs to render for this
+        // tick to trace.
+        // `take_trace_rehint` is a single flag shared with the
+        // `resize-sweep:` step's own log above: on a tick where both a
+        // sweep and the trace are running, the sweep's earlier drain wins
+        // and this row reads `rehint=0` regardless. Irrelevant to the real
+        // CGEvent-driven measurements this instrument exists for (they
+        // never run a scripted sweep at the same time).
+        if session::frame_trace_enabled() {
+            let top = self.sidebar_list.logical_scroll_top();
+            let (transcript, rehint) = self
+                .active
+                .clone()
+                .map(|view| view.update(cx, |view, _| (Some(view.trace_tick()), view.take_trace_rehint())))
+                .unwrap_or((None, false));
+            session::note_root_frame_trace(
+                top.item_ix,
+                f32::from(top.offset_in_item),
+                self.resize.width,
+                self.resize.active,
+                transcript,
+                self.sidebar_gesture_active(),
+                rehint,
+            );
+        }
         // The shell's lifecycle only: the login screen owns the whole window
         // and has no session behind it.
         if !matches!(self.auth, Auth::SignedIn(_)) {

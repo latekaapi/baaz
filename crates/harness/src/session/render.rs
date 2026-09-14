@@ -148,7 +148,6 @@ impl SessionView {
     /// happened to have folded by the time a given row was built.
     pub(super) fn render_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         crate::log::trace_first_frame();
-        self.note_frame_trace();
         let frame_start = std::time::Instant::now();
         // Owner round 4 §2: one offset per frame. The capture handler only
         // accumulates; this drain is the frame's single `scroll_by`.
