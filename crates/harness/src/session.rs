@@ -472,6 +472,11 @@ pub struct SessionView {
     submitting: bool,
     /// History is still being paged in behind the live stream.
     loading_history: bool,
+    /// A `view/page` chain is in flight. Separate from `loading_history`,
+    /// which the open path raises before the resume ack so the first frame
+    /// shows the loading row: guarding the chain on the display flag made
+    /// `backfill` skip every cache-miss open (owner round 6 regression).
+    backfill_running: bool,
     /// A stale-sidecar page failure was already retried once in this backfill
     /// chain (owner round 2 S2): the second failure reports instead.
     backfill_stale_retried: bool,
@@ -682,6 +687,7 @@ impl SessionView {
             running: None,
             submitting: false,
             loading_history: false,
+            backfill_running: false,
             backfill_stale_retried: false,
             lease_notice: None,
             banner: None,
