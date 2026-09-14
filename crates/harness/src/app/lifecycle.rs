@@ -423,6 +423,40 @@ impl Harness {
         cx.notify();
     }
 
+    /// `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>`: a frame-paced
+    /// sidebar wheel gesture (owner round 6, part C3) — `dy` held for
+    /// `finger_ticks` rendered frames, then decaying to 5% of `dy` over
+    /// `tail_ticks` more, one push per tick via
+    /// [`Self::push_sidebar_scroll_sweep`]. The
+    /// in-process fallback for a real `CGEvent` gesture: this machine's
+    /// screen session refused `NSRunningApplication.activate()` and
+    /// `screencapture` returned solid black, so a posted event's landing
+    /// window could not be confirmed (see `docs/02-app.md`). Pair with
+    /// `HARNESS_FRAME_TRACE=1` and read `scripts/frame-trace.py --metric
+    /// sidebar`; free, no turn, no wire.
+    pub(crate) fn step_sidebar_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let mut parts = rest.split(',');
+        let dy: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(-20.0);
+        let finger: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(60);
+        let tail: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(40);
+        self.sidebar_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
+        cx.notify();
+    }
+
+    /// `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>`: the
+    /// transcript's twin of `sidebar-scroll-sweep:`, pushing into the
+    /// active session's own wheel accumulator
+    /// (`SessionView::push_wheel`) once per rendered frame. Same shape,
+    /// same fallback reason, same free/no-turn/no-wire guarantee.
+    pub(crate) fn step_transcript_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let mut parts = rest.split(',');
+        let dy: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(-20.0);
+        let finger: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(60);
+        let tail: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(40);
+        self.transcript_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
+        cx.notify();
+    }
+
     pub(crate) fn step_resize_drag(&mut self, phase: &str, rest: &str, cx: &mut Context<Self>) {
         let x: f32 = rest.trim().parse().unwrap_or(0.0);
         match phase {

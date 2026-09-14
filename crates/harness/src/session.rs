@@ -1508,11 +1508,14 @@ pub(crate) fn take_draw_samples() -> Vec<u128> {
     samples.lock().map(|mut samples| std::mem::take(&mut *samples)).unwrap_or_default()
 }
 
-/// Whether the per-paint frame trace is on: `HARNESS_FRAME_TRACE=1` in the
+/// Whether the per-tick frame trace is on: `HARNESS_FRAME_TRACE=1` in the
 /// normal window, read once. The trace is how the owner's own hand gesture
-/// on `--replay` becomes a measurement: every paint appends one row, and
-/// `scripts/frame-trace.py` summarises the log.
-fn frame_trace_enabled() -> bool {
+/// on `--replay` becomes a measurement: every root render appends one row
+/// (owner round 6, part C3 — every display tick that does anything, not
+/// only the ones that rebuild the transcript), and `scripts/frame-trace.py`
+/// summarises the log. `pub(crate)` so [`crate::sidebar_view`] can gate its
+/// own trace-only counter the same way.
+pub(crate) fn frame_trace_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("HARNESS_FRAME_TRACE").as_deref() == Ok("1"))
@@ -1573,11 +1576,25 @@ static CENTRE_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// Count one centre build, for the `sbwheel` report.
 pub(crate) fn note_centre_render() {
     CENTRE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if frame_trace_enabled() {
+        TRACE_CENTRE_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Drain the count above, for the `sbwheel` report.
 pub(crate) fn take_centre_renders() -> u64 {
     CENTRE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Centre builds since the last traced root tick (owner round 6, part C3):
+/// a `sbwheel`/`centre` drain and the frame trace's own row must not fight
+/// over the same counter, so this one exists solely for
+/// [`note_root_frame_trace`] and is never touched by the step instruments.
+static TRACE_CENTRE_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Drain the trace-only centre count above, for one frame-trace row.
+fn take_trace_centre_ticks() -> u64 {
+    TRACE_CENTRE_TICKS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 struct FrameTrace {
@@ -1608,7 +1625,7 @@ fn frame_trace_slot() -> Option<std::sync::MutexGuard<'static, Option<FrameTrace
                 use std::io::Write as _;
                 let _ = writeln!(
                     out,
-                    "# harness frame trace v2: t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us"
+                    "# harness frame trace v3: t_us,root,pane,centre,sidebar_ix,sidebar_off,sidebar_w,resize_active,list_px,events_since_last_tick,gesture_active,rehint,draw_us"
                 );
                 Some(FrameTrace { out, start: Instant::now() })
             })(),
@@ -1622,7 +1639,7 @@ impl SessionView {
     /// handler applies nothing: `render_transcript` drains the sum into one
     /// `scroll_by` per frame. An upward delta leaves the tail, as everywhere
     /// else; every event re-arms the gesture horizon for the momentum tail.
-    fn push_wheel(&mut self, dy: Pixels) {
+    pub(crate) fn push_wheel(&mut self, dy: Pixels) {
         self.pending_wheel += dy;
         if dy > px(0.0) {
             self.follow = false;
@@ -1678,40 +1695,83 @@ impl SessionView {
         std::mem::take(&mut self.trace_rehint)
     }
 
-    /// Append one
-    /// `t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us`
-    /// row for this paint (v2; v1 stops after `gesture_active`): micros
-    /// since the trace opened, the absolute pixel offset a scrollbar would
-    /// draw, the wheel events applied since the last traced paint, whether
-    /// a wheel event landed in the last [`TRACE_GESTURE_MS`] milliseconds,
-    /// the transcript list's laid-out width (tracks the sidebar width
-    /// inversely — the window minus the sidebar minus the chrome), whether
-    /// a re-hint ran since the last traced paint, and the previous frame's
-    /// render-to-paint micros. Called first in `render_transcript`, so even
-    /// an empty transcript's paints trace.
-    fn note_frame_trace(&mut self) {
-        let Some(mut slot) = frame_trace_slot() else { return };
-        let Some(trace) = slot.as_mut() else { return };
+    /// Peek and drain this session's per-tick trace fields (owner round 6,
+    /// part C3): the transcript list's pixel offset, the wheel events
+    /// applied since the last traced tick, and whether a wheel gesture is
+    /// still active. Replaces the old centre-scoped `note_frame_trace`
+    /// (v2), which only ever fired when the cached transcript column itself
+    /// rebuilt — silent through a sidebar-only or resize-only tick since
+    /// owner round 6 parts 4/C1/C2 stopped those from touching the centre
+    /// at all. Called once per root render from `Harness::on_frame`, not
+    /// from `render_transcript`, so it sees every tick regardless of which
+    /// subtree actually rebuilt.
+    pub(crate) fn trace_tick(&mut self) -> (f32, usize, bool) {
         let list_px = self.bench_list_px();
         let events = std::mem::take(&mut self.trace_wheel_pending);
         let gesture = self.trace_last_wheel.is_some_and(|at| at.elapsed().as_millis() < TRACE_GESTURE_MS);
-        let centre_w = self.list_width.unwrap_or(0.0);
-        let rehint = std::mem::take(&mut self.trace_rehint);
-        let draw_us = last_draw_us();
-        use std::io::Write as _;
-        let _ = writeln!(
-            trace.out,
-            "{},{:.1},{},{},{:.1},{},{}",
-            trace.start.elapsed().as_micros(),
-            list_px,
-            events,
-            gesture as u8,
-            centre_w,
-            rehint as u8,
-            draw_us
-        );
-        let _ = trace.out.flush();
+        (list_px, events, gesture)
     }
+}
+
+/// Append one frame-trace row (owner round 6, part C3; v3 format — see the
+/// header line `frame_trace_slot` writes): micros since the trace opened;
+/// `root` (always 1 — one row is written per `Harness::render`, so this
+/// documents the tick model rather than measuring anything); `pane` and
+/// `centre`, how many times the sidebar pane and the cached transcript
+/// column actually rebuilt since the last row (0 most ticks — that they
+/// stay 0 during a sidebar-only or resize-only gesture is the point of
+/// parts 4/C1/C2, and this column is how a regression would show up);
+/// the sidebar list's `ListOffset` (`sidebar_ix`+`sidebar_off`, same shape
+/// as the `sbwheel` step's log); the sidebar divider's current width;
+/// `resize_active`, whether a divider drag is in flight this tick; the
+/// transcript list's pixel offset and wheel events applied since the last
+/// row (0/0 when no session is open); `gesture`, the OR of all three
+/// interactions' own gesture flags (transcript wheel, sidebar wheel,
+/// resize drag) — one column `scripts/frame-trace.py` can use for any of
+/// the three measured gestures without knowing which one is live; whether
+/// a transcript re-hint ran; and the previous frame's render-to-paint
+/// micros ([`note_draw_start`]/[`draw_end_marker`], unchanged by this
+/// split).
+///
+/// Called once from `Harness::on_frame`, which runs first in
+/// `Harness::render` — i.e. once per display tick that renders anything at
+/// all, matching owner round 6 part C1's zero-idle-frames fix: an idle
+/// window writes no rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn note_root_frame_trace(
+    sidebar_ix: usize,
+    sidebar_off: f32,
+    sidebar_w: f32,
+    resize_active: bool,
+    transcript: Option<(f32, usize, bool)>,
+    sidebar_gesture: bool,
+    rehint: bool,
+) {
+    let Some(mut slot) = frame_trace_slot() else { return };
+    let Some(trace) = slot.as_mut() else { return };
+    let pane = crate::sidebar_view::take_trace_pane_ticks();
+    let centre = take_trace_centre_ticks();
+    let (list_px, events, transcript_gesture) = transcript.unwrap_or((0.0, 0, false));
+    let gesture = transcript_gesture || sidebar_gesture || resize_active;
+    let draw_us = last_draw_us();
+    use std::io::Write as _;
+    let _ = writeln!(
+        trace.out,
+        "{},1,{},{},{},{:.1},{:.1},{},{:.1},{},{},{},{}",
+        trace.start.elapsed().as_micros(),
+        pane,
+        centre,
+        sidebar_ix,
+        sidebar_off,
+        sidebar_w,
+        resize_active as u8,
+        list_px,
+        events,
+        gesture as u8,
+        rehint as u8,
+        draw_us
+    );
+    let _ = trace.out.flush();
 }
 
 /// One `view/page` result as foldable wire events, in page order.

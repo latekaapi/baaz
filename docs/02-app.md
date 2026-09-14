@@ -707,18 +707,151 @@ implies `HARNESS_FRAME_STATS` (read once, so disabled builds pay one relaxed
 load per frame) and replaces the old `bench:<n>` step's role — the step still
 works, driving N frames on a static replay for the stderr percentiles.
 
-`HARNESS_FRAME_TRACE=1` traces the normal window instead of the bench:
-every paint appends `t_us,list_px,events_since_last_paint,gesture_active`
-to `$HARNESS_STATE_DIR/frame-trace.log` (the harness's own
+`HARNESS_FRAME_TRACE=1` traces the normal window instead of the bench, to
+`$HARNESS_STATE_DIR/frame-trace.log` (the harness's own
 `~/Library/Application Support/harness/` when the state dir is unset), so a
-hand gesture on `--replay` becomes a measurement: `t_us` is micros since the
-trace opened, `list_px` the absolute pixel offset a scrollbar would draw,
-`events_since_last_paint` the wheel events applied since the last traced
-paint, `gesture_active` whether a wheel event landed in the last 150 ms.
-`python3 scripts/frame-trace.py` summarises a log: paints/s over the gesture,
-the gap histogram in display ticks (the tick from the median gap of the
-densest 200 ms), events applied vs paints, and whether the last applied
-event was the last delivered one.
+hand gesture on `--replay` becomes a measurement. Through owner round 6
+part 4 the trace was v2, one row per *centre* paint
+(`t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us`)
+— it went silent through a sidebar-only or resize-only gesture once parts
+4/C1/C2 stopped those from touching the cached transcript column at all, so
+it could no longer see the two things the owner actually complained about.
+Owner round 6 part C3 replaced it with v3, one row per **root render**
+(`Harness::on_frame`, which runs first in `Harness::render` — i.e. once per
+display tick that renders anything at all, matching part C1's zero-idle
+fix): `t_us,root,pane,centre,sidebar_ix,sidebar_off,sidebar_w,resize_active,
+list_px,events_since_last_tick,gesture_active,rehint,draw_us`. `root` is
+always 1 (one row per root render, by construction, kept for clarity);
+`pane`/`centre` are how many times the sidebar pane and the cached
+transcript column actually rebuilt since the previous row — mostly 0,
+which is the whole point of the caches parts 4/C1/C2 built, and a
+regression there would show as this column going persistently non-zero.
+`sidebar_ix`+`sidebar_off` is the sidebar list's `ListOffset`, `sidebar_w`
+the divider's width, `resize_active` whether a drag is in flight,
+`list_px` the transcript list's pixel offset, `gesture_active` the OR of
+all three interactions' own gesture flags. `draw_us` is the *previous*
+frame's render-to-paint micros, unchanged by the split.
+`python3 scripts/frame-trace.py <log> [--metric sidebar|transcript|resize]`
+summarises a log per interaction: the fraction of gesture-active ticks that
+actually moved the metric (excluding ticks pinned at the list's own
+head/tail boundary — correct end-of-list behaviour, not a dropped tick,
+the same distinction `bench-scroll` makes between "stalls" and "clamped"),
+the longest silent gap both in display ticks and in raw wall-clock
+milliseconds, whether the momentum tail was cut, and frame-ms percentiles.
+
+Two free scripted steps drive a gesture at true display-tick pace without a
+real pointer, for measuring cadence headlessly: `sidebar-scroll-sweep:
+<dy,finger_ticks,tail_ticks>` and `transcript-scroll-sweep:<dy,finger_ticks,
+tail_ticks>` (owner round 6, part C3 — the transcript/sidebar twins of the
+existing `resize-sweep:`), each pushing one wheel delta into the same
+accumulator a real wheel event fills, once per rendered frame, for
+`finger_ticks` frames at a constant `dy` then `tail_ticks` more decaying
+exponentially to 5% of `dy` (the same shape the real-`CGEvent` tool below
+posts, so the two are comparable). This is the brief's own sanctioned
+fallback for a machine that cannot confirm a posted event's landing
+window (see "Real-window cadence" below) — free, no turn, no wire, and it
+respects vsync (`window.request_animation_frame()` per tick) rather than
+applying a burst's whole travel synchronously the way `wheel:`/
+`sidebar-wheel:` do.
+
+### Real-window cadence (owner round 6, part C3)
+
+For the owner's two complaints — sidebar scroll and divider-drag jank, both
+absent from the transcript's own scroll — package A prepared a small Swift
+CGEvent poster (`postscroll`/`postdrag`/`winfind`, scratch tools, not
+committed) to drive the real window: continuous trackpad-shaped scroll
+(finger phase + decaying momentum tail, `.pixel` units,
+`kCGScrollWheelEventIsContinuous`) and a real left-mouse divider drag.
+**On the machine this investigation ran on, real `CGEvent` posting is
+unreliable for confirming which window an event lands on**:
+`AXIsProcessTrusted()` and `CGPreflightPostEventAccess()` both report
+`true` (event-posting permission is granted), but
+`NSRunningApplication.activate()` for the target process intermittently
+returns `false`, `screencapture` returns a solid black image (no attached
+compositor to capture), and two `harness` windows (a fresh `--replay`
+window and the owner's own long-running one) were found reporting
+**identical, exactly overlapping** `CGWindowListCopyWindowInfo` bounds with
+no on-screen way to confirm which one a posted event actually reached.
+Where activation happened to succeed and a small control nudge landed
+cleanly in this window's own trace (confirmed before any larger gesture),
+real-`CGEvent` numbers were taken; the in-process sweep steps above cover
+the rest and are what a script can rely on.
+
+Numbers (debug build, branch head, `--replay
+fixtures/msp/synthetic-stress-hetero.jsonl --sidebar-fixture
+fixtures/sidebar/stress.json`, `HARNESS_FRAME_TRACE=1`; the tick-based
+percentage can under-count on this machine — with no real display link,
+`request_animation_frame` can fire faster than any genuine 60/120 Hz
+compositor would present, so two consecutive rows carrying the same value
+are not necessarily a dropped tick. The wall-clock gap needs no tick
+calibration and is the more trustworthy number here — see the value walks
+below):
+
+| gesture | driver | ticks_with_change | longest_gap_ticks | longest_gap_ms | note |
+|---|---|---|---|---|---|
+| sidebar scroll | in-process sweep | 65/65 (100%) | 1 | — | clean pass |
+| divider drag | in-process sweep | 39/39 (100%) | 1 | — | clean pass |
+| transcript scroll | in-process sweep | 55/56 (98.2%) | 6 | — | matches the pre-existing, already-documented "48 gaps of 53–62 ms in the burst tail" note above (round 4 baseline) — not a round-6 regression; the transcript is not this round's target |
+| sidebar scroll | real `CGEvent` | 63/186 (33.9%) | 5 | 20.7 | value itself walked smoothly and monotonically (`sidebar_ix`/`off` advancing by the exact per-event step with no skips) — read the row-count metric's low percentage as this environment's extra renders, not dropped input |
+| divider drag | real `CGEvent` | 44/96 (45.8%) | 4 | 16.8 | same: `sidebar_w` advanced by a constant ~1.7 px per real change, monotonically, no jumps, no freeze over one real ~60 Hz frame |
+
+**Not done**: the brief asked for this table across three builds
+(`c14819d`, `b2d82e2`, branch head) with matching library worktrees.
+`c14819d` carries no `HARNESS_FRAME_TRACE`/sweep instrumentation at all
+(pre-round-4) and `b2d82e2` carries only the v2, centre-scoped trace
+(round 5) — neither can produce a comparable v3 row for a sidebar-only or
+resize-only tick without a same-shape scratch patch in a matching
+`/tmp` worktree pair (library commit `0e8f708` for `c14819d`, `987318a`
+for `b2d82e2`, per their commit dates), which this round did not reach.
+The existing bisected evidence in `docs/diagnosis/round6-sidebar-scroll.md`
+and `round6-resize.md` (free scripted `pane=`/`root=`/`drains=` counts
+across those same commits) is the "before" picture that exists; it is not
+a per-tick trace and is not repeated here.
+
+Read alongside the value walks (`grep`-able straight out of `frame-trace.log`):
+on this machine, both real gestures the owner named track the pointer
+smoothly with no multi-hundred-millisecond freeze and no large skips — the
+opposite of the owner's own real-machine evidence (25–157 px jumps, gaps of
+2–9 recorded frames). That gap between "smooth here" and "janky there" is
+itself the headline finding: **this environment cannot reproduce the
+owner's jank**, whether because it lacks a real compositor (see above) or
+because the fixture's own background render load (below) differs from the
+owner's real sessions. Package A's own in-process synthetic-event rig
+reached the same conclusion for resize (1 frame/move, ~3.4 ms draw,
+flat) — two independent methods on two different rigs both fail to
+reproduce the real-machine symptom, which argues for a cause outside
+anything either rig exercises: real 60–120 Hz vsync pacing, GPU
+compositing, or OS-level input coalescing under real system load, none of
+which a scripted or headless rig can stand in for.
+
+**A related, unresolved observation, found while chasing the above**: with
+a session open and `fixtures/sidebar/stress.json` loaded, this build's
+sidebar pane was seen rebuilding on very close to 100% of root renders
+(measured 192/201 and 196/203 across separate runs) for tens of seconds at
+a stretch with **no gesture active and no session actually running**
+(`entry.running: false` on every fixture row; the replayed session's own
+`turn/started`/`turn/completed` counts matched, so it is not mid-turn
+either) — ruled out as the sidebar's own explicit notify path
+(`sync_sidebar_pane`'s `SidebarKey` compared unchanged across 3 notifies in
+5 s of the same continuous rebuilding, confirmed by a temporary debug
+print, not committed). The cached pane's `.cached()` boundary
+(gpui-pre-0.3.3 `view.rs:387-390`) can also miss on a bounds/content-mask/
+text-style change with no explicit notify at all, which was not reached
+before time ran out; a real, separately-verified mechanism in this
+codebase that unconditionally requests a repaint every tick while active —
+`gpui-base-0.6.0 motion.rs:380-388`'s `animate_keyframes`, called by every
+pulsing status dot (`aui-motion pulse.rs:38`'s `looping()`, `aui data/
+dot.rs:41`) whenever `AgentState::Running` — was confirmed **not** the
+cause here (no row in this fixture is `running`), but is worth knowing
+about for any future chase of this: `gpui-pre-0.3.3 window.rs:2525-2528`'s
+`request_animation_frame()` notifies `self.current_view()`, which while
+inside `SidebarPane`'s `.cached()` prepaint scope is the *whole pane*, not
+just the pulsing dot — so on a real session with a running turn visible in
+the sidebar, that mechanism alone would force a full sidebar rebuild every
+tick, independent of any user gesture. Not patched (registry crate; would
+need the dot to own its own inner cached scope so its self-requested
+repaint stops at itself). Filed for a follow-up rather than chased further
+in this round.
 
 Baselines (owner round 4 §1, before any fix; `wt/r4-scroll-instr`, each run
 with its own throwaway `HARNESS_STATE_DIR`). `bench-draw` is whole-frame

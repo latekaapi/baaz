@@ -78,6 +78,57 @@ impl ResizeSweep {
     }
 }
 
+/// One frame-paced scroll sweep (owner round 6, part C3): applies a wheel
+/// delta once per rendered frame — the display link's pace on a real
+/// display — standing in for a posted trackpad gesture when the
+/// environment cannot deliver real `CGEvent`s to the window (this
+/// machine's screen session refused `NSRunningApplication.activate()` and
+/// `screencapture` returned solid black, so a posted event's destination
+/// window could not be confirmed — see `docs/02-app.md`). A finger phase
+/// of `finger` ticks at a constant `dy`, then a tail of `tail` ticks
+/// decaying exponentially to 5% of `dy` — the same shape `postscroll.swift`
+/// (the real-`CGEvent` tool in the scratch `rwtools/` used for this
+/// investigation) posts, so a sweep and a real gesture are comparable.
+#[derive(Debug)]
+pub(crate) struct ScrollSweep {
+    dy: f32,
+    finger_left: u32,
+    tail_left: u32,
+    tail_total: u32,
+    pub(crate) ticks: u32,
+}
+
+impl ScrollSweep {
+    pub(crate) fn new(dy: f32, finger: u32, tail: u32) -> Self {
+        Self { dy, finger_left: finger, tail_left: tail, tail_total: tail.max(1), ticks: 0 }
+    }
+
+    /// The delta to apply this tick, or `None` once the sweep is done —
+    /// the caller drops it then.
+    pub(crate) fn advance(&mut self) -> Option<f32> {
+        self.ticks += 1;
+        if self.finger_left > 0 {
+            self.finger_left -= 1;
+            Some(self.dy)
+        } else if self.tail_left > 0 {
+            // `progress` walks 0..1 across the tail (0 on the first tail
+            // tick, 1 on the last); 0.05^progress decays from 1.0 (full
+            // `dy`) to 0.05 (5% of `dy`) — an exponential curve, matching
+            // the Swift tool's own momentum decay. A one-tick tail has no
+            // span to walk, so it decays straight to the tail's end value.
+            let progress = if self.tail_total > 1 {
+                (self.tail_total - self.tail_left) as f32 / (self.tail_total - 1) as f32
+            } else {
+                1.0
+            };
+            self.tail_left -= 1;
+            Some(self.dy * 0.05f32.powf(progress))
+        } else {
+            None
+        }
+    }
+}
+
 impl ResizeDrag {
     /// The settled state at boot: whatever `layout.json` restored.
     pub(crate) fn restored(width: f32) -> Self {
@@ -188,5 +239,28 @@ mod tests {
         let mut sweep = ResizeSweep::new(10_000.0, 4.0);
         assert_eq!(sweep.advance(418.0), aui::shell::SIDEBAR_MAX_WIDTH);
         assert_eq!(sweep.advance(420.0), aui::shell::SIDEBAR_MAX_WIDTH);
+    }
+
+    /// A scroll sweep holds a constant delta for the finger phase, then
+    /// decays to 5% of it over the tail, then stops (owner round 6, part
+    /// C3).
+    #[test]
+    fn a_scroll_sweep_holds_then_decays_then_stops() {
+        let mut sweep = ScrollSweep::new(-20.0, 3, 2);
+        assert_eq!(sweep.advance(), Some(-20.0));
+        assert_eq!(sweep.advance(), Some(-20.0));
+        assert_eq!(sweep.advance(), Some(-20.0));
+        assert_eq!(sweep.advance(), Some(-20.0)); // tail tick 1: progress 0 -> full dy
+        assert_eq!(sweep.advance(), Some(-1.0)); // tail tick 2: progress 1 -> 5% of dy
+        assert_eq!(sweep.advance(), None);
+        assert_eq!(sweep.advance(), None);
+    }
+
+    #[test]
+    fn a_scroll_sweep_with_no_tail_stops_right_after_the_finger_phase() {
+        let mut sweep = ScrollSweep::new(10.0, 2, 0);
+        assert_eq!(sweep.advance(), Some(10.0));
+        assert_eq!(sweep.advance(), Some(10.0));
+        assert_eq!(sweep.advance(), None);
     }
 }
