@@ -382,7 +382,12 @@ impl Harness {
             );
         }
         let after = self.sidebar_list_top();
-        let rows = self.visible_sessions(cx).len();
+        // The flattened row count (heads + folds + sessions), not the
+        // session count `visible_sessions(cx).len()` used to log here
+        // (owner round 6, part C4 review #5): `item_ix` walks the
+        // flattened model, so a probe comparing it against `rows=` needs
+        // the same count or its bound is off by the header/fold rows.
+        let rows = self.prev_sidebar_rows.len();
         let centre = crate::session::take_centre_renders();
         // The list walks down as `item_ix` grows; a click that moves
         // nothing reads the same index twice, an outside open the minimum
@@ -416,6 +421,7 @@ impl Harness {
         let to: f32 = to.trim().parse().unwrap_or(aui::shell::SIDEBAR_WIDTH);
         let step: f32 = step.trim().parse().unwrap_or(4.0);
         self.reveal = None;
+        self.reveal_unknown = None;
         self.sidebar_user_scrolled = true;
         self.resize.sweep = Some(crate::resize::ResizeSweep::new(to, step));
         self.resize.active = true;
@@ -904,8 +910,10 @@ impl Harness {
         self.pending_id = Some(session_id.clone());
         if quiet {
             self.reveal = None;
+            self.reveal_unknown = None;
         } else {
             self.reveal = Some(session_id.clone());
+            self.reveal_unknown = None;
             // A fresh arm owns the list again: the next user scroll disarms
             // it (owner round 5 §A1).
             self.sidebar_user_scrolled = false;
@@ -1107,11 +1115,13 @@ impl Harness {
         self.pending_id = Some(session_id.clone());
         if quiet {
             self.reveal = None;
+            self.reveal_unknown = None;
         } else {
             // The sidebar's one-shot reveal arms on the same swap — and a
             // fresh arm owns the list again: the next user scroll disarms it
             // (owner round 5 §A1).
             self.reveal = Some(session_id.clone());
+            self.reveal_unknown = None;
             self.sidebar_user_scrolled = false;
         }
         let project_name = self.project_name_for(&session_id);

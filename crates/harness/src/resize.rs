@@ -164,6 +164,7 @@ impl Harness {
     /// sessions list itself — and no reveal installs while it is in flight.
     pub(crate) fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
         self.reveal = None;
+        self.reveal_unknown = None;
         self.sidebar_user_scrolled = true;
         let drag = &mut self.resize;
         drag.active = true;

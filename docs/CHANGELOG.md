@@ -1,5 +1,68 @@
 # Harness changelog
 
+## 2026-09-15 — Owner round 6, part C4: review fixes
+
+A read-only review of `b2d82e2..d5a10b7` (harness) / `987318a..73bc480`
+(agentic-ui), found and fixed (numbers from the review report):
+
+- **#1, confirmed, most severe: a reveal for a session with no row yet
+  never fired.** A draft before its first send, or a fork before
+  `load_sessions`'s reply lands, has no flattened row — `reveal_head_row`
+  found nothing, and `reveal_sidebar_row` cleared the arm on that very
+  first render, so the row-birth that followed (the `turn/started`
+  local-row insert; the wire reply) had nothing left armed to reveal it.
+  Fixed: `reveal_sidebar_row` now distinguishes a *known* session with
+  nowhere to go (unchanged — gives up on the first miss) from an
+  *unrecognised* id, which keeps the flag armed across misses (a new
+  `Harness::reveal_unknown: Option<(String, u32)>`, cleared at every
+  existing disarm/arm site) up to `REVEAL_UNKNOWN_FRAMES` (120) attempts —
+  the row-birth sites already `invalidate_list`/notify, so a normal wait
+  is one or two attempts; the bound only guards an id that never arrives.
+  The streak bookkeeping is pulled out as pure `next_reveal_unknown_streak`
+  and unit-tested (3 new tests); the end-to-end path (a real first send or
+  fork) was code-reviewed but not probed live — a true first send needs a
+  billed turn, and a free scripted repro of the exact race needs
+  test-only wire-simulation infrastructure this pass did not build.
+- **#2, no change**: a closed group's reveal shows the group head and
+  never auto-expands. Confirmed as the owner's accepted decision from
+  round 4 (the docs already say so); left as-is per the review's own
+  finding.
+- **#4, plausible, fixed: the reveal poke loop had no layout guard.**
+  While a target's viewport position was unknown (`None`, pre-layout —
+  a degenerate zero-height sidebar rect), every pane render spawned
+  another pane-notify task, which renders, which pokes again — an
+  unbounded loop `bench-idle` would never see settle. Fixed:
+  `reveal_sidebar_row` now only spawns the wake-up task once both
+  `item_is_above_viewport`/`item_is_below_viewport` report a known
+  answer; with the viewport still unknown it leaves the flag armed and
+  schedules nothing, trusting the layout that eventually happens (a
+  resize, a normal render) to bring the function around again.
+- **#5, confirmed, fixed: the `sbwheel` log's `rows=` was the session
+  count, not the flattened row count**, off by the header/fold rows from
+  what `item_ix` actually walks. Now logs `self.prev_sidebar_rows.len()`.
+- **#6, confirmed, fixed**: `SidebarPane`'s doc comment still described
+  the reveal prepaint intents round 6 deleted; reworded to the current
+  task-poke mechanism.
+- **#3, plausible, library, investigated, not fixed this round**: the
+  rename editor slot (`aui nav/views.rs:466`, `RefCell<Option<AnyElement>>`
+  `.take()`n by whichever row build runs first in a frame) can be claimed
+  by a measure pass on a multi-build frame, leaving the paint pass to draw
+  the plain row — a possible flicker while renaming and scrolling/resizing
+  at once. `AnyElement` is not `Clone`, so the fix is a real reshape (a
+  rebuildable editor — e.g. an `Rc<dyn Fn() -> AnyElement>` the slot can
+  call more than once, not a single element it can only hand out once),
+  touching both the library's row builder and whatever harness call site
+  constructs the editor. Deferred: the change and the library gate suite
+  it needs (build, all-features, test, clippy, rustdoc, `api-doc.py`,
+  gallery) were out of this round's remaining time; risk is real only on
+  frames that build a row's measure and paint passes separately.
+- **#7, no defect, not actioned**: `VirtualSidebarView::on_selected_
+  prepainted`/`on_current_prepainted` have no harness caller left (worth a
+  library-side check of the gallery before deleting); the old div-scroll
+  `SidebarView` path is harness-dead; `flatten_sidebar` runs twice per
+  pane frame (harness sync + library render) and could take rows in
+  instead — all noted, none acted on, all optional per the review itself.
+
 ## 2026-09-15 — Owner round 6, part C3: real cadence for sidebar scroll and resize
 
 - **`HARNESS_FRAME_TRACE` moved from v2 to v3**: one row per root render
@@ -681,7 +744,6 @@ Four faults from the owner's second look, diagnosed on the wire and fixed the sa
   the window's edge, and file snippets ran past the right edge. The library palette takes
   the harness's editor in its query row (`query_slot`), bounds the list to 320 px and
   scrolls it, and truncates the context column.
-
 
 ## 2026-09-13 — Owner round: fifteen faults from three notes and nine screenshots
 
