@@ -62,7 +62,7 @@ impl Harness {
     /// gutter (ruler on the round-4 captures: nav icon centre 41 vs session
     /// dot centre 36 before; owner round 4, O3).
     fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
-        let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
+        let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
         let add_project =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.open_projects(false, window, cx));
         let automations = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
@@ -132,7 +132,7 @@ impl Harness {
                     if id.as_ref() == crate::sidebar::OTHER_GROUP {
                         this.open_projects(false, window, cx);
                     } else {
-                        this.new_session_in(Some(id.to_string()), cx);
+                        this.new_session_in(Some(id.to_string()), window, cx);
                     }
                 }
                 // The folded group's "Show N more" / "Show less" row flips
@@ -515,7 +515,7 @@ impl Harness {
             this.resume(id.to_string(), window, cx);
         });
         let action = cx.listener(|this: &mut Self, name: &str, window, cx| match name {
-            "new" => this.new_session(cx),
+            "new" => this.new_session(window, cx),
             // Task E has landed: the rail cell opens the full-text search
             // palette, like the header search icon and ⌘⇧F.
             "search" => this.open_search(window, cx),

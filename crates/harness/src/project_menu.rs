@@ -10,9 +10,9 @@
 //! second `anchored_menu`, so it flips left near the window edge.
 //!
 //! One [`MenuRow::Toggle`] per project in sidebar order, checked for the
-//! menu's project; picking one replaces a still-empty unnamed active session
-//! (hidden locally — it never reaches the wire without a turn) and otherwise
-//! starts a sibling session there. Then "New session here", "Rename project",
+//! menu's project; picking one moves an unsent draft's content into that
+//! project's draft session (started there if needed) and otherwise starts a
+//! sibling session there. Then "New session here", "Rename project",
 //! a "Colour" submenu of eight swatches, pin, reveal, and removal.
 
 use aui::nav::{view_menu, view_submenu_rows, MenuRow};
@@ -119,19 +119,41 @@ impl Harness {
         self.projects.sorted().into_iter().cloned().collect()
     }
 
-    /// Pick a project from its menu row: an active session with zero turns
-    /// and no name is abandoned (hidden locally — without a turn the wire
-    /// never lists it, so nothing reaches the server) and otherwise the new
-    /// session is a sibling there.
-    fn pick_project(&mut self, id: String, cx: &mut Context<Self>) {
+    /// Pick a project from its menu row: when the active session is an
+    /// unsent draft and another project is picked, the draft's content moves
+    /// into the picked project's draft session (started there if needed) —
+    /// the server prunes zero-turn sessions on relaunch, so the old id
+    /// simply leaves the draft map. A session with turns instead gets a
+    /// sibling there, as before.
+    fn pick_project(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active) = self.active_id(cx) {
-            let replace =
-                self.sessions.iter().find(|e| e.id == active).is_some_and(|e| e.turns == 0 && !e.named);
-            if replace {
-                self.set_override(&active, |meta| meta.hidden = true, cx);
+            // Only a registered draft moves: a session with a turn in
+            // flight already left, and a replayed capture is not ours.
+            let registered = self.drafts.values().any(|named| named == &active);
+            let sending =
+                self.active.as_ref().is_some_and(|view| view.read(cx).session_id == active && view.read(cx).is_sending());
+            let project_of = self
+                .sessions
+                .iter()
+                .find(|e| e.id == active)
+                .and_then(|e| e.project.clone())
+                .or_else(|| self.current_project_id());
+            if registered && self.is_live_draft(&active, cx) && !sending && project_of.as_deref() != Some(id.as_str()) {
+                let moving = self
+                    .active
+                    .clone()
+                    .filter(|view| view.read(cx).session_id == active)
+                    .map(|view| view.update(cx, |view, vc| view.take_draft(window, vc)));
+                self.drafts.retain(|_, named| named != &active);
+                // A rowless draft has no row to hide; a rowed one keeps the
+                // old rule so it never strands a visible empty row.
+                if self.sessions.iter().any(|e| e.id == active) {
+                    self.set_override(&active, |meta| meta.hidden = true, cx);
+                }
+                self.pending_draft = moving;
             }
         }
-        self.new_session_in(Some(id), cx);
+        self.new_session_in(Some(id), window, cx);
     }
 
     /// Rename through the crumb's dense field: the menu's project becomes
@@ -191,6 +213,9 @@ impl Harness {
             return;
         }
         self.branches.remove(&id);
+        // A removed project takes its unsent draft with it: the parked view
+        // stays cached but becomes evictable, and ⌘N can never reopen it.
+        self.drafts.remove(&id);
         // The current project is gone: the most recently opened remaining
         // adoption takes it, or nothing does.
         if self.current_project.as_deref() == Some(id.as_str()) {
@@ -422,10 +447,10 @@ impl Harness {
                 this.overlays.update(cx, |overlays, _| overlays.menu = None);
             }
             match action {
-                Some(ProjectMenuAction::Pick(id)) => this.pick_project(id, cx),
+                Some(ProjectMenuAction::Pick(id)) => this.pick_project(id, window, cx),
                 Some(ProjectMenuAction::NewHere) => {
                     if let Some(id) = target_for.clone() {
-                        this.new_session_in(Some(id), cx);
+                        this.new_session_in(Some(id), window, cx);
                     }
                 }
                 Some(ProjectMenuAction::Rename) => {

@@ -79,7 +79,7 @@ use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
 use crate::resize::ResizeDrag;
 use crate::shot::CaptureToken;
-use crate::session::{SessionEvent, SessionHost, SessionView};
+use crate::session::{Draft, SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
 use crate::sessions::{self, SessionMeta};
 use crate::projects::{self, Project, Projects};
@@ -393,6 +393,14 @@ pub struct Harness {
     /// fold, scroll position and draft kept); reopening shows it at once and
     /// tops it up from its last cursor.
     session_cache: Vec<(String, Entity<SessionView>)>,
+    /// One unsent draft session per project, by project id: what ⌘N returns
+    /// to while nothing has been sent. A draft has no sidebar row; the entry
+    /// leaves the map the moment its first turn is accepted (`turn/started`).
+    pub(crate) drafts: HashMap<String, String>,
+    /// A draft taken from another project's session, waiting for the picked
+    /// project's draft session to exist so it can be moved in. Set by the
+    /// project menu's retarget, consumed by `new_session_in`.
+    pub(crate) pending_draft: Option<Draft>,
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
@@ -562,6 +570,8 @@ impl Harness {
             reveal: None,
             reveal_stable: false,
             session_cache: Vec::new(),
+            drafts: HashMap::new(),
+            pending_draft: None,
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
@@ -883,10 +893,36 @@ impl Harness {
                 .as_ref()
                 .filter(|view| view.read(cx).session_id == session_id)
                 .and_then(|view| view.read(cx).first_prompt_text());
-            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id && entry.local) {
-                if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
-                    entry.label = prompt;
+            // A turn that started is a session made real: it is no draft
+            // any more, whether it already had a row or not.
+            self.drafts.retain(|_, named| named != &session_id);
+            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
+                // The wire still does not list it, but the prompt the view
+                // sent is known: title the local row from it.
+                if entry.local {
+                    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+                        entry.label = prompt;
+                    }
+                    self.invalidate_list();
                 }
+            } else if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                // The first send of this window's rowless draft: insert its
+                // local row now, titled from the prompt, newest-dated for
+                // the top of its project group. A turn no open view sent
+                // names nothing this window can title, so it inserts no row.
+                let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
+                let workspace = self.session_workspace(&session_id);
+                let label =
+                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned());
+                let row = sidebar::local_started_row(
+                    &session_id,
+                    label,
+                    project,
+                    Some(workspace),
+                    crate::clock::now_local(),
+                );
+                self.sessions.retain(|entry| entry.id != session_id);
+                self.sessions.push(row);
                 self.invalidate_list();
             }
         }
@@ -1392,7 +1428,7 @@ impl Harness {
                 )
                 .into_any_element();
         }
-        let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
+        let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
         v_flex()
             .size_full()
             .items_center()
@@ -1673,7 +1709,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-                .on_action(cx.listener(|this, _: &NewSession, _, cx| this.new_session(cx)))
+                .on_action(cx.listener(|this, _: &NewSession, window, cx| this.new_session(window, cx)))
                 .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))

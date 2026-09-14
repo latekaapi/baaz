@@ -65,9 +65,15 @@ Taken with the owner on 2026-09-13.
   ramp in the library tokens (both themes), assigned round-robin at add time, changeable
   from the project menu. Group rows, the header crumb, the palette and the rail tiles use it.
 - **D34 New session.** ⌘N starts in the current project. The centre header shows
-  `mark project › session`; the project part is a menu: pick another project and the empty
-  session is replaced by one there (a session with turns instead gets a sibling there). Each
-  group row also carries its own `+`.
+  `mark project › session`; the project part is a menu: pick another project and the unsent
+  draft's content moves into that project's draft session, started there if needed
+  (a session with turns instead gets a sibling there). Each
+  group row also carries its own `+`. An unsent session has no sidebar row —
+  the row appears at the top of its project on the first accepted turn — and
+  the draft (text, images, files) is per project: leaving an unsent session
+  and coming back to New session in the same project returns to the same
+  draft. Drafts live in memory for the app's lifetime; they are not persisted
+  to disk.
 - **D35 Per-project defaults.** The last-used model, effort and approval mode are stored on
   the project record and applied to that project's new sessions. `--approval-mode` still
   wins for scripted runs.

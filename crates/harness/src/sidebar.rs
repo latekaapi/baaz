@@ -280,6 +280,37 @@ pub fn replay_workspace(capture: &std::path::Path) -> Option<String> {
 /// does not contain survive (appended, still local), and a local whose id
 /// is listed is dropped — the joined wire row already replaced it. The
 /// visible list sorts newest-first downstream, so no order is promised here.
+/// The row a `turn/started` inserts for a draft that never had one: the
+/// first accepted turn makes the session real, titled from its prompt and
+/// newest-dated, so the downstream newest-first sort puts it at the top of
+/// its project group until the wire lists it.
+pub fn local_started_row(
+    session_id: &str,
+    label: String,
+    project: Option<String>,
+    workspace: Option<String>,
+    updated: DateTime<Local>,
+) -> SessionEntry {
+    SessionEntry {
+        id: session_id.to_owned(),
+        label,
+        updated,
+        running: true,
+        turns: 0,
+        hidden: false,
+        pinned: false,
+        archived: false,
+        description: String::new(),
+        replayed: false,
+        named: false,
+        needs_title: false,
+        local: true,
+        workspace,
+        project,
+        branch: None,
+    }
+}
+
 pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) -> Vec<SessionEntry> {
     let mut merged = wire;
     let listed: std::collections::HashSet<String> = merged.iter().map(|entry| entry.id.clone()).collect();
@@ -807,6 +838,43 @@ mod tests {
             project: None,
             branch: None,
         }
+    }
+
+    #[test]
+    fn an_empty_row_is_noise_unless_it_is_open() {
+        // `is_empty` is unchanged by the draft rework: a zero-turn unnamed
+        // session shows only while it is the open one.
+        let row = entry("s");
+        assert!(row.is_empty(None));
+        assert!(!row.is_empty(Some("s")));
+        assert!(row.is_empty(Some("other")));
+        let mut named = entry("n");
+        named.named = true;
+        assert!(!named.is_empty(None));
+        let mut turned = entry("t");
+        turned.turns = 1;
+        assert!(!turned.is_empty(None));
+    }
+
+    #[test]
+    fn a_first_send_inserts_a_titled_local_row() {
+        let now = Local::now();
+        let row = local_started_row("s-new", "Fix the header".into(), Some("p".into()), Some("/w".into()), now);
+        // Titled from the prompt, local so the wire replaces it on listing,
+        // carrying the draft's project, and dated now for the top of the
+        // group — but never named, so the empty filter still applies
+        // anywhere but the open session.
+        assert_eq!(row.label, "Fix the header");
+        assert!(row.local);
+        assert!(!row.named);
+        assert_eq!(row.project.as_deref(), Some("p"));
+        assert_eq!(row.updated, now);
+        assert!(!row.is_empty(Some("s-new")));
+        // The wire's later listing supersedes it, as before.
+        let wire = vec![entry("s-new")];
+        let merged = merge_session_list(wire, &[row]);
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].local);
     }
 
     fn project(id: &str, name: &str, colour: u8, pinned: bool) -> crate::projects::Project {
