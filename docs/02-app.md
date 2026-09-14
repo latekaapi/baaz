@@ -283,10 +283,12 @@ a "Show N more" / "Show less" row (`expanded_groups` in the layout file,
 persisted like `closed_groups`); the open session is always among the
 visible ones even when older than the fifth. With one project and nothing in
 Other the list stays the date view: the grouping follows the data until the
-view menu persists a choice. A session just started is listed by the wire
-only after its log flushes on `turn/completed`, so its row appears at once as
-a local one ("New session", titled from the first prompt on `turn/started`)
-and the next `session/list` keeps it until the wire lists its id.
+view menu persists a choice. An unsent session has no sidebar row. The row appears at the top of its
+project when the first message is accepted (`turn/started`), titled from the
+prompt, and the wire replaces it once the log flushes on `turn/completed`
+(the wire lists a session only then). Repeated ⌘N never creates more than
+one session per project: the draft is per project (see `docs/03-composer.md`),
+and the parked draft view is never evicted from the MRU.
 
 A group row's `+` starts a session in that project (making it current); on
 Other it opens the Projects palette. Its `…` opens the project menu for that

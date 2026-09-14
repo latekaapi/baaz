@@ -403,11 +403,10 @@ impl Harness {
                 if id.as_ref() == "choose" {
                     self.choose_project_folder(cx);
                 } else if let Some(project) = id.strip_prefix("p:") {
-                    self.new_session_in(Some(project.to_owned()), cx);
+                    self.new_session_in(Some(project.to_owned()), window, cx);
                 } else if let Some(root) = id.strip_prefix("a:") {
                     self.adopt_root(std::path::Path::new(root), cx);
                 }
-                let _ = window;
             }
             PaletteKind::Fork => {
                 self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));

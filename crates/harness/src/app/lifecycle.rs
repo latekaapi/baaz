@@ -10,6 +10,51 @@ use super::*;
 /// too, so a parked view's own fold never grows past it either).
 const SESSION_CACHE_LIMIT: usize = 8;
 
+/// What `new_session_in` does about the target project's draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DraftDecision {
+    /// Reopen this draft session's view; nothing starts.
+    Reuse(String),
+    /// Start a session; first forget this stale draft name, if any.
+    Start { stale: Option<String> },
+}
+
+/// The draft map's decision, in pure form: reuse the project's draft while
+/// `live` still calls it unsent, else start — pruning a name the app can no
+/// longer open.
+pub(crate) fn draft_decision(
+    drafts: &HashMap<String, String>,
+    project: &str,
+    live: impl Fn(&str) -> bool,
+) -> DraftDecision {
+    match drafts.get(project) {
+        Some(named) if live(named) => DraftDecision::Reuse(named.clone()),
+        Some(named) => DraftDecision::Start { stale: Some(named.clone()) },
+        None => DraftDecision::Start { stale: None },
+    }
+}
+
+/// Which parked ids survive the MRU cap, in order: drafts are never evicted,
+/// everything else keeps most-recent-first up to `limit`.
+pub(crate) fn evict_parked(
+    ids: &[String],
+    drafts: &std::collections::HashSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    let mut kept = 0usize;
+    ids.iter()
+        .filter(|id| {
+            if drafts.contains(*id) {
+                true
+            } else {
+                kept += 1;
+                kept <= limit
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 /// One `--sidebar-fixture` row: the wire's shape, spelled as JSON.
 ///
 /// `label` stands in for the index title a live row would carry.
@@ -177,7 +222,7 @@ impl Harness {
             // A scripted turn or a scripted capture with no session named needs
             // somewhere to go.
             if (self.args.send.is_some() || !self.args.steps.is_empty()) && self.active.is_none() {
-                self.new_session(cx);
+                self.new_session(window, cx);
             }
             return;
         };
@@ -295,6 +340,20 @@ impl Harness {
         cx.notify();
     }
 
+    /// `new`: the same as ⌘N, in the current project. `new:<project name>`:
+    /// the group row's `+` for the project named — an unknown name only logs.
+    pub(crate) fn step_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = rest.trim();
+        if name.is_empty() {
+            self.new_session(window, cx);
+            return;
+        }
+        match self.projects.projects.iter().find(|p| p.name == name).map(|p| p.id.clone()) {
+            Some(id) => self.new_session_in(Some(id), window, cx),
+            None => crate::harness_log!("unknown project `{name}`"),
+        }
+    }
+
     /// `pin`: pin or unpin the active session.
     /// `pin`: toggle the active session's pin; `pin:<id>`: toggle that row's.
     /// The id form is for captures: the replay row lives in closed Other, so
@@ -384,24 +443,59 @@ impl Harness {
     /// and go while the window is open, and the `@` picker should not offer a
     /// path that was deleted an hour ago. With no adoption there is nowhere
     /// to start, so nothing starts — package 2's hero owns that state.
-    pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_project_id();
-        self.new_session_in(current, cx);
+        self.new_session_in(current, window, cx);
     }
 
     /// `session/start` in `project`, which becomes current first so the new
     /// view, its workspace and the next ⌘N all agree about where it started.
     /// A `None` or unknown project is [`Self::new_session`] with no adoption:
     /// nothing starts.
-    pub(crate) fn new_session_in(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+    ///
+    /// An unsent session has no sidebar row: while the target project's draft
+    /// is still unsent this reopens that view instead of starting another
+    /// session, so repeated clicks never create more than one session per
+    /// project.
+    pub(crate) fn new_session_in(
+        &mut self,
+        project: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = project.as_deref().filter(|id| self.projects.find(id).is_some()) {
             self.projects.touch(id);
             self.projects.current = Some(id.to_owned());
             self.current_project = Some(id.to_owned());
             projects::write(&self.projects);
         }
-        let Some(client) = self.client.clone() else { return };
         let current = self.current_project_id();
+        // A live draft in the target project is the session: reopen its view
+        // without touching the wire.
+        if let Some(id) = current.clone() {
+            match draft_decision(&self.drafts, &id, |candidate| self.is_live_draft(candidate, cx)) {
+                DraftDecision::Reuse(draft_id) => {
+                    if self.open_draft(&draft_id, window, cx) {
+                        return;
+                    }
+                    // Named but viewless: the MRU never evicts a draft, so
+                    // this is unreachable — drop the stale name and start
+                    // below rather than strand a retarget.
+                    self.drafts.remove(&id);
+                }
+                DraftDecision::Start { stale: Some(_) } => {
+                    self.drafts.remove(&id);
+                }
+                DraftDecision::Start { stale: None } => {}
+            }
+        }
+        let Some(client) = self.client.clone() else {
+            // Scripted chrome (`--no-connect` / `--replay`): no child to
+            // start a session on, so the draft opens as a local view. Its id
+            // is deterministic per project so captures read the same.
+            self.open_local_draft(window, cx);
+            return;
+        };
         // `session/start` is the only surface that declares a session's
         // policy up front; `session/setApprovalMode` afterwards is a
         // different thing, and on this server it does not reach
@@ -417,6 +511,7 @@ impl Harness {
             .and_then(|id| self.projects.find(id))
             .and_then(|p| p.defaults.effort.as_deref())
             .and_then(projects::parse_effort);
+        let started_project = current.clone();
         self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
         let work = move || client.session_start(&params);
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
@@ -434,21 +529,14 @@ impl Harness {
                         view.update(cx, |view, cx| view.seed_session(envelope, cx));
                     }
                 }
-                // The wire lists a session only after its log flushes on
-                // `turn/completed`, so its row appears at once as a local
-                // one — labelled "New session" until the first
-                // `turn/started` titles it from the prompt — and the next
-                // `load_sessions` keeps it until the wire lists its id.
-                let mut local = SessionEntry::join(&started.session, None, None, &this.projects);
-                local.local = true;
-                this.sessions.retain(|entry| entry.id != local.id);
-                this.sessions.push(local);
-                this.invalidate_list();
+                // No row until the first send: the wire lists a session
+                // only after its log flushes on `turn/completed`, and the
+                // `turn/started` handler inserts the local row meanwhile.
                 // The session groups under the project it started in, even
                 // when its folder later proves to be a worktree of that root.
                 this.set_override(&session_id, |meta| meta.project = current.clone(), cx);
-                // The local row did not exist when the view activated, so
-                // its project name arrives now.
+                // The row does not exist when the view activates, so its
+                // project name arrives now.
                 let name = this.project_name_for(&session_id);
                 if let Some(view) = this.active.clone() {
                     view.update(cx, |view, _| view.set_project_name(name));
@@ -459,10 +547,153 @@ impl Harness {
                         view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
                     }
                 }
+                // A retargeted draft lands in the session it was moved to.
+                let moving = this.pending_draft.take();
+                let retarget = moving.is_some();
+                if let Some(view) =
+                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
+                {
+                    Self::land_moving_draft(&view, moving, window, cx);
+                } else if moving.is_some() {
+                    this.pending_draft = moving;
+                }
+                if let Some(id) = started_project.clone() {
+                    this.drafts.insert(id.clone(), session_id);
+                    crate::harness_log!(
+                        "session/start project={} reason={}",
+                        id,
+                        if retarget { "retarget" } else { "no-draft" }
+                    );
+                }
                 this.load_sessions(cx);
             }
             Err(error) => this.report(&error, cx),
         });
+    }
+
+    /// Whether `session_id` still names an unsent draft: a row with zero
+    /// turns and no name, or — drafts have no row — a live view whose fold
+    /// holds no turns and nobody named. A replayed row is never a draft.
+    /// (A turn in flight is checked by the callers that move content.)
+    pub(crate) fn is_live_draft(&self, session_id: &str, cx: &gpui::App) -> bool {
+        if let Some(entry) = self.sessions.iter().find(|e| e.id == session_id) {
+            return entry.turns == 0 && !entry.named && !entry.replayed;
+        }
+        if self
+            .overrides
+            .get(session_id)
+            .and_then(|m| m.name.clone())
+            .is_some_and(|n| !n.trim().is_empty())
+        {
+            return false;
+        }
+        let in_centre =
+            self.active.clone().filter(|view| view.read(cx).session_id == session_id);
+        let parked = self
+            .session_cache
+            .iter()
+            .find(|(id, _)| id == session_id)
+            .map(|(_, view)| view.clone());
+        let Some(view) = in_centre.or(parked) else { return false };
+        view.read(cx).session().is_none_or(|session| session.turns.is_empty())
+    }
+
+    /// Reopen a live draft's view: the active one when it is already open,
+    /// else the parked one out of the MRU. A retargeted draft in flight
+    /// lands in it when it holds nothing. Returns whether the view was
+    /// still around to open.
+    fn open_draft(&mut self, draft_id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let moving = self.pending_draft.take();
+        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == draft_id) {
+            if let Some(view) = self.active.clone() {
+                Self::land_moving_draft(&view, moving, window, cx);
+            }
+            return true;
+        }
+        let Some(view) = self.cache_take(draft_id) else {
+            self.pending_draft = moving;
+            return false;
+        };
+        Self::land_moving_draft(&view, moving, window, cx);
+        self.activate(view, window, cx);
+        true
+    }
+
+    /// Land a retargeted draft in its new session: moved content wins an
+    /// empty composer, and a composer that already holds something keeps it —
+    /// the moved text is dropped rather than clobbering what was there.
+    fn land_moving_draft(
+        view: &Entity<SessionView>,
+        moving: Option<Draft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = moving else { return };
+        view.update(cx, |view, vc| {
+            if view.draft_content_empty(vc) {
+                view.put_draft(draft, window, vc);
+            } else {
+                crate::harness_log!(
+                    "draft retarget dropped: the picked project's draft already holds text"
+                );
+            }
+        });
+    }
+
+    /// The replay-only stand-in for `session/start`: open the current
+    /// project's draft as a local view with no child behind it. Recorded in
+    /// `drafts` like a started session, carrying the project's effort and a
+    /// retargeted draft when one is in flight.
+    fn open_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.current_project_id() else { return };
+        if projects::start_params(
+            &self.projects,
+            Some(id.as_str()),
+            &self.args.provider,
+            self.args.approval_mode.clone(),
+        )
+        .is_none()
+        {
+            return;
+        }
+        let moving = self.pending_draft.take();
+        let retarget = moving.is_some();
+        let draft_id = format!("local-draft-{id}");
+        let workspace = self.workspace();
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        let host = SessionHost {
+            provider_id: self.args.provider.clone(),
+            workspace,
+            overlays: self.overlays.clone(),
+            capture: self.capture.clone(),
+        };
+        let view = cx.new(|cx| SessionView::new(draft_id.clone(), None, host, window, cx));
+        view.update(cx, |view, cx| view.load_history(cx));
+        self.activate(view, window, cx);
+        // No row exists for a draft, so the empty state and the later
+        // `turn/started` row read the project straight from the store.
+        self.set_override(&draft_id, |meta| meta.project = Some(id.clone()), cx);
+        let name = self.current_project().map(|p| p.name.clone());
+        let effort = self
+            .current_project()
+            .and_then(|p| p.defaults.effort.as_deref())
+            .and_then(projects::parse_effort);
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, _| view.set_project_name(name));
+            if let Some(effort) = effort {
+                view.update(cx, |view, vc| view.set_initial_effort(Some(effort), vc));
+            }
+            Self::land_moving_draft(&view, moving, window, cx);
+        } else if moving.is_some() {
+            self.pending_draft = moving;
+        }
+        self.drafts.insert(id.clone(), draft_id);
+        crate::harness_log!(
+            "session/start project={} reason={}",
+            id,
+            if retarget { "retarget" } else { "no-draft" }
+        );
+        cx.notify();
     }
 
     /// `session/resume`, then stream the transcript in.
@@ -489,10 +720,23 @@ impl Harness {
         self.pending_id = Some(session_id.clone());
         self.reveal = Some(session_id.clone());
         self.reveal_stable = false;
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.client.clone() else {
+            // Scripted chrome (`--no-connect` / `--replay`) has no child to
+            // resume from: the row opens as a local view, so a capture can
+            // drive drafts and switching for nothing. Live reconnects never
+            // land here — they keep their client-shaped early return below
+            // because `args.offline` is false for them.
+            if self.args.offline {
+                if let Some(view) = self.cache_take(&session_id) {
+                    self.activate(view, window, cx);
+                } else {
+                    self.open(session_id.clone(), false, window, cx);
+                }
+            }
+            return;
+        };
         crate::log::trace_reset();
         crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
-        self.pending_id = Some(session_id.clone());
         if let Some(view) = self.cache_take(&session_id) {
             crate::log::trace_mark("cache-hit");
             self.activate(view, window, cx);
@@ -567,7 +811,7 @@ impl Harness {
     /// the list knows it, else where the next session would go. Anything
     /// about a session reads this; anything about "where the next session
     /// goes" reads the current project directly.
-    fn session_workspace(&self, session_id: &str) -> String {
+    pub(crate) fn session_workspace(&self, session_id: &str) -> String {
         self.sessions
             .iter()
             .find(|e| e.id == session_id)
@@ -601,17 +845,19 @@ impl Harness {
     /// row while the first page is still on the wire — never the old view
     /// held past its switch.
     pub(super) fn open(&mut self, session_id: String, backfill: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
+        // The client rides along when there is one; scripted chrome
+        // (`--no-connect` / `--replay`) opens the row as a local view with
+        // none, which is what lets a capture drive drafts and switching.
+        let client = self.client.clone();
         let (provider, workspace) = (self.args.provider.clone(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };
-        let view = cx.new(|cx| SessionView::new(session_id.clone(), Some(client), host, window, cx));
+        let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
-        self.pending_id = Some(session_id.clone());
         self.activate(view, window, cx);
         self.adopt_session_project(&session_id);
-        if backfill {
+        if backfill && client.is_some() {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.backfill(cx));
             }
@@ -642,7 +888,13 @@ impl Harness {
     /// (owner round 4, O6). A sidebar click comes through here too, already
     /// visible, so the same rule is a no-op there.
     fn activate(&mut self, view: Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
+        // The UI points at what is open: the row highlight and the header
+        // label read this, never the view, so every swap refreshes it here
+        // rather than at each call site — and the sidebar's one-shot reveal
+        // arms on the same swap (a sidebar click is already visible, so the
+        // same rule is a no-op there).
         let session_id = view.read(cx).session_id.clone();
+        self.pending_id = Some(session_id.clone());
         self.reveal = Some(session_id.clone());
         self.reveal_stable = false;
         let project_name = self.project_name_for(&session_id);
@@ -682,7 +934,14 @@ impl Harness {
         if cacheable {
             self.session_cache.retain(|(id, _)| *id != session_id);
             self.session_cache.insert(0, (session_id, view));
-            self.session_cache.truncate(SESSION_CACHE_LIMIT);
+            // Views named in `drafts` are never evicted from the MRU: the
+            // draft outlives whatever else was parked since.
+            let draft_ids: std::collections::HashSet<String> =
+                self.drafts.values().cloned().collect();
+            let ids: Vec<String> =
+                self.session_cache.iter().map(|(id, _)| id.clone()).collect();
+            let surviving = evict_parked(&ids, &draft_ids, SESSION_CACHE_LIMIT);
+            self.session_cache.retain(|(id, _)| surviving.contains(id));
         }
     }
 
@@ -833,7 +1092,14 @@ impl Harness {
                     view.update(cx, |view, cx| view.follow_tail(cx));
                 }
             }
-            SessionEvent::NewSession => self.new_session(cx),
+            // `/clear` is emitted from the session view with no window of its
+            // own: reopen through the window the update provides, like the
+            // fork path below does.
+            SessionEvent::NewSession => {
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
+                }));
+            }
             // The fork result is a resume envelope for the **new** session, so
             // it is already attached: opening it and paging it in is all that
             // is left, and the sidebar re-reads itself because there is now one
@@ -1001,5 +1267,57 @@ mod tests {
         let entry = fixture_entry(&row, std::path::Path::new("/repo"), &Projects::default());
         assert_eq!(entry.workspace.as_deref(), Some("/private/tmp/h4ws"));
         assert!(entry.project.is_none());
+    }
+
+    fn draft_map(names: &[(&str, &str)]) -> HashMap<String, String> {
+        names.iter().map(|(p, s)| ((*p).to_owned(), (*s).to_owned())).collect()
+    }
+
+    #[test]
+    fn a_project_without_a_draft_starts() {
+        let drafts = draft_map(&[]);
+        assert_eq!(draft_decision(&drafts, "p", |_| panic!("no name to check")), DraftDecision::Start {
+            stale: None
+        });
+    }
+
+    #[test]
+    fn a_live_draft_reopens_and_a_dead_name_is_pruned() {
+        let drafts = draft_map(&[("p", "s-draft")]);
+        assert_eq!(draft_decision(&drafts, "p", |id| id == "s-draft"), DraftDecision::Reuse("s-draft".into()));
+        assert_eq!(
+            draft_decision(&drafts, "p", |_| false),
+            DraftDecision::Start { stale: Some("s-draft".into()) }
+        );
+    }
+
+    #[test]
+    fn drafts_are_per_project() {
+        // Two projects' drafts never answer for each other, and a first
+        // turn clears only its own session's name.
+        let mut drafts = draft_map(&[("a", "s-a"), ("b", "s-b")]);
+        assert_eq!(draft_decision(&drafts, "a", |_| true), DraftDecision::Reuse("s-a".into()));
+        assert_eq!(draft_decision(&drafts, "b", |_| true), DraftDecision::Reuse("s-b".into()));
+        drafts.retain(|_, named| named != "s-a");
+        assert_eq!(drafts.get("a"), None);
+        assert_eq!(drafts.get("b").map(String::as_str), Some("s-b"));
+    }
+
+    #[test]
+    fn parked_drafts_survive_the_mru_cap() {
+        use std::collections::HashSet;
+        let ids: Vec<String> = (0..10).map(|n| format!("s-{n}")).collect();
+        let drafts: HashSet<String> = ["s-9"].iter().map(|s| (*s).to_owned()).collect();
+        // The oldest non-draft past the cap of eight goes; the draft at the
+        // tail stays, wherever it sits.
+        assert_eq!(
+            evict_parked(&ids, &drafts, 8),
+            ["s-0", "s-1", "s-2", "s-3", "s-4", "s-5", "s-6", "s-7", "s-9"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect::<Vec<_>>()
+        );
+        // With no drafts the cap is a plain truncate.
+        assert_eq!(evict_parked(&ids, &HashSet::new(), 8), ids[..8].to_owned());
     }
 }

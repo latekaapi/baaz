@@ -74,6 +74,21 @@
   one synthetic wheel event at the window centre and logs
   `harness: wheel dy=<dy> list_px=<before>-><after>` (`docs/02-app.md` §6).
 
+## 2026-09-13 — Owner round 4, new session
+
+- **O5 — An unsent session has no sidebar row.** The row appears at the top
+  of its project when the first message is accepted (`turn/started`), titled
+  from the prompt, and the wire replaces it on `turn/completed` as before.
+  `Harness.drafts` names one draft session per project: ⌘N reopens it while
+  it is still unsent instead of calling `session/start`, so repeated clicks
+  never accumulate "New session" rows; draft views are never evicted from
+  the MRU. Picking another project from the crumb menu moves the draft's
+  text, images and files into that project's draft session (`take_draft` /
+  `put_draft`). `--steps new` is ⌘N, `new:<project>` the group row's `+`;
+  every `session/start` logs one `harness: session/start
+  project=<id> reason=<no-draft|retarget>` line. Docs: `03-composer.md` §9,
+  `12-projects.md` D34, `02-app.md` §5.
+
 ## 2026-09-13 — Owner round 3, library (agentic-ui `owner-round-3-2026-09-13`)
 
 - **D2 — A project's rows keep the project row's right edge at any sidebar

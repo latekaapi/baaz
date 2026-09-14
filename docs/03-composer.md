@@ -282,12 +282,43 @@ turn, while Shift+Enter still inserts a newline. The flag lives in the library
 when the clipboard holds no image, so an ordinary text paste is the editor's,
 untouched.
 
+## 9. New-session drafts
+
+An unsent session has **no sidebar row** and costs at most one server session
+per project. `Harness.drafts` names one draft session per project id; ⌘N
+(`new_session_in`) reopens that view while it is still unsent (zero turns,
+no name) instead of calling `session/start`, so repeated ⌘N never accumulates
+"New session" rows. Views named in `drafts` are never evicted from the
+parked-view MRU.
+
+The row appears when the first message is accepted: `turn/started` inserts a
+`local` row built from the seeded session envelope, titled from the prompt
+and dated now (newest-first puts it at the top of its project), and drops
+the id from `drafts`; `turn/completed` reloads and the wire row replaces it
+as before. Switching away parks the unsent view silently — there is no row
+to filter.
+
+The draft is per project: text, images and files. Picking another project
+from the header crumb's menu moves the active draft's content into the picked
+project's draft session (`take_draft` / `put_draft`; created there if needed,
+inheriting that project's effort default), and the old id leaves `drafts`
+(the server prunes zero-turn sessions on relaunch). A composer that already
+holds something keeps it — moved content never clobbers. Drafts live in
+memory for the app's lifetime; nothing is persisted to disk.
+
+Scripting: `--steps new` is ⌘N, `new:<project name>` the group row's `+`.
+Every `session/start` the app sends logs one `harness: session/start
+project=<id> reason=<no-draft|retarget>` line, so a scripted run can count
+them. Under `--no-connect` / `--replay` there is no child to start on, so
+`new` opens the draft as a local view (`local-draft-<project>`) and `open:`
+opens the row the same way — captures drive the same lifecycle for free.
+
 The probe found that MSP admits an image part it cannot decode — the first
 capture's "PNG" had a broken IDAT CRC and `turn/start` still answered
 `status: accepted`. The wire checks the base64 and the media type and nothing
 else, so the app decodes before it sends.
 
-## 9. What is deliberately not here
+## 10. What is deliberately not here
 
 - **`/fork`, `/name`, `/resume`** are listed and say which phase brings them.
 - **Approvals and questions are still read-only.** Phase 4.
