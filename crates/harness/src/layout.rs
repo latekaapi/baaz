@@ -52,6 +52,21 @@ pub struct Layout {
     /// the start so the toggle has somewhere to land.
     #[serde(rename = "searchAllProjects", default = "default_search_all")]
     pub search_all_projects: bool,
+    /// Whether project group rows draw the collapse chevron in the leading
+    /// box. Off by default: the row is a plain label (owner round 4, O4).
+    /// No UI yet — the Settings dialog (⌘,) owns the switch; `--steps
+    /// group-chevron` flips it for captures meanwhile.
+    #[serde(rename = "groupChevron", default)]
+    pub group_chevron: bool,
+    /// Whether the current project wears its 2 px accent bar. Off by
+    /// default: `current(true)` alone keeps only the semibold ink name (O4).
+    /// No UI yet — see [`Self::group_chevron`].
+    #[serde(rename = "groupBar", default)]
+    pub group_bar: bool,
+    /// Whether project group rows trail the workspace branch in mono. Off
+    /// by default (O4). No UI yet — see [`Self::group_chevron`].
+    #[serde(rename = "groupBranch", default)]
+    pub group_branch: bool,
 }
 
 fn default_search_all() -> bool {
@@ -66,6 +81,9 @@ impl Default for Layout {
             closed_groups: Vec::new(),
             expanded_groups: Vec::new(),
             search_all_projects: true,
+            group_chevron: false,
+            group_bar: false,
+            group_branch: false,
         }
     }
 }
@@ -135,28 +153,43 @@ mod tests {
         assert!(layout.closed_groups.is_empty());
         assert!(layout.expanded_groups.is_empty());
         assert!(layout.search_all_projects);
+        assert!(!layout.group_chevron);
+        assert!(!layout.group_bar);
+        assert!(!layout.group_branch);
         let stored = Layout {
             sidebar_width: Some(300.0),
             group_by: Some(GroupBy::Project),
             closed_groups: vec!["other".into()],
             expanded_groups: vec!["p-harness".into()],
             search_all_projects: false,
+            group_chevron: true,
+            group_bar: true,
+            group_branch: true,
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
         assert!(text.contains("\"closedGroups\":[\"other\"]"));
         assert!(text.contains("\"expandedGroups\":[\"p-harness\"]"));
         assert!(text.contains("\"searchAllProjects\":false"));
+        assert!(text.contains("\"groupChevron\":true"));
+        assert!(text.contains("\"groupBar\":true"));
+        assert!(text.contains("\"groupBranch\":true"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
         assert_eq!(back.expanded_groups, vec!["p-harness".to_owned()]);
         assert!(!back.search_all_projects);
+        assert!(back.group_chevron);
+        assert!(back.group_bar);
+        assert!(back.group_branch);
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.group_by, None);
         assert!(old.expanded_groups.is_empty());
         assert!(old.search_all_projects);
+        assert!(!old.group_chevron);
+        assert!(!old.group_bar);
+        assert!(!old.group_branch);
     }
 
     fn with_width(width: f32) -> Layout {

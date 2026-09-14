@@ -461,6 +461,13 @@ impl Harness {
             return;
         }
         self.adopt_session_project(&session_id);
+        // The click's target first: the row highlights on the click's own
+        // frame and the reveal arms, even when there is no client to open
+        // with (a `--replay` capture, the `open:` step's screenshots).
+        // `activate` below sets both again on the paths that reach it.
+        self.pending_id = Some(session_id.clone());
+        self.reveal = Some(session_id.clone());
+        self.reveal_stable = false;
         let Some(client) = self.client.clone() else { return };
         crate::log::trace_reset();
         crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
@@ -548,8 +555,13 @@ impl Harness {
     }
 
     /// A session view opened: the current project becomes that session's
-    /// project when it has one. Touched and written, so the next boot and
-    /// the next ⌘N start where this session is.
+    /// project when it has one. Made current and written, so the next boot
+    /// and the next ⌘N start where this session is — but never touched:
+    /// opening a session must not reorder the groups (owner round 4, O1).
+    /// The touch that remains is in [`Self::new_session_in`] (a new session
+    /// is itself the freshest thing about its project) and in `adopt_root`,
+    /// and both feed only [`Projects::most_recent`](crate::projects::Projects::most_recent)
+    /// now.
     fn adopt_session_project(&mut self, session_id: &str) {
         let project = self
             .sessions
@@ -558,7 +570,6 @@ impl Harness {
             .and_then(|e| e.project.clone())
             .filter(|id| self.projects.find(id).is_some());
         let Some(id) = project else { return };
-        self.projects.touch(&id);
         self.projects.current = Some(id.clone());
         self.current_project = Some(id);
         projects::write(&self.projects);
@@ -601,11 +612,19 @@ impl Harness {
     /// Make `view` the centre pane now: park the outgoing view in the MRU,
     /// point the event subscription at the new one, refresh its context, and
     /// run anything scripted. The frame after this draws the new view.
+    ///
+    /// Every activation path (⌘N, a group `+`, the palette, the `open:` step,
+    /// fork, boot `--session`) comes through here, so this is where the
+    /// sidebar's one-shot reveal is armed: the next prepaint scrolls the
+    /// least distance that brings the row (or, when its group is closed or
+    /// folded past the cut, the group) into view, then consumes the flag
+    /// (owner round 4, O6). A sidebar click comes through here too, already
+    /// visible, so the same rule is a no-op there.
     fn activate(&mut self, view: Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
-        let project_name = {
-            let id = view.read(cx).session_id.clone();
-            self.project_name_for(&id)
-        };
+        let session_id = view.read(cx).session_id.clone();
+        self.reveal = Some(session_id.clone());
+        self.reveal_stable = false;
+        let project_name = self.project_name_for(&session_id);
         view.update(cx, |view, _| view.set_project_name(project_name));
         self.park_active(cx);
         // A parked view's client predates a reconnect; the current child is

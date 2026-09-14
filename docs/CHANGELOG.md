@@ -1,5 +1,33 @@
 # Harness changelog
 
+## 2026-09-13 — Owner round 4, sidebar
+
+- **O1 — Stable project order.** `Projects::sorted` is pinned first, then name
+  case-insensitively (ties by `addedAt`, then id) — never recency. `recency()`,
+  the `activity` parameter, `project_activity()` and the per-frame activity map
+  are gone; `adopt_session_project` and `start_project_rename` no longer touch
+  (the touch in `new_session_in` and `adopt_root` stays, feeding only the
+  `most_recent` boot fallback). A freshly adopted project lands at its name.
+- **O6 — Reveal the active session.** `Harness::reveal` arms in `activate` (and
+  in `resume` ahead of it, so a client-less run still reveals); the first
+  prepaint writes the minimum offset that brings the row — or, when its group
+  is closed or folded past the cut, the group row, never auto-expanded — into
+  view, then consumes the flag. The write lands too late for its own frame's
+  paint and invalidating from inside draw schedules nothing, so the intent
+  also notifies from a spawned task outside the draw, and the next frame
+  paints the scroll. The arithmetic is the pure `sidebar::reveal_offset`,
+  with unit tests for above, below, inside and taller-than-the-viewport.
+- **O3/O4 — Chrome.** No coloured tiles anywhere (group rows, header crumb,
+  Projects palette rows take the folder glyph, rail tiles a plain initial);
+  no Muse badge on the crumb or the session rows (the composer chip, footer
+  meter and login card keep theirs). The chevron, accent bar and branch are
+  `layout.json` flags (`group_chevron`, `group_bar`, `group_branch`, default
+  off — the Settings dialog owns the switches; `--steps
+  group-chevron|group-bar|group-branch` flips them meanwhile).
+- **Fixture.** `fixtures/sidebar/projects.json` grows to 41 rows across the
+  three adopted projects (the seven `acme-web` rows stay, so the fold still
+  shows) so a reveal has to scroll.
+
 ## 2026-09-13 — Owner round 3, library (agentic-ui `owner-round-3-2026-09-13`)
 
 - **D2 — A project's rows keep the project row's right edge at any sidebar

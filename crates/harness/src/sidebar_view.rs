@@ -17,13 +17,19 @@
 //!
 //! [`Grouping`]: aui::nav::Grouping
 
+use std::rc::Rc;
+
 use aui::data::{icon_button, ButtonSize};
-use aui::nav::{dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem, RowAction};
+use aui::nav::{
+    dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem, RowAction,
+    SidebarView,
+};
 use aui::overlay::popover_layer;
 use aui_icons::{IconName, Provider};
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled};
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, Focusable, SharedString, Window,
+    div, point, prelude::*, px, AnyElement, Bounds, Context, Focusable, Pixels, Point, ScrollHandle, SharedString,
+    Window,
 };
 use gpui_kit::base::v_flex;
 use muse_client::schema::AccountStateKind;
@@ -31,7 +37,7 @@ use muse_client::schema::AccountStateKind;
 use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
 use crate::login::Auth;
 use crate::overlays::MenuKind;
-use crate::sidebar::SessionEntry;
+use crate::sidebar::{Grouping, SessionEntry};
 
 /// How many sessions the collapsed rail shows: enough to reach the ones a
 /// person switches between, few enough to stay a rail.
@@ -50,7 +56,11 @@ enum ViewAction {
 
 impl Harness {
     /// The rows above the Sessions caption: New session, Add project, and
-    /// Automations behind a Soon tag until it has somewhere to go.
+    /// Automations behind a Soon tag until it has somewhere to go. No side
+    /// inset of its own: the library's gutter positions the nav rows, and
+    /// the harness block inset shifted them 4 px off the session rows'
+    /// gutter (ruler on the round-4 captures: nav icon centre 41 vs session
+    /// dot centre 36 before; owner round 4, O3).
     fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.new_session(cx));
         let add_project =
@@ -64,7 +74,6 @@ impl Harness {
         v_flex()
             .w_full()
             .flex_none()
-            .px(px(scale::SP_2))
             .pt(px(scale::SP_2))
             .child(nav_item("nav-new", IconName::Plus, "New session").on_click(new_session))
             .child(nav_item("nav-projects", IconName::Folder, "Add project").on_click(add_project))
@@ -140,7 +149,7 @@ impl Harness {
                 }
             },
         );
-        let mut view = sidebar_view("sessions", grouping)
+        let mut view = sidebar_view("sessions", Rc::clone(&grouping))
             .caption("Sessions")
             .on_view_options(move |w, cx| open_view(&(), w, cx))
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
@@ -153,6 +162,13 @@ impl Harness {
         }
         if let Some(selected) = selected {
             view = view.selected(selected);
+        }
+        // The one-shot reveal (owner round 4, O6): armed in `activate` for
+        // every activation path, consumed on the first prepaint after it.
+        // Never from a list refresh, a regroup, or while the user scrolls —
+        // the flag only exists between an activation and its prepaint.
+        if let Some(reveal_id) = self.reveal.clone() {
+            view = self.install_reveal(view, &grouping, &reveal_id, cx);
         }
         // No quick-filter field: ⌘⇧F and the sidebar search icon open the
         // full-text search palette instead, so the two can never share the
@@ -176,6 +192,118 @@ impl Harness {
             )
             .child(self.render_footer(cx))
             .into_any_element()
+    }
+
+    /// Fold one reveal prepaint's [`RevealProgress`] into the flag.
+    ///
+    /// A scroll that landed whole consumes the flag at once. An inside
+    /// reading consumes it only when the previous prepaint read inside too:
+    /// a single inside reading can come from a frame whose layout has not
+    /// settled, and consuming on it strands the scroll wherever that frame
+    /// left it. Anything else leaves the flag (and the confirmation bit)
+    /// for the next prepaint.
+    fn settle_reveal(&mut self, progress: RevealProgress, cx: &mut Context<Self>) {
+        match progress {
+            RevealProgress::NotReady => {}
+            RevealProgress::Inside => {
+                if self.reveal_stable {
+                    self.reveal = None;
+                    self.reveal_stable = false;
+                } else {
+                    self.reveal_stable = true;
+                }
+                cx.notify();
+            }
+            RevealProgress::Landed => {
+                self.reveal = None;
+                self.reveal_stable = false;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Install the one-shot reveal for `reveal_id` on the sidebar view.
+    ///
+    /// When the row is rendered this frame, the selected-row intent scrolls
+    /// the minimum distance that brings it into view and consumes the flag.
+    /// When it is not rendered — its group is closed or folded past the cut
+    /// — the current-group intent does the same for the group row and never
+    /// auto-expands. Both intents settle through [`Self::settle_reveal`],
+    /// which is what finally consumes the flag, so a later user scroll
+    /// never fights a stale reveal.
+    fn install_reveal(
+        &self,
+        view: SidebarView,
+        grouping: &Grouping,
+        reveal_id: &str,
+        cx: &mut Context<Self>,
+    ) -> SidebarView {
+        let rendered = match grouping {
+            Grouping::Project(groups) => {
+                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
+            }
+            Grouping::Date(groups) => {
+                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
+            }
+            Grouping::Status(groups) => {
+                groups.iter().any(|g| g.sessions.iter().any(|s| s.id.as_ref() == reveal_id))
+            }
+        };
+        let scroll = self.sessions_scroll.clone();
+        let harness = cx.entity();
+        if rendered {
+            let reveal_id = reveal_id.to_owned();
+            view.on_selected_prepainted(move |id, bounds, _window, app| {
+                if id.as_ref() != reveal_id {
+                    return;
+                }
+                let (progress, applied) = reveal_scroll(&scroll, bounds);
+                if applied.is_some() {
+                    // The write above lands too late for this frame's paint
+                    // (the scroll div already threaded the old offset through
+                    // the prepaint walk) and invalidating from inside draw
+                    // schedules nothing — so notify from a task outside the
+                    // draw, which schedules the frame that paints it. The
+                    // flag is already consumed and the clamp keeps the point,
+                    // so that frame is a plain repaint.
+                    let notify = harness.clone();
+                    app.spawn(async move |cx| {
+                        cx.update(|cx| notify.update(cx, |_, cx| cx.notify()));
+                    })
+                    .detach();
+                }
+                harness.update(app, |this: &mut Harness, cx| this.settle_reveal(progress, cx));
+            })
+        } else {
+            // The row is not on screen: reveal its group instead. The
+            // session's own project when it names one still adopted, else
+            // the current project — with neither, there is no group to
+            // reveal and the flag waits for the row.
+            let group_id = self
+                .sessions
+                .iter()
+                .find(|e| e.id == reveal_id)
+                .and_then(|e| e.project.clone())
+                .filter(|id| self.projects.find(id).is_some())
+                .or_else(|| self.current_project.clone());
+            let Some(group_id) = group_id else { return view };
+            view.on_current_prepainted(move |id, bounds, _window, app| {
+                if id.as_ref() != group_id {
+                    return;
+                }
+                let (progress, applied) = reveal_scroll(&scroll, bounds);
+                if applied.is_some() {
+                    // Same late-write as the selected-row intent above: wake
+                    // the painting frame from outside the draw.
+                    let notify = harness.clone();
+                    app.spawn(async move |cx| {
+                        cx.update(|cx| notify.update(cx, |_, cx| cx.notify()));
+                    })
+                    .detach();
+                }
+                harness.update(app, |this: &mut Harness, cx| this.settle_reveal(progress, cx));
+            })
+        }
     }
 
     /// The field the row being renamed holds: the library's dense recipe —
@@ -337,17 +465,9 @@ impl Harness {
         }
         for entry in shown {
             let state = if entry.running { AgentState::Running } else { AgentState::Idle };
+            // A plain initial on the surface step: rail tiles wear no label
+            // tint anywhere (owner round 4, O4).
             let mut cell = RailItem::session(entry.id.clone(), state).label(entry.label.clone());
-            // A tile wears its project's label colour; sessions in Other
-            // workspaces keep the default ink.
-            if let Some(colour) = entry
-                .project
-                .as_deref()
-                .and_then(|id| self.projects.find(id))
-                .map(|p| cx.aui().colors.label(p.colour.saturating_sub(1)))
-            {
-                cell = cell.tint(colour);
-            }
             if entry.running {
                 cell = cell.pulse();
             }
@@ -584,5 +704,57 @@ impl Harness {
             )
             .into_any_element(),
         )
+    }
+}
+
+/// What one reveal prepaint found: the scroll div not yet measured
+/// ([`RevealProgress::NotReady`]), the row already inside
+/// ([`RevealProgress::Inside`]), or a scroll that landed whole
+/// ([`RevealProgress::Landed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevealProgress {
+    NotReady,
+    Inside,
+    Landed,
+}
+
+/// Move the scroll offset by the minimum that brings `row` into the scroll
+/// viewport, and nothing when it is already inside (owner round 4, O6).
+///
+/// The offset is ≤ 0 and grows negative as the list scrolls down, so the
+/// answer is clamped into `[−max_offset.y, 0]`. Anything less than a whole
+/// landing — a viewport or row with no height yet, a zero maximum offset,
+/// or a clamp that cut the target short — reads [`RevealProgress::NotReady`]:
+/// the scroll div has not measured yet and the flag must survive for the
+/// next prepaint instead of dying on a stale maximum.
+///
+/// Returns the point written on a landing, so the caller can re-apply the
+/// same point on the next frame: a write from inside a prepaint callback
+/// lands too late for that frame's paint (the scroll div already threaded
+/// the old offset through the walk), and only a pre-draw write paints.
+fn reveal_scroll(scroll: &ScrollHandle, row: Bounds<Pixels>) -> (RevealProgress, Option<Point<Pixels>>) {
+    let viewport = scroll.bounds();
+    let offset = scroll.offset();
+    let max = scroll.max_offset();
+    let target = crate::sidebar::reveal_offset(viewport, row, offset.y);
+    if f32::from(viewport.size.height) <= 0.0 {
+        return (RevealProgress::NotReady, None);
+    }
+    if f32::from(row.size.height) <= 0.0 {
+        return (RevealProgress::NotReady, None);
+    }
+    let Some(target) = target else { return (RevealProgress::Inside, None) };
+    let max = f32::from(max.y);
+    if max <= 0.0 {
+        return (RevealProgress::NotReady, None);
+    }
+    let target = f32::from(target);
+    let clamped = target.clamp(-max, 0.0);
+    let applied = point(offset.x, px(clamped));
+    scroll.set_offset(applied);
+    if clamped == target {
+        (RevealProgress::Landed, Some(applied))
+    } else {
+        (RevealProgress::NotReady, None)
     }
 }

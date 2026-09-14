@@ -15,7 +15,6 @@
 //! project — a worktree session's folder differs from its project's root, and
 //! a prefix match would adopt it into the wrong project.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -246,38 +245,25 @@ impl Projects {
         self.projects.iter().find(|p| canonical_path(&p.root) == canonical)
     }
 
-    /// The sidebar order (decision D37): pinned projects first, then by
-    /// recency, then by name. No drag reorder.
+    /// The sidebar order (decision D37, owner round 4, O1): pinned projects
+    /// first, then by name case-insensitively, ties by `added_at` then id.
+    /// Never recency: a project never moves because a session in it was
+    /// created, opened, or got a turn. No drag reorder.
     ///
-    /// Recency is [`recency`]: the newest of the project's last session
-    /// activity — supplied by the caller as project id to epoch millis, since
-    /// activity lives in the session list, not here — its `last_opened_at`,
-    /// and its `added_at`. Keying on session activity alone sank a project
-    /// the moment it was adopted, because a folder with no sessions yet has
-    /// no activity at all and sorted as 0, under every project that had ever
-    /// been used (D3). Adoption is itself the freshest thing about it.
-    pub fn sorted(&self, activity: &HashMap<String, i64>) -> Vec<&Project> {
+    /// `last_opened_at` and `added_at` stay on the record for
+    /// [`Projects::most_recent`] (the boot fallback) and for a future
+    /// `projectOrder` — but they decide nothing about this order.
+    pub fn sorted(&self) -> Vec<&Project> {
         let mut out: Vec<&Project> = self.projects.iter().collect();
-        out.sort_by(|a, b| b.pinned.cmp(&a.pinned).then_with(|| recency(b, activity).cmp(&recency(a, activity))).then_with(|| a.name.cmp(&b.name)));
+        out.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.added_at.cmp(&b.added_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         out
     }
-}
-
-/// How recently a project was touched, in epoch millis: the newest of its
-/// session activity, the last time one of its sessions was opened, and its
-/// adoption. A freshly adopted project has only the last of those, which is
-/// exactly why it counts — see [`Projects::sorted`].
-///
-/// The two stored stamps are RFC3339 UTC; an unparseable or empty one
-/// contributes nothing rather than poisoning the key.
-fn recency(project: &Project, activity: &HashMap<String, i64>) -> i64 {
-    let stamp = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.timestamp_millis()).unwrap_or(i64::MIN);
-    activity
-        .get(&project.id)
-        .copied()
-        .unwrap_or(i64::MIN)
-        .max(stamp(&project.last_opened_at))
-        .max(stamp(&project.added_at))
 }
 
 /// The branch `root` is on: `git symbolic-ref --short HEAD`, so a detached
@@ -504,41 +490,71 @@ mod tests {
         assert_eq!(projects.most_recent().map(|p| p.id.as_str()), Some("aaa"));
     }
 
-    /// Epoch millis for an RFC3339 stamp, so a test's activity map speaks the
-    /// same units the store's own stamps do.
-    fn millis(stamp: &str) -> i64 {
-        chrono::DateTime::parse_from_rfc3339(stamp).expect("stamp").timestamp_millis()
-    }
-
+    /// Pinned first whatever the stamps say, then name order: the one
+    /// pinned-first property the recency order had that the name order keeps.
     #[test]
-    fn sorting_is_pinned_first_then_newest_activity_then_name() {
+    fn a_pinned_project_leads_whatever_its_activity() {
         let mut projects = Projects::default();
-        projects.projects.push(project_with("/work/beta", 1, false));
-        projects.projects[0].id = "beta".into();
-        projects.projects.push(project_with("/work/alpha", 2, false));
-        projects.projects[1].id = "alpha".into();
-        projects.projects.push(project_with("/work/pinned", 3, true));
-        projects.projects[2].id = "pinned".into();
-        // Both stamps on the helper's projects are 2026-09-13T10:00:00Z, so
-        // activity has to be later than that to be the newest thing about a
-        // project — as it is in the app, where both are epoch millis.
-        let mut activity = HashMap::new();
-        activity.insert("beta".to_owned(), millis("2026-09-13T12:00:00Z"));
-        activity.insert("alpha".to_owned(), millis("2026-09-13T11:00:00Z"));
-        let order: Vec<&str> = projects.sorted(&activity).iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(order, vec!["pinned", "beta", "alpha"]);
-        // No activity anywhere: every project falls back to its own stamps,
-        // which tie here, so ties break by name.
-        let order: Vec<&str> = projects.sorted(&HashMap::new()).iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(order, vec!["pinned", "alpha", "beta"]);
+        let mut zebra = project_with("/work/zebra", 1, true);
+        zebra.id = "zebra".into();
+        zebra.name = "zebra".into();
+        // Ancient stamps on the pinned project: under recency it would sink.
+        zebra.added_at = "2020-01-01T00:00:00Z".into();
+        zebra.last_opened_at = "2020-01-01T00:00:00Z".into();
+        projects.projects.push(zebra);
+        let mut alpha = project_with("/work/alpha", 2, false);
+        alpha.id = "alpha".into();
+        alpha.name = "alpha".into();
+        projects.projects.push(alpha);
+        let order: Vec<&str> = projects.sorted().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["zebra", "alpha"]);
     }
 
-    /// D3: a project adopted a moment ago has no sessions, so it has no
-    /// activity — and used to sort under every project that had ever been
-    /// used, i.e. straight to the bottom of the sidebar, which is the one
-    /// place the person who just adopted it will not look.
     #[test]
-    fn a_freshly_adopted_project_sorts_to_the_top() {
+    fn sorting_is_pinned_first_then_name_case_insensitive() {
+        let mut projects = Projects::default();
+        for (root, name, pinned) in
+            [("/work/beta", "beta", false), ("/work/Alpha", "Alpha", false), ("/work/pinned", "pinned", true)]
+        {
+            let mut project = project_with(root, 1, pinned);
+            project.id = name.into();
+            project.name = name.into();
+            projects.projects.push(project);
+        }
+        let order: Vec<&str> = projects.sorted().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["pinned", "Alpha", "beta"]);
+    }
+
+    /// O1: touching, opening and newer sessions never reorder the groups.
+    /// A touch rewrites `last_opened_at`, but the name order never reads it.
+    #[test]
+    fn order_is_by_name_never_by_activity() {
+        fn order(projects: &Projects) -> Vec<String> {
+            projects.sorted().iter().map(|p| p.id.clone()).collect()
+        }
+        let mut projects = Projects::default();
+        for (id, name) in [("mmm", "mmm"), ("aaa", "aaa")] {
+            let mut project = project_with(&format!("/work/{id}"), 1, false);
+            project.id = id.into();
+            project.name = name.into();
+            project.added_at = "2026-09-13T10:00:00Z".into();
+            project.last_opened_at = "2026-09-13T10:00:00Z".into();
+            projects.projects.push(project);
+        }
+        assert_eq!(order(&projects), vec!["aaa", "mmm"]);
+        // Touching (what opening a session used to do) moves no group.
+        projects.touch("mmm");
+        assert_eq!(order(&projects), vec!["aaa", "mmm"]);
+        // Neither does a newer adoption stamp on the later-named project.
+        projects.projects.iter_mut().find(|p| p.id == "mmm").expect("mmm").added_at =
+            "2026-09-14T10:00:00Z".into();
+        assert_eq!(order(&projects), vec!["aaa", "mmm"]);
+    }
+
+    /// O1: a freshly adopted project lands at its name, not on top. The
+    /// header crumb names it and scroll-into-view finds it instead.
+    #[test]
+    fn a_freshly_adopted_project_sorts_by_name() {
         let mut projects = Projects::default();
         let mut used = project_with("/work/used", 1, false);
         used.id = "used".into();
@@ -552,35 +568,24 @@ mod tests {
         fresh.last_opened_at = String::new();
         projects.projects.push(fresh);
 
-        let mut activity = HashMap::new();
-        activity.insert("used".to_owned(), millis("2026-09-13T15:00:00Z"));
-
-        let order: Vec<&str> = projects.sorted(&activity).iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(order, vec!["fresh", "used"], "adoption is the freshest thing about a project with no sessions");
-
-        // And it still yields to a project used after it was adopted.
-        activity.insert("used".to_owned(), millis("2026-09-13T17:00:00Z"));
-        let order: Vec<&str> = projects.sorted(&activity).iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(order, vec!["used", "fresh"]);
+        let order: Vec<&str> = projects.sorted().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["fresh", "used"]);
     }
 
-    /// An empty or malformed stamp contributes nothing rather than sorting a
-    /// project to one end: a store written by an older build has neither.
+    /// Name ties (case-insensitively) fall back to `added_at`, then id — so
+    /// even unparseable stamps order deterministically and never by activity.
     #[test]
-    fn an_unparseable_stamp_does_not_decide_the_order() {
+    fn name_ties_break_by_added_at_then_id() {
         let mut projects = Projects::default();
-        let mut broken = project_with("/work/broken", 1, false);
-        broken.id = "broken".into();
-        broken.name = "broken".into();
-        broken.added_at = "not a date".into();
-        broken.last_opened_at = String::new();
-        projects.projects.push(broken);
-        let mut good = project_with("/work/good", 2, false);
-        good.id = "good".into();
-        good.name = "good".into();
-        projects.projects.push(good);
-        let order: Vec<&str> = projects.sorted(&HashMap::new()).iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(order, vec!["good", "broken"], "a project with no usable stamp sorts last, not first");
+        for (id, added_at) in [("second", "2026-09-13T11:00:00Z"), ("first", "2026-09-13T10:00:00Z")] {
+            let mut project = project_with(&format!("/work/{id}"), 1, false);
+            project.id = id.into();
+            project.name = "Same".into();
+            project.added_at = added_at.into();
+            projects.projects.push(project);
+        }
+        let order: Vec<&str> = projects.sorted().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["first", "second"]);
     }
 
     #[test]

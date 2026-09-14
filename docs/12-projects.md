@@ -74,8 +74,10 @@ Taken with the owner on 2026-09-13.
 - **D36 Search.** All projects, results badged with the project name; a "Search all
   projects" toggle in the Sessions view menu narrows to the current project. `search.db`
   gains a workspace column on both tables.
-- **D37 Ordering.** Project groups sort by their newest session, pinned projects first;
-  no drag reorder. "Other workspaces" is always last.
+- **D37 Ordering (rewritten 2026-09-13, owner round 4, O1).** Project groups sort
+  pinned first, then by name case-insensitively (ties by `addedAt`, then id) —
+  never by recency; no drag reorder. A project never moves because a session in
+  it was created, opened, or got a turn. "Other workspaces" is always last.
 - **D38 Removal.** Remove from sidebar keeps every session; they move to "Other
   workspaces". Nothing on Muse's side changes.
 - **D39 Boot.** `--workspace` wins and is adopted if new; else the stored current project;
@@ -244,9 +246,11 @@ codebase and bent.
   the one ⌘N would land in.
 - **The hover tray hides what it covers.** The branch and the count fade out
   as the tray fades in, on the one tween, opacity only.
-- **Ordering counts adoption.** `Projects::sorted` keyed on session activity
-  alone, so a folder adopted a moment ago — which has no sessions, hence no
-  activity — sorted below every project that had ever been used. It now keys
-  on the newest of session activity, `last_opened_at` and `added_at`.
-  Consequence: adopting several folders in one go ties them all at "now", so
-  they order by name until they are used.
+- **Ordering counts adoption (superseded 2026-09-13, owner round 4, O1).**
+  `Projects::sorted` used to key on session activity, then on the newest of
+  session activity, `last_opened_at` and `added_at`. It now keys on nothing
+  but pin and name (D37 as rewritten): adopting several folders in one go
+  orders them by name at once, and no activation, creation or turn ever moves
+  a group. `last_opened_at` survives only for the `most_recent` boot fallback.
+  Scroll-into-view on activation replaces "a new project lands on top" as the
+  way a fresh adoption is found.
