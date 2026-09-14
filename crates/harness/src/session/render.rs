@@ -90,6 +90,7 @@ impl SessionView {
     /// happened to have folded by the time a given row was built.
     pub(super) fn render_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         crate::log::trace_first_frame();
+        self.note_frame_trace();
         let frame_start = std::time::Instant::now();
         self.sync_render_cache();
         if self.cached_turns.is_empty() {
@@ -1537,6 +1538,7 @@ fn wheel_capture(list_state: gpui::ListState, cx: &mut Context<SessionView>) -> 
                     if delta.y > gpui::px(0.0) {
                         view.follow = false;
                     }
+                    view.note_wheel_event();
                     cx.notify();
                 });
             });

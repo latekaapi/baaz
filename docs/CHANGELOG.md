@@ -89,6 +89,39 @@
   project=<id> reason=<no-draft|retarget>` line. Docs: `03-composer.md` §9,
   `12-projects.md` D34, `02-app.md` §5.
 
+## 2026-09-13 — Owner round 4, scroll instruments
+
+- **The scroll-cadence instruments (§1), no behaviour change.** `bench-draw`
+  times the whole frame, from the start of the root render to the end of
+  paint (a zero-size canvas painted last stamps the end; `gpui`'s
+  `next_frame_callbacks` run at the top of the *next* request-frame, so they
+  cannot close a frame). It prints beside `bench-element` and joins
+  `--bench-out`: element construction was 3–12 µs p50 while whole frames run
+  1.3–2.6 ms p50, so the gap the instrument closes is row building, layout
+  and paint.
+- **`--bench` drives the normal shell.** The `Harness` root with the replayed
+  session active (streamed event by event, as the bare bench always did), so
+  `bench-draw` covers the sidebar, header and composer; `--bench-bare` keeps
+  the transcript-only `BenchRoot`. Baseline: shell ≈ bare + 0.4–0.6 ms p50
+  on both captures, both profiles.
+- **The offset series.** Every dispatched wheel event and every frame appends
+  `bench_list_px` to `scroll.offset_px` in `--bench-out`; each event waits at
+  most 50 ms for its frame, so quiet runs no longer sit out the old 2 s
+  timeout and its ~95 s artifact. First finding: on the new heterogeneous
+  capture the upward climb over unmeasured rows steps up to 1062 px against
+  20 px events (H-1 re-basing) while the mirror descent over measured rows
+  steps a clean 20 px, travel conserved.
+- **`HARNESS_FRAME_TRACE=1` + `scripts/frame-trace.py`.** Every paint in the
+  normal window appends `t_us,list_px,events_since_last_paint,gesture_active`
+  to `$HARNESS_STATE_DIR/frame-trace.log`, so a hand gesture on `--replay`
+  is the measurement; the script reports paints/s, the gap histogram in
+  display ticks, events vs paints, and whether the tail settled.
+- **The capture.** `fixtures/msp/make-stress-hetero.py` generates
+  `synthetic-stress-hetero.jsonl` (80 turns: two 60-line shell cards, a
+  30-line rust block and prose per turn) — scrollable *and* heterogeneous,
+  which no checked-in capture was before. Full before-fix table in
+  `docs/02-app.md` §6.
+
 ## 2026-09-13 — Owner round 3, library (agentic-ui `owner-round-3-2026-09-13`)
 
 - **D2 — A project's rows keep the project row's right edge at any sidebar
