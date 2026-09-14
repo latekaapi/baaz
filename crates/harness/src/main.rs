@@ -59,6 +59,7 @@ mod resize;
 mod search;
 mod session;
 mod sessions;
+mod settings;
 mod shot;
 mod sidebar;
 mod sidebar_view;

@@ -82,6 +82,7 @@
 //! | `overflow` | open the header's overflow menu |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
+//! | `settings:<section>` | open the Settings dialog, optionally on the section with that id (`settings` alone opens the first section) |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
@@ -90,6 +91,9 @@
 //! | `project-menu` | open the header's project menu (`project-menu:<name>` opens the group row menu for the project named) |
 //! | `project-colour:<n>` | set the current project's colour slot (1–8) |
 //! | `group-by:<date\|project>` | persist the sidebar grouping and regroup |
+//! | `group-bar` | flip the current-project accent bar flag |
+//! | `group-branch` | flip the trailing-branch flag |
+//! | `group-chevron` | flip the group-row chevron flag |
 //! | `remove-project:<name>` | raise the project removal dialog |
 //! | `remove-confirm` | confirm it |
 //! | `wait:<ms>` | let the wire catch up before the next step |
@@ -169,6 +173,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "overflow", run: |this, _, _, cx| this.open_menu(MenuKind::Overflow, cx) },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| this.open_menu(MenuKind::ViewOptions, cx) },
     WindowVerb { verb: "account", run: |this, _, _, cx| this.open_menu(MenuKind::Account, cx) },
+    WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| this.confirm_archive_dialog(window, cx) },
@@ -178,6 +183,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "project-menu", run: |this, rest, _, cx| this.step_project_menu(rest, cx) },
     WindowVerb { verb: "project-colour", run: |this, rest, _, cx| this.step_project_colour(rest, cx) },
     WindowVerb { verb: "group-by", run: |this, rest, _, cx| this.step_group_by(rest, cx) },
+    WindowVerb { verb: "group-bar", run: |this, _, _, cx| this.step_group_bar(cx) },
+    WindowVerb { verb: "group-branch", run: |this, _, _, cx| this.step_group_branch(cx) },
+    WindowVerb { verb: "group-chevron", run: |this, _, _, cx| this.step_group_chevron(cx) },
     WindowVerb { verb: "remove-project", run: |this, rest, _, cx| this.step_remove_project(rest, cx) },
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
 ];

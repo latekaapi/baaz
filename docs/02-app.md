@@ -262,11 +262,22 @@ falls back to `Session <first id group>`. Nothing ever writes to it.
 
 The rows are the library's `SessionSummary`, grouped by **calendar day** —
 Today / Yesterday / This week / This month / Earlier — or by **project**:
-one collapsible group per adoption in sidebar order (pinned projects first,
-then newest session activity, no drag reorder), each with its mark, the
-branch in mono, a running dot and the count, hover `+` and `…`; sessions
-inside run newest-first with pinned first; then the muted "Other workspaces"
-group, always last and closed until opened. Past five a group folds: it shows
+one collapsible group per adoption in sidebar order (pinned first, then name
+case-insensitively, never recency, no drag reorder — owner round 4, O1), each
+a plain muted label with the count, a running dot when any of its sessions
+runs, and hover `+` and `…`; sessions inside run newest-first with pinned
+first; then the muted "Other workspaces" group, always last and closed until
+opened. The collapse chevron, the current-project accent bar and the trailing
+branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
+default off — owner round 4, O4). The Settings dialog owns the switches:
+⌘, (File → Settings…), the account footer menu's "Settings…" row, or
+`--steps settings[:<section>]`; its Sidebar section holds the three flags
+and later sections add arms in `Harness::settings_sections`
+(`crate::settings`). `--steps group-chevron|group-bar|group-branch` flips
+them without opening the dialog.
+Activating a session from outside the sidebar reveals it: the least scroll
+that brings the row — or, when its group is closed or folded past the cut,
+the group row, never auto-expanded — into view (O6). Past five a group folds: it shows
 its pinned rows, then the five most recent others, and holds the rest behind
 a "Show N more" / "Show less" row (`expanded_groups` in the layout file,
 persisted like `closed_groups`); the open session is always among the
@@ -281,7 +292,9 @@ A group row's `+` starts a session in that project (making it current); on
 Other it opens the Projects palette. Its `…` opens the project menu for that
 project; on Other the menu carries the single row "Add as project…".
 
-Every row carries one muted second line: `last_summary` when a turn completed
+Session rows carry no provider mark: each row reads title, then the preview
+line, with the elapsed time at the right (owner round 4, O3/O4). Every row
+carries one muted second line: `last_summary` when a turn completed
 in this app, else the index's first prompt — but only when the row's label is
 not that same prompt (a user-given name or a Muse title); otherwise the row
 shows the "N turns" meta alone, never a repeated first line. Whatever shows
@@ -304,7 +317,8 @@ check is seen to change; Clear empty closes it and hides through the same
 Archived sessions are excluded from the list and from Clear-empty; shown,
 they carry a muted Archived tag and their Archive tray action puts them back.
 
-The **project menu** (`mark project ▾` in the header, or a group row's `…`):
+The **project menu** (`project ▾` in the header — the crumb reads
+`project › session` with no marks, owner round 4, O4 — or a group row's `…`):
 one toggle row per project in sidebar order, checked for the menu's project —
 picking one replaces a still-empty unnamed active session (hidden locally)
 and otherwise starts a sibling session there — then New session here, Rename
@@ -318,7 +332,8 @@ resolves them by root), current passes to the most recently opened remaining
 adoption, and there is no Undo — re-adding is one click in the palette.
 
 The **Projects palette** (⌘⇧O, File › Add Project…, the nav row, the rail
-cell, `/project`): section Projects — every adoption with its mark, the root
+cell, `/project`): section Projects — every adoption with the folder glyph
+(no coloured tiles anywhere, owner round 4, O4), the root
 with `~` for home, and the visible session count; picking one starts a
 session there — then section Add, whose head is the library's
 `folder_drop_card` ("Drop a folder here / or click to choose one", ⌘⇧O
@@ -348,8 +363,8 @@ for eight seconds.
 
 Collapsed (⌘B), the sidebar column is the library `rail` (`flat(true)`):
 New, Search and Projects cells, a separator, the open session and up to eight
-of the visible list as titled tiles — each tinted with its project's colour
-(sessions in Other keep the default ink), running ones pulsing — and the
+of the visible list as titled tiles — each a plain initial on the surface
+step with no label tint (owner round 4, O4), running ones pulsing — and the
 account avatar. The Search cell opens the full-text search palette, exactly
 as ⌘⇧F does; the Projects cell opens the Projects palette, exactly as ⌘⇧O
 does — there is no sidebar quick-filter, so the palettes can never share the
@@ -357,7 +372,8 @@ sidebar. The window-level
 `--steps` verbs for all of this are `sidebar` (toggle), `overflow`,
 `view-menu`, `account`, `pin`, `archive`, `archive-confirm`,
 `show-archived`, `projects`, `project:<path>`, `project-menu[:<name>]`,
-`project-colour:<n>`, `group-by:<date|project>`, `remove-project:<name>` and
+`project-colour:<n>`, `group-by:<date|project>`, `group-bar`,
+`group-branch`, `group-chevron`, `remove-project:<name>` and
 `remove-confirm`, beside the older `search`,
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 
@@ -405,9 +421,10 @@ The shell paints no traffic lights of its own — the window's native ones are
 the only set. The sidebar header reserves their footprint (`native_lights`)
 and the window positions them with `aui::shell::traffic_light_position`, so
 they sit centred in the header row at every density. The centre header shows
-the project crumb (`mark project ▾`, one click target opening the project
+the project crumb (`project ▾`, one click target opening the project
 menu; "Add a project…" with no current project), a `·` separator, then the
-active session's label with the provider mark before it, and the overflow "…"
+active session's label with no provider mark before it (owner round 4, O4),
+and the overflow "…"
 menu (Rename, Fork, Archive); the title flexes inside the header cell and
 elides to one line, so a whole first prompt as the label can never push the
 overflow button out. Renaming the open session swaps the session label for
@@ -668,7 +685,8 @@ The banner stays up until the new child answers.
 
 The menu bar is built in `crate::app::set_menus`, called from `main.rs`
 after `bind_keys` — after, because macOS reads each item's shortcut from the
-keymap. Harness (About, Services, Quit), File (Add Project…, New, Close),
+keymap. Harness (About, Services, Quit), File (Add Project…, New, Settings…
+⌘,, Close),
 Edit (the standard six with `OsAction`), View (sidebar, palette, search,
 theme),
 Window (Minimize, Zoom), Help (Harness Documentation, which reveals the

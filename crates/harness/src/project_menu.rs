@@ -14,8 +14,6 @@
 //! starts a sibling session there. Then "New session here", "Rename project",
 //! a "Colour" submenu of eight swatches, pin, reveal, and removal.
 
-use std::collections::HashMap;
-
 use aui::nav::{view_menu, view_submenu_rows, MenuRow};
 use aui::overlay::popover_layer;
 use aui_tokens::ActiveAui;
@@ -113,27 +111,11 @@ impl Harness {
         id
     }
 
-    /// The adoptions in sidebar order: pinned first, then newest session
-    /// activity, then name. What the project menu and the Projects palette
-    /// both list.
+    /// The adoptions in sidebar order: pinned first, then name, never
+    /// recency (owner round 4, O1). What the project menu and the Projects
+    /// palette both list.
     pub(crate) fn ordered_projects(&self) -> Vec<crate::projects::Project> {
-        let activity = self.project_activity();
-        self.projects.sorted(&activity).into_iter().cloned().collect()
-    }
-
-    /// Newest session activity per project id, which is what
-    /// [`Projects::sorted`](crate::projects::Projects::sorted) orders by.
-    fn project_activity(&self) -> HashMap<String, i64> {
-        let mut activity: HashMap<String, i64> = HashMap::new();
-        for entry in &self.sessions {
-            if let Some(id) = entry.project.as_deref() {
-                activity
-                    .entry(id.to_owned())
-                    .and_modify(|newest| *newest = (*newest).max(entry.updated.timestamp_millis()))
-                    .or_insert(entry.updated.timestamp_millis());
-            }
-        }
-        activity
+        self.projects.sorted().into_iter().cloned().collect()
     }
 
     /// Pick a project from its menu row: an active session with zero turns
@@ -154,9 +136,10 @@ impl Harness {
     /// Rename through the crumb's dense field: the menu's project becomes
     /// current (its name is what the crumb shows), the field is seeded with
     /// it, and `ConfirmRename` commits through [`Self::commit_project_rename`].
+    /// Renaming never touches the project: opening the field must not
+    /// reorder the groups (owner round 4, O1).
     fn start_project_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.projects.find(&id).cloned() else { return };
-        self.projects.touch(&id);
         self.projects.current = Some(id.clone());
         self.current_project = Some(id.clone());
         projects::write(&self.projects);
@@ -304,6 +287,34 @@ impl Harness {
             _ => return,
         };
         self.layout.group_by = Some(mode);
+        crate::layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `group-chevron`: flip the group-row chevron flag and persist it. The
+    /// switch itself lives in the Settings dialog (owner round 4, O4); this
+    /// verb is what captures flip until it exists.
+    pub(crate) fn step_group_chevron(&mut self, cx: &mut Context<Self>) {
+        self.layout.group_chevron = !self.layout.group_chevron;
+        crate::layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `group-bar`: flip the current-project accent bar flag and persist it.
+    /// See [`Self::step_group_chevron`].
+    pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) {
+        self.layout.group_bar = !self.layout.group_bar;
+        crate::layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `group-branch`: flip the trailing-branch flag and persist it. See
+    /// [`Self::step_group_chevron`].
+    pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) {
+        self.layout.group_branch = !self.layout.group_branch;
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
