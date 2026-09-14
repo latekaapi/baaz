@@ -228,6 +228,15 @@ pub struct Args {
     /// `turn/completed`, so the idle window is measured with a turn still
     /// running (finding `performance-13`).
     pub bench_open_turn: bool,
+    /// `--bench-bare`: drive the transcript alone (`BenchRoot`) instead of
+    /// the normal shell. Without it `--bench` opens the normal `Harness`
+    /// root with the replayed session active, so `bench-draw` includes the
+    /// sidebar, header and composer. See `docs/02-app.md` §6.
+    pub bench_bare: bool,
+    /// Set internally when `--bench` boots the shell: the replayed view
+    /// opens in bench-replay state for the driver to stream into, rather
+    /// than folding the capture at once. Not a CLI flag.
+    pub bench_shell: bool,
     /// `--sidebar-fixture <json>`: a scripted session list merged into the
     /// sidebar as if the wire had listed it — `{ "sessionId",
     /// "workspaceRoot", "label", "updatedAt", "turnCount", "status" }` per
@@ -273,6 +282,8 @@ fn parse_args() -> Args {
         bench_frames: 600,
         bench_out: None,
         bench_open_turn: false,
+        bench_bare: false,
+        bench_shell: false,
         sidebar_fixture: None,
         no_project: false,
     };
@@ -384,6 +395,7 @@ fn parse_args() -> Args {
                 out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
             }
             "--bench-open-turn" => out.bench_open_turn = true,
+            "--bench-bare" => out.bench_bare = true,
             "--sidebar-fixture" => {
                 let value = args.next().unwrap_or_else(|| usage("--sidebar-fixture needs <fixture.json>"));
                 out.sidebar_fixture = Some(PathBuf::from(shellexpand(&value)));
@@ -452,7 +464,7 @@ fn usage(err: &str) -> ! {
          \x20              [--print-tier] [--approval-mode <mode>]\n\
          \x20              [--login <state>] [--login-steps <a;b;c>]\n\
          \x20              [--bench <capture.jsonl>] [--bench-cadence-ms <ms>] [--bench-scroll top|mid|tail|sweep|wheel]\n\
-         \x20              [--bench-frames <n>] [--bench-open-turn] [--bench-out <file.json>]\n\n\
+         \x20              [--bench-frames <n>] [--bench-open-turn] [--bench-bare] [--bench-out <file.json>]\n\n\
          environment: HARNESS_PROVIDER=echo routes through echo (NOT free: on a signed-in\n\
          \x20              machine it reaches the real model); HARNESS_MUSE names the binary.\n\
          \x20              --replay and --no-connect are the only runs that cost nothing.\n\n\
@@ -485,6 +497,8 @@ fn run_bench(args: Args) {
         args.workspace.to_string_lossy().into_owned(),
         args.provider.clone(),
     );
+    // The shell branch rebuilds these into the `Harness` boot below.
+    let (bench_bare, shell_args) = (args.bench_bare, args.clone());
     gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
         aui::init(theme, cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
@@ -509,19 +523,51 @@ fn run_bench(args: Args) {
             }),
             ..TitleBar::window_options()
         };
-        let stashed: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<bench::BenchRoot>>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(None));
-        let capture_stash = stashed.clone();
-        let handle = cx
-            .open_window(options, |window, cx| {
-                let view = cx.new(|cx| bench::BenchRoot::new(workspace.clone(), provider.clone(), window, cx));
-                capture_stash.borrow_mut().replace(view.clone());
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("open the bench window");
-        let Some(root) = stashed.borrow().clone() else {
-            eprintln!("bench: the window closed before the run started");
-            return;
+        // The window and the seed the driver streams into: the transcript
+        // alone behind `--bench-bare`, else the normal shell with its
+        // replayed session active — the same boot shape as `--replay`, but
+        // the view opens in bench-replay state for the driver to stream
+        // into, so `bench-draw` covers the whole shell.
+        let (handle, seed) = if bench_bare {
+            let stashed: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<bench::BenchRoot>>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+            let capture_stash = stashed.clone();
+            let handle = cx
+                .open_window(options, |window, cx| {
+                    let view = cx.new(|cx| bench::BenchRoot::new(workspace.clone(), provider.clone(), window, cx));
+                    capture_stash.borrow_mut().replace(view.clone());
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("open the bench window");
+            let Some(root) = stashed.borrow().clone() else {
+                eprintln!("bench: the window closed before the run started");
+                return;
+            };
+            (handle, bench::BenchSeed::Bare(root))
+        } else {
+            let mut shell_args = shell_args;
+            // A bench run is its own mode: it streams rather than replaying,
+            // so the capture rides the replay lane (the signed-in shell, no
+            // child) while `bench_shell` holds the fold for the driver.
+            shell_args.bench = None;
+            shell_args.replay = Some(opts.capture.clone());
+            shell_args.bench_shell = true;
+            let stashed: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<app::Harness>>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+            let capture_stash = stashed.clone();
+            let capture = crate::shot::CaptureToken::default();
+            let handle = cx
+                .open_window(options, move |window, cx| {
+                    let view = cx.new(|cx| app::Harness::new(shell_args.clone(), capture.clone(), window, cx));
+                    capture_stash.borrow_mut().replace(view.clone());
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("open the bench window");
+            let Some(harness) = stashed.borrow().clone() else {
+                eprintln!("bench: the window closed before the run started");
+                return;
+            };
+            (handle, bench::BenchSeed::Shell(harness))
         };
         handle
             .update(cx, |_, window, cx| {
@@ -535,7 +581,7 @@ fn run_bench(args: Args) {
             crate::tier::cleanup_probes();
         })
         .detach();
-        bench::run(handle, root, opts, command, cx);
+        bench::run(handle, seed, opts, command, cx);
     });
 }
 

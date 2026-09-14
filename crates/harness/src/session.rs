@@ -409,6 +409,12 @@ pub struct SessionView {
     rehint: bool,
     /// The `(turn id, row count)` list the virtual list was last synced to.
     synced_counts: Vec<(String, usize)>,
+    /// Wheel events applied since the last traced paint, and when the last
+    /// one landed (`HARNESS_FRAME_TRACE`, owner round 4 §1: the hand-gesture
+    /// instrument). Counted by the capture handler, drained by the next
+    /// traced paint; both stay untouched unless the trace is on.
+    trace_wheel_pending: usize,
+    trace_last_wheel: Option<Instant>,
     /// What `render_transcript` reads every frame (C1): one snapshot shared
     /// by steady-state frames, refreshed only when the fold changes (length
     /// drift or `follow`), so per-frame cost stays bounded as the transcript
@@ -640,6 +646,8 @@ impl SessionView {
             list_width: None,
             rehint: false,
             synced_counts: Vec::new(),
+            trace_wheel_pending: 0,
+            trace_last_wheel: None,
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: Rc::new(HashMap::new()),
             cached_pending_approval: None,
@@ -1089,6 +1097,16 @@ pub enum BannerAction {
 }
 
 
+/// The session a capture names (exactly one), for a bench or replayed view
+/// that opens before the first event is folded. Shared by the bare driver
+/// and the shell's `open_replay` in bench mode.
+pub(crate) fn capture_session_id(events: &[MuseEvent]) -> Option<String> {
+    events.iter().find_map(|event| match event {
+        MuseEvent::Notification { session_id: Some(id), .. } => Some(id.clone()),
+        _ => None,
+    })
+}
+
 /// The pending question a block id names, resolved once so the callers do not
 /// each re-walk the fold.
 struct Pending {
@@ -1389,6 +1407,147 @@ pub(crate) fn take_frame_samples() -> Vec<u128> {
 pub(crate) fn take_frame_times() -> Vec<std::time::Instant> {
     let times = FRAME_TIMES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
     times.lock().map(|mut times| std::mem::take(&mut *times)).unwrap_or_default()
+}
+
+/// Whole-frame timing (`bench-draw`, owner round 4 §1): the root render
+/// stamps the start; a zero-size canvas painted last in the same frame
+/// stamps the end. Paint order is depth-first, so the trailing child closes
+/// the frame's own paint — `window.on_next_frame` would not: gpui runs
+/// `next_frame_callbacks` at the top of the *next* request-frame.
+static DRAW_START: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> = std::sync::OnceLock::new();
+static DRAW_SAMPLES: std::sync::OnceLock<std::sync::Mutex<Vec<u128>>> = std::sync::OnceLock::new();
+
+/// Stamp the start of a whole-frame draw. First line of the root render
+/// (`Harness::render`, `BenchRoot::render`); recorded only while frame stats
+/// are on (`HARNESS_FRAME_STATS=1` or `--bench`), so a disabled build pays
+/// one relaxed load per frame.
+pub(crate) fn note_draw_start() {
+    if !frame_stats_enabled() {
+        return;
+    }
+    if let Ok(mut start) = DRAW_START.get_or_init(|| std::sync::Mutex::new(None)).lock() {
+        *start = Some(Instant::now());
+    }
+}
+
+/// Close the frame stamped above: a zero-size canvas, painted last in the
+/// root, whose paint closure records the render-to-paint duration. It paints
+/// nothing and takes no space, so captures are unaffected. A render with no
+/// paint behind it (a hidden window) leaves a start the next render
+/// overwrites, so `bench-draw` may count fewer frames than `bench-element`.
+pub(crate) fn draw_end_marker() -> AnyElement {
+    gpui::canvas(|_, _, _| (), |_, (), _, _| {
+        note_draw_end();
+    })
+    .into_any_element()
+}
+
+fn note_draw_end() {
+    if !frame_stats_enabled() {
+        return;
+    }
+    let start = DRAW_START
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .map(|mut start| start.take())
+        .unwrap_or(None);
+    if let Some(start) = start {
+        if let Ok(mut samples) = DRAW_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock() {
+            samples.push(start.elapsed().as_micros());
+        }
+    }
+}
+
+/// Drain the recorded whole-frame samples (microseconds), for the bench's
+/// end-of-run table.
+pub(crate) fn take_draw_samples() -> Vec<u128> {
+    let samples = DRAW_SAMPLES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    samples.lock().map(|mut samples| std::mem::take(&mut *samples)).unwrap_or_default()
+}
+
+/// Whether the per-paint frame trace is on: `HARNESS_FRAME_TRACE=1` in the
+/// normal window, read once. The trace is how the owner's own hand gesture
+/// on `--replay` becomes a measurement: every paint appends one row, and
+/// `scripts/frame-trace.py` summarises the log.
+fn frame_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HARNESS_FRAME_TRACE").as_deref() == Ok("1"))
+}
+
+/// How long after the last applied wheel event a traced paint still counts
+/// as mid-gesture: the momentum tail arrives at 60 Hz, so 150 ms covers a
+/// missed sample (owner round 4 §2 arms the same horizon).
+const TRACE_GESTURE_MS: u128 = 150;
+
+struct FrameTrace {
+    out: std::io::BufWriter<std::fs::File>,
+    start: Instant,
+}
+
+/// The open trace file, if the trace is on and the log could be opened:
+/// `$HARNESS_STATE_DIR/frame-trace.log`, falling back to the harness's own
+/// `~/Library/Application Support/harness/`. One handle per process,
+/// appended to, flushed per paint so a crash keeps what painted.
+fn frame_trace_slot() -> Option<std::sync::MutexGuard<'static, Option<FrameTrace>>> {
+    if !frame_trace_enabled() {
+        return None;
+    }
+    static TRACE: std::sync::OnceLock<std::sync::Mutex<Option<FrameTrace>>> = std::sync::OnceLock::new();
+    let slot = TRACE.get_or_init(|| {
+        std::sync::Mutex::new(
+            (|| {
+                let dir = crate::store::support_dir();
+                std::fs::create_dir_all(&dir).ok()?;
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("frame-trace.log"))
+                    .ok()?;
+                let mut out = std::io::BufWriter::new(file);
+                use std::io::Write as _;
+                let _ = writeln!(out, "# harness frame trace v1: t_us,list_px,events_since_last_paint,gesture_active");
+                Some(FrameTrace { out, start: Instant::now() })
+            })(),
+        )
+    });
+    slot.lock().ok()
+}
+
+impl SessionView {
+    /// Count one applied wheel event for the frame trace. Called from the
+    /// capture handler's view update, beside the `follow` bookkeeping.
+    fn note_wheel_event(&mut self) {
+        if !frame_trace_enabled() {
+            return;
+        }
+        self.trace_wheel_pending += 1;
+        self.trace_last_wheel = Some(Instant::now());
+    }
+
+    /// Append one `t_us,list_px,events_since_last_paint,gesture_active` row
+    /// for this paint: micros since the trace opened, the absolute pixel
+    /// offset a scrollbar would draw, the wheel events applied since the
+    /// last traced paint, and whether a wheel event landed in the last
+    /// [`TRACE_GESTURE_MS`] milliseconds. Called first in
+    /// `render_transcript`, so even an empty transcript's paints trace.
+    fn note_frame_trace(&mut self) {
+        let Some(mut slot) = frame_trace_slot() else { return };
+        let Some(trace) = slot.as_mut() else { return };
+        let list_px = self.bench_list_px();
+        let events = std::mem::take(&mut self.trace_wheel_pending);
+        let gesture = self.trace_last_wheel.is_some_and(|at| at.elapsed().as_millis() < TRACE_GESTURE_MS);
+        use std::io::Write as _;
+        let _ = writeln!(
+            trace.out,
+            "{},{:.1},{},{}",
+            trace.start.elapsed().as_micros(),
+            list_px,
+            events,
+            gesture as u8
+        );
+        let _ = trace.out.flush();
+    }
 }
 
 /// One `view/page` result as foldable wire events, in page order.
