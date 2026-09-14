@@ -1,5 +1,17 @@
 # Harness changelog
 
+## 2026-09-14 — Owner round 4 fixup: the Sessions header stays fixed
+
+- **The Sessions caption no longer scrolls with the list.** `render_sidebar`
+  draws the library caption row fixed between the nav block and the
+  `sessions-scroll` div (same 8 px margin, 28 px height — the unscrolled list
+  is pixel-identical), so at any scroll offset the header and its spacing
+  stay put and the rows clip at the list's own top edge: no row ever reaches
+  the nav rows again, including after the reveal-on-activation scroll. The
+  Sessions view menu seats from the caption's tracked bounds
+  (`sessions_caption`, pure `view_menu_seat` with unit tests) instead of the
+  scroll content's head minus the offset — same seat, scroll-independent.
+
 ## 2026-09-13 — Owner round 4, scroll cadence
 
 - **One offset per frame (§2).** `wheel_capture` no longer calls `scroll_by`

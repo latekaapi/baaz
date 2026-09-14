@@ -310,6 +310,10 @@ Above the Sessions caption sit three `nav_item` rows: **New session** (Plus,
 the ⌘N in the sidebar), **Add project** (Folder, the ⌘⇧O in the sidebar) and
 **Automations** (Zap) with a muted "Soon" tag — a placeholder with no
 destination yet, so it answers with a toast saying so.
+The Sessions caption is fixed above the scrolling list: the rows clip at the
+list's own top edge, so the header and its spacing stay put at any scroll
+offset — including after a reveal-on-activation scrolls the list — and no row
+ever reaches the nav rows (owner round 4 fixup).
 The caption's sliders icon opens the **view menu**: Group by project
 (toggle), Show empty (n) / Hide empty, Show hidden (n) / Hide hidden (the
 legacy `/hide` rows), Clear empty, Show archived (n) / Hide archived, and
