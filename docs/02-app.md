@@ -269,8 +269,12 @@ runs, and hover `+` and `…`; sessions inside run newest-first with pinned
 first; then the muted "Other workspaces" group, always last and closed until
 opened. The collapse chevron, the current-project accent bar and the trailing
 branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
-default off — owner round 4, O4; the Settings dialog owns the switches, and
-`--steps group-chevron|group-bar|group-branch` flips them until it exists).
+default off — owner round 4, O4). The Settings dialog owns the switches:
+⌘, (File → Settings…), the account footer menu's "Settings…" row, or
+`--steps settings[:<section>]`; its Sidebar section holds the three flags
+and later sections add arms in `Harness::settings_sections`
+(`crate::settings`). `--steps group-chevron|group-bar|group-branch` flips
+them without opening the dialog.
 Activating a session from outside the sidebar reveals it: the least scroll
 that brings the row — or, when its group is closed or folded past the cut,
 the group row, never auto-expanded — into view (O6). Past five a group folds: it shows
@@ -681,7 +685,8 @@ The banner stays up until the new child answers.
 
 The menu bar is built in `crate::app::set_menus`, called from `main.rs`
 after `bind_keys` — after, because macOS reads each item's shortcut from the
-keymap. Harness (About, Services, Quit), File (Add Project…, New, Close),
+keymap. Harness (About, Services, Quit), File (Add Project…, New, Settings…
+⌘,, Close),
 Edit (the standard six with `OsAction`), View (sidebar, palette, search,
 theme),
 Window (Minimize, Zoom), Help (Harness Documentation, which reveals the

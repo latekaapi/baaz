@@ -148,11 +148,22 @@ pub struct Palette {
 /// a root with an open view is never the one dropped.
 pub(crate) const MAX_CACHED_ROOTS: usize = 8;
 
+/// The open Settings dialog: which section the rail has open. `None` is
+/// closed. Only one modal is ever open — opening Settings drops the plain
+/// [`Dialog`] and vice versa — so Escape's order stays a single rule.
+pub struct Settings {
+    /// Index into the sections [`crate::app::Harness::settings_sections`]
+    /// builds.
+    pub section: usize,
+}
+
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
     /// The modal, if any.
     pub dialog: Option<Dialog>,
+    /// The Settings dialog, if any.
+    pub settings: Option<Settings>,
     /// The open popover, if any.
     pub menu: Option<Menu>,
     /// The open command palette, if any.
@@ -182,7 +193,10 @@ impl Overlays {
         if self.palette.take().is_some() {
             return true;
         }
-        self.dialog.take().is_some()
+        if self.dialog.take().is_some() {
+            return true;
+        }
+        self.settings.take().is_some()
     }
 
     /// Move the palette's selection by `delta` within `count`, wrapping.
