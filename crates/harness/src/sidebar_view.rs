@@ -21,8 +21,8 @@ use std::rc::Rc;
 
 use aui::data::{icon_button, ButtonSize};
 use aui::nav::{
-    dense_field, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem, RowAction,
-    SidebarView,
+    dense_field, group_row, nav_item, rail, sidebar_footer, sidebar_view, view_menu, GroupAction, MenuRow, RailItem,
+    RowAction, SidebarView,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
@@ -190,6 +190,36 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The Sessions caption, fixed above the scrolling list (owner round 4
+    /// fixup): the header stays put with its spacing at any scroll offset,
+    /// so the list below it always clips at its own top edge and never butts
+    /// against the nav block. The row is the library's caption row with the
+    /// same 8 px top margin and 28 px height it had as the scroll content's
+    /// first child, so the unscrolled list sits pixel-identical; only the
+    /// scrolled states change (the header no longer scrolls away). The
+    /// wrapper reports the row's own rect, which is what the Sessions view
+    /// menu seats at — under the sliders icon, never following the scroll.
+    fn render_sessions_caption(&self, cx: &mut Context<Self>) -> AnyElement {
+        // The sliders icon toggles the view menu like every other popover.
+        let open_view = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.open_menu(MenuKind::ViewOptions, cx);
+        });
+        let caption_report = cx.entity().downgrade();
+        div()
+            .w_full()
+            .flex_none()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = caption_report.update(cx, |this, cx| {
+                        Harness::note_trigger_bounds(&mut this.sessions_caption, bounds, cx);
+                    });
+                }
+            })
+            .child(group_row("sessions-caption", "Sessions").on_view_options(move |_, w, cx| open_view(&(), w, cx)))
+            .into_any_element()
+    }
+
     pub(crate) fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let visible = self.visible_sessions(cx);
         let empty = self.render_sidebar_empty(&visible, cx);
@@ -223,10 +253,6 @@ impl Harness {
                 }
                 _ => {}
             }
-        });
-        // The sliders icon toggles the view menu like every other popover.
-        let open_view = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.open_menu(MenuKind::ViewOptions, cx);
         });
         let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
             this.toggle_group(id.to_string(), cx);
@@ -264,9 +290,10 @@ impl Harness {
         // before the first prepaint appears on the next frame; steady bounds
         // never schedule work of their own.
         let menu_report = cx.entity().downgrade();
+        // No caption on the view: the Sessions header is fixed above the
+        // scroll div (see `render_sessions_caption`), so it never scrolls
+        // away and the list always starts below it.
         let mut view = sidebar_view("sessions", Rc::clone(&grouping))
-            .caption("Sessions")
-            .on_view_options(move |w, cx| open_view(&(), w, cx))
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_toggle(move |id, w, cx| toggle(id, w, cx))
@@ -301,16 +328,18 @@ impl Harness {
         v_flex()
             .size_full()
             .child(self.render_nav_block(cx))
+            .child(self.render_sessions_caption(cx))
             .child(
                 div()
                     .id("sessions-scroll")
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
-                    // Tracked so the Sessions view menu can anchor under the
-                    // caption's sliders icon (the caption scrolls with this
-                    // list); observing changes nothing about the scrolling
-                    // itself.
+                    // Tracked so the reveal can read the viewport and move
+                    // the offset; observing changes nothing about the
+                    // scrolling itself. The fixed caption above is outside
+                    // this div, so the list clips at the div's own top edge
+                    // and nothing from it ever reaches the nav rows.
                     .track_scroll(&self.sessions_scroll)
                     .child(view)
                     .children(empty),
@@ -648,18 +677,13 @@ impl Harness {
     /// The Sessions caption's view menu: where list management lives now that
     /// the footer is the library's account row again.
     ///
-    /// Anchored under the caption's sliders icon, right edge aligned to the
-    /// sidebar's content edge. The caption row is the scroll content's first
-    /// child — an 8 px top margin (`scale::SP_3`, the library row's default)
-    /// and 28 px tall, the icon at its right end under 12 px of row padding
-    /// (both read out of `aui::nav::parts`, which keeps them private) — plus
-    /// a 4 px gap under it. The tracked scroll handle reports the viewport
-    /// and its offset in window coordinates every prepaint, so the menu
-    /// follows the sidebar's width and the list's scroll; before the first
-    /// prepaint there are no bounds, so there is no menu this frame (never a
-    /// seat at a fixed corner). The caption's own bounds are not obtainable
-    /// from the frozen library, so this menu keeps its measured seat rather
-    /// than moving to `anchored_menu`.
+    /// Anchored under the fixed caption's sliders icon (see
+    /// [`Self::render_sessions_caption`]), right edge aligned to the
+    /// sidebar's content edge. The caption never scrolls, so the seat comes
+    /// straight from its tracked bounds and ignores the list's scroll; before
+    /// the first prepaint there are no bounds, so there is no menu this frame
+    /// (never a seat at a fixed corner). The seat keeps its measured
+    /// positioning rather than moving to `anchored_menu`.
     pub(crate) fn render_view_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
             return None;
@@ -748,35 +772,15 @@ impl Harness {
                 None => {}
             }
         });
-        // Caption geometry the library keeps private (`aui::nav::parts`):
-        // 28 px row, 12 px horizontal padding, 4 px gap under the menu. The
-        // menu itself is a fixed 250 px (`aui::nav::view_menu`, private
-        // `MENU_W`): right-align it to the caption's right edge, clamped
-        // into the window so a sidebar narrower than the menu never clips
-        // its left side.
-        const CAPTION_H: f32 = 28.0;
-        const CAPTION_PAD_X: f32 = 12.0;
-        const MENU_GAP: f32 = 4.0;
-        const MENU_W: f32 = 250.0;
-        let viewport = self.sessions_scroll.bounds();
-        let placed: Option<(f32, f32)> = if f32::from(viewport.size.width) > 0.0 {
-            // The view is the scroll content's first child; the caption sits
-            // at its head under the row's top margin.
-            let content_top = f32::from(
-                self.sessions_scroll
-                    .bounds_for_item(0)
-                    .map(|bounds| bounds.origin.y)
-                    .unwrap_or(viewport.origin.y),
-            );
-            let top = (content_top - f32::from(self.sessions_scroll.offset().y) + scale::SP_3 + CAPTION_H
-                + MENU_GAP)
-                .max(f32::from(viewport.origin.y) + MENU_GAP);
-            let right_edge = f32::from(viewport.origin.x) + f32::from(viewport.size.width) - CAPTION_PAD_X;
-            let left = (right_edge - MENU_W).max(8.0);
-            Some((top, left))
-        } else {
-            None
-        };
+        // The menu seats under the fixed caption's sliders icon: the caption
+        // never scrolls, so the seat takes no scroll offset and never needs
+        // the viewport clamp the scrolling caption did. Right edge aligned
+        // to the caption's right edge under its 12 px of row padding (both
+        // read out of `aui::nav::parts`, which keeps them private), 4 px
+        // under it; the menu itself is a fixed 250 px (`aui::nav::view_menu`,
+        // private `MENU_W`), clamped into the window so a sidebar narrower
+        // than the menu never clips its left side.
+        let placed: Option<(f32, f32)> = self.sessions_caption.map(view_menu_seat);
         // No bounds yet (before the first prepaint, or the rail): no menu
         // this frame, never a fixed corner. The notify covers the cold open;
         // the rail guard keeps a scripted menu there from repainting forever.
@@ -925,5 +929,53 @@ fn reveal_scroll(scroll: &ScrollHandle, row: Bounds<Pixels>) -> (RevealProgress,
         (RevealProgress::Landed, Some(applied))
     } else {
         (RevealProgress::NotReady, None)
+    }
+}
+
+/// The Sessions view menu's seat for a fixed caption (owner round 4 fixup):
+/// 4 px under the caption's bottom edge, right edge aligned to the caption's
+/// right edge under its 12 px of row padding; the menu is a fixed 250 px
+/// wide, so a sidebar narrower than that clamps the seat's left at 8 px into
+/// the window. Pure in the caption bounds — the seat never moves with the
+/// list's scroll, which is what pins the menu under the sliders icon that
+/// opened it at any scroll offset.
+fn view_menu_seat(caption: Bounds<Pixels>) -> (f32, f32) {
+    const CAPTION_PAD_X: f32 = 12.0;
+    const MENU_GAP: f32 = 4.0;
+    const MENU_W: f32 = 250.0;
+    let top = f32::from(caption.origin.y) + f32::from(caption.size.height) + MENU_GAP;
+    let right_edge = f32::from(caption.origin.x) + f32::from(caption.size.width) - CAPTION_PAD_X;
+    (top, (right_edge - MENU_W).max(8.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caption(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
+    }
+
+    #[test]
+    fn view_menu_seat_sits_under_the_caption_right_aligned() {
+        // A 400 px caption: the menu hangs 4 px under its bottom edge with
+        // its right edge 12 px inside the caption's (400 - 12 - 250).
+        assert_eq!(view_menu_seat(caption(0.0, 138.0, 400.0, 28.0)), (170.0, 138.0));
+    }
+
+    #[test]
+    fn view_menu_seat_clamps_into_a_narrow_sidebar() {
+        // A 200 px sidebar is narrower than the 250 px menu: the seat's left
+        // stops at 8 px instead of running off the window's left edge.
+        assert_eq!(view_menu_seat(caption(0.0, 100.0, 200.0, 28.0)), (132.0, 8.0));
+    }
+
+    #[test]
+    fn view_menu_seat_for_the_default_sidebar() {
+        // The standard 252 px sidebar with the caption at y 146: the menu
+        // opens 4 px under it with its left clamped at 8 px (252 - 12 is
+        // narrower than the 250 px menu). The seat takes no scroll offset,
+        // so it stays under the sliders icon at any scroll position.
+        assert_eq!(view_menu_seat(caption(0.0, 146.0, 252.0, 28.0)), (178.0, 8.0));
     }
 }

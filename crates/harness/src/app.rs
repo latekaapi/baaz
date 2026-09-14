@@ -419,11 +419,11 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
-    /// The sessions list's scroll state, tracked so the Sessions view menu
-    /// can anchor under the caption's sliders icon: the caption scrolls with
-    /// the list, so its visible position is its content position minus this
-    /// offset. One handle for the window's life, so the state persists
-    /// across frames.
+    /// The sessions list's scroll state: what the reveal reads and moves
+    /// (`reveal_scroll`), persisting across frames on one handle for the
+    /// window's life. (The Sessions view menu used to anchor off this too,
+    /// back when the caption scrolled with the list; the caption is fixed
+    /// now, so the menu seats from `sessions_caption` instead.)
     pub(crate) sessions_scroll: ScrollHandle,
     /// The two flags a `--screenshot` wait reads out of this window (see
     /// [`crate::shot::CaptureToken`]). Handed to every session view this
@@ -500,6 +500,10 @@ pub struct Harness {
     /// instead of flashing at a wrong seat, and nothing repaints afterwards.
     /// The sidebar footer row: the account menu's trigger.
     pub(crate) footer_bounds: Option<Bounds<Pixels>>,
+    /// The fixed Sessions caption row: the Sessions view menu's trigger
+    /// (owner round 4 fixup — the header sits above the scrolling list, so
+    /// its menu seats under the sliders icon at any scroll offset).
+    pub(crate) sessions_caption: Option<Bounds<Pixels>>,
     /// The header project crumb: the header project menu's trigger.
     pub(crate) crumb_bounds: Option<Bounds<Pixels>>,
     /// The header overflow `…` button: the overflow menu's trigger.
@@ -620,6 +624,7 @@ impl Harness {
             renaming_project: None,
             project_colour_open: false,
             footer_bounds: None,
+            sessions_caption: None,
             crumb_bounds: None,
             overflow_bounds: None,
             project_menu_bounds: None,
