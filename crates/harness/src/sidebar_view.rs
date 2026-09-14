@@ -1147,6 +1147,21 @@ mod tests {
     }
 
     #[test]
+    fn render_counters_drain_what_they_counted() {
+        // The idle instrument's contract (owner round 6): `take_*` zeroes,
+        // so the take after a window holds only that window's renders. The
+        // counters are process-global and only the render paths note them,
+        // which unit tests never reach — drain first to stay hermetic.
+        take_harness_root_renders();
+        take_sidebar_pane_renders();
+        note_harness_render();
+        note_harness_render();
+        assert_eq!(take_harness_root_renders(), 2);
+        assert_eq!(take_harness_root_renders(), 0);
+        assert_eq!(take_sidebar_pane_renders(), 0);
+    }
+
+    #[test]
     fn view_menu_seat_for_the_default_sidebar() {
         // The standard 252 px sidebar with the caption at y 146: the menu
         // opens 4 px under it with its left clamped at 8 px (252 - 12 is

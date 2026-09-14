@@ -458,6 +458,9 @@ impl Render for BenchRoot {
         // The whole-frame instrument's start; the trailing marker closes it
         // after paint (see `session::draw_end_marker`).
         session::note_draw_start();
+        // The idle window's `root_2s`: no `Harness` renders in bare mode,
+        // so the bench root counts itself — the window's root either way.
+        crate::sidebar_view::note_harness_render();
         // The shell splits the centre (cached transcript above a live
         // composer band); the bench renders both whole every frame, so the
         // transcript keeps its viewport and the band its measure.
@@ -484,6 +487,17 @@ impl Render for BenchRoot {
 const FRAME_BUDGET: Duration = Duration::from_micros(16_700);
 /// How long the idle assertion watches a settled transcript.
 const IDLE_WINDOW: Duration = Duration::from_secs(2);
+/// Quiet required before the idle window opens (owner round 6): the driver
+/// stopping is not the same as settled — trailing async work (list measure,
+/// enter presences, a tier answer) lands in the first frames after the last
+/// driven update, and counting it flakes 0–32 run to run on the same binary.
+/// 500 ms with no transcript constructions means settled (traces show the
+/// tail inside ~0.3 s); an open turn still ticks 1 Hz through both.
+const SETTLE_QUIET: Duration = Duration::from_millis(500);
+/// Bound on the settle wait: a true never-idles loop never quiets, so the
+/// run proceeds after this and the 2 s count fails loudly instead of the
+/// run hanging.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the driver polls for frame counts.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -668,13 +682,36 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         let stream_secs = run_start.elapsed().as_secs_f64();
         // The idle assertion: a settled transcript must request no frames.
         // `render_transcript` records one sample per construction, so the
-        // sample delta over a quiet 2 s is the frame count there.
+        // sample delta over a quiet 2 s is the frame count there. Settle
+        // first (see `SETTLE_QUIET`): the count opens only after 500 ms
+        // with no constructions, so trailing work the driver stopped no
+        // longer counts as idle. The root renders drain beside it: the
+        // transcript count says the centre rebuilt, `root_2s` says the
+        // window did (a blinking caret legitimately repaints the band).
+        let mut last = session::frame_sample_count();
+        let mut quiet_since = Instant::now();
+        let settle_deadline = Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            cx.background_executor().timer(POLL).await;
+            let now = session::frame_sample_count();
+            if now != last {
+                last = now;
+                quiet_since = Instant::now();
+            }
+            if quiet_since.elapsed() >= SETTLE_QUIET || Instant::now() >= settle_deadline {
+                break;
+            }
+        }
         let idle_start = session::frame_sample_count();
+        // Zero the root counter: the take after the window then holds only
+        // the idle window's root renders.
+        crate::sidebar_view::take_harness_root_renders();
         let deadline = Instant::now() + IDLE_WINDOW;
         while Instant::now() < deadline {
             cx.background_executor().timer(POLL).await;
         }
         let idle_frames = session::frame_sample_count().saturating_sub(idle_start);
+        let idle_root = crate::sidebar_view::take_harness_root_renders();
         // The tables.
         let mut element = session::take_frame_samples();
         element.sort_unstable();
@@ -740,7 +777,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         );
         println!("bench-frames frames={frames} fps={fps:.1} dropped={dropped} stream_secs={stream_secs:.1}");
         println!("bench-rss peak_mb={rss_mb:.1}");
-        println!("bench-idle frames_2s={idle_frames} open_turn={}", opts.open_turn);
+        println!("bench-idle frames_2s={idle_frames} root_2s={idle_root} open_turn={}", opts.open_turn);
         let scroll_json = match wheel_stats.as_ref() {
             Some(WheelOutcome { tail_ix, phases, bursts, offsets, scroll_bys }) => {
                 println!("bench-wheeldrain drains={scroll_bys}");
@@ -851,6 +888,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                 "dropped": dropped,
                 "stream_secs": stream_secs,
                 "idle_frames_2s": idle_frames,
+                "idle_root_2s": idle_root,
                 "idle_open_turn": opts.open_turn,
                 "scroll": scroll_json,
                 "rss_peak_mb": rss_mb,
