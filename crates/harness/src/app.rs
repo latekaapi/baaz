@@ -1002,7 +1002,7 @@ impl Harness {
                 this.client = Some(connection.client.clone());
                 this.wire = Wire::Ready;
                 if let Some(active) = &this.active {
-                    active.update(cx, |view, _| view.reconnected(connection.client.clone()));
+                    active.update(cx, |view, cx| view.reconnected(connection.client.clone(), cx));
                 }
                 this.pump(events, cx);
                 this.resume_after_reconnect(resume, cx);
@@ -1347,8 +1347,41 @@ impl Harness {
         // frame changes is in [`Self::on_frame`].
         self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
+        // The transcript column has its own cached entity boundary (owner
+        // round 6, part 4): a sidebar-only frame reuses the retained
+        // transcript instead of rebuilding it. The composer band and the
+        // drop overlay compose live beside it — the band's textarea would
+        // pin any cached ancestor dirty on every paint, and a hidden
+        // overlay would keep asking for the next frame while its exit runs.
+        // `render_no_session` stays inline — there is no view to cache on,
+        // and the screen is static.
         let body = match self.active.clone() {
-            Some(view) => view.update(cx, |view, cx| view.render_centre(window, cx)),
+            Some(view) => {
+                let transcript = view
+                    .clone()
+                    .cached(StyleRefinement::default().flex_grow(1.))
+                    .into_any_element();
+                let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
+                let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
+                v_flex()
+                    .size_full()
+                    .relative()
+                    .child(transcript)
+                    .child(band)
+                    .children(overlay)
+                    // gpui reports an external drag only while it moves, so
+                    // that is what raises the overlay; the drop takes it
+                    // down again.
+                    .on_drag_move(cx.listener(
+                        |this: &mut Self, _: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
+                            this.with_session(cx, |view, cx| view.note_drag_over(cx));
+                        },
+                    ))
+                    .on_drop(cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
+                        this.with_session(cx, |view, cx| view.drop_external(paths, cx));
+                    }))
+                    .into_any_element()
+            }
             None => self.render_no_session(window, cx),
         };
         v_flex()

@@ -458,7 +458,21 @@ impl Render for BenchRoot {
         // The whole-frame instrument's start; the trailing marker closes it
         // after paint (see `session::draw_end_marker`).
         session::note_draw_start();
-        let centre = self.view.update(cx, |view, cx| view.render_centre(window, cx));
+        // The shell splits the centre (cached transcript above a live
+        // composer band); the bench renders both whole every frame, so the
+        // transcript keeps its viewport and the band its measure.
+        let centre = self.view.update(cx, |view, cx| {
+            let transcript = view.render_transcript_column(window, cx);
+            let band = view.render_composer_band(window, cx);
+            let overlay = view.render_drop_overlay(window, cx);
+            gpui::div()
+                .size_full()
+                .relative()
+                .child(transcript)
+                .child(band)
+                .children(overlay)
+                .into_any_element()
+        });
         // `size_full`: the wrapper fills the window exactly as the centre
         // did standing alone, so the transcript keeps its viewport (a bare
         // `div` would collapse it to zero height and unscrollable).
