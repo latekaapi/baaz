@@ -15,11 +15,12 @@ use super::*;
 ///
 /// What `visible` was built for: the list epoch plus the open session's id
 /// (the empty filter never hides the open session, so a switch changes the
-/// rows) plus the grouping mode, the closed set and the expanded set (a
-/// toggle regroups the same rows).
-type ListKey = (u64, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>);
+/// rows) plus the click's target (the grouping rescues it past the fold, so
+/// a click must rebuild) plus the grouping mode, the closed set and the
+/// expanded set (a toggle regroups the same rows).
+type ListKey = (u64, Option<String>, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>);
 
-/// Validity is five keys, not a timestamp (see [`ListKey`]), and the grouping
+/// Validity is six keys, not a timestamp (see [`ListKey`]), and the grouping
 /// carries the minute it labelled its rows against.
 #[derive(Default)]
 pub(crate) struct ListCache {
@@ -387,10 +388,15 @@ impl Harness {
         let group_by = self.effective_group_by();
         let closed = self.layout.closed_groups.clone();
         let expanded = self.layout.expanded_groups.clone();
+        // The click's target rides the key: the grouping rescues it past the
+        // fold, so a click (or an `open:` step) that names a held-back row
+        // must rebuild the grouping on its own frame.
+        let pending = self.pending_id.clone();
         let mut cache = self.list_cache.borrow_mut();
-        if cache.key.as_ref().is_some_and(|(epoch, id, cached_group, cached_closed, cached_expanded)| {
+        if cache.key.as_ref().is_some_and(|(epoch, id, awaited, cached_group, cached_closed, cached_expanded)| {
             *epoch == self.list_epoch
                 && *id == active
+                && *awaited == pending
                 && *cached_group == group_by
                 && *cached_closed == closed
                 && *cached_expanded == expanded
@@ -414,7 +420,7 @@ impl Harness {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        cache.key = Some((self.list_epoch, active, group_by, closed, expanded));
+        cache.key = Some((self.list_epoch, active, pending, group_by, closed, expanded));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)
@@ -446,8 +452,13 @@ impl Harness {
                 let expanded: std::collections::HashSet<String> =
                     self.layout.expanded_groups.iter().cloned().collect();
                 let active = self.active_id(cx);
-                let view = sidebar::GroupView { closed: &closed, expanded: &expanded, active: active.as_deref() };
-                sidebar::grouping_by_project(&visible, &self.projects, &cx.aui().colors, &self.branches, &view, now)
+                let view = sidebar::GroupView {
+                    closed: &closed,
+                    expanded: &expanded,
+                    active: active.as_deref(),
+                    pending: self.pending_id.as_deref(),
+                };
+                sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, &self.layout, now)
             }
             // The list or the index hasn't landed yet: a flat date view,
             // exactly what the window showed while loading before projects

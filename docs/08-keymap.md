@@ -63,6 +63,7 @@ stays where the person was typing and the needs-you banner is the way over.
 |---|---|
 | ⌘B | Sidebar ↔ collapsed rail |
 | ⌘N | New session in this workspace |
+| ⌘, | The Settings dialog (File → Settings…; its Sidebar section owns the three group flags) |
 | ⌘K | The command palette: every `/` command and every session operation |
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧O | The Projects palette: adopted projects to switch to, recent Muse workspaces to adopt |
@@ -84,7 +85,7 @@ disarmed and every control would wear a ring after the first key press.
 
 The menu bar is real (`crate::app::set_menus`, called after `bind_keys` in
 `main.rs`): Harness (About, Services, Quit ⌘Q), File (Add Project ⌘⇧O, New
-⌘N, Close ⌘W),
+⌘N, Settings ⌘,, Close ⌘W),
 Edit (the standard six, each carrying its `OsAction` for OS recognition),
 View (sidebar, palette ⌘K, search ⌘⇧F, theme), Window (Minimize ⌘M, Zoom),
 Help (Harness Documentation reveals `docs/` in Finder). A menu item's shortcut displays

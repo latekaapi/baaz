@@ -11,14 +11,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use aui_icons::Provider;
 use aui_tokens::AgentState;
+use gpui::{Bounds, Pixels};
 pub use aui::nav::Grouping;
 
 use aui::nav::{DateGroup, ProjectGroup, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
+use crate::layout::Layout;
 use crate::projects::Projects;
 use crate::sessions::SessionMeta;
 
@@ -205,10 +206,11 @@ impl SessionEntry {
         }
     }
 
-    /// The library row for this session, labelled against `now`.
+    /// The library row for this session, labelled against `now`. No
+    /// provider mark: the sidebar rows read title, preview and elapsed only
+    /// (owner round 4, O4).
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
-        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
-            .provider(Provider::Muse);
+        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
         // The description first, so the second line reads what was done here
         // last; the turn count stays in the meta after it.
         if !self.description.is_empty() {
@@ -330,8 +332,8 @@ pub const OTHER_GROUP: &str = "other";
 pub const VISIBLE_RECENT: usize = 5;
 
 /// What the project grouping shows beyond the rows: which groups stand
-/// closed, which folded groups stand expanded, and which session is open
-/// (it is never held back).
+/// closed, which folded groups stand expanded, which session is open, and
+/// which session the UI is pointed at (neither is ever held back).
 pub struct GroupView<'a> {
     /// Group ids standing closed (`"other"` starts closed).
     pub closed: &'a HashSet<String>,
@@ -339,19 +341,24 @@ pub struct GroupView<'a> {
     pub expanded: &'a HashSet<String>,
     /// The open session's id, if any.
     pub active: Option<&'a str>,
+    /// The click's target: `resume` names it before any view exists (and on
+    /// a client-less run no view ever comes), so without the rescue below
+    /// the highlight it earned would sit behind "Show N more" unseen.
+    pub pending: Option<&'a str>,
 }
 
 /// Group the entries by project, against an explicit clock.
 ///
-/// One group per adoption in [`Projects::sorted`] order — pinned projects
-/// first, then by newest session activity — each carrying its mark (the
-/// name's initial in the project's label colour), the branch when known, a
-/// running dot when any of its sessions runs, and the visible-session count
-/// (an empty project still gets its row, counting `"0"`). Sessions inside
-/// run newest-first with pinned rows first, each drawn exactly as the date
-/// view draws it. Entries that resolve to no project land in a last muted
-/// "Other workspaces" group, each row tagged with its workspace's folder
-/// name. A group stands open unless its id is in `closed` — except "Other
+/// One group per adoption in [`Projects::sorted`] order — pinned first, then
+/// name, never recency (owner round 4, O1) — each a plain muted label with
+/// the visible-session count (an empty project still gets its row, counting
+/// `"0"`), a running dot when any of its sessions runs, and, only when the
+/// layout flags ask, the collapse chevron, the current-project bar and the
+/// trailing branch. No coloured mark anywhere. Sessions inside run
+/// newest-first with pinned rows first, each drawn exactly as the date view
+/// draws it. Entries that resolve to no project land in a last muted "Other
+/// workspaces" group, each row tagged with its workspace's folder name. A
+/// group stands open unless its id is in `closed` — except "Other
 /// workspaces", which reads the same set inverted and starts closed, so one
 /// flip rule serves both.
 ///
@@ -361,29 +368,24 @@ pub struct GroupView<'a> {
 /// A project group shows its pinned rows, then the [`VISIBLE_RECENT`] most
 /// recent others; the rest are held back and the group is
 /// [folded](aui::nav::ProjectGroup::folded) until its id lands in `expanded`.
-/// The open session (`active`) is always among the visible ones even when it
-/// is older than the fifth — it appends past the five rather than displacing
-/// a newer row. "Other workspaces" never folds: it is closed until opened
-/// and usually short.
+/// The open session (`active`) — and the click's target (`pending`) — are
+/// always among the visible ones even when older than the fifth: they append
+/// past the five rather than displacing a newer row. "Other workspaces"
+/// never folds: it is closed until opened and usually short.
 pub fn grouping_by_project(
     entries: &[SessionEntry],
     projects: &Projects,
-    palette: &aui_tokens::Palette,
     branches: &HashMap<String, String>,
     view: &GroupView<'_>,
+    layout: &Layout,
     now: DateTime<Local>,
 ) -> Grouping {
-    let mut activity: HashMap<String, i64> = HashMap::new();
     let mut by_project: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
     let mut other: Vec<&SessionEntry> = Vec::new();
     for entry in entries {
         match entry.project.as_deref().and_then(|id| projects.find(id)) {
             Some(project) => {
                 by_project.entry(project.id.as_str()).or_default().push(entry);
-                activity
-                    .entry(project.id.clone())
-                    .and_modify(|newest| *newest = (*newest).max(entry.updated.timestamp_millis()))
-                    .or_insert(entry.updated.timestamp_millis());
             }
             None => other.push(entry),
         }
@@ -398,7 +400,7 @@ pub fn grouping_by_project(
         .and_then(|e| e.project.as_deref())
         .or(projects.current.as_deref());
     let mut groups = Vec::new();
-    for project in projects.sorted(&activity) {
+    for project in projects.sorted() {
         let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
         rows.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
         // Pinned rows always show and never count toward the five; the open
@@ -421,6 +423,17 @@ pub fn grouping_by_project(
                 }
             }
         }
+        // The click's target is rescued exactly like the open session: on a
+        // client-less run it never becomes the open session, but its row
+        // still has to be on screen for the highlight — and the reveal — to
+        // mean anything.
+        if let Some(pending) = view.pending {
+            if !visible.iter().any(|e| e.id == pending) {
+                if let Some(entry) = rows.iter().find(|e| e.id == pending) {
+                    visible.push(entry);
+                }
+            }
+        }
         let held = rows.len().saturating_sub(visible.len());
         let is_expanded = view.expanded.contains(&project.id);
         let shown: Vec<SessionSummary> = if is_expanded {
@@ -433,17 +446,16 @@ pub fn grouping_by_project(
         // meaningless digit on the same baseline as the meaningful ones
         // (audit 2026-09-13).
         let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
-        let initial = project
-            .name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().collect::<String>())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "?".to_owned());
-        let mut group =
-            ProjectGroup::new(project.id.clone(), project.name.clone(), count).mark(initial, palette.label(project.colour.saturating_sub(1)));
-        if let Some(branch) = branches.get(&project.id) {
-            group = group.trailing(branch.clone());
+        // The plain default group row (owner round 4, O4): no mark, the
+        // chevron, the current bar and the trailing branch only when the
+        // layout flags ask. The count stays.
+        let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count)
+            .chevron(layout.group_chevron)
+            .current_bar(layout.group_bar);
+        if layout.group_branch {
+            if let Some(branch) = branches.get(&project.id) {
+                group = group.trailing(branch.clone());
+            }
         }
         if rows.iter().any(|e| e.running) {
             group = group.state(AgentState::Running);
@@ -479,6 +491,31 @@ pub fn grouping_by_project(
         groups.push(group);
     }
     Grouping::Project(groups)
+}
+
+/// The scroll offset that reveals `row` in `viewport`, or `None` when it is
+/// already fully inside (owner round 4, O6).
+///
+/// `row` is the row's laid-out bounds and `offset` the scroll div's current
+/// y offset (≤ 0, growing negative as the list scrolls down), so the row's
+/// visible top is `row.top + offset`. The move is the minimum: a row above
+/// the viewport puts its top at the viewport's top; a row below puts its
+/// bottom at the viewport's bottom. A row taller than the viewport aligns
+/// its top, the way gpui's own `scroll_to_item` does. The caller clamps the
+/// answer into `[−max_offset.y, 0]` and writes it with `set_offset`.
+pub(crate) fn reveal_offset(viewport: Bounds<Pixels>, row: Bounds<Pixels>, offset: Pixels) -> Option<Pixels> {
+    let top = row.origin.y + offset;
+    let bottom = top + row.size.height;
+    let viewport_top = viewport.origin.y;
+    let viewport_bottom = viewport_top + viewport.size.height;
+    if row.size.height > viewport.size.height || top < viewport_top {
+        let aligned = viewport_top - row.origin.y;
+        (aligned != offset).then_some(aligned)
+    } else if bottom > viewport_bottom {
+        Some(viewport_bottom - (row.origin.y + row.size.height))
+    } else {
+        None
+    }
 }
 
 /// The last path component of a workspace root, for the "Other workspaces"
@@ -807,10 +844,6 @@ mod tests {
         e
     }
 
-    fn dark_palette() -> aui_tokens::Palette {
-        aui_tokens::Palette::for_kind(aui_tokens::ThemeKind::Dark)
-    }
-
     fn by_project(entries: &[SessionEntry], projects: &crate::projects::Projects) -> Grouping {
         by_project_view(entries, projects, &HashSet::new(), &HashSet::new(), None)
     }
@@ -822,8 +855,19 @@ mod tests {
         expanded: &HashSet<String>,
         active: Option<&str>,
     ) -> Grouping {
-        let view = GroupView { closed, expanded, active };
-        grouping_by_project(entries, projects, &dark_palette(), &HashMap::new(), &view, Local::now())
+        by_project_layout(entries, projects, closed, expanded, active, &crate::layout::Layout::default())
+    }
+
+    fn by_project_layout(
+        entries: &[SessionEntry],
+        projects: &crate::projects::Projects,
+        closed: &HashSet<String>,
+        expanded: &HashSet<String>,
+        active: Option<&str>,
+        layout: &crate::layout::Layout,
+    ) -> Grouping {
+        let view = GroupView { closed, expanded, active, pending: None };
+        grouping_by_project(entries, projects, &HashMap::new(), &view, layout, Local::now())
     }
 
     /// Nine sessions in one project, newest first: `s0` is today, `s8` eight
@@ -851,17 +895,18 @@ mod tests {
         let Grouping::Project(groups) = by_project(&entries, &projects) else {
             panic!("project grouping must yield project groups");
         };
-        // Newest activity first: harness (today), agentic-ui (yesterday),
-        // the empty project, then Other workspaces last.
+        // Name order, never recency (owner round 4, O1): agentic-ui, empty,
+        // harness — even though the harness rows are the newest — then Other
+        // workspaces last.
         assert_eq!(groups.len(), 4);
-        assert_eq!(groups[0].id.as_ref(), "p-harness");
-        assert_eq!(groups[0].count.as_ref(), "2");
-        assert_eq!(groups[1].id.as_ref(), "p-agentic");
-        assert_eq!(groups[2].id.as_ref(), "p-empty");
+        assert_eq!(groups[0].id.as_ref(), "p-agentic");
+        assert_eq!(groups[1].id.as_ref(), "p-empty");
+        assert_eq!(groups[2].id.as_ref(), "p-harness");
+        assert_eq!(groups[2].count.as_ref(), "2");
         // No count at all rather than "0": the pill says how much is inside,
         // and at zero the absent rows already say it (audit 2026-09-13).
-        assert_eq!(groups[2].count.as_ref(), "", "an empty project carries no count");
-        assert!(groups[2].open, "an empty project still gets an open group row");
+        assert_eq!(groups[1].count.as_ref(), "", "an empty project carries no count");
+        assert!(groups[1].open, "an empty project still gets an open group row");
         let other = &groups[3];
         assert_eq!(other.id.as_ref(), OTHER_GROUP);
         assert_eq!(other.name.as_ref(), "Other workspaces");
@@ -869,47 +914,83 @@ mod tests {
         assert!(!other.open, "Other workspaces starts closed");
         assert_eq!(other.count.as_ref(), "2");
         assert!(other.sessions.is_empty(), "a closed group counts its rows without carrying them");
-        // Marks: the name's initial in the project's label colour.
-        let palette = dark_palette();
-        assert_eq!(groups[0].mark.as_ref().map(|(initial, _)| initial.to_string()), Some("H".to_owned()));
-        assert_eq!(
-            groups[0].mark.clone().map(|(_, colour)| format!("{colour:?}")),
-            Some(format!("{:?}", palette.label(0)))
-        );
+        // No coloured marks anywhere: every group row is the plain default.
+        assert!(groups.iter().all(|g| g.mark.is_none()), "no group row carries a mark");
         // Newest first inside the group.
-        assert_eq!(groups[0].sessions[0].id.as_ref(), "s1");
-        assert_eq!(groups[0].sessions[1].id.as_ref(), "s2");
+        let harness = &groups[2];
+        assert_eq!(harness.sessions[0].id.as_ref(), "s1");
+        assert_eq!(harness.sessions[1].id.as_ref(), "s2");
+    }
+
+    /// Sessions that resolve to no project land after every adoption: "Other
+    /// workspaces" is always last, whatever the names say.
+    #[test]
+    fn other_workspaces_is_last() {
+        let projects = grouped_projects();
+        let entries = vec![
+            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0),
+            grouped_entry("s4", None, Some("/tmp/z-stray"), 0),
+        ];
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        let last = groups.last().expect("groups");
+        assert_eq!(last.id.as_ref(), OTHER_GROUP);
+        assert_eq!(last.count.as_ref(), "1");
     }
 
     #[test]
     fn a_pinned_project_leads_whatever_its_activity() {
         let mut projects = grouped_projects();
-        projects.projects.iter_mut().find(|p| p.id == "p-agentic").expect("agentic").pinned = true;
+        // Pin the project that sorts last by name: pinned still leads.
+        projects.projects.iter_mut().find(|p| p.id == "p-harness").expect("harness").pinned = true;
         let entries = vec![
-            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0),
-            grouped_entry("s3", Some("p-agentic"), Some("/work/p-agentic"), 5),
+            grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 5),
+            grouped_entry("s3", Some("p-agentic"), Some("/work/p-agentic"), 0),
         ];
         let Grouping::Project(groups) = by_project(&entries, &projects) else {
             panic!("project grouping must yield project groups");
         };
-        assert_eq!(groups[0].id.as_ref(), "p-agentic");
+        assert_eq!(groups[0].id.as_ref(), "p-harness");
+        assert_eq!(groups[1].id.as_ref(), "p-agentic");
     }
 
     #[test]
-    fn a_running_session_marks_its_group_and_branches_trail() {
+    fn a_running_session_marks_its_group() {
         let projects = grouped_projects();
         let mut entries = vec![grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0)];
         entries[0].running = true;
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        assert_eq!(group.state, Some(AgentState::Running));
+        // …while the branch stays off the row until its flag is on.
+        assert_eq!(group.trailing.as_deref(), None);
+        assert!(!group.chevron);
+        assert!(!group.current_bar);
+    }
+
+    /// The three flags are state only: the grouping passes each one through
+    /// to the row, and the branch trails only when its flag is on.
+    #[test]
+    fn group_chrome_follows_the_layout_flags() {
+        let projects = grouped_projects();
+        let entries = vec![grouped_entry("s1", Some("p-harness"), Some("/work/p-harness"), 0)];
         let mut branches = HashMap::new();
         branches.insert("p-harness".to_owned(), "main".to_owned());
-        let view = GroupView { closed: &HashSet::new(), expanded: &HashSet::new(), active: None };
+        let layout = crate::layout::Layout { group_chevron: true, group_bar: true, group_branch: true, ..Default::default() };
+        let empty = HashSet::new();
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: None };
         let Grouping::Project(groups) =
-            grouping_by_project(&entries, &projects, &dark_palette(), &branches, &view, Local::now())
+            grouping_by_project(&entries, &projects, &branches, &view, &layout, Local::now())
         else {
             panic!("project grouping must yield project groups");
         };
-        assert_eq!(groups[0].state, Some(AgentState::Running));
-        assert_eq!(groups[0].trailing.as_deref(), Some("main"));
+        let group = folded_group(&groups, "p-harness");
+        assert!(group.chevron);
+        assert!(group.current_bar);
+        assert_eq!(group.trailing.as_deref(), Some("main"));
     }
 
     #[test]
@@ -922,9 +1003,10 @@ mod tests {
         else {
             panic!("project grouping must yield project groups");
         };
-        assert!(!groups[0].open);
-        assert_eq!(groups[0].count.as_ref(), "1");
-        assert!(groups[0].sessions.is_empty());
+        let group = folded_group(&groups, "p-harness");
+        assert!(!group.open);
+        assert_eq!(group.count.as_ref(), "1");
+        assert!(group.sessions.is_empty());
         // …while opening Other workspaces is the same set read inverted.
         let mut closed = HashSet::new();
         closed.insert(OTHER_GROUP.to_owned());
@@ -956,12 +1038,13 @@ mod tests {
         let Grouping::Project(groups) = by_project(&entries, &projects) else {
             panic!("project grouping must yield project groups");
         };
-        let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_ref()).collect();
+        let group = folded_group(&groups, "p-harness");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
         assert_eq!(ids, vec!["s2", "s1"]);
         // The pin flag reaches the library row, which is what draws the
         // meta-line glyph and flips the tray button to `PinOff` (P5).
-        assert!(groups[0].sessions[0].pinned);
-        assert!(!groups[0].sessions[1].pinned);
+        assert!(group.sessions[0].pinned);
+        assert!(!group.sessions[1].pinned);
     }
 
     /// Owner round 2, P3: nine sessions fold to the five newest, holding
@@ -1016,6 +1099,27 @@ mod tests {
         assert_eq!(group.fold, Some((3, false)));
     }
 
+    /// The click's target survives the cut like the open session: on a
+    /// client-less run it never becomes open, but its row still has to show
+    /// for the highlight — and the reveal — to mean anything.
+    #[test]
+    fn the_click_target_survives_the_cut() {
+        let projects = grouped_projects();
+        let entries = nine_sessions("p-harness");
+        let empty = HashSet::new();
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: Some("s8") };
+        let layout = crate::layout::Layout::default();
+        let Grouping::Project(groups) =
+            grouping_by_project(&entries, &projects, &HashMap::new(), &view, &layout, Local::now())
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = folded_group(&groups, "p-harness");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s0", "s1", "s2", "s3", "s4", "s8"]);
+        assert_eq!(group.fold, Some((3, false)));
+    }
+
     /// Pinned rows always show and never count toward the five: two pinned
     /// ancients plus the five newest make seven visible, two held back.
     #[test]
@@ -1057,16 +1161,16 @@ mod tests {
                 e
             })
             .collect();
-        let palette = dark_palette();
         let empty = HashSet::new();
-        let view = GroupView { closed: &empty, expanded: &empty, active: None };
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: None };
+        let layout = crate::layout::Layout::default();
         let cold = std::time::Instant::now();
         for _ in 0..FRAMES {
-            std::hint::black_box(grouping_by_project(&entries, &projects, &palette, &HashMap::new(), &view, now));
+            std::hint::black_box(grouping_by_project(&entries, &projects, &HashMap::new(), &view, &layout, now));
         }
         let cold = cold.elapsed() / FRAMES as u32;
         let grouping =
-            std::rc::Rc::new(grouping_by_project(&entries, &projects, &palette, &HashMap::new(), &view, now));
+            std::rc::Rc::new(grouping_by_project(&entries, &projects, &HashMap::new(), &view, &layout, now));
         let warm = std::time::Instant::now();
         for _ in 0..FRAMES {
             std::hint::black_box(std::rc::Rc::clone(&grouping));
@@ -1204,5 +1308,55 @@ mod tests {
     fn a_long_summary_is_cut_where_the_row_would_truncate_it() {
         let meta = meta_with(Some(&"w".repeat(200)), None);
         assert_eq!(describe(Some(&meta), None, "x", false).chars().count(), 80);
+    }
+
+    /// The [`reveal_offset`] geometry, in laid-out coordinates: the viewport
+    /// is the scroll div's bounds, the row its laid-out bounds, the offset
+    /// the handle's current y (≤ 0, growing negative as the list scrolls).
+    fn viewport(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(gpui::point(gpui::px(0.0), gpui::px(top)), gpui::size(gpui::px(200.0), gpui::px(height)))
+    }
+
+    fn row(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(gpui::point(gpui::px(0.0), gpui::px(top)), gpui::size(gpui::px(200.0), gpui::px(height)))
+    }
+
+    #[test]
+    fn a_row_above_the_viewport_aligns_its_top() {
+        // Viewport 100..300; the row sits 400 above the content origin with
+        // the list scrolled 500 down, so it shows at -100: above.
+        let viewport = viewport(100.0, 200.0);
+        let row = row(400.0, 30.0);
+        assert_eq!(reveal_offset(viewport, row, gpui::px(-500.0)), Some(gpui::px(-300.0)));
+    }
+
+    #[test]
+    fn a_row_below_the_viewport_aligns_its_bottom() {
+        // Same viewport; the row sits 700 down the content with the list at
+        // the top, so it shows at 700: below.
+        let viewport = viewport(100.0, 200.0);
+        let row = row(700.0, 30.0);
+        assert_eq!(reveal_offset(viewport, row, gpui::px(0.0)), Some(gpui::px(-430.0)));
+    }
+
+    #[test]
+    fn a_row_inside_the_viewport_moves_nothing() {
+        let viewport = viewport(100.0, 200.0);
+        // Fully inside: shows at 100..130.
+        assert_eq!(reveal_offset(viewport, row(400.0, 30.0), gpui::px(-300.0)), None);
+        // A top edge exactly on the viewport's counts as inside: 100..130.
+        assert_eq!(reveal_offset(viewport, row(450.0, 30.0), gpui::px(-350.0)), None);
+        // …and so does a bottom edge exactly on it: 270..300.
+        assert_eq!(reveal_offset(viewport, row(500.0, 30.0), gpui::px(-230.0)), None);
+    }
+
+    #[test]
+    fn a_row_taller_than_the_viewport_aligns_its_top() {
+        let viewport = viewport(100.0, 200.0);
+        // 300 px of row in a 200 px viewport, top cut off above.
+        assert_eq!(reveal_offset(viewport, row(400.0, 300.0), gpui::px(-500.0)), Some(gpui::px(-300.0)));
+        // …while a tall row whose top already shows stays put: the top is
+        // the most the viewport can keep.
+        assert_eq!(reveal_offset(viewport, row(400.0, 300.0), gpui::px(-300.0)), None);
     }
 }

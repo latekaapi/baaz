@@ -48,7 +48,6 @@ use std::sync::Arc;
 
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
-use aui::nav::project_mark;
 use aui::util::{interaction, TrackInteraction};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
@@ -57,7 +56,7 @@ use aui::shell::{
     RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
 };
-use aui_icons::{icon, provider_mark, IconName, Provider};
+use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
@@ -142,6 +141,8 @@ actions!(
         ZoomWindow,
         /// Flip the theme between light and dark.
         ToggleTheme,
+        /// Open the Settings dialog (⌘,).
+        OpenSettings,
         /// Show the About dialog.
         ShowAbout,
         /// Reveal the docs folder in Finder.
@@ -232,6 +233,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseWindow, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-q", QuitApp, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("cmd-m", MinimizeWindow, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("enter", ConfirmRename, Some(RENAME_CONTEXT)),
         // The transcript list wears `TRANSCRIPT_CONTEXT`; the predicate keeps
         // this off the composer and every field, so copy there stays native.
@@ -289,6 +291,7 @@ pub fn set_menus(cx: &mut App) {
         gpui::Menu::new("File").items([
             gpui::MenuItem::action("Add Project…", AddProject),
             gpui::MenuItem::action("New Session", NewSession),
+            gpui::MenuItem::action("Settings…", OpenSettings),
             gpui::MenuItem::action("Close Window", CloseWindow),
         ]),
         gpui::Menu::new("Edit").items([
@@ -371,6 +374,19 @@ pub struct Harness {
     /// names the active view — but the row highlights and the header label
     /// read it, never the view, so the click is acknowledged on its own frame.
     pub(crate) pending_id: Option<String>,
+    /// The session id the sidebar scrolls into view once, on the first
+    /// prepaint after activation (owner round 4, O6). Set in `activate` for
+    /// every activation path (and in `resume` ahead of it, so a client-less
+    /// run still reveals); consumed — never from a list refresh, a regroup,
+    /// or while the user scrolls — by the selected-row / current-group
+    /// prepaint intents `render_sidebar` installs.
+    pub(crate) reveal: Option<String>,
+    /// Whether the reveal target already read as inside on the previous
+    /// prepaint. A single inside reading can come from a frame whose layout
+    /// has not settled (rows still measuring into place), so the flag is
+    /// consumed only on two consecutive inside readings, or once a scroll
+    /// lands whole. Reset every time `reveal` is armed.
+    pub(crate) reveal_stable: bool,
     /// Parked session views, most-recently-opened first: an MRU of eight.
     /// Switching away parks the view (its event subscription dropped, its
     /// fold, scroll position and draft kept); reopening shows it at once and
@@ -520,6 +536,8 @@ impl Harness {
             index: HashMap::new(),
             active: None,
             pending_id: None,
+            reveal: None,
+            reveal_stable: false,
             session_cache: Vec::new(),
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
@@ -986,24 +1004,17 @@ impl Harness {
         let label = target.and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()));
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
-        // The project crumb: mark, name and chevron as one click target that
-        // opens the project menu under it. With no current project it reads
-        // "Add a project…" and opens the Projects palette instead.
+        // The project crumb: name and chevron as one click target that opens
+        // the project menu under it — `project › session`, no marks (owner
+        // round 4, O4). With no current project it reads "Add a project…"
+        // and opens the Projects palette instead.
         let renaming_project_here =
             self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
         let crumb: AnyElement = if renaming_project_here {
             div().flex_none().child(self.rename_field(window, cx)).into_any_element()
         } else if let Some(project) = self.current_project() {
-            let initial = project
-                .name
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().collect::<String>())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "?".to_owned());
             let id = project.id.clone();
             let name = project.name.clone();
-            let colour = cx.aui().colors.label(project.colour.saturating_sub(1));
             let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 if this.renaming_project.is_some() {
                     return;
@@ -1018,7 +1029,6 @@ impl Harness {
                 .gap(px(5.0))
                 .track_interaction(&state)
                 .on_click(open)
-                .child(project_mark(initial, colour).size(px(18.0)))
                 .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
                 .child(icon(IconName::ChevronDown).size(px(11.0)).color(p.ink_3))
                 .into_any_element()
@@ -1036,13 +1046,13 @@ impl Harness {
                 .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child("Add a project…"))
                 .into_any_element()
         };
-        // The session half keeps today's construction — provider mark, then
-        // the label — moved after the `·` separator. The title flexes inside
-        // the header cell and clips to one line, so a whole first prompt as
-        // the derived title can never push the overflow button out; the
-        // provider mark is flex-none so it stays painted. There is no width
-        // token in aui-tokens, so the flex leftover — not a fixed max — is
-        // the constraint, which also holds on narrow windows.
+        // The session half is the label after the `·` separator, with no
+        // provider mark before it (owner round 4, O4). The title flexes
+        // inside the header cell and clips to one line, so a whole first
+        // prompt as the derived title can never push the overflow button
+        // out. There is no width token in aui-tokens, so the flex leftover
+        // — not a fixed max — is the constraint, which also holds on narrow
+        // windows.
         let mut title = h_flex()
             .flex_1()
             .min_w(px(0.0))
@@ -1071,9 +1081,7 @@ impl Harness {
                     div().flex_1().min_w(px(0.0)).overflow_hidden().child(self.rename_field(window, cx)),
                 );
             } else {
-                title = title
-                    .child(div().flex_none().child(provider_mark(Provider::Muse)))
-                    .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+                title = title.child(div().flex_1().min_w(px(0.0)).truncate().child(label));
             }
         }
         let title: AnyElement = title.into_any_element();
@@ -1537,6 +1545,7 @@ impl Render for Harness {
             self.render_login(cx).into_any_element()
         };
         let dialog = self.render_dialog(cx);
+        let settings = self.render_settings(cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
@@ -1597,6 +1606,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
                 .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
                 .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
+                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(0, cx)))
                 .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
@@ -1614,6 +1624,7 @@ impl Render for Harness {
                 .children(toasts)
                 .children(palette)
                 .children(dialog)
+                .children(settings)
                 .children(overflow)
                 .children(view_options)
                 .children(account)
