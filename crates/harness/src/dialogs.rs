@@ -18,7 +18,7 @@ use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
 use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui};
+use aui_tokens::scale;
 use gpui::{
     div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
 };
@@ -233,7 +233,6 @@ impl Harness {
     /// card under the section title (it is not a `PaletteItem` and takes no
     /// keyboard selection). The query filters both sections by name and path.
     fn projects_rows(&self, cx: &gpui::App) -> Vec<ProjectsRow> {
-        let p = cx.aui().colors;
         let query = self.projects_query.read(cx).value().trim().to_owned();
         let needle = query.to_lowercase();
         let matches = |name: &str, path: &str| {
@@ -247,21 +246,14 @@ impl Harness {
             if !matches(&project.name, &root) {
                 continue;
             }
-            let initial = project
-                .name
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().collect::<String>())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "?".to_owned());
             let count = visible.iter().filter(|e| e.project.as_deref() == Some(project.id.as_str())).count();
+            // No coloured tiles anywhere (owner round 4, O4): adopted
+            // projects wear the folder glyph, like the recent workspaces
+            // below.
             let item = emphasise(
                 PaletteItem::new(
                     SharedString::from(format!("p:{}", project.id)),
-                    PaletteIcon::Mark {
-                        initial: initial.into(),
-                        colour: p.label(project.colour.saturating_sub(1)),
-                    },
+                    PaletteIcon::Glyph(IconName::Folder),
                     project.name.clone(),
                 )
                 .context(tilde_root(&root))
