@@ -69,7 +69,8 @@
 //! | `fork` | `session/fork` at the newest completed turn |
 //! | `retry` | retry the newest failed turn |
 //! | `search:<query>` | open the search palette, optionally on a query |
-//! | `open:<session_id>` | open a session as a sidebar click does (scripting only) |
+//! | `open:<session_id>` | open a session as an outside activation does (palette, boot; scripting only) — arms the one-shot reveal |
+//! | `click:<session_id>` | open a session as a sidebar click does (scripting only) — never arms the reveal, never moves the list |
 //! | `palette` | open the command palette |
 //! | `resume` | open the resume picker |
 //! | `fork-picker` | open the fork picker |
@@ -99,7 +100,7 @@
 //! | `new` | the same as ⌘N |
 //! | `new:<project>` | the group row's `+` for the project named |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `harness: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
-//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_px=<before>-><after> max=<max> pane=<pane> root=<root> drains=<drains>` (the sidebar-scroll instrument; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders) |
+//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_px=<before>-><after> max=<max> vh=<viewport> content=<content> rows=<entries> pane=<pane> root=<root> drains=<drains>` (the sidebar-scroll instrument; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders) |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -166,6 +167,7 @@ pub(crate) struct LoginVerb {
 pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "search", run: |this, rest, window, cx| this.step_search(rest, window, cx) },
     WindowVerb { verb: "open", run: |this, rest, window, cx| this.resume(rest.to_owned(), window, cx) },
+    WindowVerb { verb: "click", run: |this, rest, window, cx| this.resume_quiet(rest.to_owned(), window, cx) },
     WindowVerb { verb: "palette", run: |this, _, _, cx| this.open_palette(PaletteKind::Commands, cx) },
     WindowVerb { verb: "resume", run: |this, _, _, cx| this.open_palette(PaletteKind::Resume, cx) },
     WindowVerb { verb: "fork-picker", run: |this, _, _, cx| this.open_palette(PaletteKind::Fork, cx) },

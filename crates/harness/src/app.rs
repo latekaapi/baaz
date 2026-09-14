@@ -376,19 +376,16 @@ pub struct Harness {
     /// names the active view — but the row highlights and the header label
     /// read it, never the view, so the click is acknowledged on its own frame.
     pub(crate) pending_id: Option<String>,
-    /// The session id the sidebar scrolls into view once, on the first
-    /// prepaint after activation (owner round 4, O6). Set in `activate` for
-    /// every activation path (and in `resume` ahead of it, so a client-less
-    /// run still reveals); consumed — never from a list refresh, a regroup,
-    /// or while the user scrolls — by the selected-row / current-group
-    /// prepaint intents `render_sidebar` installs.
+    /// The pending "ensure visible" row id (owner round 4, O6; owner round
+    /// 6: `scrollIntoView({ block: "nearest" })`). Set only by
+    /// outside-the-sidebar activations — the palette, New session / `+`,
+    /// fork, boot `--session`, the `open:` step — and consumed once, on the
+    /// first prepaint after activation, by the selected-row / current-group
+    /// intents `render_sidebar` installs: above aligns the row's top, below
+    /// its bottom, inside moves nothing. A sidebar click never sets it (the
+    /// clicked row is under the cursor, hence visible), and neither does a
+    /// list refresh, a regroup, a user scroll or a resize drag.
     pub(crate) reveal: Option<String>,
-    /// Whether the reveal target already read as inside on the previous
-    /// prepaint. A single inside reading can come from a frame whose layout
-    /// has not settled (rows still measuring into place), so the flag is
-    /// consumed only on two consecutive inside readings, or once a scroll
-    /// lands whole. Reset every time `reveal` is armed.
-    pub(crate) reveal_stable: bool,
     /// The sidebar column as its own view (owner round 4 §3): embedded with
     /// gpui's `.cached(size_full)`, a clean pane reuses its retained subtree
     /// instead of rebuilding the column on a transcript notify.
@@ -603,7 +600,6 @@ impl Harness {
             active: None,
             pending_id: None,
             reveal: None,
-            reveal_stable: false,
             sidebar_pane,
             sidebar_key: None,
             session_cache: Vec::new(),
@@ -1311,8 +1307,14 @@ impl Harness {
         });
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
-        self.sessions =
-            vec![SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects)];
+        // The replayed row stands for the capture's own turns: without them
+        // the empty filter reads it as a turn-less session and drops it the
+        // moment it is not the open one — so switching sessions in a replay
+        // window would shrink the list under the scroll (owner round 6: the
+        // click moved `-1262 → -1198` on the clamp, not on the reveal).
+        let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects);
+        replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
+        self.sessions = vec![replayed];
         // A scripted sidebar joins the replayed row, as if the wire had
         // listed it beside the capture.
         self.apply_sidebar_fixture();
@@ -1321,6 +1323,11 @@ impl Harness {
         self.sessions_loaded = true;
         self.index_loaded = true;
         self.invalidate_list();
+        // `--session <id>`: the live boot opens it once the list arrives
+        // (`load_sessions`), and a replay window has no list reply — so the
+        // landed fixture is the arrival it waits for (owner round 6). A run
+        // with no session named keeps the replayed view.
+        self.open_boot_session(window, cx);
         // A replayed window has no wire, but the search palette still needs
         // the host's session index: read it (read-only) and rebuild `search.db`
         // so `--steps search:<query>` screenshots show session hits.
