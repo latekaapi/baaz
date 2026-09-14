@@ -16,7 +16,10 @@
 
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
-use aui::overlay::{command_palette, dialog, popover_layer, DialogKind, PaletteIcon, PaletteItem, PaletteSection};
+use aui::overlay::{
+    anchored_menu, command_palette, dialog, popover_layer, DialogKind, MenuAlign, MenuSide, PaletteIcon,
+    PaletteItem, PaletteSection,
+};
 use aui_icons::IconName;
 use aui_tokens::scale;
 use gpui::{
@@ -470,8 +473,16 @@ impl Harness {
                 None => {}
             }
         });
+        // Below-end of the `…` button that opened it — `anchored_menu` flips
+        // above and slides inside the window on overflow. No button bounds
+        // yet: no menu this frame, never the old `top(48) right(8)` corner
+        // (the button is always rendered, so the notify lands next frame).
+        let Some(trigger) = self.overflow_bounds else {
+            cx.notify();
+            return None;
+        };
         // A click anywhere outside closes it: the catcher is a sibling of
-        // the menu inside the same deferred draw (owner round 2, P4).
+        // the menu inside the same draw (owner round 2, P4).
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
@@ -483,17 +494,14 @@ impl Harness {
             .inset_0()
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
-            popover_layer(
-                div().absolute().inset_0().child(catcher).child(
-                    div()
-                        .absolute()
-                        .top(px(48.0))
-                        .right(px(8.0))
-                        .child(view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| {
-                            activate(&i, w, cx)
-                        })),
-                ),
-            )
+            div().absolute().inset_0().child(catcher).child(anchored_menu(
+                trigger,
+                MenuSide::Below,
+                MenuAlign::End,
+                view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| {
+                    activate(&i, w, cx)
+                }),
+            ))
             .into_any_element(),
         )
     }
@@ -683,6 +691,15 @@ impl Harness {
                     .id("palette-scrim")
                     .absolute()
                     .inset_0()
+                    // The open palette owns the wheel: occluding the scrim
+                    // makes the transcript's `wheel_capture` yield everywhere
+                    // outside the card (the library card already occludes its
+                    // own rect and stops the wheel after its list scrolls),
+                    // so a wheel over the dimmed ground never reaches the
+                    // transcript behind this modal. Clicks already dismiss
+                    // through this same scrim, so blocking click-through
+                    // changes nothing.
+                    .occlude()
                     .bg(gpui::black().opacity(PALETTE_SCRIM))
                     // A click on the dimmed ground closes it, which is the
                     // gesture every overlay in this window already answers to.
