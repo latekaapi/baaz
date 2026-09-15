@@ -221,6 +221,18 @@ pub fn remember(tier: &Tier) {
     }
 }
 
+/// The `--print-tier` field text for one usage percentage: `"N% used"`,
+/// the card's own word `"unavailable"` with no dangling "used" appended, or
+/// `"— used"` while the probe has not been answered at all. Pure, so the
+/// "unavailable" case has a unit test independent of a live probe.
+fn print_tier_field(p: Option<u32>, usage_unavailable: bool) -> String {
+    match p {
+        Some(p) => format!("{p}% used"),
+        None if usage_unavailable => "unavailable".to_owned(),
+        None => "\u{2014} used".into(),
+    }
+}
+
 /// `--print-tier`: probe and print, without opening a window.
 ///
 /// The one way to ask this question from a script — the plan the login is on
@@ -240,14 +252,9 @@ pub fn print_and_exit(muse: &str) -> ! {
     }
     match probed {
         Ok(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) => {
-            let pct = |p: Option<u32>| match p {
-                Some(p) => format!("{p}%"),
-                None if usage_unavailable => "unavailable".to_owned(),
-                None => "\u{2014}".into(),
-            };
             println!("Subscription: {plan}");
-            println!("Current: {} used", pct(current_pct));
-            println!("Weekly: {} used", pct(weekly_pct));
+            println!("Current: {}", print_tier_field(current_pct, usage_unavailable));
+            println!("Weekly: {}", print_tier_field(weekly_pct, usage_unavailable));
             for reset in resets {
                 println!("{reset}");
             }
@@ -1108,6 +1115,18 @@ mod tests {
         // Naming the plan either way — this is what keeps a known plan from
         // ever reading as the generic "Muse did not say which plan" banner.
         assert!(unavailable.status_lines().contains("Plan: Power Usage"));
+    }
+
+    /// `--print-tier` prints the card's own word, `unavailable`, with no
+    /// "used" glued onto it — unlike a real percentage or the still-drawing
+    /// dash, both of which are a measurement and read naturally as "N% used"
+    /// / "— used".
+    #[test]
+    fn print_tier_field_does_not_append_used_to_unavailable() {
+        assert_eq!(print_tier_field(None, true), "unavailable");
+        assert_eq!(print_tier_field(None, false), "\u{2014} used");
+        assert_eq!(print_tier_field(Some(42), true), "42% used");
+        assert_eq!(print_tier_field(Some(0), false), "0% used");
     }
 
     /// The probe's own `--workspace` is always run with `--trust-workspace`:
