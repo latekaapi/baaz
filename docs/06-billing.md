@@ -50,9 +50,16 @@ your account".
 
 So `crates/harness/src/tier.rs` drives that card:
 
-1. `openpty`, then `muse --workspace <probe dir>` on the slave side with its own
-   session and the slave as its controlling terminal — without which the
-   launcher refuses to draw a TUI at all.
+1. `openpty`, then `muse --workspace <probe dir> --trust-workspace` on the
+   slave side with its own session and the slave as its controlling terminal
+   — without which the launcher refuses to draw a TUI at all.
+   `--trust-workspace` (added v0.1 prep task 2) matters as of muse 1.3.0:
+   an untrusted `--workspace` now opens on a "Do you trust this workspace?"
+   gate, and without the flag the probe's blind `/upgrade`-then-Enter
+   keystrokes land on that gate instead — Enter accepts its default ("Trust
+   and continue"), eating both the command text and the card, so the probe
+   read a bare idle composer and reported "not recognised" on every run
+   against a fresh `HARNESS_STATE_DIR`.
 2. **Answer the cursor-position query.** The TUI opens with `ESC [ 6 n` and
    paints nothing until something replies; the driver answers `ESC [ 1;1 R`
    every time it sees one.
@@ -94,6 +101,17 @@ never the pid alone). Closing the window or quitting mid-probe runs the same kil
   keeps reading while time remains, and only on the deadline settles for the
   plan without a meter. The verbatim 1.2.1 card (URL redacted) is pinned by
   `tier::tests::the_1_2_1_card_parses_with_its_percentages`.
+- Under muse 1.3.0, a login whose quota is fully spent draws `Usage currently
+  unavailable` in place of both percentages — the plan sentence still names
+  the plan, but neither window ever gets a number. This is the card's own
+  final word, not a partial draw, so `Tier::Subscription` carries a
+  `usage_unavailable` flag the parser sets from that exact phrase, and the
+  probe stops waiting for numbers that are not coming rather than spending
+  its whole ceiling on them. `/status` and `--print-tier` print "unavailable"
+  in place of a percent, never a bare dash pretending nothing was said. The
+  verbatim 1.3.0 exhausted card (URL is muse's own public account-center
+  link, nothing sensitive) is pinned by
+  `tier::tests::the_1_3_0_exhausted_card_names_the_plan_with_no_percentages`.
 
 The first two are pinned by `tier::tests::the_card_this_muse_really_draws_parses`.
 

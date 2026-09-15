@@ -330,6 +330,7 @@ fn parse_args() -> Args {
                         current_pct: Some(2),
                         weekly_pct: Some(2),
                         resets: vec!["Resets at 3:00 PM".into(), "Resets Monday".into()],
+                        usage_unavailable: false,
                     },
                     "payg" => tier::Tier::PayAsYouGo,
                     "unknown" => tier::Tier::Unavailable("scripted".into()),
