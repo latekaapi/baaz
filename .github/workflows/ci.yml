@@ -10,8 +10,11 @@ jobs:
     steps:
       # The harness depends on the `aui` library by **path**, as
       # `../agentic-ui/crates/*`, so the library has to be checked out beside
-      # it — on `muse-support`, which is the branch every library change for
-      # this slice lands on.
+      # it.
+      # TODO(release): switch Cargo.toml's aui/aui-* entries to a git
+      # dependency pinned to a tagged agentic-ui release, and drop this
+      # second checkout (see Cargo.toml's own path-dependency comment for
+      # the exact change).
       - uses: actions/checkout@v4
         with:
           path: harness
@@ -19,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: latekaapi/agentic-ui
-          ref: muse-support
+          ref: main
           path: agentic-ui
 
       - name: Install Rust stable
