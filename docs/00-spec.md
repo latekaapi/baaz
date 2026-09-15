@@ -6,10 +6,10 @@ Status: frozen 2026-09-08. Change only with the owner's agreement; record change
 This repository is the agentic coding **harness**. Its first slice is a feature-complete
 macOS chat interface to Meta's **Muse Code** agent (`muse` CLI 1.0.3, subscription, the
 owner is already logged in), built on the `aui` component library at
-`/Users/latekaapi/Projects/agentic-ui` (gpui-pre 0.3.3 + gpui-kit 0.6, path dependencies).
+`/Users/alex/Projects/agentic-ui` (gpui-pre 0.3.3 + gpui-kit 0.6, path dependencies).
 
 Ground truth for everything about Muse is
-`/Users/latekaapi/Projects/agentic-ui/docs/10-muse-research.md` (the "research doc"). Wire
+`/Users/alex/Projects/agentic-ui/docs/10-muse-research.md` (the "research doc"). Wire
 captures from live `muse serve` sessions are in `fixtures/msp/*.jsonl`, the exact schema for
 this binary in `fixtures/msp/msp/` and `fixtures/msp/msp-ts/msp.d.ts`. When the research doc
 and a capture disagree, the capture wins; when the schema and a capture disagree, the capture

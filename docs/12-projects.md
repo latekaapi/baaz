@@ -104,7 +104,7 @@ honoured), camelCase:
   "projects": [
     {
       "id": "6d0e…",
-      "root": "/Users/latekaapi/Projects/harness",
+      "root": "/Users/alex/Projects/harness",
       "name": "harness",
       "colour": 3,
       "pinned": false,
