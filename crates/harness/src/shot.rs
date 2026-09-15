@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{path::PathBuf, time::Duration};
 
-use gpui::{App, WindowHandle};
+use gpui::{App, AsyncApp, WindowHandle};
 use gpui_kit::component::Root;
 
 /// The two facts a `--screenshot` wait needs out of the window it is capturing.
@@ -59,7 +59,25 @@ impl CaptureToken {
 
 /// How long a capture that is waiting for an approval will wait.
 const APPROVAL_CEILING: Duration = Duration::from_secs(15);
-/// How often it looks.
+/// How long a capture waits for the `--steps`/`--login-steps` task to even
+/// begin. It is spawned from the same frame that opens the window, so this
+/// is normally a poll or two; the ceiling only guards a race, never a script.
+const STEPS_START_CEILING: Duration = Duration::from_secs(5);
+/// How long a capture waits for a `--steps` script to run to completion,
+/// once it has started — deliberately generous, and never shared with
+/// [`APPROVAL_CEILING`]: a script's own `wait:` steps routinely add up to far
+/// more than 15 s (a scripted send-then-wait-then-send easily clears a
+/// minute), and a capture that gave up on the steps list at 15 s used to take
+/// the screenshot mid-script and then quit under a turn the later steps
+/// never got to send or wait out (see [`capture_and_quit`]'s doc). Bounded
+/// only as a backstop against a script that genuinely never finishes.
+const STEPS_CEILING: Duration = Duration::from_secs(600);
+/// How long a capture waits, after every step and the settling delay have
+/// run, for no turn to be running in any session this window has open,
+/// before it quits. Quitting mid-turn kills the `muse` child that turn is
+/// running on and orphans it (`docs/CONTRIBUTING.md`'s scripting notes).
+const TURN_CEILING: Duration = Duration::from_secs(120);
+/// How often any of the above looks.
 const POLL: Duration = Duration::from_millis(100);
 
 /// Sleep `delay` as a loop of [`POLL`] timers so the foreground executor
@@ -101,16 +119,48 @@ fn write_capture(
     Ok((target_w, target_h))
 }
 
-/// Waits for the first frames, captures the window and exits the process.
+/// Whether any session `handle`'s window has open has a turn in flight —
+/// [`crate::app::Harness::any_turn_running`], reached through the window's
+/// root view rather than a per-frame flag, so this reads the state fresh on
+/// every poll instead of whatever a stale last render happened to stamp
+/// (the render that would stamp it may be many seconds in the past by the
+/// time a long `wait:` step ends). `false` on any failure to reach it (the
+/// window closed, the root view is not a `Harness`) — the same
+/// fail-open-to-"nothing running" this module uses everywhere else a
+/// missing signal must not hang a capture forever.
+fn any_turn_running(handle: WindowHandle<Root>, cx: &AsyncApp) -> bool {
+    cx.update(|cx| {
+        handle
+            .update(cx, |root, _window, cx| {
+                root.view()
+                    .clone()
+                    .downcast::<crate::app::Harness>()
+                    .ok()
+                    .is_some_and(|harness| harness.read(cx).any_turn_running(cx))
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Waits for every scripted step, captures the window and exits the process.
 ///
 /// `await_steps` is set whenever `--steps` or `--login-steps` were given, and
 /// `await_approval` when one of them is a `shell:`, which raises a real,
-/// server-minted approval over a live wire. The fixed delay is the right wait
-/// for a fold that is already in memory and the wrong one for a script or a
-/// round-trip to a child process: `docs/images/phase4-approval-stage1-*.png`
-/// were captured before the card arrived and showed the shell card alone
-/// (finding F9). So the capture waits for the condition, and then for the
-/// same settling delay it would have used anyway.
+/// server-minted approval over a live wire.
+///
+/// The order matters, and used to be wrong: a capture used to apply the
+/// settling `delay` *before* checking on the steps at all, then gave the
+/// steps only [`APPROVAL_CEILING`] (15 s, meant for an approval card) to
+/// finish — so a script whose own `wait:` steps added up to more than that
+/// (routine: a `send:` needs a `wait:` many times that long) had its
+/// screenshot taken mid-script, before steps after the point it gave up had
+/// run at all, and then quit the app under whatever turn was still in
+/// flight, orphaning it. Now: every step runs to completion first
+/// ([`STEPS_CEILING`], a generous backstop rather than a real deadline),
+/// then any awaited approval, then the settling `delay` — once, last, never
+/// racing the steps it is meant to let settle — and only then, bounded by
+/// [`TURN_CEILING`], a wait for no turn to be running anywhere in the window
+/// before the process quits and takes the `muse` child with it.
 ///
 /// Every wait here is a loop of [`POLL`] timers, never one `timer(delay)`:
 /// in a headless capture nothing else wakes the foreground executor, so a
@@ -129,19 +179,21 @@ pub fn capture_and_quit(
     cx: &mut App,
 ) {
     cx.spawn(async move |cx| {
-        settle(cx, delay).await;
-        let mut waited = false;
         if await_steps {
-            let deadline = std::time::Instant::now() + APPROVAL_CEILING;
-            // The flag is only raised once the session is open, so the wait is
-            // for "the steps have run", not "the steps are not running yet".
-            while !capture.steps_running() && std::time::Instant::now() < deadline {
+            let start_deadline = std::time::Instant::now() + STEPS_START_CEILING;
+            // The flag is only raised once the steps task is scheduled, so
+            // this first wait is for "the steps have started", not "the
+            // steps are not running yet" — normally a poll or two.
+            while !capture.steps_running() && std::time::Instant::now() < start_deadline {
                 cx.background_executor().timer(POLL).await;
             }
-            while capture.steps_running() && std::time::Instant::now() < deadline {
+            let steps_deadline = std::time::Instant::now() + STEPS_CEILING;
+            while capture.steps_running() && std::time::Instant::now() < steps_deadline {
                 cx.background_executor().timer(POLL).await;
             }
-            waited = true;
+            if capture.steps_running() {
+                eprintln!("harness: steps still running after {STEPS_CEILING:?}; capturing anyway");
+            }
         }
         if await_approval {
             let deadline = std::time::Instant::now() + APPROVAL_CEILING;
@@ -151,12 +203,34 @@ pub fn capture_and_quit(
             if !capture.pending_approval() {
                 eprintln!("harness: no approval arrived in {APPROVAL_CEILING:?}; capturing anyway");
             }
-            waited = true;
         }
-        if waited {
-            // Whatever arrived animates in; give it the same settling time the
-            // first frames got — polled, for the same starvation reason.
-            settle(cx, delay).await;
+        // The settling delay runs last, after every step (including every
+        // `wait:`) and any awaited approval have had their turn: whatever
+        // the script left on screen, or an arriving card, gets this to
+        // animate into before the capture — never a race against steps
+        // still running (see this function's own doc).
+        settle(cx, delay).await;
+        // A scripted run's own steps do not promise the turn they started
+        // is finished — a trailing `send:` with no matching `wait:` after
+        // it, or the steps ceiling above giving up early, both leave one in
+        // flight — and quitting under a running turn kills its `muse` child
+        // and orphans it (the turn resumes as "orphaned" the next time its
+        // session opens). Wait, bounded, for every open session's own turn
+        // to clear before this process does that.
+        {
+            let deadline = std::time::Instant::now() + TURN_CEILING;
+            let mut logged = false;
+            while any_turn_running(handle, cx) {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("harness: a turn is still running after {TURN_CEILING:?}; quitting anyway");
+                    break;
+                }
+                if !logged {
+                    crate::harness_log!("waiting for a running turn before quitting a screenshot");
+                    logged = true;
+                }
+                cx.background_executor().timer(POLL).await;
+            }
         }
         // Only the render stays on the UI thread; the Lanczos3 downsample,
         // the PNG encode and the write go to the background executor
@@ -191,4 +265,49 @@ pub fn capture_and_quit(
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scheduling loops above all start from this: a step list that has
+    /// not been armed yet reads exactly like one that already finished, so
+    /// [`capture_and_quit`]'s first wait ("has it started") has to exist at
+    /// all — this is the state it is waiting to see flip.
+    #[test]
+    fn a_fresh_capture_token_has_nothing_running_or_pending() {
+        let token = CaptureToken::default();
+        assert!(!token.pending_approval());
+        assert!(!token.steps_running());
+    }
+
+    #[test]
+    fn steps_running_round_trips() {
+        let token = CaptureToken::default();
+        token.set_steps_running(true);
+        assert!(token.steps_running());
+        token.set_steps_running(false);
+        assert!(!token.steps_running());
+    }
+
+    #[test]
+    fn pending_approval_round_trips() {
+        let token = CaptureToken::default();
+        token.set_pending_approval(true);
+        assert!(token.pending_approval());
+        token.set_pending_approval(false);
+        assert!(!token.pending_approval());
+    }
+
+    /// Pins the actual bug: the steps wait used to share `APPROVAL_CEILING`
+    /// (15 s), and a script's own `wait:` steps routinely add up to far more
+    /// than that, so the capture gave up on the steps list — and took the
+    /// screenshot, and later quit the app — while steps (and the turn they
+    /// started) were still running. `STEPS_CEILING` must never collapse back
+    /// onto `APPROVAL_CEILING`.
+    #[test]
+    fn the_steps_ceiling_is_not_the_approval_ceiling() {
+        assert!(STEPS_CEILING > APPROVAL_CEILING);
+    }
 }
