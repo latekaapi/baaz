@@ -1,5 +1,24 @@
 # Harness changelog
 
+## 2026-09-15 — v0.1 prep, task 4: `scripts/captures.sh` writes to its own state dir
+
+- **The first two loops of `scripts/captures.sh` (every replay fixture ×
+  both themes, and the five login screens — 61 of the script's 81
+  invocations) ran the app with no `HARNESS_STATE_DIR`, so they read and
+  wrote the owner's real `~/Library/Application Support/harness` store**:
+  exactly the incident a verification pass hit on 2026-09-12 (the shared
+  `harness` project's `lastOpenedAt` bumped, search reindexed) — the
+  "Projects, package 2" section added afterwards already ran every
+  invocation from a fresh `HARNESS_STATE_DIR="$(mktemp -d)"` (matching
+  `scripts/journeys.sh`'s own pattern throughout), but the two older loops
+  above it were never brought in line. Both loops now set
+  `HARNESS_STATE_DIR="$(mktemp -d)"` per invocation, same as everywhere
+  else in both scripts — no exceptions left. Verified with a stand-in
+  `harness` binary that logs `HARNESS_STATE_DIR` instead of drawing
+  anything: the unpatched script left 61 of 81 invocations with it unset,
+  the fixed one leaves 0, all 81 distinct. The real script still produces
+  its usual capture set end to end.
+
 ## 2026-09-15 — v0.1 prep, task 3: no row for a session before its first send
 
 - **A zero-turn session showed a sidebar row the instant it opened, under

@@ -12,11 +12,11 @@ export HARNESS_DETERMINISTIC=1
 for f in fixtures/msp/transcript-*.jsonl fixtures/msp/synthetic-*.jsonl; do
   name=$(basename "$f" .jsonl)
   for t in dark light; do
-    "$bin" --replay "$f" --theme "$t" --screenshot "$out/$name-$t.png" >/dev/null 2>&1 || echo "FAILED $name $t"
+    HARNESS_STATE_DIR="$(mktemp -d)" "$bin" --replay "$f" --theme "$t" --screenshot "$out/$name-$t.png" >/dev/null 2>&1 || echo "FAILED $name $t"
   done
 done
 for l in choose device apikey error apikey-error; do
-  "$bin" --no-connect --login "$l" --theme dark --screenshot "$out/login-$l-dark.png" >/dev/null 2>&1 || echo "FAILED login $l"
+  HARNESS_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login "$l" --theme dark --screenshot "$out/login-$l-dark.png" >/dev/null 2>&1 || echo "FAILED login $l"
 done
 # --- Projects, package 2 (docs/12-projects.md) ---
 # One window over three adopted roots plus two strays, then each surface in
