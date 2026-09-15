@@ -318,7 +318,7 @@ fact. The fold drops or regroups in exactly these cases, and nothing else:
 
 - `reminderChild` renders as **nothing**. It is a Muse-internal
   child-session record (child session id, log path, generation), re-emitted
-  once per reminder generation; the owner asked for it to go. `workflow`
+  once per reminder generation; it renders as nothing by design. `workflow`
   stays generic — nobody complained about it, and the mandate says to render
   what is not modelled.
 - A shell result serialised as one JSON object (`command`, `description`,

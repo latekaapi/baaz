@@ -196,7 +196,7 @@ enters the app with **no reconnect** (the flow is host-owned, so the `muse
 serve` that ran it already holds the credential), and `loggedOut` while
 signed in clears the shell and raises the "Signed out of Muse" dialog ("The
 credential was removed outside the app."). There is no reconnect-after-login:
-the old function stays, unused, until the owner's first live turn confirms it
+the old function stays, unused, until the first live turn confirms it
 is not needed. Escape walks the login states (`Cancel` in `Starting` /
 `Device`, `Back` in `ApiKey`, `ChooseAnother` in `Error`).
 
@@ -263,7 +263,7 @@ falls back to `Session <first id group>`. Nothing ever writes to it.
 The rows are the library's `SessionSummary`, grouped by **calendar day** —
 Today / Yesterday / This week / This month / Earlier — or by **project**:
 one collapsible group per adoption in sidebar order (pinned first, then name
-case-insensitively, never recency, no drag reorder — owner round 4, O1), each
+case-insensitively, never recency, no drag reorder), each
 a plain muted label with the count, a running dot when any of its sessions
 runs, and hover `+` and `…`; sessions inside run newest-first with pinned
 first; then the muted "Other workspaces" group, always last and closed until
@@ -271,11 +271,11 @@ opened. The plain label's first glyph starts at the leading centre (x = 18,
 the line the nav icons and the session dots sit on); with the chevron flag
 the chevron takes that box and the label follows at `NAV_LABEL_X` like every
 other label. Every project label reads the same muted `ink-3` — the current
-project is never brighter (owner round 5); only the accent bar marks it, and
+project is never brighter; only the accent bar marks it, and
 the bar alone never moves or recolours the label. The collapse chevron, the
 current-project accent bar and the trailing
 branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
-default off — owner round 4, O4). The Settings dialog owns the switches:
+default off). The Settings dialog owns the switches:
 ⌘, (File → Settings…), the account footer menu's "Settings…" row, or
 `--steps settings[:<section>]`; its Sidebar section holds the three flags
 and later sections add arms in `Harness::settings_sections`
@@ -303,12 +303,11 @@ verbs (`name:`, `draft:`, `send:`) wait for the switch, bounded at 10 s,
 instead of acting on the session that is still open; any activation clears
 the wait, as does a failed start. Its `…` opens the project menu for that
 project; on Other the menu carries the single row "Add as project…".
-Owner round 7 proved the need for the wait: without it, `new:reckoner`
-followed at once by `send:` billed its turn on the session that was open
-before.
+Without the wait, `new:demo` followed at once by `send:` could bill its
+turn on the session that was open before.
 
 Session rows carry no provider mark: each row reads title, then the preview
-line, with the elapsed time at the right (owner round 4, O3/O4). Every row
+line, with the elapsed time at the right). Every row
 carries one muted second line: `last_summary` when a turn completed
 in this app, else the index's first prompt — but only when the row's label is
 not that same prompt (a user-given name or a Muse title); otherwise the row
@@ -326,9 +325,8 @@ destination yet, so it answers with a toast saying so.
 The Sessions caption is fixed above the scrolling list: the rows clip at the
 list's own top edge, so the header and its spacing stay put at any scroll
 offset — including after a reveal-on-activation scrolls the list — and no row
-ever reaches the nav rows (owner round 4 fixup). The sessions area is the
-library's virtualised list (`aui::nav::virtual_sidebar_view`, owner round 6
-part C2): `render_sidebar` re-flattens the grouping into `SidebarRow`s every
+ever reaches the nav rows. The sessions area is the
+library's virtualised list (`aui::nav::virtual_sidebar_view`): `render_sidebar` re-flattens the grouping into `SidebarRow`s every
 frame (an index walk, no summaries cloned) and keeps a harness-owned
 `ListState` in sync — `reset` after a regroup or filter change (the only sync
 that drops the offset), `splice` after a local insert or remove (open/close,
@@ -336,7 +334,7 @@ fold expand, sessions arriving or leaving), `remeasure_items` after a
 text-only height change under stable rows — so only the rows near the
 viewport, plus a small overdraw runway, are ever built; a 200-session stress
 sidebar builds the same handful of rows a 20-session one does. The list
-scrolls like the transcript (owner round 5): a capture-phase canvas over the
+scrolls like the transcript: a capture-phase canvas over the
 list takes the wheel, accumulates it into the shared `sidebar_wheel` cell,
 and the pane drains exactly one `ListState::scroll_by` per frame, notifying
 only the sidebar pane; a 150 ms gesture horizon keeps presenting through the
@@ -355,8 +353,7 @@ point and logs the list's `item_ix`+`offset_in_item` plus pane/root renders
 and drains); the render counters behind it are the sidebar analogue of the
 transcript's wheel instruments. The `sbwheel` line also carries `centre=`:
 transcript-column rebuilds since the last drain, so a sidebar burst reads
-`centre=0` while the cached transcript reuses its retained subtree (owner
-round 6, part 4).
+`centre=0` while the cached transcript reuses its retained subtree.
 The caption's sliders icon opens the **view menu**: Group by project
 (toggle), Show empty (n) / Hide empty, Show hidden (n) / Hide hidden (the
 legacy `/hide` rows), Clear empty, Show archived (n) / Hide archived, and
@@ -367,7 +364,7 @@ Archived sessions are excluded from the list and from Clear-empty; shown,
 they carry a muted Archived tag and their Archive tray action puts them back.
 
 The **project menu** (`project ▾` in the header — the crumb reads
-`project › session` with no marks, owner round 4, O4 — or a group row's `…`):
+`project › session` with no marks, or a group row's `…`):
 one toggle row per project in sidebar order, checked for the menu's project —
 picking one replaces a still-empty unnamed active session (hidden locally)
 and otherwise starts a sibling session there — then New session here, Rename
@@ -382,7 +379,7 @@ adoption, and there is no Undo — re-adding is one click in the palette.
 
 The **Projects palette** (⌘⇧O, File › Add Project…, the nav row, the rail
 cell, `/project`): section Projects — every adoption with the folder glyph
-(no coloured tiles anywhere, owner round 4, O4), the root
+(no coloured tiles anywhere), the root
 with `~` for home, and the visible session count; picking one starts a
 session there — then section Add, whose head is the library's
 `folder_drop_card` ("Drop a folder here / or click to choose one", ⌘⇧O
@@ -413,7 +410,7 @@ for eight seconds.
 Collapsed (⌘B), the sidebar column is the library `rail` (`flat(true)`):
 New, Search and Projects cells, a separator, the open session and up to eight
 of the visible list as titled tiles — each a plain initial on the surface
-step with no label tint (owner round 4, O4), running ones pulsing — and the
+step with no label tint, running ones pulsing — and the
 account avatar. The Search cell opens the full-text search palette, exactly
 as ⌘⇧F does; the Projects cell opens the Projects palette, exactly as ⌘⇧O
 does — there is no sidebar quick-filter, so the palettes can never share the
@@ -472,7 +469,7 @@ and the window positions them with `aui::shell::traffic_light_position`, so
 they sit centred in the header row at every density. The centre header shows
 the project crumb (`project ▾`, one click target opening the project
 menu; "Add a project…" with no current project), a `·` separator, then the
-active session's label with no provider mark before it (owner round 4, O4),
+active session's label with no provider mark before it,
 and the overflow "…"
 menu (Rename, Fork, Archive); the title flexes inside the header cell and
 elides to one line, so a whole first prompt as the label can never push the
@@ -553,8 +550,7 @@ The transcript list is virtualized (2026-09-10): `render_transcript` renders a
 gpui `list()` with a persistent top-aligned `ListState`, one item per **row**
 — a block of an assistant turn, a user bubble, or the silent-reasoning
 footer (`transcript::turn_rows` / `turn_row`) — instead of building every
-cell every frame. Per row rather than per turn since the owner round of
-2026-09-13: gpui lays a visible list item out whole every frame, and a real
+cell every frame. Per row rather than per turn: gpui lays a visible list item out whole every frame, and a real
 turn runs to hundreds of blocks, so per-turn items cost a frame whatever the
 biggest visible turn cost. Every row carries a height hint (`ROW_HEIGHT_HINT`)
 until it is measured: on the first fill, again after each history page lands
@@ -586,8 +582,7 @@ and unchanged turns are never re-parsed (the library memoises markdown).
 `synthetic-stress-300.jsonl` capture (~300 turns, generated by
 `fixtures/msp/make-stress-300.py`) is the benchmark.
 
-**The transcript column is cached; the composer band is live** (owner round
-6, part 4). The root embeds the active `SessionView` through gpui's
+**The transcript column is cached; the composer band is live.** The root embeds the active `SessionView` through gpui's
 `.cached` (laid out with `flex_grow(1)` so it fills the centre above the
 composer), and a sidebar-only frame — wheel, reveal, resize tick — reuses
 the retained transcript instead of rebuilding it. The composer band and the
@@ -656,8 +651,8 @@ bench root, which is the window's root there), and `idle_root_2s` in
 1 Hz elapsed clock through both (≈2), and its running animations (braille
 lead, label shimmer, activity spinners — all infinite while mounted) rebuild
 the transcript every tick they paint, which is legitimate animation work,
-not an idle loop: on a settled capture every commit since round 3 reads
-steady `0/0` (owner round 6 bisection). The registry input element's
+not an idle loop: on a settled capture every commit reads
+steady `0/0`. The registry input element's
 paint-end state rewrite (`gpui-base-0.6.0/.../input/base/element.rs:2374`)
 never self-drives: gpui-pre only wakes the platform outside the draw phase
 (`gpui-pre-0.3.3/.../window.rs:167-193`) and clears the dirty set at draw
@@ -670,7 +665,7 @@ with gpui's `.cached(size_full)` and re-armed by `SidebarKey` from
 column — a plain entity embed would re-render every frame, which is why the
 cache call is there.
 `--bench-bare` keeps the old `BenchRoot` — the transcript alone — for the
-transcript-only number; shell ≈ bare + ≤ 1 ms is the round-4 goal (after
+transcript-only number; shell ≈ bare + ≤ 1 ms is the goal (after
 the fixes: ≤ 0.6 ms p50 in all 8 cells).
 `--bench-scroll wheel` is the scroll-jank instrument rather than a frame
 driver: the stream lands head-pinned (so, as after a real backfill, every
@@ -717,13 +712,12 @@ works, driving N frames on a static replay for the stderr percentiles.
 `HARNESS_FRAME_TRACE=1` traces the normal window instead of the bench, to
 `$HARNESS_STATE_DIR/frame-trace.log` (the harness's own
 `~/Library/Application Support/harness/` when the state dir is unset), so a
-hand gesture on `--replay` becomes a measurement. Through owner round 6
-part 4 the trace was v2, one row per *centre* paint
+hand gesture on `--replay` becomes a measurement. An earlier version of the trace was v2, one row per *centre* paint
 (`t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us`)
 — it went silent through a sidebar-only or resize-only gesture once parts
 4/C1/C2 stopped those from touching the cached transcript column at all, so
-it could no longer see the two things the owner actually complained about.
-Owner round 6 part C3 replaced it with v3, one row per **root render**
+it could no longer see the two things that mattered.
+It was replaced with v3, one row per **root render**
 (`Harness::on_frame`, which runs first in `Harness::render` — i.e. once per
 display tick that renders anything at all, matching part C1's zero-idle
 fix): `t_us,root,pane,centre,sidebar_ix,sidebar_off,sidebar_w,resize_active,
@@ -749,19 +743,19 @@ milliseconds, whether the momentum tail was cut, and frame-ms percentiles.
 Two free scripted steps drive a gesture at true display-tick pace without a
 real pointer, for measuring cadence headlessly: `sidebar-scroll-sweep:
 <dy,finger_ticks,tail_ticks>` and `transcript-scroll-sweep:<dy,finger_ticks,
-tail_ticks>` (owner round 6, part C3 — the transcript/sidebar twins of the
+tail_ticks>` (the transcript/sidebar twins of the
 existing `resize-sweep:`), each pushing one wheel delta into the same
 accumulator a real wheel event fills, once per rendered frame, for
 `finger_ticks` frames at a constant `dy` then `tail_ticks` more decaying
 exponentially to 5% of `dy` (the same shape the real-`CGEvent` tool below
-posts, so the two are comparable). This is the brief's own sanctioned
+posts, so the two are comparable). This is the sanctioned
 fallback for a machine that cannot confirm a posted event's landing
 window (see "Real-window cadence" below) — free, no turn, no wire, and it
 respects vsync (`window.request_animation_frame()` per tick) rather than
 applying a burst's whole travel synchronously the way `wheel:`/
 `sidebar-wheel:` do.
 
-### The running dot ticks at 20 Hz, not display rate (owner round 7, task 2)
+### The running dot ticks at 20 Hz, not display rate
 
 A looping pulse ring asks gpui for another frame on every render, and the
 request notifies the enclosing view — the whole cached `SidebarPane` —
@@ -787,10 +781,10 @@ with an all-idle fixture reads 5 boot rows and then silence — the timer
 never starts. Two screenshots a second apart show the ring tight+bright,
 then wide+faint: the dot still animates. Colour and size unchanged.
 
-### Real-window cadence (owner round 6, part C3)
+### Real-window cadence
 
-For the owner's two complaints — sidebar scroll and divider-drag jank, both
-absent from the transcript's own scroll — package A prepared a small Swift
+For two known complaints — sidebar scroll and divider-drag jank, both
+absent from the transcript's own scroll — one investigation prepared a small Swift
 CGEvent poster (`postscroll`/`postdrag`/`winfind`, scratch tools, not
 committed) to drive the real window: continuous trackpad-shaped scroll
 (finger phase + decaying momentum tail, `.pixel` units,
@@ -802,7 +796,7 @@ unreliable for confirming which window an event lands on**:
 `NSRunningApplication.activate()` for the target process intermittently
 returns `false`, `screencapture` returns a solid black image (no attached
 compositor to capture), and two `harness` windows (a fresh `--replay`
-window and the owner's own long-running one) were found reporting
+window and another long-running one) were found reporting
 **identical, exactly overlapping** `CGWindowListCopyWindowInfo` bounds with
 no on-screen way to confirm which one a posted event actually reached.
 Where activation happened to succeed and a small control nudge landed
@@ -824,32 +818,31 @@ below):
 |---|---|---|---|---|---|
 | sidebar scroll | in-process sweep | 65/65 (100%) | 1 | — | clean pass |
 | divider drag | in-process sweep | 39/39 (100%) | 1 | — | clean pass |
-| transcript scroll | in-process sweep | 55/56 (98.2%) | 6 | — | matches the pre-existing, already-documented "48 gaps of 53–62 ms in the burst tail" note above (round 4 baseline) — not a round-6 regression; the transcript is not this round's target |
+| transcript scroll | in-process sweep | 55/56 (98.2%) | 6 | — | matches the pre-existing, already-documented "48 gaps of 53–62 ms in the burst tail" note above (baseline) — not a regression; the transcript is not the target here |
 | sidebar scroll | real `CGEvent` | 63/186 (33.9%) | 5 | 20.7 | value itself walked smoothly and monotonically (`sidebar_ix`/`off` advancing by the exact per-event step with no skips) — read the row-count metric's low percentage as this environment's extra renders, not dropped input |
 | divider drag | real `CGEvent` | 44/96 (45.8%) | 4 | 16.8 | same: `sidebar_w` advanced by a constant ~1.7 px per real change, monotonically, no jumps, no freeze over one real ~60 Hz frame |
 
-**Not done**: the brief asked for this table across three builds
+**Not done**: this table across three builds
 (`c14819d`, `b2d82e2`, branch head) with matching library worktrees.
 `c14819d` carries no `HARNESS_FRAME_TRACE`/sweep instrumentation at all
-(pre-round-4) and `b2d82e2` carries only the v2, centre-scoped trace
-(round 5) — neither can produce a comparable v3 row for a sidebar-only or
+(an earlier commit) and `b2d82e2` carries only the v2, centre-scoped trace
+(a later one) — neither can produce a comparable v3 row for a sidebar-only or
 resize-only tick without a same-shape scratch patch in a matching
 `/tmp` worktree pair (library commit `0e8f708` for `c14819d`, `987318a`
-for `b2d82e2`, per their commit dates), which this round did not reach.
-The existing bisected evidence in `docs/diagnosis/round6-sidebar-scroll.md`
-and `round6-resize.md` (free scripted `pane=`/`root=`/`drains=` counts
-across those same commits) is the "before" picture that exists; it is not
+for `b2d82e2`, per their commit dates), which was not reached.
+Earlier bisected evidence — free scripted `pane=`/`root=`/`drains=` counts
+across those same commits — is the "before" picture that exists; it is not
 a per-tick trace and is not repeated here.
 
 Read alongside the value walks (`grep`-able straight out of `frame-trace.log`):
-on this machine, both real gestures the owner named track the pointer
+on this machine, both real gestures track the pointer
 smoothly with no multi-hundred-millisecond freeze and no large skips — the
-opposite of the owner's own real-machine evidence (25–157 px jumps, gaps of
+opposite of the reporting machine's own evidence (25–157 px jumps, gaps of
 2–9 recorded frames). That gap between "smooth here" and "janky there" is
-itself the headline finding: **this environment cannot reproduce the
-owner's jank**, whether because it lacks a real compositor (see above) or
-because the fixture's own background render load (below) differs from the
-owner's real sessions. Package A's own in-process synthetic-event rig
+itself the headline finding: **this environment cannot reproduce
+the jank**, whether because it lacks a real compositor (see above) or
+because the fixture's own backgrouand render load (below) differs from real
+sessions elsewhere. A separate in-process synthetic-event rig
 reached the same conclusion for resize (1 frame/move, ~3.4 ms draw,
 flat) — two independent methods on two different rigs both fail to
 reproduce the real-machine symptom, which argues for a cause outside
@@ -884,9 +877,9 @@ the sidebar, that mechanism alone would force a full sidebar rebuild every
 tick, independent of any user gesture. Not patched (registry crate; would
 need the dot to own its own inner cached scope so its self-requested
 repaint stops at itself). Filed for a follow-up rather than chased further
-in this round.
+at the time.
 
-Baselines (owner round 4 §1, before any fix; `wt/r4-scroll-instr`, each run
+Baselines (before any fix, on an instrumented branch; each run
 with its own throwaway `HARNESS_STATE_DIR`). `bench-draw` is whole-frame
 render-to-paint in µs; `bench-element` beside it is 3–12 µs p50 everywhere,
 so the two orders of magnitude between them are row building, layout and
@@ -901,11 +894,10 @@ paint — the blind spot the instrument closes:
 
 Shell ≈ bare + 0.4–0.6 ms p50 in every cell — the sidebar/header/composer
 rebuild costs half a millisecond on these replayed sessions, already near
-the round's ≤ 1 ms goal at baseline. `bench-scroll` travel is identical
+the ≤ 1 ms goal at baseline. `bench-scroll` travel is identical
 shell vs bare: 696 events, 793 frames (hetero) / 999 (stress-300), no
 jumps/stalls/clamps, every burst kept 100 % — except stress-300
-`down-clean` at 90.5 % in all eight runs, the known small asymmetry
-(round-4 `scroll-cadence` §6 item 5), unchanged. `bench-idle` is 0
+`down-clean` at 90.5 % in all eight runs, the known small asymmetry, unchanged. `bench-idle` is 0
 everywhere; phase waits resolve on frames (793/999 frames for 696
 events), stream 8–15 s with none of the old 2 s artifact.
 
@@ -923,8 +915,8 @@ synchronous batch-dispatch pattern meets no frame within the 50 ms wait, so
 each repeat's gap spans the timeout; the old 2 s timeout masked it.
 Mechanism unresolved; p50/p90 are unaffected.
 
-After the fixes (owner round 4 §§2–5, same-day same-machine before/after on
-the branch head, each run with its own throwaway `HARNESS_STATE_DIR`;
+After the fixes (same-day same-machine before/after, each run with its
+own throwaway `HARNESS_STATE_DIR`;
 `bench-draw` and `bench-frame` are p50/p90/max, draw in µs, frame in ms):
 
 | fixture | scroll | debug shell | debug bare | release shell | release bare |
@@ -956,10 +948,10 @@ stalls/clamps across all phases).
 What the bench cannot show is the cadence itself — one synthetic event per
 frame earns one drain by construction, so the 6.5× application saving only
 materialises where events share a frame (bursts, and any real gesture). The
-owner's hand gesture is the verdict: `HARNESS_FRAME_TRACE=1 cargo run -p
+hand gesture is the verdict: `HARNESS_FRAME_TRACE=1 cargo run -p
 harness -- --replay fixtures/msp/synthetic-stress-hetero.jsonl`, scroll up
 for 2 s, lift, wait for the tail; then `python3 scripts/frame-trace.py`.
-The round passes at paints/s ≥ 55 during the tail and ≥ 110 during the
+This passes at paints/s ≥ 55 during the tail and ≥ 110 during the
 finger phase on the 120 Hz panel, no gap > 2 ticks, last applied event =
 last delivered. The trace plumbing is verified: a scripted
 `--steps "wait:…;wheel:600;…"` run writes one row per paint with the wheel

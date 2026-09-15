@@ -100,7 +100,7 @@ The keyboard owns `selected`; the pointer owns its highlight and reports a click
 On the **echo** provider `session/setModel` is refused, and that refusal is
 correct behaviour rather than a bug: `docs/images/phase3-banner-*.png` is the
 inline banner showing it. The rejection reason on this build is
-`invalid_target`, not the `unsupported_route` the phase brief predicted.
+`invalid_target`, not `unsupported_route`.
 
 ## 3. The context meter and compaction
 
@@ -234,7 +234,7 @@ to the one before it is not stored twice.
 ↑ on the draft's first line and ↓ on its last line walk it, with the draft kept
 as the newest slot so walking up and back down returns exactly what was there.
 gpui-kit's `TextareaState` does expose the caret's line (`cursor_position()`),
-so the fallback the brief allowed — "↑ at offset 0" — was not needed. The keymap
+so the naive fallback — "↑ at offset 0" — was not needed. The keymap
 does this with a key context rather than a guess: the composer's holder wears
 `histup` / `histdown` when the caret is on the first / last line and `menu` when
 a popover is open, and the bindings are predicated on them, so ↑, ↓ and ↩ mean

@@ -377,9 +377,9 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             // round-trip, after the following steps would run: session
             // verbs wait for the switch (bounded) so `name:`/`draft:`/
             // `send:` reach the session the script meant, not the one
-            // still open. Owner round 7: without this, `new:reckoner`
-            // followed at once by `send:` billed the turn on the session
-            // that was open before.
+            // still open. Without this, `new:demo` followed at once by
+            // `send:` could bill the turn on the session that was open
+            // before.
             if is_session_step(&step) {
                 for _ in 0..SWITCH_WAIT_POLLS {
                     let pending = this

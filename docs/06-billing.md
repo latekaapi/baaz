@@ -27,14 +27,13 @@ tier. A pay-as-you-go token signs in, lists models, starts sessions and answers
 turns exactly as a subscribed one does — it simply sends the bill somewhere
 else.
 
-### What happened in Phases 1–4
+### A real incident during early development
 
-The owner's login token, taken on 2026-09-08, was on pay-as-you-go, so roughly
-110 sessions and 40 turns across Phases 1 to 4 were billed as API usage while
-every document in this repository — including this one's predecessors — described
-them as subscription turns. A logout and a fresh login on 2026-09-09 14:46 put
-the token on the **Muse Code High Usage** plan; nothing else changed, and nothing
-in the harness could have told the difference before or after.
+An early login token was on pay-as-you-go, so roughly 110 sessions and 40 turns
+across early development were billed as API usage while the project's own docs
+described them as subscription turns. A logout and a fresh login put the token
+on a subscription plan; nothing else changed, and nothing in the harness could
+have told the difference before or after.
 
 ---
 
@@ -212,9 +211,9 @@ Resets Sep 14 at 5:30 AM
 It refreshes the same cache the window reads, and exits non-zero when the plan
 could not be determined.
 
-**In Account Center**, the owner should check that the subscription is the one
-they expect and that no API-usage line is still accruing from the pay-as-you-go
-period. The harness cannot see either.
+**In Account Center**, check that the subscription is the one you expect and
+that no API-usage line is still accruing from a pay-as-you-go period. The
+harness cannot see either.
 
 ### Scripting the states
 
