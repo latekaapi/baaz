@@ -190,5 +190,5 @@ session are refused with a banner rather than silently dropped, and the sidebar
 labels the row by the **file**, because a replayed session is not one this host
 ever ran.
 
-Almost every screenshot in `docs/images/` is one of these. The ones that are not
-are named in the document that owns them, with the command that took them.
+Almost every screenshot referenced by this document set is one of these,
+named in the document that owns it along with the command that took it.

@@ -218,7 +218,7 @@ the request the provider actually minted — and from the `userInput/clarify`
 command on, the lines are hand-written to the shapes in `msp.d.ts`
 (`outcome: "clarified"`, `answers: []`, a `clarification` object). It is named
 `synthetic-` so nobody mistakes the second half for the wire. It folds to
-`QuestionOutcome::Clarified` and renders as `docs/images/phase4-clarified-*.png`.
+`QuestionOutcome::Clarified`.
 
 ---
 
@@ -319,7 +319,7 @@ read-only".
 
 Every capture under `fixtures/msp/` must open without panicking —
 `fixtures.rs::every_capture_opens_without_panicking` is that gate — and this is
-how almost every screenshot in `docs/images/phase4-*.png` was taken.
+how almost every screenshot of this behaviour was taken.
 
 ---
 
@@ -352,9 +352,8 @@ sidebar's search field, and `rename[:<text>]` opens the row's inline field.
 A `--screenshot` run now **waits for its steps to finish** before capturing, and
 for a pending approval as well when a `shell:` step was given. The delay is
 measured from the first frame, so a step list with a `wait:` in it used to
-outlive the capture — which is how
-`docs/images/phase4-approval-stage1-*.png` came to show the shell card alone
-(finding F9).
+outlive the capture — which used to leave a capture showing the shell card
+alone with no approval yet raised (finding F9).
 
 Every one of these is free. None of them invents a fact: there is deliberately no
 step that fabricates a todo list or a goal — those come from
