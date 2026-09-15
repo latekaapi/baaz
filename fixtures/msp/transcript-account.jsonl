@@ -1,5 +1,5 @@
 --> {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "harness", "version": "0.1.0"}, "capabilities": {"experimentalApi": true, "requestedCapabilities": ["userShell"]}}}
-<-- {"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"muse","version":"1.1.1"},"userAgent":"muse-build/1.1.1 (non-interactive; macos-aarch64; build b934305d214ca7b7ee5493ac696cd2109020b314)","museHome":"/Users/latekaapi/.local/share/muse","platformFamily":"unix","platformOs":"macos","schema":{"version":1,"fingerprint":"sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f"},"grantedCapabilities":["userShell"],"experimentalApi":true,"sessionDurability":"durable"}}
+<-- {"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"muse","version":"1.1.1"},"userAgent":"muse-build/1.1.1 (non-interactive; macos-aarch64; build b934305d214ca7b7ee5493ac696cd2109020b314)","museHome":"/Users/alex/.local/share/muse","platformFamily":"unix","platformOs":"macos","schema":{"version":1,"fingerprint":"sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f"},"grantedCapabilities":["userShell"],"experimentalApi":true,"sessionDurability":"durable"}}
 --> {"jsonrpc": "2.0", "method": "initialized"}
 --> {"jsonrpc": "2.0", "id": 2, "method": "account/read"}
 <-- {"jsonrpc":"2.0","id":2,"result":{"state":"apiKey","label":"stored key","credentialRequired":true}}
@@ -9,7 +9,7 @@
 <-- {"jsonrpc":"2.0","method":"account/loginCompleted","params":{"outcome":"cancelled"},"emittedAtMs":1789146546408}
 <-- {"jsonrpc":"2.0","id":4,"result":{"cancelled":true}}
 --> {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "harness", "version": "0.1.0"}, "capabilities": {"requestedCapabilities": ["userShell"]}}}
-<-- {"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"muse","version":"1.1.1"},"userAgent":"muse-build/1.1.1 (non-interactive; macos-aarch64; build b934305d214ca7b7ee5493ac696cd2109020b314)","museHome":"/Users/latekaapi/.local/share/muse","platformFamily":"unix","platformOs":"macos","schema":{"version":1,"fingerprint":"sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f"},"grantedCapabilities":["userShell"],"experimentalApi":false,"sessionDurability":"durable"}}
+<-- {"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"muse","version":"1.1.1"},"userAgent":"muse-build/1.1.1 (non-interactive; macos-aarch64; build b934305d214ca7b7ee5493ac696cd2109020b314)","museHome":"/Users/alex/.local/share/muse","platformFamily":"unix","platformOs":"macos","schema":{"version":1,"fingerprint":"sha256:c669a30c2ee17d63192b227865b424d1d78b5d6c04d9f1c9e9b77b9cf03e6a4f"},"grantedCapabilities":["userShell"],"experimentalApi":false,"sessionDurability":"durable"}}
 --> {"jsonrpc": "2.0", "method": "initialized"}
 --> {"jsonrpc": "2.0", "id": 2, "method": "account/read"}
 <-- {"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"account/read requires experimentalApi capability","data":{"kind":"experimentalRequired","descriptor":"account/read"}}}

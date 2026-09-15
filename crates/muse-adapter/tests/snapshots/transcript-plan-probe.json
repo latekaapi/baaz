@@ -7,7 +7,7 @@
       "model": "muse-spark-1.3-contributor",
       "mode": "denyUnmatched",
       "plan": false,
-      "cwd": "/Users/latekaapi/Projects/harness/fixtures/msp/ws",
+      "cwd": "/Users/alex/Projects/harness/fixtures/msp/ws",
       "branch": "main",
       "environment": {
         "kind": "local"

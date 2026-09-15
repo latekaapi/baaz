@@ -12,7 +12,7 @@
 # index.
 #
 # The `synthetic-` prefix is load-bearing: nothing here was ever on a wire.
-<-- {"jsonrpc":"2.0","method":"session/started","params":{"viewCursor":"v:syn:1","session":{"sessionId":"synthetic-turn-removed","workspaceRoot":"/tmp/synthetic","modelId":"muse-spark-1.3","status":"idle","createdAt":"2026-09-09T09:00:00Z","updatedAt":"2026-09-09T09:00:00Z","turnCount":0,"approvalMode":{"mode":"onRequest","source":"session"},"path":"/Users/latekaapi/.local/share/muse/sessions/2026/09/09/synthetic-turn-removed/session.jsonl","activeTurnId":null}}}
+<-- {"jsonrpc":"2.0","method":"session/started","params":{"viewCursor":"v:syn:1","session":{"sessionId":"synthetic-turn-removed","workspaceRoot":"/tmp/synthetic","modelId":"muse-spark-1.3","status":"idle","createdAt":"2026-09-09T09:00:00Z","updatedAt":"2026-09-09T09:00:00Z","turnCount":0,"approvalMode":{"mode":"onRequest","source":"session"},"path":"/Users/alex/.local/share/muse/sessions/2026/09/09/synthetic-turn-removed/session.jsonl","activeTurnId":null}}}
 <-- {"jsonrpc":"2.0","method":"turn/started","params":{"viewCursor":"v:syn:2","sessionId":"synthetic-turn-removed","turnId":"t-syn-1","commandId":"t-syn-1"}}
 <-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:syn:3","sessionId":"synthetic-turn-removed","item":{"itemId":"i-syn-user-1","kind":"userMessage","turnId":"t-syn-1","revision":1,"status":"completed","text":"one","commandId":"t-syn-1"}}}
 <-- {"jsonrpc":"2.0","method":"item/completed","params":{"viewCursor":"v:syn:4","sessionId":"synthetic-turn-removed","item":{"itemId":"i-syn-agent-1","kind":"agentMessage","turnId":"t-syn-1","revision":1,"status":"completed","text":"Reply one"}}}
