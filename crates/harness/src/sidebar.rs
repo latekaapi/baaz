@@ -190,10 +190,22 @@ impl SessionEntry {
     }
 
     /// Whether this row is noise: no turns yet, not running, and nobody named
-    /// it. The open session is never noise — a session just created has no
-    /// turns yet and must stay visible — so the caller passes its id.
-    pub fn is_empty(&self, active: Option<&str>) -> bool {
-        self.turns == 0 && !self.running && !self.named && !active.is_some_and(|id| id == self.id)
+    /// it. **A new session has no row at all until its first message is
+    /// sent** — this holds even for the session that is currently open (owner
+    /// round: v0.1 prep task 3). It used to exempt the open session so a
+    /// fresh draft stayed visible while being typed into, which is what made
+    /// this row noise-free under muse 1.2.1 (the wire never listed a
+    /// zero-turn session at all, so the exemption never fired for anything
+    /// the person had not already typed a name into). muse 1.3.0 lists a
+    /// zero-turn session like any other, and `load_sessions` merges
+    /// `session/list` unfiltered — so the exemption started firing on every
+    /// brand-new session the moment it opened, putting an "untitled, 0
+    /// turns" row in the sidebar before a single word was sent. The reveal on
+    /// first send still works without the exemption: [`local_started_row`]
+    /// marks its row `running: true`, which already fails this check on its
+    /// own.
+    pub fn is_empty(&self) -> bool {
+        self.turns == 0 && !self.running && !self.named
     }
 
     /// The row's state dot: running sessions pulse, everything else is idle.
@@ -817,19 +829,22 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_row_is_noise_unless_it_is_open() {
-        // `is_empty` is unchanged by the draft rework: a zero-turn unnamed
-        // session shows only while it is the open one.
+    fn an_empty_row_is_noise_even_while_it_is_open() {
+        // v0.1 prep task 3: a zero-turn unnamed session has no row, full
+        // stop — being the currently open session no longer exempts it
+        // (that exemption is what put a row in the sidebar for a brand-new
+        // session the instant muse 1.3.0 started listing it).
         let row = entry("s");
-        assert!(row.is_empty(None));
-        assert!(!row.is_empty(Some("s")));
-        assert!(row.is_empty(Some("other")));
+        assert!(row.is_empty());
         let mut named = entry("n");
         named.named = true;
-        assert!(!named.is_empty(None));
+        assert!(!named.is_empty());
         let mut turned = entry("t");
         turned.turns = 1;
-        assert!(!turned.is_empty(None));
+        assert!(!turned.is_empty());
+        let mut running = entry("r");
+        running.running = true;
+        assert!(!running.is_empty());
     }
 
     #[test]
@@ -845,7 +860,7 @@ mod tests {
         assert!(!row.named);
         assert_eq!(row.project.as_deref(), Some("p"));
         assert_eq!(row.updated, now);
-        assert!(!row.is_empty(Some("s-new")));
+        assert!(!row.is_empty());
         // The wire's later listing supersedes it, as before.
         let wire = vec![entry("s-new")];
         let merged = merge_session_list(wire, &[row]);
@@ -1268,34 +1283,37 @@ mod tests {
 
     #[test]
     fn a_session_with_no_turns_is_empty() {
-        assert!(entry("a").is_empty(None));
+        assert!(entry("a").is_empty());
     }
 
+    /// v0.1 prep task 3: being the open session no longer exempts a
+    /// zero-turn, unnamed row — see [`SessionEntry::is_empty`]'s doc for why
+    /// (`load_sessions` merges muse 1.3.0's now-unfiltered `session/list`,
+    /// and the old exemption fired on every brand-new session as a result).
     #[test]
-    fn the_open_session_is_never_empty() {
-        assert!(!entry("a").is_empty(Some("a")));
-        assert!(entry("a").is_empty(Some("b")));
+    fn the_open_session_is_empty_too_until_it_has_something_to_show() {
+        assert!(entry("a").is_empty());
     }
 
     #[test]
     fn a_running_session_is_never_empty() {
         let mut running = entry("a");
         running.running = true;
-        assert!(!running.is_empty(None));
+        assert!(!running.is_empty());
     }
 
     #[test]
     fn a_named_session_is_never_empty() {
         let mut named = entry("a");
         named.named = true;
-        assert!(!named.is_empty(None));
+        assert!(!named.is_empty());
     }
 
     #[test]
     fn a_session_with_turns_is_never_empty() {
         let mut turned = entry("a");
         turned.turns = 1;
-        assert!(!turned.is_empty(None));
+        assert!(!turned.is_empty());
     }
 
     fn meta_with(summary: Option<&str>, derived: Option<&str>) -> SessionMeta {
