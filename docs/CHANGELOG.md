@@ -1,5 +1,39 @@
 # Harness changelog
 
+## 2026-09-15 — v0.1 prep, task 2: the tier probe on muse 1.3.0
+
+- **`--print-tier` named no plan; the app banner said the same.** Two causes,
+  both in `crates/harness/src/tier.rs`. First: the probe's `muse --workspace
+  <probe dir>` never passed `--trust-workspace`, and muse 1.3.0 opens an
+  untrusted workspace on a "Do you trust this workspace?" gate before
+  drawing anything else — the probe's blind `/upgrade`-then-Enter keystrokes
+  landed on that gate instead (Enter takes its default, "Trust and
+  continue"), eating both the command and the card, so every probe against a
+  fresh `HARNESS_STATE_DIR` read a bare idle composer and reported "not
+  recognised" (`Tier::Unavailable`, the generic banner). Fixed by adding
+  `--trust-workspace` to the probe's own scratch workspace (nothing to load:
+  no skills, no rules — same posture every other muse child this app spawns
+  already uses) via a new pure `probe_command` builder, unit-tested
+  (`the_probe_trusts_its_own_scratch_workspace`) rather than only provable
+  live. Second, once the card does draw: this login's quota sits fully spent
+  (exhausted until 2026-09-21), and muse 1.3.0 draws `Usage currently
+  unavailable` in place of both percentages instead of `N% used` — the
+  parser had no rule for that sentence, so a plan parsed but its
+  percentages stayed `None` forever, which is why `--print-tier` printed
+  `Current: — used` / `Weekly: — used`: a card that had, in fact, finished
+  answering read as still drawing, so the probe also burned its whole 20 s
+  ceiling every time. `Tier::Subscription` gained a `usage_unavailable`
+  flag the parser sets from that literal phrase (`CARD_USAGE_UNAVAILABLE`,
+  pinned alongside the other card wording); `complete()` now treats it as an
+  answer, and `/status`/`--print-tier` print `unavailable` in its place
+  instead of a dash indistinguishable from "not yet". Verified live:
+  `--print-tier` now prints `Subscription: Muse Code Power Usage` /
+  `Current: unavailable used` / `Weekly: unavailable used` in about 11 s
+  (previously ran the full 20 s ceiling and named no plan). Unit tests use
+  the real captured 1.3.0 card text (`the_1_3_0_exhausted_card_names_
+  the_plan_with_no_percentages`); nothing sensitive in it (a plan name and
+  muse's own public account-center URL). `docs/06-billing.md` updated.
+
 ## 2026-09-15 — v0.1 prep, task 1: muse 1.3.0 schema
 
 - **The installed `muse` binary moved 1.2.1 → 1.3.0; the mirrored schema was

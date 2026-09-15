@@ -78,12 +78,24 @@ pub enum Tier {
     Subscription {
         /// The plan's name, e.g. `Muse Code High Usage`.
         plan: String,
-        /// The current window's usage, as a whole percent.
+        /// The current window's usage, as a whole percent. `None` either
+        /// because the card has not finished drawing yet, or because
+        /// `usage_unavailable` below says it never will.
         current_pct: Option<u32>,
-        /// The weekly window's usage, as a whole percent.
+        /// The weekly window's usage, as a whole percent. Same absence rule
+        /// as `current_pct`.
         weekly_pct: Option<u32>,
         /// The reset clauses, in the order the card printed them.
         resets: Vec<String>,
+        /// The card said `Usage currently unavailable` instead of either
+        /// percentage (muse 1.3.0): a known plan whose usage windows the
+        /// server is not reporting right now — seen while this login's
+        /// quota sits fully spent, waiting on its next reset. Distinct from
+        /// `current_pct`/`weekly_pct` simply being `None` because the card
+        /// has not finished drawing: this is the card's own final word, so
+        /// the probe treats it as a complete answer rather than waiting out
+        /// its deadline for numbers that are never coming.
+        usage_unavailable: bool,
     },
     /// The card said pay-as-you-go: **every turn bills API usage**.
     PayAsYouGo,
@@ -126,8 +138,14 @@ impl Tier {
     /// The `/status` and `/usage` lines for this tier.
     pub fn status_lines(&self) -> String {
         match self {
-            Tier::Subscription { plan, current_pct, weekly_pct, resets } => {
-                let pct = |p: &Option<u32>| p.map(|p| format!("{p}%")).unwrap_or_else(|| "—".into());
+            Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable } => {
+                let pct = |p: &Option<u32>| {
+                    match p {
+                        Some(p) => format!("{p}%"),
+                        None if *usage_unavailable => "unavailable".to_owned(),
+                        None => "—".to_owned(),
+                    }
+                };
                 let mut text = format!(
                     "Plan: {plan}\nCurrent usage: {} used\nWeekly usage: {} used",
                     pct(current_pct),
@@ -221,8 +239,12 @@ pub fn print_and_exit(muse: &str) -> ! {
         remember(tier);
     }
     match probed {
-        Ok(Tier::Subscription { plan, current_pct, weekly_pct, resets }) => {
-            let pct = |p: Option<u32>| p.map(|p| format!("{p}%")).unwrap_or_else(|| "\u{2014}".into());
+        Ok(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) => {
+            let pct = |p: Option<u32>| match p {
+                Some(p) => format!("{p}%"),
+                None if usage_unavailable => "unavailable".to_owned(),
+                None => "\u{2014}".into(),
+            };
             println!("Subscription: {plan}");
             println!("Current: {} used", pct(current_pct));
             println!("Weekly: {} used", pct(weekly_pct));
@@ -495,7 +517,9 @@ fn probe_blocking(muse: &str) -> Result<Tier, String> {
 /// 2, S4). Anything else is complete as parsed.
 fn complete(tier: &Tier) -> bool {
     match tier {
-        Tier::Subscription { current_pct, weekly_pct, .. } => current_pct.is_some() && weekly_pct.is_some(),
+        Tier::Subscription { current_pct, weekly_pct, usage_unavailable, .. } => {
+            (current_pct.is_some() && weekly_pct.is_some()) || *usage_unavailable
+        }
         Tier::PayAsYouGo | Tier::Unavailable(_) => true,
     }
 }
@@ -567,8 +591,20 @@ pub fn probe(muse: &str) -> Result<Tier, String> {
     // fixed list of harmless words it saw — never the output itself.
     if std::env::var_os("HARNESS_TIER_DEBUG").is_some() {
         let flat = flatten(&text);
-        let seen: Vec<&str> = ["subscribed", "pay-as-you-go", "upgrade", "Upgrade", "plan", "%", "Ask", "muse", "error"]
-            .into_iter()
+        let seen: Vec<&str> = [
+            "subscribed",
+            "pay-as-you-go",
+            "upgrade",
+            "Upgrade",
+            "plan",
+            "%",
+            "Ask",
+            "muse",
+            "error",
+            "unavailable",
+            "trust",
+        ]
+        .into_iter()
             .filter(|word| flat.contains(word))
             .collect();
         eprintln!("tier probe: {} bytes read, {} after flattening, saw {seen:?}", text.len(), flat.len());
@@ -601,6 +637,12 @@ pub const CARD_PAY_AS_YOU_GO: [&str; 4] = [
     "subscriptions aren't currently available",
     "subscriptions are not currently available",
 ];
+/// The sentence muse 1.3.0 draws in place of both percentages while a known
+/// plan's usage windows are not being reported — observed while this login's
+/// quota sits fully spent (owner round: quota exhausted until 2026-09-21),
+/// but the card gives no reason, so this is read as "no numbers, ever, this
+/// probe" rather than assumed to mean any one cause.
+pub const CARD_USAGE_UNAVAILABLE: &str = "usage currently unavailable";
 
 /// What the card said, or `None` while it has not said it yet.
 ///
@@ -613,6 +655,7 @@ fn parse_card(raw: &str) -> Option<Tier> {
             current_pct: percent_after(&text, "Current"),
             weekly_pct: percent_after(&text, "Weekly"),
             resets: reset_clauses(&text),
+            usage_unavailable: text.to_lowercase().contains(CARD_USAGE_UNAVAILABLE),
         });
     }
     let lower = text.to_lowercase();
@@ -730,6 +773,35 @@ fn flatten(raw: &str) -> String {
 // The pseudo-terminal
 // ---------------------------------------------------------------------------
 
+/// The `muse` invocation the probe spawns: the throwaway workspace, sized
+/// for the card's own lines, and trusted for this run only.
+///
+/// A pure builder — no process touched — so the trust flag is a unit-testable
+/// fact rather than something only a live probe could catch a regression in.
+fn probe_command(muse: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(muse);
+    command
+        .arg("--workspace")
+        .arg(probe_workspace())
+        // muse 1.3.0 shows a "Do you trust this workspace?" gate on an
+        // untrusted `--workspace` before it will draw anything else, and
+        // this probe's own scratch directory (nothing to load: no skills,
+        // no rules) is never pre-trusted under a fresh `HARNESS_STATE_DIR`.
+        // Without this flag the probe's blind `/upgrade`-then-Enter
+        // keystrokes land on the trust prompt instead — Enter accepts its
+        // default ("Trust and continue"), which dismisses the gate but eats
+        // both the command text and the card, so the probe reads a bare
+        // idle composer and reports "not recognised". `--trust-workspace`
+        // skips the gate for this run only (it does not save the decision),
+        // matching the trust posture every other muse child this app spawns
+        // already uses (`MuseConfig::trust_workspace`).
+        .arg("--trust-workspace")
+        .env("TERM", "xterm-256color")
+        .env("LINES", ROWS.to_string())
+        .env("COLUMNS", COLS.to_string());
+    command
+}
+
 /// A `muse` TUI on the far side of a pty, and the master side to talk to it.
 struct Pty {
     master: RawFd,
@@ -744,13 +816,7 @@ impl Pty {
         // A harness that was force-quit mid-probe left its child behind;
         // SIGKILL it before starting the next one.
         sweep_stale_probe();
-        let mut command = std::process::Command::new(muse);
-        command
-            .arg("--workspace")
-            .arg(probe_workspace())
-            .env("TERM", "xterm-256color")
-            .env("LINES", ROWS.to_string())
-            .env("COLUMNS", COLS.to_string());
+        let command = probe_command(muse);
         let pty = Self::spawn(command)?;
         let pid = pty.child.id();
         if let Ok(mut live) = LIVE_PROBES.lock() {
@@ -884,7 +950,13 @@ mod tests {
 
     #[test]
     fn the_weekly_fraction_feeds_the_footer_meter() {
-        let sub = |weekly_pct| Tier::Subscription { plan: "High Usage".into(), current_pct: None, weekly_pct, resets: vec![] };
+        let sub = |weekly_pct| Tier::Subscription {
+            plan: "High Usage".into(),
+            current_pct: None,
+            weekly_pct,
+            resets: vec![],
+            usage_unavailable: false,
+        };
         let frac = sub(Some(12)).weekly_fraction().unwrap();
         assert!((frac - 0.12).abs() < 1e-6, "{frac}");
         assert_eq!(sub(None).weekly_fraction(), None);
@@ -897,13 +969,16 @@ mod tests {
         let card = "\u{1b}[2J\u{1b}[1;1H\u{2502} You are currently subscribed to the Muse Code High Usage \
                     plan. \u{2502}\n\u{2502} Current 2% used \u{b7} Resets at 3:00 PM \u{2502}\n\
                     \u{2502} Weekly 7% used \u{b7} Resets Monday \u{2502}\n";
-        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets }) = parse_card(card) else {
+        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) =
+            parse_card(card)
+        else {
             panic!("expected a subscription");
         };
         assert_eq!(plan, "Muse Code High Usage");
         assert_eq!(current_pct, Some(2));
         assert_eq!(weekly_pct, Some(7));
         assert_eq!(resets, vec!["Resets at 3:00 PM".to_owned(), "Resets Monday".to_owned()]);
+        assert!(!usage_unavailable);
     }
 
     /// The card this machine's `muse` actually draws, flattened. Its wording is
@@ -915,13 +990,16 @@ mod tests {
         let card = "You are currently subscribed to the Muse Code High Usage usage plan. \
                     Current 0% used \u{b7} Resets at 5:17 PM Weekly 2% used \u{b7} \
                     Resets Sep 14 at 5:30 AM as of 3:27 PM Manage your plan in Account Center";
-        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets }) = parse_card(card) else {
+        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) =
+            parse_card(card)
+        else {
             panic!("expected a subscription");
         };
         assert_eq!(plan, "Muse Code High Usage");
         assert_eq!(current_pct, Some(0));
         assert_eq!(weekly_pct, Some(2));
         assert_eq!(resets, vec!["Resets at 5:17 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+        assert!(!usage_unavailable);
     }
 
     /// The wording this build reads the card by, pinned (finding
@@ -943,6 +1021,8 @@ mod tests {
                 "subscriptions are not currently available",
             ]
         );
+        assert_eq!(CARD_USAGE_UNAVAILABLE, "usage currently unavailable");
+        assert_eq!(CARD_USAGE_UNAVAILABLE, CARD_USAGE_UNAVAILABLE.to_lowercase());
         // Every one of them is lowercase, because the matcher lowercases the
         // card before looking; a capital here would never match.
         for sentence in CARD_PAY_AS_YOU_GO {
@@ -988,6 +1068,7 @@ mod tests {
             current_pct: Some(1),
             weekly_pct: Some(2),
             resets: vec![],
+            usage_unavailable: false,
         };
         // D5: the label is the plan's name and nothing else. The weekly
         // percentage belongs to the meter row under it, which reads the same
@@ -1000,6 +1081,44 @@ mod tests {
         assert!(Tier::PayAsYouGo.is_warning());
         assert_eq!(Tier::Unavailable("no tty".into()).footer_label(), "Plan unknown");
         assert!(Tier::Unavailable("no tty".into()).is_warning());
+    }
+
+    /// A plan with no percentages reads as "—" (still drawing) unless the
+    /// card said usage is unavailable, in which case `/status` says so
+    /// plainly instead of a dash that looks like a bug.
+    #[test]
+    fn the_status_line_distinguishes_still_drawing_from_the_cards_own_word() {
+        let still_drawing = Tier::Subscription {
+            plan: "Power Usage".into(),
+            current_pct: None,
+            weekly_pct: None,
+            resets: vec![],
+            usage_unavailable: false,
+        };
+        assert!(still_drawing.status_lines().contains("Current usage: — used"));
+        let unavailable = Tier::Subscription {
+            plan: "Power Usage".into(),
+            current_pct: None,
+            weekly_pct: None,
+            resets: vec![],
+            usage_unavailable: true,
+        };
+        assert!(unavailable.status_lines().contains("Current usage: unavailable used"));
+        assert!(unavailable.status_lines().contains("Weekly usage: unavailable used"));
+        // Naming the plan either way — this is what keeps a known plan from
+        // ever reading as the generic "Muse did not say which plan" banner.
+        assert!(unavailable.status_lines().contains("Plan: Power Usage"));
+    }
+
+    /// The probe's own `--workspace` is always run with `--trust-workspace`:
+    /// without it, muse 1.3.0's trust gate eats the probe's keystrokes and
+    /// the card never draws (v0.1 prep task 2).
+    #[test]
+    fn the_probe_trusts_its_own_scratch_workspace() {
+        let command = probe_command("muse");
+        let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.contains(&"--trust-workspace".to_owned()), "{args:?}");
+        assert!(args.contains(&"--workspace".to_owned()), "{args:?}");
     }
 
     #[test]
@@ -1048,19 +1167,51 @@ mod tests {
                     You are currently subscribed to the Muse Code Power Usage usage plan. \
                     Current 13% used · Resets at 7:14 PM Weekly 36% used · \
                     Resets Sep 14 at 5:30 AM as of 3:29 PM Manage your plan in Account Center";
-        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets }) = parse_card(card) else {
+        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) =
+            parse_card(card)
+        else {
             panic!("expected a subscription");
         };
         assert_eq!(plan, "Muse Code Power Usage");
         assert_eq!(current_pct, Some(13));
         assert_eq!(weekly_pct, Some(36));
         assert_eq!(resets, vec!["Resets at 7:14 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+        assert!(!usage_unavailable);
         assert!(complete(&Tier::Subscription {
             plan,
             current_pct,
             weekly_pct,
             resets,
+            usage_unavailable,
         }));
+    }
+
+    /// The verbatim 1.3.0 card captured live against this login (v0.1 prep
+    /// task 2), while its quota sat fully spent (exhausted until
+    /// 2026-09-21): no percentages at all, on either window — the card says
+    /// so outright rather than drawing zeroes. Nothing sensitive in it: a
+    /// plan name and a public account-center URL, same as every other
+    /// pinned card fixture in this file.
+    #[test]
+    fn the_1_3_0_exhausted_card_names_the_plan_with_no_percentages() {
+        let card = "You are currently subscribed to the Muse Code Power Usage usage plan. \
+                    Usage currently unavailable Manage your plan in Account Center \
+                    (https://accountscenter.meta.com/muse_code)";
+        let Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) =
+            parse_card(card)
+        else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(plan, "Muse Code Power Usage");
+        assert_eq!(current_pct, None);
+        assert_eq!(weekly_pct, None);
+        assert!(resets.is_empty());
+        assert!(usage_unavailable, "the card's own words, not a still-drawing guess");
+        // The missing numbers are the card's final word, not a partial
+        // draw: the probe must not spend its whole deadline waiting for
+        // percentages that are never coming (owner round: quota exhausted
+        // until 2026-09-21 printed dashes forever under the old rule).
+        assert!(complete(&Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }));
     }
 
     /// A plan sentence on its own parses — and reads as still drawing, not
