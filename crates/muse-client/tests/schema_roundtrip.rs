@@ -22,7 +22,9 @@ const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/m
 /// `initialized` is the notification that takes none; `nope/nope` is the probe
 /// that proves an unknown method is rejected. `model/list` takes none either —
 /// it asks for the whole catalog — and `muse-client` sends it bare, which
-/// `transcript-userinput-answer.jsonl` records.
+/// `transcript-userinput-answer.jsonl` records. `usage/read` (muse 1.3.0) is the
+/// same shape: it asks for the last-observed usage snapshot and the published
+/// schema gives it no params interface at all.
 const UNTYPED_METHODS: &[&str] = &[
     "nope/nope",
     "initialized",
@@ -30,6 +32,7 @@ const UNTYPED_METHODS: &[&str] = &[
     "account/read",
     "account/loginCancel",
     "account/logout",
+    "usage/read",
 ];
 
 /// The lane whose **results** msp.d.ts leaves shapeless.
@@ -99,6 +102,17 @@ fn roundtrip_request_params(method: &str, params: Option<&Value>) -> bool {
         "turn/cancel" => roundtrip::<TurnCancelParams>(w, params),
         "turn/unqueue" => roundtrip::<TurnUnqueueParams>(w, params),
         "model/list" => roundtrip::<ModelListParams>(w, params),
+        "skill/list" => roundtrip::<SkillListParams>(w, params),
+        "task/background" => roundtrip::<TaskBackgroundParams>(w, params),
+        "task/stop" => roundtrip::<TaskStopParams>(w, params),
+        "task/stopAll" => roundtrip::<TaskStopAllParams>(w, params),
+        "goal/set" => roundtrip::<GoalSetParams>(w, params),
+        "goal/edit" => roundtrip::<GoalEditParams>(w, params),
+        "goal/clear" => roundtrip::<GoalClearParams>(w, params),
+        "goal/pause" => roundtrip::<GoalPauseParams>(w, params),
+        "goal/resume" => roundtrip::<GoalResumeParams>(w, params),
+        "workflow/cancel" => roundtrip::<WorkflowCancelParams>(w, params),
+        "workflow/childControl" => roundtrip::<WorkflowChildControlParams>(w, params),
         "view/page" => roundtrip::<ViewPageParams>(w, params),
         "view/subscribe" => roundtrip::<ViewSubscribeParams>(w, params),
         "view/unsubscribe" => roundtrip::<ViewUnsubscribeParams>(w, params),
@@ -145,6 +159,15 @@ fn roundtrip_result(method: &str, result: Option<&Value>) -> bool {
         "turn/cancel" => roundtrip::<TurnCancelResult>(w, result),
         "turn/unqueue" => roundtrip::<TurnUnqueueResult>(w, result),
         "model/list" => roundtrip::<ModelListResult>(w, result),
+        "skill/list" => roundtrip::<SkillListResult>(w, result),
+        "task/background" | "task/stop" => roundtrip::<TaskCommandResult>(w, result),
+        "task/stopAll" => roundtrip::<TaskStopAllResult>(w, result),
+        "goal/set" | "goal/edit" | "goal/pause" | "goal/resume" | "goal/clear" => {
+            roundtrip::<GoalCommandResult>(w, result);
+        }
+        "workflow/cancel" => roundtrip::<WorkflowControlResult>(w, result),
+        "workflow/childControl" => roundtrip::<WorkflowControlResult>(w, result),
+        "usage/read" => roundtrip::<UsageReadResult>(w, result),
         "view/page" => roundtrip::<ViewPageResult>(w, result),
         "view/subscribe" => roundtrip::<ViewSubscribeResult>(w, result),
         "view/unsubscribe" => roundtrip::<ViewUnsubscribeResult>(w, result),
@@ -198,6 +221,10 @@ fn roundtrip_server_params(method: &str, params: Option<&Value>) -> bool {
         "session/tokenUsage" => roundtrip::<SessionTokenUsageParams>(w, params),
         "session/contextUsage" => roundtrip::<SessionContextUsageParams>(w, params),
         "session/approvalModeChanged" => roundtrip::<SessionApprovalModeChangedParams>(w, params),
+        "session/statusChanged" => roundtrip::<SessionStatusChangedParams>(w, params),
+        "session/viewHealthChanged" => roundtrip::<SessionViewHealthChangedParams>(w, params),
+        "skill/changed" => roundtrip::<SkillChangedParams>(w, params),
+        "usage/changed" => roundtrip::<SubscriptionUsage>(w, params),
         _ => return false,
     }
     true
@@ -501,10 +528,10 @@ fn view_subscribe_and_item_read_output_and_model_route_unserved_round_trip() {
 
 #[test]
 fn index_constants_match_the_published_schema() {
-    assert_eq!(MSP_METHODS.len(), 35);
-    assert_eq!(MSP_NOTIFICATIONS.len(), 26);
+    assert_eq!(MSP_METHODS.len(), 47);
+    assert_eq!(MSP_NOTIFICATIONS.len(), 30);
     assert_eq!(MSP_SERVER_REQUESTS, &["approval/request", "userInput/request"]);
-    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 37);
+    assert_eq!(MSP_ERROR_DATA_KINDS.len(), 38);
     assert!(SCHEMA_FINGERPRINT.starts_with("sha256:"));
     // `session/started` is emitted by the binary but absent from the published index.
     assert!(!MSP_NOTIFICATIONS.contains(&"session/started"));

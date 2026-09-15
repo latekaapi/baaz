@@ -730,10 +730,12 @@ mod tests {
         muse_client::schema::Session {
             active_turn_id: None,
             approval_mode: None,
+            attention: None,
             branch: None,
             created_at: "2026-09-13T10:00:00Z".into(),
             first_user_prompt: None,
             forked_from: None,
+            last_activity_at: None,
             model_id: None,
             name: None,
             path: String::new(),

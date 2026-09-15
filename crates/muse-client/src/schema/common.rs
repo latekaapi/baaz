@@ -10,6 +10,16 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 open_enum! {
+    /// One attention flag (tdd SS2.4, ADR 31983 D3): a pending server-initiated request class
+    /// parked on the session (muse 1.3.0). Open on the wire — clients MUST ignore unknown
+    /// values; future attention kinds are additive.
+    AttentionFlag {
+        ApprovalPending = "approvalPending",
+        InputPending = "inputPending",
+    }
+}
+
+open_enum! {
     /// Who durably backgrounded a task (tdd SS4.5.5).
     BackgroundInitiator {
         User = "user",
@@ -286,6 +296,9 @@ pub struct ErrorData {
     /// default for this code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// The rejected skill selector on `skillNotFound` (`-32032`, SS3.22.4; muse 1.3.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
     /// Session identity on errors whose lookup is session-scoped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -327,6 +340,7 @@ open_enum! {
         SessionStreamMismatch = "sessionStreamMismatch",
         CommandRejected = "commandRejected",
         Backpressured = "backpressured",
+        SkillNotFound = "skillNotFound",
         ViewTruncated = "viewTruncated",
         OutputUnavailable = "outputUnavailable",
         BoundaryPruned = "boundaryPruned",
@@ -389,6 +403,81 @@ pub struct Goal {
     pub percent_complete: f64,
     /// Goal status, verbatim from the durable goal state (free string by design).
     pub status: String,
+}
+
+/// `goal/clear` params (tdd SS3.18, muse 1.3.0). An `objective` here is an unknown field and
+/// rejects `-32602 invalidParams` — the bare verbs carry exactly this pair.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalClearParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// The shared SS3.18 goal ack (muse 1.3.0), admission-only: all five verbs answer this one shape
+/// (the tdd's "Shared contract"), differing only in when `turnId` is present.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCommandResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+    /// Present by exactly the four SS3.18 result cases: an idle wake carries the fresh goal
+    /// turn's id; a busy `set`/`edit`/`resume` carries the admission-time active turn's id (a
+    /// routing fact, not a delivery promise); `pause`/`clear` never carry it; an idle admission
+    /// whose resulting goal is not unfinished parks the notification and carries none.
+    /// **Additive-optional**: absent means "no turn named", never fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// `goal/edit` params (tdd SS3.18, muse 1.3.0): replace the current goal's objective. Same shape
+/// as `goal/set`; the verbs differ in their `missing_goal` precondition, not their payload.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalEditParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The replacement objective; same trim/non-empty rule as `goal/set`.
+    pub objective: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/pause` params (tdd SS3.18, muse 1.3.0); shape as `goal/clear`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalPauseParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/resume` params (tdd SS3.18, muse 1.3.0); shape as `goal/clear`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalResumeParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/set` params (tdd SS3.18, muse 1.3.0): set the session's goal objective.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalSetParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The objective text; required, non-empty after Unicode-whitespace trim (the trimmed text
+    /// is the payload). Empty-after-trim is `-32602 invalidParams` (tdd SS3.18).
+    pub objective: String,
+    /// The target session.
+    pub session_id: String,
 }
 
 open_enum! {
@@ -719,6 +808,71 @@ pub struct ServerInfo {
     pub version: String,
 }
 
+/// One typed-invocable shortcut spelling (tdd SS3.22.1, muse 1.3.0). A plugin skill may
+/// contribute two rows: its bare-name winner and its qualified `<pluginId>:<skillId>` form.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCatalogEntry {
+    /// Present when the skill declares an argument hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    /// The skill's palette summary.
+    pub description: String,
+    /// The skill display name the first-party palette shows.
+    pub display_name: String,
+    /// The owning plugin's identifier; present when `source` is `plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// The shortcut token without the leading slash — bare (`fix-bug`) or plugin-qualified
+    /// (`acme:deploy`) — the exact value a `skill` input part submits. Unique within one
+    /// response.
+    pub selector: String,
+    /// Where the skill comes from.
+    pub source: SkillSource,
+}
+
+/// `skill/changed` params (tdd SS3.22.2, muse 1.3.0): the session's user-invocable set changed;
+/// clients re-issue `skill/list`. Advisory — the host may coalesce bursts and guarantees no
+/// ordering relative to view events (ADR 32471 D3).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillChangedParams {
+    /// The session whose set changed.
+    pub session_id: String,
+}
+
+/// `skill/list` params (tdd SS3.22.1, muse 1.3.0). Per-session because skill scope follows the
+/// session's workspace and plugin state.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListParams {
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `skill/list` result (tdd SS3.22.1, muse 1.3.0): one row per typed-invocable shortcut spelling
+/// — exactly the invocations the first-party typed dispatch accepts (spec 11352 INV-007
+/// predicate and the shared shortcut layer's name resolution, both by call-through; ADR 32471
+/// D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListResult {
+    /// The session's user-invocable skill rows.
+    pub skills: Vec<SkillCatalogEntry>,
+}
+
+open_enum! {
+    /// A skill row's source scope (tdd SS3.22.1, muse 1.3.0): the projection of the skills
+    /// crate's `SkillsSourceScope`. Open (server-produced result vocabulary, the #22785
+    /// enum-openness rule): a future scope value is additive.
+    SkillSource {
+        Bundled = "bundled",
+        User = "user",
+        Project = "project",
+        Plugin = "plugin",
+    }
+}
+
 /// The compaction boundary an anchored snapshot is anchored at (tdd SS2.5.2).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -889,6 +1043,49 @@ pub struct SubagentTargetParams {
     pub subagent_id: String,
 }
 
+/// The one usage payload shape (muse 1.3.0): the `usage/read` result's `usage` member and the
+/// `usage/changed` params (ADR 32563 D2/D3). The numbers are point-in-time — `observedAtMs` is
+/// the host's arrival stamp, so a client renders "as of", never implies live data (spec 18742
+/// US-FR-004).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsage {
+    /// When the host RECEIVED this observation (frame arrival or mint request-send), epoch
+    /// milliseconds.
+    pub observed_at_ms: u64,
+    /// The provider's subscription tier id, verbatim.
+    pub tier: String,
+    /// The rolling weekly block.
+    pub weekly: SubscriptionUsageWeekly,
+    /// The current window.
+    pub window: SubscriptionUsageWindow,
+}
+
+/// The rolling weekly block (muse 1.3.0): same semantics as [`SubscriptionUsageWindow`] without
+/// a duration (ADR 32563 D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsageWeekly {
+    /// When the weekly window resets, epoch milliseconds.
+    pub resets_at_ms: u64,
+    /// Percent of the weekly budget used (integer ≥ 0, may exceed 100).
+    pub used_percent: u32,
+}
+
+/// The current usage window (muse 1.3.0; the provider's 5-hour-class block): verbatim provider
+/// percentages with the reset stamp normalized to epoch milliseconds (ADR 32563 D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsageWindow {
+    /// When the window resets, epoch milliseconds.
+    pub resets_at_ms: u64,
+    /// Percent of the window's budget used: an integer ≥ 0, verbatim from the provider —
+    /// over-quota values above 100 are valid.
+    pub used_percent: u32,
+    /// The window's length in minutes (> 0).
+    pub window_duration_mins: u32,
+}
+
 /// A success response frame (SS1.2 §2.3).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -902,6 +1099,79 @@ pub struct SuccessResponse {
     pub result: Map<String, Value>,
 }
 
+/// `task/background` params (tdd §3.13, muse 1.3.0): durably send a running foreground tool task
+/// to the background.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskBackgroundParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The task to background, exactly as the view names it: the `toolCall` item's `itemId` IS
+    /// the task id (SS4.5.5).
+    pub task_id: String,
+}
+
+/// The `task/background` / `task/stop` ack (tdd §3.13/§3.14, muse 1.3.0): admission-only, echoing
+/// the targeted task.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCommandResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+    /// Echoes the targeted task id.
+    pub task_id: String,
+}
+
+/// `task/stopAll` params (tdd §3.15, muse 1.3.0): stop every stoppable background workload live
+/// at admission.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopAllParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// The `task/stopAll` ack (tdd §3.15, muse 1.3.0): always `accepted`, including over an empty set
+/// — a blanket stop over nothing is a satisfied gesture. The ack deliberately carries no
+/// stopped-task list; count the kills from the view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopAllResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
+/// `task/stop` params (tdd §3.14, muse 1.3.0): stop one named background task. Required target,
+/// never "whichever is loudest" — §3.15 is the blanket verb.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The task to stop, the `toolCall` item's `itemId` (SS4.5.5).
+    pub task_id: String,
+}
+
+/// `usage/read` result (muse 1.3.0): `{usage?}` — omitted, never `null`, when the host has
+/// observed nothing (ADR 32563 D2: truthful absence, no "nothing observed" error).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReadResult {
+    /// The last-observed subscription usage window, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SubscriptionUsage>,
+}
+
 open_enum! {
     /// Version-control system of a branch observation (tdd SS4.6.4).
     Vcs {
@@ -910,14 +1180,67 @@ open_enum! {
     }
 }
 
-/// The `sha256:` stable-surface fingerprint of the muse 1.2.1 schema bundle these types were
+/// `workflow/cancel` params (tdd SS3.19, muse 1.3.0): cancel a live workflow run.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowCancelParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The run to cancel, exactly as the `workflow` item names it (SS4.5.8); required,
+    /// non-empty.
+    pub workflow_run_id: String,
+}
+
+closed_enum! {
+    /// Which control to apply to the child's current attempt (tdd SS3.20, muse 1.3.0). Closed on
+    /// the wire: an unknown value is `-32602 invalidParams`.
+    WorkflowChildAction {
+        Skip = "skip",
+        Retry = "retry",
+    }
+}
+
+/// `workflow/childControl` params (tdd SS3.20, muse 1.3.0): skip or retry one workflow child,
+/// keyed by the `(childId, attempt)` pair the `workflow` item's `children[]` carries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowChildControlParams {
+    /// The control to apply.
+    pub action: WorkflowChildAction,
+    /// The child's CURRENT attempt (integer >= 1). A stale value rejects `"stale_attempt"`;
+    /// re-read the item and re-key — never guess. Minimum 1.
+    pub attempt: u32,
+    /// The child, from the item's `children[]`; required, non-empty.
+    pub child_id: String,
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The run owning the child (SS4.5.8); required, non-empty.
+    pub workflow_run_id: String,
+}
+
+/// The shared SS3.19/SS3.20 admission-only ack (muse 1.3.0): deliberately bare `{commandId,
+/// status}` — settlement arrives as the workflow item's view events, never through the ack.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowControlResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
+/// The `sha256:` stable-surface fingerprint of the muse 1.3.0 schema bundle these types were
 /// generated from (`fixtures/msp/msp/manifest.json`).
 ///
 /// Compare it against `InitializeResult.schema.fingerprint`. **A mismatch is a WARNING, never an
 /// error**: the server is free to ship a different stable surface, and additive evolution keeps
 /// these types working (research §1.2). Log it, do not refuse the connection.
 pub const SCHEMA_FINGERPRINT: &str =
-    "sha256:c7ff6c5d1e89cd42f803aea1f05b8e72082f2099685802473eb726903484713b";
+    "sha256:ab69549a7ebb423fce94068762da0b5ff3cdec1f8fc263dcc17248eda117f852";
 
 /// Every wire **method** in the SS1.9 published index (`MspMethod`).
 ///
@@ -949,6 +1272,17 @@ pub const MSP_METHODS: &[&str] = &[
     "session/setReasoningEffort",
     "session/userShell",
     "model/list",
+    "skill/list",
+    "task/background",
+    "task/stop",
+    "task/stopAll",
+    "goal/set",
+    "goal/edit",
+    "goal/clear",
+    "goal/pause",
+    "goal/resume",
+    "workflow/cancel",
+    "workflow/childControl",
     "view/subscribe",
     "view/unsubscribe",
     "view/page",
@@ -959,6 +1293,7 @@ pub const MSP_METHODS: &[&str] = &[
     "userInput/answer",
     "userInput/cancel",
     "userInput/clarify",
+    "usage/read",
 ];
 
 /// Every wire **notification** in the SS1.9 published index (`MspNotification`).
@@ -967,6 +1302,7 @@ pub const MSP_METHODS: &[&str] = &[
 /// omits — a client must accept it.
 pub const MSP_NOTIFICATIONS: &[&str] = &[
     "initialized",
+    "skill/changed",
     "turn/started",
     "turn/completed",
     "turn/retracted",
@@ -985,6 +1321,7 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "session/modelChanged",
     "session/nameChanged",
     "session/reasoningEffortChanged",
+    "session/statusChanged",
     "session/goalChanged",
     "session/todoListChanged",
     "session/branchChanged",
@@ -992,6 +1329,8 @@ pub const MSP_NOTIFICATIONS: &[&str] = &[
     "session/contextUsage",
     "session/approvalModeChanged",
     "session/modelRouteUnserved",
+    "session/viewHealthChanged",
+    "usage/changed",
 ];
 
 /// Every server-initiated wire request in the schema's `requests` index
@@ -1051,6 +1390,7 @@ pub const MSP_ERROR_DATA_KINDS: &[&str] = &[
     "sessionStreamMismatch",
     "commandRejected",
     "backpressured",
+    "skillNotFound",
     "viewTruncated",
     "outputUnavailable",
     "boundaryPruned",

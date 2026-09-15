@@ -48,6 +48,12 @@ pub struct Session {
     /// legitimately omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<EffectiveApprovalModeState>,
+    /// Attention flags (tdd SS2.4, ADR 31983 D3; muse 1.3.0). **Additive-optional**, present only
+    /// when at least one flag is set; absence is a NON-assertion (nothing pending, or the loaded
+    /// session's pending source declined to answer). Loaded sessions only: a `notLoaded` row
+    /// omits it even while its durable pending set is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Vec<AttentionFlag>>,
     /// Derived workspace branch (tdd SS2.14.1). **Additive-optional**, omitted when underivable;
     /// the live-change signal stays `session/branchChanged`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +67,12 @@ pub struct Session {
     /// `null` for root sessions; fork provenance otherwise. Required-nullable.
     #[serde(default)]
     pub forked_from: Option<ForkProvenance>,
+    /// Content-activity recency, RFC3339 (tdd SS2.4, ADR 31983 D5; muse 1.3.0). **Additive-
+    /// optional**: omitted when no content record exists. Never advanced by lifecycle bookkeeping
+    /// (the resume marker, re-stamps) or a fork's copied seed-replay records, and never precedes
+    /// `createdAt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
     /// The winning metadata fold's model; `null` when that record omits it. Required-nullable.
     #[serde(default)]
     pub model_id: Option<String>,
@@ -694,6 +706,29 @@ open_enum! {
     }
 }
 
+/// `session/statusChanged` params (tdd SS4.6.10, ADR 31983 D2; muse 1.3.0): a loaded session's
+/// projected `(status, attention)` value flipped. A command-plane broadcast — delivered to every
+/// connection regardless of its view subscription set, never gated, no `sourceRange`; the same
+/// facts live on the [`Session`] object, which is how a client seeds its table (no initial burst
+/// on connect).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStatusChangedParams {
+    /// Attention flags after the transition; present only when at least one flag is set (tdd
+    /// SS2.4, ADR 31983 D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Vec<AttentionFlag>>,
+    /// The owning session.
+    pub session_id: String,
+    /// Load state after the transition (the closed SS2.4 enum, unchanged).
+    pub status: SessionStatus,
+    /// The causing record's view cursor (ADR 31983 D4). Required-nullable: `null` exactly when
+    /// the paired `session/closed`'s cursor is `null` (the unload fold-failure arm); a definite
+    /// cursor everywhere else.
+    #[serde(default)]
+    pub view_cursor: Option<String>,
+}
+
 /// `session/todoListChanged` params (tdd SS4.6.3): a `TodoSnapshotUpdated` record landed. Replace
 /// the whole list on every event; an empty `items` array is a cleared list, not a no-op.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -776,4 +811,35 @@ pub struct SessionUserShellResult {
     pub command_id: String,
     /// Admission status.
     pub status: CommandStatus,
+}
+
+open_enum! {
+    /// The view-health state (tdd SS2.5.2 companion; muse 1.3.0). Open enum (`x-msp-openness:
+    /// open`): a client MUST ignore an unrecognized value. v1 emits only `Unavailable`; openness
+    /// itself reserves additive room for a future re-arm (ADR 32557 D1 names it `healthy`) and
+    /// for the #14401 durable-degraded axis, so no never-emitted token is baked onto the stable
+    /// surface now.
+    SessionViewHealth {
+        Unavailable = "unavailable",
+    }
+}
+
+/// `session/viewHealthChanged` params (ADR 32557; #32557; muse 1.3.0): the named session's live
+/// view stream became unavailable, and why. Best-effort: ordered after already-queued view
+/// frames and may be dropped (for example when the connection is closing), so a client MUST NOT
+/// assume a guaranteed push and still reads `history.noneReason` on its next resume/read
+/// (FM-005).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionViewHealthChangedParams {
+    /// The new view-health state. In v1 the host emits only `Unavailable`.
+    pub health: SessionViewHealth,
+    /// Why the view is unavailable — the SAME typed `HistoryNoneReason` vocabulary the pull path
+    /// stamps on `history.noneReason` (tdd SS2.5.2, D-050), so a client reuses one handler for
+    /// push and pull. `projectionUnavailable` in v1; present only when `health` is `Unavailable`.
+    /// Open on the client side: an unknown reason decodes conservatively and renders generically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub none_reason: Option<HistoryNoneReason>,
+    /// The session whose live view health changed.
+    pub session_id: String,
 }

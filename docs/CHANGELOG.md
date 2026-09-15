@@ -1,5 +1,32 @@
 # Harness changelog
 
+## 2026-09-15 — v0.1 prep, task 1: muse 1.3.0 schema
+
+- **The installed `muse` binary moved 1.2.1 → 1.3.0; the mirrored schema was
+  still 1.2.1's, so every live connect logged `FingerprintMismatch`.**
+  Re-exported `fixtures/msp/msp/{manifest.json,msp.schema.json}` and
+  `fixtures/msp/msp-ts/msp.d.ts` with `muse schema generate-json-schema` /
+  `generate-ts`; the new fingerprint is `sha256:ab69549a…`. The diff is
+  additive: `Session` gained `attention` (`AttentionFlag[]`) and
+  `lastActivityAt`; `TurnInputPart` gained a `skill` part (`arguments`,
+  `selector`); `ErrorKind`/`ErrorData` gained `skillNotFound`/`selector`; 28
+  new definitions (the `goal/*` family, `AttentionFlag`,
+  `SessionStatusChangedParams`, `SessionViewHealth(ChangedParams)`, the
+  `skill/*` catalog family, `usage/read`+`usage/changed`, the `task/*`
+  family, `workflow/cancel`+`workflow/childControl`). All mirrored in
+  `crates/muse-client/src/schema/{common,session,turn}.rs`;
+  `SCHEMA_FINGERPRINT`, `MSP_METHODS` (35→47), `MSP_NOTIFICATIONS` (26→30)
+  and `MSP_ERROR_DATA_KINDS` (37→38) updated to match, and
+  `crates/muse-client/tests/schema_roundtrip.rs` gained a dispatch arm (or an
+  `UNTYPED_METHODS` entry, for the params-less `usage/read`) for every new
+  method and notification. None of the new surface is wired into the
+  harness's own dispatch yet — new notifications fall through
+  `muse-adapter`'s existing "unhandled method" arm, same as any other
+  notification the harness does not act on. Verified live: `--session <id>`
+  on a real 1.3.0 session no longer logs `FingerprintMismatch` and still
+  opens its full transcript (screenshot read). `docs/01-transport.md` §4
+  gained finding 16.
+
 ## 2026-09-15 — Owner round 7, tasks 1–2: the rename builder and the 20 Hz pulse loop
 
 - **Task 1 (library change, harness follows): the rename editor rebuilds on

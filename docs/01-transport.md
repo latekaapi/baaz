@@ -264,6 +264,26 @@ the schema and a capture disagree, the capture wins and it is written down.
     rejection is session-scoped: the wire stays up and everything else keeps
     working.
 
+16. **muse 1.3.0's schema is additive over 1.2.1.** `SCHEMA_FINGERPRINT` moved
+    from `sha256:c7ff6c5d…` to `sha256:ab69549a…` (re-exported with `muse
+    schema generate-json-schema`/`generate-ts` into `fixtures/msp/msp/` and
+    `fixtures/msp/msp-ts/`). `Session` gained `attention` (`AttentionFlag[]`)
+    and `lastActivityAt`; `TurnInputPart` gained a `skill` part type
+    (`arguments`, `selector`); `ErrorKind`/`ErrorData` gained `skillNotFound`
+    and `selector`. 28 new definitions: the `goal/*` five-verb family and its
+    shared `GoalCommandResult` ack, `AttentionFlag`, `SessionStatusChangedParams`,
+    `SessionViewHealth(ChangedParams)`, the `skill/*` catalog family, the
+    `usage/read` + `usage/changed` subscription-usage family, the `task/*`
+    background-task family, and `workflow/cancel` + `workflow/childControl`.
+    None of them are wired into the harness's own request/notification
+    dispatch yet — they round-trip in `crates/muse-client/tests/
+    schema_roundtrip.rs` (`every_published_method_has_a_dispatch_arm`) and fold
+    through `muse-adapter`'s existing "unhandled method" arm
+    (`crates/muse-adapter/src/fold.rs`), same as any other notification the
+    harness does not yet act on. Verified live: connecting to the 1.3.0
+    binary no longer logs `FingerprintMismatch`, and `--session <id>` opens a
+    session's full transcript unchanged.
+
 ---
 
 ## 5. What the fold does with the shape mismatch
