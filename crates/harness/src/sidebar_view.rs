@@ -958,17 +958,13 @@ impl Harness {
             return None;
         }
         let p = cx.aui().colors;
-        let active = self.active_id(cx);
         // What each filter alone is keeping out, past the other one: the
         // empty text names its own toggle rather than borrowing hidden's.
         // (There is no sidebar text filter — search lives in the palette —
         // so no "no match" state exists here.)
         let hidden_only = !self.show_hidden && self.sessions.iter().any(|e| e.hidden);
         let empty_only = !self.show_empty
-            && self
-                .sessions
-                .iter()
-                .any(|e| (self.show_hidden || !e.hidden) && e.is_empty(active.as_deref()));
+            && self.sessions.iter().any(|e| (self.show_hidden || !e.hidden) && e.is_empty());
         let (title, detail) = match (hidden_only, empty_only) {
             (true, _) => {
                 ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.")
@@ -1137,9 +1133,8 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::ViewOptions) {
             return None;
         }
-        let active = self.active_id(cx);
         let hidden = self.sessions.iter().filter(|e| e.hidden).count();
-        let empty = self.sessions.iter().filter(|e| !e.archived && e.is_empty(active.as_deref())).count();
+        let empty = self.sessions.iter().filter(|e| !e.archived && e.is_empty()).count();
         let archived = self.sessions.iter().filter(|e| e.archived).count();
         let mut rows: Vec<MenuRow> = Vec::new();
         let mut actions: Vec<Option<ViewAction>> = Vec::new();

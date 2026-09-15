@@ -1,5 +1,36 @@
 # Harness changelog
 
+## 2026-09-15 — v0.1 prep, task 3: no row for a session before its first send
+
+- **A zero-turn session showed a sidebar row the instant it opened, under
+  muse 1.3.0.** Cause: `SessionEntry::is_empty` exempted the *active*
+  session from the empty-row filter — "the open session is never noise" —
+  which was safe under muse 1.2.1 because the wire itself never listed a
+  zero-turn session at all, so the exemption only ever fired for a session
+  the person had already named. muse 1.3.0 lists a zero-turn session like
+  any other, and `load_sessions` (`crates/harness/src/app/lifecycle.rs`)
+  merges `session/list` unfiltered, so the exemption started firing on
+  every brand-new session the moment it opened: an "untitled, 0 turns" row
+  before a single word was sent. Fixed at the rule itself, not by filtering
+  the merge (the product rule holds regardless of what the wire lists):
+  `SessionEntry::is_empty` (`crates/harness/src/sidebar.rs`) no longer takes
+  an `active` id and no longer exempts anything by activity — a row needs
+  turns, a running turn, or a name, full stop. The round-4/6 reveal is
+  unaffected: `local_started_row` (the row `turn/started` inserts) already
+  marks itself `running: true`, which already fails the check on its own,
+  independent of the removed exemption. One deliberate carve-out:
+  `clear_empty`'s own filter (`crates/harness/src/app/list.rs`) now excludes
+  the open session explicitly, since `hidden` has no auto-clear on activity
+  — sweeping a live draft there would hide it *past* its first send, not
+  just until then. Unit tests: `sidebar::tests::an_empty_row_is_noise_even_
+  while_it_is_open` pins the new rule; the parallel duplicate suite lower in
+  the same file updated to match. Verified live (free: `session/start` only,
+  no send) — `--steps
+  "group-by:project;project:/Users/latekaapi/Projects/reckoner;wait:8000;
+  sidebar-wheel:0,0;new:reckoner;wait:4000;sidebar-wheel:0,0"`: `rows=68`
+  before and after `new:reckoner`, screenshot shows the new session's "New
+  session" hero open with no matching row under its project's group.
+
 ## 2026-09-15 — v0.1 prep, task 2: the tier probe on muse 1.3.0
 
 - **`--print-tier` named no plan; the app banner said the same.** Two causes,

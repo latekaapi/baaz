@@ -696,11 +696,16 @@ impl Harness {
                         view.update(cx, |view, cx| view.seed_session(envelope, cx));
                     }
                 }
-                // No row until the first send: the wire lists a session
-                // only after its log flushes on `turn/completed`, and the
-                // `turn/started` handler inserts the local row meanwhile.
-                // The session groups under the project it started in, even
-                // when its folder later proves to be a worktree of that root.
+                // No row until the first send. Under muse 1.2.1 this held
+                // because the wire itself listed a session only after its
+                // log flushed on `turn/completed`; muse 1.3.0 lists a
+                // zero-turn session like any other, so as of v0.1 prep
+                // task 3 `SessionEntry::is_empty` enforces the rule itself
+                // instead of assuming the wire will — the `turn/started`
+                // handler still inserts the local row that makes the first
+                // row appear. The session groups under the project it
+                // started in, even when its folder later proves to be a
+                // worktree of that root.
                 this.set_override(&session_id, |meta| meta.project = current.clone(), cx);
                 // The row does not exist when the view activates, so its
                 // project name arrives now.

@@ -189,15 +189,27 @@ impl Harness {
     }
 
     /// "Clear empty": hide every session with no turns, with a way back for
-    /// eight seconds. Rows already hidden — and archived rows, which Clear
-    /// must never sweep — stay out of the batch, so Undo restores exactly
-    /// what this hid and nothing it did not.
+    /// eight seconds. Rows already hidden, archived rows, and the open
+    /// session — none of which Clear must ever sweep — stay out of the
+    /// batch, so Undo restores exactly what this hid and nothing it did not.
+    ///
+    /// The open session is excluded here, not by [`SessionEntry::is_empty`]
+    /// (which no longer exempts it — v0.1 prep task 3): `hidden` is a sticky,
+    /// explicit flag with no auto-clear on activity, so sweeping a person's
+    /// live draft would hide it **permanently**, past its first send, until
+    /// they noticed and unhid it by hand — worse than the no-row-yet state
+    /// Clear Empty is trying to tidy away.
     pub(crate) fn clear_empty(&mut self, cx: &mut Context<Self>) {
         let active = self.active_id(cx);
         let cleared: Vec<String> = self
             .sessions
             .iter()
-            .filter(|entry| !entry.hidden && !entry.archived && entry.is_empty(active.as_deref()))
+            .filter(|entry| {
+                !entry.hidden
+                    && !entry.archived
+                    && entry.is_empty()
+                    && !active.as_deref().is_some_and(|id| id == entry.id)
+            })
             .map(|entry| entry.id.clone())
             .collect();
         if cleared.is_empty() {
@@ -411,9 +423,7 @@ impl Harness {
             .filter(|entry| {
                 // An archived row shown on request is explicitly asked for;
                 // the empty filter must not swallow it back.
-                (self.show_archived && entry.archived)
-                    || self.show_empty
-                    || !entry.is_empty(active.as_deref())
+                (self.show_archived && entry.archived) || self.show_empty || !entry.is_empty()
             })
             .cloned()
             .collect();
