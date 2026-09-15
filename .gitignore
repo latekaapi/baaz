@@ -8,3 +8,20 @@ __pycache__/
 # Local secrets for testing (owner-provided API key); never committed.
 .dev.env
 .env
+
+# Internal AI-process material: not part of the public v0.1 release. Kept on
+# disk for whoever maintains this checkout, just not tracked.
+/CLAUDE.md
+/docs/briefs/
+/docs/diagnosis/
+/docs/audit/
+/docs/mockups/
+/docs/status/
+/docs/05-handoff.md
+/docs/09-handoff-improvements.md
+/docs/11-muse-workflows.md
+/docs/13-naming-handoff.md
+/docs/14-terminal.md
+/docs/15-skills.md
+# The old phase-by-phase internal diary; superseded by the root CHANGELOG.md.
+/docs/CHANGELOG.md
