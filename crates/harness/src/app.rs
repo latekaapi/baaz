@@ -990,13 +990,28 @@ impl Harness {
             // any more, whether it already had a row or not.
             self.drafts.retain(|_, named| named != &session_id);
             if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                // The wire still does not list it, but the prompt the view
-                // sent is known: title the local row from it.
-                if entry.local {
-                    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
-                        entry.label = prompt;
-                    }
+                // muse 1.3.0 lists a zero-turn session in `session/list`
+                // like any other row, so the draft this turn is making real
+                // may already be a wire entry here rather than the `local`
+                // placeholder the `else` arm below still covers — either
+                // shape is invisible (`SessionEntry::is_empty`) until
+                // `first_send_update` runs (see its doc).
+                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local()) {
                     self.invalidate_list();
+                    // The row just went from invisible to visible. A reveal
+                    // armed when this session was opened may already have
+                    // given up on it: `reveal_sidebar_row` disarms on the
+                    // first miss for a *known* session with nowhere to go,
+                    // which this row was — present in `self.sessions`, but
+                    // filtered as empty — until the line above. Re-arm it
+                    // exactly as an outside activation does, so the sidebar
+                    // still steers to the row a first send just created; but
+                    // only for the session this window has open, so a turn
+                    // on some other session never steals its reveal.
+                    if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                        self.reveal = Some(session_id.clone());
+                        self.reveal_unknown = None;
+                    }
                 }
             } else if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
                 // The first send of this window's rowless draft: insert its

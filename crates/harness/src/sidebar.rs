@@ -322,6 +322,36 @@ pub fn local_started_row(
     }
 }
 
+/// What `turn/started` does to a session's row that already existed with no
+/// turns — muse 1.3.0 lists a zero-turn session in `session/list` like any
+/// other row (see [`SessionEntry::is_empty`]'s doc), so the draft a first
+/// send makes real is, as of that muse, already a wire entry rather than the
+/// rowless gap [`local_started_row`] used to fill; the same can happen to a
+/// `local` placeholder row too, if one was already sitting in the list under
+/// an older path. Either shape is invisible until this runs: mark it
+/// running, title it from the prompt when it carries no name of its own yet,
+/// and date it `now` so the newest-first sort puts it at the top of its
+/// project group — the same three facts [`local_started_row`] starts a fresh
+/// row with.
+///
+/// A session that already has turns is never a first send — it is a later
+/// turn on a session whose row is already showing — so it is left untouched
+/// and this returns `false`. The caller reads the return to decide whether
+/// the list needs invalidating and the sidebar reveal re-arming.
+pub fn first_send_update(entry: &mut SessionEntry, prompt: Option<&str>, now: DateTime<Local>) -> bool {
+    if entry.turns > 0 {
+        return false;
+    }
+    entry.running = true;
+    if !entry.named {
+        if let Some(prompt) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
+            entry.label = one_line(prompt);
+        }
+    }
+    entry.updated = now;
+    true
+}
+
 pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) -> Vec<SessionEntry> {
     let mut merged = wire;
     let listed: std::collections::HashSet<String> = merged.iter().map(|entry| entry.id.clone()).collect();
@@ -866,6 +896,68 @@ mod tests {
         let merged = merge_session_list(wire, &[row]);
         assert_eq!(merged.len(), 1);
         assert!(!merged[0].local);
+    }
+
+    /// muse 1.3.0's own case: `session/list` already listed the draft as a
+    /// zero-turn wire row (`local: false`) before its first send, so
+    /// `turn/started` finds it via `find(...)` rather than needing to insert
+    /// one. It is noise (`is_empty`) until `first_send_update` runs.
+    #[test]
+    fn first_send_update_reveals_a_wire_zero_turn_entry() {
+        let now = Local::now();
+        let mut row = entry("s-wire");
+        assert!(row.is_empty());
+        assert!(!row.local);
+        let changed = first_send_update(&mut row, Some("Fix the header"), now);
+        assert!(changed);
+        assert!(row.running);
+        assert_eq!(row.label, "Fix the header");
+        assert_eq!(row.updated, now);
+        assert!(!row.is_empty());
+        // Titling is not naming: the empty filter's `named` exemption still
+        // reads this as a first send, not a person's own choice.
+        assert!(!row.named);
+    }
+
+    /// The pre-1.3.0 shape still works the same way: a `local` placeholder
+    /// row already in the list (rather than newly inserted) is revealed
+    /// exactly like a wire one.
+    #[test]
+    fn first_send_update_reveals_a_local_entry() {
+        let now = Local::now();
+        let mut row = local_started_row("s-local", UNNAMED.to_owned(), None, None, now);
+        row.running = false; // as it would be once parked back into `self.sessions`
+        let changed = first_send_update(&mut row, Some("Fix the header"), now);
+        assert!(changed);
+        assert!(row.running);
+        assert_eq!(row.label, "Fix the header");
+        assert!(row.local);
+    }
+
+    /// A later turn on a session that already has one is never a first
+    /// send: the row is left exactly as it was.
+    #[test]
+    fn first_send_update_leaves_a_turned_entry_untouched() {
+        let now = Local::now();
+        let mut row = entry("s-turned");
+        row.turns = 3;
+        row.label = "Existing title".into();
+        let before = row.clone();
+        let changed = first_send_update(&mut row, Some("Ignored prompt"), now);
+        assert!(!changed);
+        assert_eq!(row, before);
+    }
+
+    /// A user-given name outranks the prompt, exactly as [`SessionEntry::join`]
+    /// ranks it: a first send titles an unnamed row, never renames a named one.
+    #[test]
+    fn first_send_update_never_overwrites_a_user_given_name() {
+        let now = Local::now();
+        let mut row = entry("s-named");
+        row.named = true;
+        row.label = "My name".into();
+        first_send_update(&mut row, Some("Ignored prompt"), now);
+        assert_eq!(row.label, "My name");
     }
 
     fn project(id: &str, name: &str, colour: u8, pinned: bool) -> crate::projects::Project {
