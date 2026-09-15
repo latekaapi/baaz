@@ -239,10 +239,10 @@ over title + first prompt + search text.
 `/usage`, `/clear` (new session), `/logout`, `/help`. Skills from `muse skills list` appear in
 the same menu tagged `skill`, and insert `/name ` as text.
 
-## 4. Library changes (in agentic-ui, branch `muse-support`)
+## 4. Library changes (in agentic-ui)
 
-Library changes are made in `/Users/latekaapi/Projects/agentic-ui` on branch `muse-support`,
-committed per phase with the library's gates (`cargo build --workspace`, `cargo test
+Library changes are made in the `agentic-ui` checkout beside this repository, on a feature
+branch, committed per phase with the library's gates (`cargo build --workspace`, `cargo test
 --workspace`, clippy `-D warnings`, doc `-D warnings`, `docs/06-api.md` regenerated). Design
 rules of the library apply (docs/00-agent-brief.md, docs/04-design-rules.md); new components
 get a gallery entry with sample data.
@@ -265,9 +265,9 @@ field; `feedback::banner` gains an action slot; `aui-icons` gains a Muse mark.
 
 ## 5. Phases and gates
 
-Each phase is one Opus lead session, briefed with this spec, the research doc and the
-library's agent brief. The owner reviews at each gate on screenshots (light and dark, 1440×900)
-and a read of the diff. Commit per phase in both repositories.
+Each phase was built against this spec and the research doc. Every gate was reviewed on
+screenshots (light and dark, 1440×900) and a read of the diff before the next phase started.
+Committed per phase in both repositories.
 
 1. **Transport and fold.** `muse-client`, `muse-adapter`, the `aui-protocol` extensions, replay
    tests over every fixture, a live echo-provider integration test (`cargo test -p muse-client
@@ -297,5 +297,5 @@ Real-provider spend: at most five real turns per phase; everything else on `echo
 Inherited from agentic-ui `docs/00-agent-brief.md`: no literal colours/sizes/durations,
 stateless `RenderOnce` components with intents out, `popover_layer` for anything that
 overflows, `AuiStyled` text roles, both themes, `export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"` before every cargo command, own `CARGO_TARGET_DIR` per
-worktree when agents run in parallel. Rust 2021, `rust-version` matching agentic-ui, clippy
+worktree when building from more than one at once. Rust 2021, `rust-version` matching agentic-ui, clippy
 and rustdoc clean under `-D warnings`.

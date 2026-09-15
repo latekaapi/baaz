@@ -1,12 +1,10 @@
 # Projects — one window over several workspaces
 
 Design record for the Projects feature, 2026-09-13. Research first (four reference apps, the
-wire, the codebase), then the decisions taken with the owner, then the data model, the UI,
-and the build order. The briefs Muse implements from are `docs/briefs/muse-projects-lib.md`,
-`muse-projects-harness-1.md` and `muse-projects-harness-2.md`, in that order.
+wire, the codebase), then the decisions, then the data model, the UI, and the build order.
 
-Supersedes the brief in `docs/09-handoff-improvements.md` §12 where the two differ (§12
-recommended one project at a time behind a switcher; the owner chose all projects at once).
+An earlier sketch recommended one project at a time behind a switcher; that was superseded
+by the decision below to show all projects at once.
 
 ## 1. What the four references do
 
@@ -50,7 +48,7 @@ a folder.
 
 ## 3. Decisions (D30–D41)
 
-Taken with the owner on 2026-09-13.
+Taken 2026-09-13.
 
 - **D30 Sidebar shape.** All projects at once: collapsible project groups, pinned rows first
   inside each group, a Date/Project toggle in the Sessions view menu. "Current project" is
@@ -80,7 +78,7 @@ Taken with the owner on 2026-09-13.
 - **D36 Search.** All projects, results badged with the project name; a "Search all
   projects" toggle in the Sessions view menu narrows to the current project. `search.db`
   gains a workspace column on both tables.
-- **D37 Ordering (rewritten 2026-09-13, owner round 4, O1).** Project groups sort
+- **D37 Ordering (rewritten 2026-09-13).** Project groups sort
   pinned first, then by name case-insensitively (ties by `addedAt`, then id) —
   never by recency; no drag reorder. A project never moves because a session in
   it was created, opened, or got a turn. "Other workspaces" is always last.
@@ -149,18 +147,15 @@ workspaces". Never by prefix, never by the current project.
   no sessions: the existing "No sessions yet · ⌘N starts one."
 - **Window title.** `session — project`, or `project`.
 
-## 6. Build order and packages
+## 6. Build order
 
-1. `muse-projects-lib.md` — agentic-ui branch `projects-2026-09-13` off `main`: the label
-   ramp, project mark, group-row additions, swatch menu rows, rail tint, palette mark,
-   gallery entries.
-2. `muse-projects-harness-1.md` — harness branch `projects-2026-09-13`: store, index
-   column, unfiltered paged list, project resolution, grouping, current project and the
-   `workspace()` audit, per-project defaults, per-root `@` index, search column. Data only;
-   the window still draws.
-3. `muse-projects-harness-2.md` — same branch: the sidebar groups, header crumb and menu,
-   Projects palette and folder panel, removal, rail tint, search badges and scope, steps
-   verbs, a sidebar fixture for reproducible captures, docs.
+Built in three steps: first the library component (the label ramp, project mark, group-row
+additions, swatch menu rows, rail tint, palette mark, gallery entries), then the harness data
+layer (store, index column, unfiltered paged list, project resolution, grouping, current
+project and the `workspace()` audit, per-project defaults, per-root `@` index, search column
+— data only, the window still drawing the old way), then the harness UI (the sidebar groups,
+header crumb and menu, Projects palette and folder panel, removal, rail tint, search badges
+and scope, steps verbs, a sidebar fixture for reproducible captures, docs).
 
 Free throughout: `session/list`, `session/start`, `session/read`, `muse skills list`, `git`
 reads. Nothing in this feature sends a turn.
@@ -171,12 +166,12 @@ Worktree per session (D31), custom groups or Spaces, an attention inbox across p
 multi-folder projects, clone-from-URL, per-project scripts, split and pop-out windows,
 notifications. Each is a later slice; none is blocked by the model above.
 
-## 8. As built (package 2, 2026-09-13)
+## 8. As built (2026-09-13)
 
-Everything in §5 landed. The deviations below are where the brief met the
+Everything in §5 landed. The deviations below are where the design met the
 codebase and bent.
 
-- **Group-row menu anchor.** The brief wanted the menu measured under the
+- **Group-row menu anchor.** The design called for the menu measured under the
   row's `…` button. The library reports no per-row geometry for a group row,
   and the harness does not fork the library for it — so the row menu anchors
   right-aligned to the sidebar's content edge under the header, by the same
@@ -209,7 +204,7 @@ codebase and bent.
   run, machine-specific across machines. The badge and scope rules it
   exercises are index-independent.
 
-### Owner round 2, surface (2026-09-13)
+### Follow-up fixes, surface pass (2026-09-13)
 
 - **The "Choose folder…" row is a card, not a row.** The Add section's lead
   is the library's `folder_drop_card` (`PaletteSection::lead`), which is not
@@ -225,7 +220,7 @@ codebase and bent.
 - **Folding holds back past five, not past the open session.** Pinned rows
   never count toward the five; the open session appends past the cut rather
   than displacing a newer row; "Other workspaces" never folds.
-- **No menu had click-outside handling.** The brief's `.on_dismiss` does not
+- **No menu had click-outside handling.** The expected `.on_dismiss` does not
   exist on `popover_layer` — the view, account, project (+ colour) and
   overflow menus all gained catcher siblings in the same deferred draw, the
   shape the composer's chip pickers already used.
@@ -234,7 +229,7 @@ codebase and bent.
   went idle: a running row's pulse ring animates on wall-clock time and no
   capture containing one can be byte-identical run to run.
 
-## 8a. Owner round 3 (2026-09-13)
+## 8a. Further follow-up (2026-09-13)
 
 - **A project's rows end where the project row ends, at any sidebar width.**
   The indent wrapper between `rows` and the reveal had no width, and
@@ -252,7 +247,7 @@ codebase and bent.
   the one ⌘N would land in.
 - **The hover tray hides what it covers.** The branch and the count fade out
   as the tray fades in, on the one tween, opacity only.
-- **Ordering counts adoption (superseded 2026-09-13, owner round 4, O1).**
+- **Ordering counts adoption (superseded 2026-09-13).**
   `Projects::sorted` used to key on session activity, then on the newest of
   session activity, `last_opened_at` and `added_at`. It now keys on nothing
   but pin and name (D37 as rewritten): adopting several folders in one go
