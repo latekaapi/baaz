@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
 description = "Transport for Meta's Muse Code agent: a `muse serve` child speaking MSP (JSON-RPC 2.0 over NDJSON stdio)."
 

@@ -7,7 +7,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
+authors = ["latekaapi"]
+description = "A native macOS chat client for Meta's Muse Code agent, built with gpui and the aui component library."
+readme = "README.md"
 repository = "https://github.com/latekaapi/harness"
+keywords = ["muse", "agent", "chat", "gpui", "macos"]
+categories = ["gui", "command-line-utilities"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -33,7 +38,12 @@ gpui = { package = "gpui-pre", version = "=0.3.3" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.3" }
 gpui-kit = "0.6.0"
 
-# Path dependencies on the aui library.
+# Path dependencies on the aui library, checked out beside this repository.
+# TODO(release): once agentic-ui's public names are final, pin these to a git
+# dependency instead, e.g.:
+#   aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
+# (one entry per aui-* crate below, same git + tag), and drop the second
+# checkout step in .github/workflows/ci.yml.
 aui = { path = "../agentic-ui/crates/aui" }
 aui-protocol = { path = "../agentic-ui/crates/aui-protocol" }
 aui-motion = { path = "../agentic-ui/crates/aui-motion" }

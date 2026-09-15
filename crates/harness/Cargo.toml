@@ -4,7 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "The harness: a macOS chat interface to Meta's Muse Code agent, built on the aui component library."
+# The app itself is not meant to be published to crates.io (it is a binary,
+# distributed as a signed .app bundle, not a library).
+publish = false
 
 [dependencies]
 # `test-support` exposes `Window::render_to_image`, which `--screenshot` uses,
