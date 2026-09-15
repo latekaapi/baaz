@@ -1,80 +1,119 @@
 # Harness
 
-A macOS chat interface to Meta's **Muse Code** agent, built on the
-[`aui`](../agentic-ui) component library and gpui.
+A native macOS chat client for [Muse Code](https://github.com/facebookresearch/muse) —
+built with [gpui](https://www.gpui.rs) (the UI framework behind
+[Zed](https://zed.dev)) and the `aui` component library.
 
-The `muse` CLI ships a TUI. This is the same agent with a window around it: a
-sessions sidebar on the left, a streaming transcript and a docked composer in
-the centre, and every card the agent can raise — approvals with the server's own
-choices, questions with previews and a timeout, plans, todos, tool output,
-errors with retry — drawn rather than printed.
+The `muse` CLI ships a terminal UI. This is the same agent with a window
+around it: a projects-and-sessions sidebar on the left, a streaming
+transcript and a docked composer in the centre, and every card the agent can
+raise — approvals with the server's own choices, questions with previews and
+a timeout, plans, todos, tool output, errors with retry — drawn rather than
+printed.
 
-![The harness, mid-approval](docs/images/phase4-approval-stage1-dark.png)
+> **Harness is a working name.** The project will be renamed before it
+> settles; expect the repository and binary name to change.
 
-## Running it
+<p>
+  <img src="docs/images/readme-approval-dark.png" width="49%" alt="A multi-stage shell approval card, dark theme">
+  <img src="docs/images/readme-approval-light.png" width="49%" alt="The same approval card, light theme">
+</p>
+<p>
+  <img src="docs/images/readme-projects-dark.png" width="49%" alt="The projects sidebar, grouped by project">
+  <img src="docs/images/readme-settings-dark.png" width="49%" alt="The settings dialog">
+</p>
+
+## What it does
+
+- **Chat over Muse Code.** Drives `muse serve` as a child process and speaks
+  MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does
+  (device code or an API key).
+- **A streaming transcript** with markdown, reasoning, and tool calls folded
+  into readable cards, per-turn token counts, a context meter with
+  compaction, and a queue strip for steering a running turn.
+- **Approvals, questions and errors** as real UI: multi-stage approval cards
+  with the server's own choices, question cards with previews and a timeout,
+  error banners with retry, plans and todos.
+- **Projects** — a sidebar over several workspaces at once, grouped by
+  project or by date, with per-project pinning, colour, and model/effort/
+  approval defaults.
+- **Sessions**: resume, rename, fork, archive; a draft (text, images, files)
+  kept per project; a full-text search palette over transcripts and the
+  files a turn created.
+- **A composer** with model, effort and mode menus, `@`-mentions, a
+  `/`-command menu (including skills from `muse skills list`), prompt
+  history, and image attachments.
+- **Billing-tier awareness.** The harness probes which plan a login is on and
+  warns before a turn would bill pay-as-you-go, rather than finding out
+  after the fact (see **Cost**, below).
+- Both light and dark themes, a command palette, and a keyboard-first keymap.
+
+## Requirements
+
+- **macOS 14 (Sonoma) or later.**
+- **Rust 1.85+** and the Xcode command line tools (`xcode-select --install`).
+- The **`muse` CLI** on your `PATH`, signed in to a Muse Code account.
+  Harness currently targets muse's 1.3.x wire schema (MSP).
+- The [`aui`](https://github.com/latekaapi/agentic-ui) component library,
+  checked out **beside** this repository — it's a path dependency for now
+  (see `Cargo.toml`).
+
+## Building and running
 
 ```sh
-export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+git clone https://github.com/latekaapi/harness
+git clone https://github.com/latekaapi/agentic-ui   # beside it, not inside it
 
-cargo run -p harness                                    # workspace = $PWD
-cargo run -p harness -- --workspace ~/code/thing        # somewhere else
-cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
-cargo run -p harness -- --print-tier                    # which plan is this login on?
+cd harness
+cargo run -p harness                               # workspace = $PWD
+cargo run -p harness -- --workspace ~/code/thing    # somewhere else
 ```
 
-It drives `muse serve` as a child process and speaks MSP — JSON-RPC 2.0 as
-NDJSON over stdio. You need the `muse` CLI on your `PATH` and a login; the app
-signs you in the way the CLI does (device code), and the window is otherwise
-the whole interface.
+A distributable `.app` bundle:
 
-`agentic-ui` must be checked out **beside** this repository, on branch
-`muse-support`: the `aui` crates are path dependencies.
+```sh
+scripts/bundle.sh                    # builds target/bundle/Harness.app
+open target/bundle/Harness.app
+```
 
-Scripted sign-in for captures: `--login-steps <a;b;c>` drives the login
-screen once it is up on a live connection (never with `--no-connect` /
-`--replay`), and `--login <state>` picks the state a `--no-connect` capture
-boots into.
+## Cost — read this before running anything scripted
 
-| step | what it does |
-|---|---|
-| `account` | start the device flow (the browser opens) |
-| `apikey` | open the API-key form |
-| `key-from-env:<VAR>` | put the value of environment variable `VAR` into the API-key field |
-| `submit` | submit the API-key form |
-| `wait:<ms>` | let the wire catch up before the next step |
+**There is no free provider.** `--provider echo` picks a *route*, not a
+bill: on a signed-in machine, anything that reaches `turn/start` spends a
+turn, and what that turn costs depends on which plan the login is on —
+Muse issues credentials on two tiers, and a pay-as-you-go token bills every
+turn as API usage. The harness probes the tier and warns before sending on
+pay-as-you-go.
 
-## What a turn costs
+What costs nothing:
 
-Read this before running anything scripted.
+```sh
+cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # a checked-in capture, no server at all
+cargo run -p harness -- --no-connect                                     # draws the chrome, no server
+cargo run -p harness -- --print-tier                                     # which plan is this login on?
+```
 
-**There is no free provider.** `--provider echo` picks a *route*, not a bill: on
-a signed-in machine the session log records `provider_id: echo` at intake and
-then a metadata record naming `provider_id: meta` with a real model, and the
-turn bills reasoning tokens like any other. What genuinely costs nothing is
-`--replay <capture>`, which folds a checked-in wire capture with no server at
-all; `--no-connect`, which draws the chrome without one; and, on a live server,
-`session/start`, `session/userShell` (the `!` path), `approval/*`,
-`userInput/*`, `session/fork`, `session/list` and `view/page` — none of which
-make a model call. Anything that reaches `turn/start` spends a turn. **And what
-that turn costs depends on the login**: Muse issues credentials on two tiers,
-and a pay-as-you-go token bills every turn as API usage. The harness probes the
-tier and refuses to send on pay-as-you-go until you say so once
-(`docs/06-billing.md`).
+See `docs/06-billing.md` for the full picture, and `CONTRIBUTING.md` for the
+rest of the scripting surface (`--steps`, `--screenshot`, and which step
+verbs spend a turn).
 
 ## Documentation
 
 | file | what it covers |
 |---|---|
-| `docs/00-spec.md` | the frozen spec: scope, decisions, the five phases and their gates |
+| `docs/00-spec.md` | the frozen spec: scope, decisions, and the build's phases and gates |
 | `docs/01-transport.md` | MSP over stdio: framing, the handshake, reconnect |
 | `docs/02-app.md` | the application: entities, auth, the sidebar, the shell |
 | `docs/03-composer.md` | the composer's controls, menus and pickers |
-| `docs/04-approvals.md` | approvals, questions, errors, `--replay` — **§0 first** |
-| `docs/06-billing.md` | the two credential tiers, the probe, and the guard |
+| `docs/04-approvals.md` | approvals, questions, errors, `--replay` |
+| `docs/06-billing.md` | the two credential tiers, the probe, and the send guard |
 | `docs/07-architecture.md` | the crates, the thread model and the fold |
 | `docs/08-keymap.md` | every key, as built |
-| `docs/05-handoff.md` | maintenance: where things are and what to be careful of |
-| `docs/CHANGELOG.md` | what each phase landed, and what it spent |
+| `docs/10-msp-1.1.1-diff.md` | the MSP schema diff this client tracks |
+| `docs/12-projects.md` | the projects feature: design and data model |
+| `docs/12-search.md` | full-text search: storage and indexing |
+| `CHANGELOG.md` | what's in this release |
+| `CONTRIBUTING.md` | building, testing, gates, and the debug/scripting env vars |
 
 ## Layout
 
@@ -85,6 +124,20 @@ crates/harness        the gpui application
 fixtures/msp          checked-in wire captures; every one of them replays
 ```
 
-## Licence
+## Status
 
-MIT.
+Pre-1.0, macOS only. The wire protocol (MSP) is versioned by the `muse` CLI
+itself; this client tracks its 1.3.x schema and may need updating against a
+newer or older `muse`. Expect rough edges and a rename before the project
+settles.
+
+## License
+
+MIT — see `LICENSE`.
+
+## Credits
+
+Built on [gpui](https://www.gpui.rs) — the UI framework behind
+[Zed](https://zed.dev) — the `gpui-kit` component kit, and the `aui`
+component library (which uses [Geist](https://vercel.com/font) fonts).
+Talks to [Muse Code](https://github.com/facebookresearch/muse) from Meta.
