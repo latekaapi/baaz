@@ -7,7 +7,7 @@
       "model": "muse-spark-1.3-contributor",
       "mode": "promptUnmatched",
       "plan": false,
-      "cwd": "/private/tmp/claude-501/-Users-latekaapi-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "cwd": "/private/tmp/claude-501/-Users-alex-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
       "branch": "main",
       "environment": {
         "kind": "local"

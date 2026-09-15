@@ -260,7 +260,7 @@ the schema and a capture disagree, the capture wins and it is written down.
     second one's `session/resume` for it is rejected with `-32021` (`session
     … is already in use`, `data.kind: sessionInUse`) while the first keeps
     its lease — verified live with `--session <id>` on both and the second's
-    screen captured (`docs/images/round2-session-in-use-dark.png`). The
+    screen captured. The
     rejection is session-scoped: the wire stays up and everything else keeps
     working.
 

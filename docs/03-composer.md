@@ -35,7 +35,7 @@ the picker is live rather than disabled.
 
 ## 1. How to drive it from a command line
 
-Every screenshot in `docs/images/phase3-*.png` is one invocation. `--steps`
+Every screenshot in this document's own capture set was one invocation. `--steps`
 takes `;`-separated steps (a `;` rather than a comma, because a step's payload
 carries paths and prose), applied to the session the moment it opens; naming any
 step is enough to start a session, so `--send` is no longer the only way in.
@@ -67,9 +67,9 @@ HARNESS_PROVIDER=echo cargo run -p harness -- --workspace /tmp/ws --theme dark \
 `context:` is the one step that invents a fact, and it exists for one reason:
 the meter's `warning` and `blocked` states are the server's to declare, the
 thresholds are the server's, and no prompt anyone would want to send fills a
-one-million-token window in a turn anyone would want to spend. `docs/images/phase3-blocked-*.png`
-is therefore a synthetic pressure level over a real session's real cumulative
-counters. Everything else in every capture came off the wire.
+one-million-token window in a turn anyone would want to spend. The blocked
+state shown in captures is therefore a synthetic pressure level over a real
+session's real cumulative counters. Everything else in every capture came off the wire.
 
 ---
 
@@ -98,8 +98,7 @@ pointer's row into `selected` would give the selection two owners, and the check
 The keyboard owns `selected`; the pointer owns its highlight and reports a click.
 
 On the **echo** provider `session/setModel` is refused, and that refusal is
-correct behaviour rather than a bug: `docs/images/phase3-banner-*.png` is the
-inline banner showing it. The rejection reason on this build is
+correct behaviour rather than a bug: an inline banner shows it. The rejection reason on this build is
 `invalid_target`, not `unsupported_route`.
 
 ## 3. The context meter and compaction
@@ -121,8 +120,8 @@ fresh session shows, because steps run the moment the session opens.
 Toasts hang from the top right, under the window header: the library's stack
 lays its cards out **downward** from its own box, so anchoring it to the bottom
 of the window would draw the newest one off the end.
-`docs/images/phase3-toast-*.png` is the "not in this build yet" toast, which is
-also the proof that the `/` menu's Enter path reaches a command.
+The resulting "not in this build yet" toast is also the proof that the `/`
+menu's Enter path reaches a command.
 
 ## 4. The queue and steering
 
@@ -173,8 +172,7 @@ skips the picker and forks the nth newest completed turn directly — `1` is the
 newest. A number with no turn behind it is a banner, never a fork of whatever
 the server thinks is newest. Choosing a row, like every fork, only sends
 `session/fork`; the new session opens when the server's resume envelope
-arrives, never before. The picker is scripted as `--steps fork-picker` (see
-`docs/images/improve-fork-picker-dark.png`).
+arrives, never before. The picker is scripted as `--steps fork-picker`.
 
 A command can also be **typed in full and sent**. `send()` parses the whole
 line, so `/name Fix the parser` renames the session rather than asking Muse
