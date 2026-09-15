@@ -84,8 +84,20 @@ HARNESS_STATE_DIR="$(mktemp -d)" cargo run -p harness -- \
   connection without knowing — and intending — what it will bill; they are
   harmless against `--replay` (there is no live server to send to).
 - `--screenshot <out.png>` / `--screenshot-delay <ms>` render a frame to a
-  PNG after steps finish (plus the delay). `--theme dark|light` picks the
-  theme.
+  PNG only once every step — including every `wait:` in the list, not just
+  the last one — has actually finished running, and then the delay on top
+  of that: the delay never races the steps, and it is applied exactly once,
+  after them, never before. `--theme dark|light` picks the theme.
+- On a live connection, a `--screenshot` run also waits, bounded (up to two
+  minutes, logged to stderr while it waits), for no turn to still be
+  running in any session the window has open before it quits. Quitting
+  mid-turn kills the `muse` child that turn is running on and orphans it —
+  reopening the session later shows "Turn interrupted: the turn was
+  orphaned when the session's process was lost." A `send:` as the last step
+  with no `wait:` after it long enough for the reply is exactly what this
+  guards against, but the wait it does is a backstop, not a budget: size
+  your own `wait:` for the reply you are capturing rather than relying on
+  it.
 
 See `docs/03-composer.md` and `docs/04-approvals.md` for the full step-verb
 tables, and `scripts/captures.sh` for the capture set this project's own

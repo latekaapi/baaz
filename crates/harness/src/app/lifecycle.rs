@@ -1201,6 +1201,22 @@ impl Harness {
         Some(self.session_cache.remove(ix).1)
     }
 
+    /// Whether any session this window has open — the active view, or one
+    /// parked in the MRU cache — has a turn in flight
+    /// ([`SessionView::is_sending`]: submitted and no `turn/started` yet, or
+    /// the server says it runs).
+    ///
+    /// What a `--screenshot` run checks, bounded, before it quits
+    /// ([`crate::shot::capture_and_quit`]): quitting under a running turn
+    /// kills its `muse` child and orphans it. A cached view only reflects
+    /// whatever it last knew — live events reach `self.active` alone
+    /// ([`Harness::route`]) — so this is best-effort for a session parked
+    /// mid-turn, same as every other read of parked state in this module.
+    pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
+        self.active.as_ref().is_some_and(|view| view.read(cx).is_sending())
+            || self.session_cache.iter().any(|(_, view)| view.read(cx).is_sending())
+    }
+
     /// Top a reopened cached view up from its last cursor: re-attach with the
     /// reconnect procedure (`docs/01-transport.md` §3), which serves
     /// `history.mode: "none"` and streams only the suffix. The view is
