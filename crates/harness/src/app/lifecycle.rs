@@ -95,10 +95,12 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     let session = muse_client::schema::Session {
         active_turn_id: None,
         approval_mode: None,
+        attention: None,
         branch: None,
         created_at: row.updated_at.clone(),
         first_user_prompt: None,
         forked_from: None,
+        last_activity_at: None,
         model_id: None,
         name: None,
         path: String::new(),

@@ -191,6 +191,10 @@ open_enum! {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnInputPart {
+    /// Free-text skill arguments, optional on a `skill` part — the wire twin of what the TUI
+    /// accepts after the shortcut token (tdd SS3.22.3, muse 1.3.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
     /// Base64 payload, required on an `image` part. Invalid base64 or an empty payload is rejected
     /// with invalid params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +205,11 @@ pub struct TurnInputPart {
     /// Media type, required on an `image` part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    /// The skill to invoke, required on a `skill` part (tdd SS3.2, SS3.22.3; ADR 32471 D4; muse
+    /// 1.3.0): a bare or plugin-qualified shortcut token from `skill/list`. The HOST resolves and
+    /// expands; an unknown selector is the typed `-32032 skillNotFound` request error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
     /// User prompt text, on a `text` part. Multiple text parts are joined in order into the turn's
     /// prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,9 +227,11 @@ impl TurnInputPart {
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self {
+            arguments: None,
             base64_data: None,
             height: None,
             media_type: None,
+            selector: None,
             text: Some(text.into()),
             r#type: TurnInputPartType::Text,
             width: None,
@@ -231,11 +242,29 @@ impl TurnInputPart {
     #[must_use]
     pub fn image(base64_data: impl Into<String>, media_type: impl Into<String>) -> Self {
         Self {
+            arguments: None,
             base64_data: Some(base64_data.into()),
             height: None,
             media_type: Some(media_type.into()),
+            selector: None,
             text: None,
             r#type: TurnInputPartType::Image,
+            width: None,
+        }
+    }
+
+    /// A `skill` part invoking `selector` (bare or plugin-qualified, from `skill/list`), with
+    /// optional free-text `arguments` (muse 1.3.0, tdd SS3.22.3).
+    #[must_use]
+    pub fn skill(selector: impl Into<String>, arguments: Option<String>) -> Self {
+        Self {
+            arguments,
+            base64_data: None,
+            height: None,
+            media_type: None,
+            selector: Some(selector.into()),
+            text: None,
+            r#type: TurnInputPartType::Skill,
             width: None,
         }
     }
@@ -247,6 +276,7 @@ closed_enum! {
     TurnInputPartType {
         Text = "text",
         Image = "image",
+        Skill = "skill",
     }
 }
 

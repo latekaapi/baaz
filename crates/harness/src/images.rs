@@ -170,8 +170,10 @@ impl Image {
     pub fn part(&self) -> muse_client::schema::TurnInputPart {
         muse_client::schema::TurnInputPart {
             r#type: muse_client::schema::TurnInputPartType::Image,
+            arguments: None,
             base64_data: Some(self.base64_data.clone()),
             media_type: Some(self.media_type.clone()),
+            selector: None,
             width: Some(self.width),
             height: Some(self.height),
             text: None,
