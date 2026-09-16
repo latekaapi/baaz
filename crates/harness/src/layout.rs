@@ -68,6 +68,25 @@ pub struct Layout {
     /// [`Self::group_chevron`].
     #[serde(rename = "groupBranch", default)]
     pub group_branch: bool,
+    /// Whether a first send earns one cheap model call for a generated
+    /// title (auto-titles). ON by default; off means no model call ever
+    /// happens for a title, and the row keeps its first-prompt label. The
+    /// Settings dialog's Sidebar section owns the switch (part 4 wires it);
+    /// the titler reads this field from part 2 on.
+    #[serde(rename = "autoTitle", default = "default_true")]
+    pub auto_title: bool,
+    /// Whether a completed turn refreshes the sidebar's two-line byline
+    /// from the transcript, spending a model call only when the free excerpt
+    /// is poor (auto-summaries). ON by default; off means the ladder's
+    /// preview rung only. Same ownership as [`Self::auto_title`].
+    #[serde(rename = "autoSummary", default = "default_true")]
+    pub auto_summary: bool,
+}
+
+/// The default for the auto-title and auto-summary switches: ON. A missing
+/// key (every `layout.json` written before this feature) reads as enabled.
+fn default_true() -> bool {
+    true
 }
 
 fn default_search_all() -> bool {
@@ -85,6 +104,8 @@ impl Default for Layout {
             group_chevron: false,
             group_bar: false,
             group_branch: false,
+            auto_title: true,
+            auto_summary: true,
         }
     }
 }
@@ -166,6 +187,8 @@ mod tests {
             group_chevron: true,
             group_bar: true,
             group_branch: true,
+            auto_title: true,
+            auto_summary: true,
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -191,6 +214,12 @@ mod tests {
         assert!(!old.group_chevron);
         assert!(!old.group_bar);
         assert!(!old.group_branch);
+        // Both auto switches default ON, old files included: new behaviour
+        // without a migration.
+        assert!(Layout::default().auto_title);
+        assert!(Layout::default().auto_summary);
+        assert!(old.auto_title);
+        assert!(old.auto_summary);
     }
 
     fn with_width(width: f32) -> Layout {

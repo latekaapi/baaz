@@ -42,6 +42,18 @@ pub struct SessionMeta {
     /// (finding F10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
+    /// The title one cheap model call wrote for this session (auto-titles):
+    /// 3–6 words harvested off a throwaway side session's `turn/completed`.
+    /// Ranked directly under [`Self::name`] in the label order, and never
+    /// written to the server — `session/rename` stays untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_title: Option<String>,
+    /// A title generation already ran (or is running) for this session. The
+    /// once-ever marker: set the moment a generation starts, persisted, so
+    /// resume, reconnect, replay and restart never earn a second one, and a
+    /// retry budget of one is enforced per session, not per run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_attempted: bool,
     /// Pinned to the top of the sidebar's date view, in its own group.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -70,6 +82,8 @@ impl SessionMeta {
         self.name.is_none()
             && !self.hidden
             && self.derived_title.is_none()
+            && self.generated_title.is_none()
+            && !self.title_attempted
             && !self.pinned
             && !self.archived
             && self.last_summary.is_none()

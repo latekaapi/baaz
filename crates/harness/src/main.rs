@@ -67,6 +67,7 @@ mod skills;
 mod steps;
 mod store;
 mod tier;
+mod titles;
 mod transcript;
 mod wire;
 

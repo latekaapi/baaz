@@ -509,7 +509,11 @@ impl Harness {
         let wanted: Vec<String> = self
             .sessions
             .iter()
-            .filter(|entry| entry.needs_title && !self.titled.contains(&entry.id))
+            .filter(|entry| {
+                entry.needs_title
+                    && !self.titled.contains(&entry.id)
+                    && !crate::titles::is_side_session(&entry.id)
+            })
             .map(|entry| entry.id.clone())
             .take(MAX_TITLE_READS)
             .collect();

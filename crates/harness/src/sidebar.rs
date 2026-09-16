@@ -28,6 +28,20 @@ use crate::sessions::SessionMeta;
 /// row (finding F10). Every step before it is a real fact about the session.
 pub const UNNAMED: &str = "New session";
 
+/// The label the header crumb and the window title show for a row: while a
+/// generated title is in flight and the session has no better name yet,
+/// the pending placeholder — otherwise the row's own label. A session that
+/// already reads from its first prompt keeps that prompt; only an untitled
+/// row borrows the placeholder, so the crumb never flickers between two
+/// real labels.
+pub fn display_label(label: &str, title_pending: bool) -> &str {
+    if title_pending && label == UNNAMED {
+        PLACEHOLDER_NAMING
+    } else {
+        label
+    }
+}
+
 /// The second line while a turn is running. Matches the transcript footer's
 /// wording (`session/render.rs`), so the row and the transcript agree about
 /// what the session is doing.
@@ -114,17 +128,18 @@ impl SessionEntry {
     /// rows whose list entries predate the derivation:
     ///
     /// 1. the name someone gave it with `/name` or the row's pencil;
-    /// 2. the row's own `name`;
-    /// 3. the row's own `title`;
-    /// 4. the row's own `first_user_prompt`;
-    /// 5. the index's `session_name`;
-    /// 6. the index's generated `title`;
-    /// 7. the index's `first_user_prompt`;
-    /// 8. the transcript's first user prompt — else its first `userShell`
+    /// 2. the generated title one cheap model call wrote (auto-titles);
+    /// 3. the row's own `name`;
+    /// 4. the row's own `title`;
+    /// 5. the row's own `first_user_prompt`;
+    /// 6. the index's `session_name`;
+    /// 7. the index's generated `title`;
+    /// 8. the index's `first_user_prompt`;
+    /// 9. the transcript's first user prompt — else its first `userShell`
     ///    command when the session has no user text at all — cached in the
     ///    store by the application after a `session/read` or straight from
     ///    the open transcript;
-    /// 9. [`UNNAMED`].
+    /// 10. [`UNNAMED`].
     ///
     /// The session id is never a title. "Session 01a081ef" tells a person
     /// nothing they can act on, and it reads like something went wrong.
@@ -139,6 +154,7 @@ impl SessionEntry {
         }
         let name = pick(meta.and_then(|m| m.name.as_deref()));
         let label = name
+            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
             .or_else(|| pick(session.name.as_deref()))
             .or_else(|| pick(session.title.as_deref()))
             .or_else(|| pick(session.first_user_prompt.as_deref()))
@@ -887,7 +903,7 @@ mod tests {
         assert_eq!(counted.second_line(), None);
         let summary = counted.summary(Local::now());
         assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
-        assert!(summary.meta.iter().any(|item| matches!(item, aui::nav::MetaItem::Text(text) if text.to_string() == "2 turns")));
+        assert!(summary.meta.iter().any(|item| matches!(item, aui::nav::MetaItem::Text(text) if text.as_ref() == "2 turns")));
     }
 
     /// Rung 5: a turn-less row that still has something to say (here, an
@@ -1046,6 +1062,52 @@ mod tests {
         assert_eq!(entry.branch.as_deref(), Some("feature-x"));
         assert_eq!(entry.label, UNNAMED);
         assert!(entry.needs_title);
+    }
+
+    /// A generated title ranks directly under a user-given name: above the
+    /// row's own words, the index title, and the derived first-prompt
+    /// cache — and it settles `needs_title`, so no `session/read` chases a
+    /// session that already has a name.
+    #[test]
+    fn a_generated_title_ranks_under_a_name_and_above_everything_else() {
+        let projects = crate::projects::Projects::default();
+        let index = old_index();
+        let generated = || crate::sessions::SessionMeta {
+            generated_title: Some("Tighten validation".into()),
+            ..Default::default()
+        };
+        // Above the row's own title, the index title and the derived cache.
+        let mut wired = wire_session();
+        wired.title = Some("Wire Title".into());
+        wired.first_user_prompt = Some("Wire prompt".into());
+        let derived = crate::sessions::SessionMeta {
+            derived_title: Some("First prompt".into()),
+            ..Default::default()
+        };
+        let entry = SessionEntry::join(&wired, Some(&index), Some(&generated()), &projects);
+        assert_eq!(entry.label, "Tighten validation");
+        let entry = SessionEntry::join(&wired, Some(&index), Some(&derived), &projects);
+        assert_eq!(entry.label, "Wire Title");
+        let titled = SessionEntry::join(&wire_session(), None, Some(&generated()), &projects);
+        assert_eq!(titled.label, "Tighten validation");
+        assert!(!titled.needs_title, "a generated title settles the row");
+        // …but a user-given name still wins.
+        let named = crate::sessions::SessionMeta {
+            name: Some("Ship it".into()),
+            generated_title: Some("Tighten validation".into()),
+            ..Default::default()
+        };
+        let entry = SessionEntry::join(&wired, Some(&index), Some(&named), &projects);
+        assert_eq!(entry.label, "Ship it");
+    }
+
+    /// The crumb borrows the pending placeholder only while the row has no
+    /// better name: a first-prompt label never flickers.
+    #[test]
+    fn the_crumb_borrows_the_placeholder_only_while_untitled() {
+        assert_eq!(display_label(UNNAMED, true), PLACEHOLDER_NAMING);
+        assert_eq!(display_label(UNNAMED, false), UNNAMED);
+        assert_eq!(display_label("Fix the header", true), "Fix the header");
     }
 
     fn entry(id: &str) -> SessionEntry {

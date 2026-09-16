@@ -198,12 +198,16 @@ impl Harness {
                 let wire: Vec<SessionEntry> = sessions
                     .iter()
                     .map(|s| {
-                        SessionEntry::join(
+                        let mut entry = SessionEntry::join(
                             s,
                             this.index.get(&s.session_id),
                             this.overrides.get(&s.session_id),
                             &projects,
-                        )
+                        );
+                        // Pending rows read pending; side sessions read
+                        // hidden — even before their override writes land.
+                        Harness::apply_title_flags(&this.titles_pending, &mut entry);
+                        entry
                     })
                     .collect();
                 // Local rows whose id the reply does not contain survive;
@@ -590,8 +594,10 @@ impl Harness {
             let meta = self.overrides.get(&entry.id);
             let index = self.index.get(&entry.id);
             let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+            let generated =
+                meta.and_then(|m| m.generated_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let derived = meta.and_then(|m| m.derived_title.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-            let label = name.or_else(|| index.and_then(IndexEntry::label)).or(derived);
+            let label = name.or(generated).or_else(|| index.and_then(IndexEntry::label)).or(derived);
             // Same rule as [`SessionEntry::join`]: a user-given name always
             // earns the first prompt below it, any other label only when it
             // does not already say it.
@@ -613,6 +619,10 @@ impl Harness {
             entry.hidden = meta.is_some_and(|m| m.hidden);
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
+            // A generation in flight still reads pending after the rejoin,
+            // and a side session still reads hidden — even when a restart
+            // lost the override write that said so.
+            Self::apply_title_flags(&self.titles_pending.clone(), entry);
             // A fixture or replayed row names its own preview the way it
             // names its label: no store or index source speaks for a
             // scripted id, so a rejoin must not blank it either.
