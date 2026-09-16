@@ -55,6 +55,88 @@ pub(crate) fn evict_parked(
         .collect()
 }
 
+/// What [`Harness::ensure_boot_session`] should do about the boot session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BootDecision {
+    /// Open the boot session now: `--session <id>` resumes and anything
+    /// else starts, all without waiting for `session/list`.
+    Open,
+    /// `--session latest` cannot resolve until the list lands: wait for it.
+    WaitForList,
+    /// Nothing to do: a session is open or on its way, the boot was already
+    /// attempted, the wire is down, or nothing scripted wants a session.
+    Idle,
+}
+
+/// The inputs [`boot_decision`] reads, bundled so the decision stays a plain
+/// function of named state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BootState<'a> {
+    /// A session view is already open.
+    pub active: bool,
+    /// A `session/start` round-trip is still in flight.
+    pub switch_pending: bool,
+    /// The boot session was already attempted once.
+    pub attempted: bool,
+    /// The wire child exists.
+    pub connected: bool,
+    /// The `--session` argument, if given.
+    pub session_arg: Option<&'a str>,
+    /// A `--send` turn is waiting for a session.
+    pub send: bool,
+    /// A `--steps` list is waiting for a session.
+    pub steps_pending: bool,
+    /// The session list has landed at least once.
+    pub sessions_loaded: bool,
+}
+
+/// The boot-session decision, in pure form: at most one attempt, only on a
+/// live wire, and `latest` alone waits for the list — everything else the
+/// wire and a project can already answer.
+pub(crate) fn boot_decision(state: BootState<'_>) -> BootDecision {
+    if state.active || state.switch_pending || state.attempted {
+        return BootDecision::Idle;
+    }
+    if !state.connected {
+        return BootDecision::Idle;
+    }
+    if state.session_arg == Some("latest") && !state.sessions_loaded {
+        return BootDecision::WaitForList;
+    }
+    if state.session_arg.is_none() && !state.send && !state.steps_pending {
+        return BootDecision::Idle;
+    }
+    BootDecision::Open
+}
+
+/// The `--steps` readiness decision, in pure form: a live run needs the wire
+/// and an open session; a `--replay` or `--no-connect` run has no wire, so
+/// an open session alone is enough. Never the session list (see
+/// [`Harness::steps_ready`]).
+pub(crate) fn steps_ready_for(
+    steps_pending: bool,
+    replay: bool,
+    offline: bool,
+    connected: bool,
+    session_open: bool,
+) -> bool {
+    if !steps_pending {
+        return false;
+    }
+    if replay || offline {
+        return session_open;
+    }
+    connected && session_open
+}
+
+/// Take a scripted list out of its holder, so a later pass finds nothing to
+/// do: the drain-once rule behind `--steps` and `--login-steps`. Both
+/// runners take through here, so the second caller — a later frame, a later
+/// activation — always sees an empty list.
+pub(crate) fn drain_steps(steps: &mut Vec<String>) -> Vec<String> {
+    std::mem::take(steps)
+}
+
 /// One `--sidebar-fixture` row: the wire's shape, spelled as JSON.
 ///
 /// `label` stands in for the index title a live row would carry.
@@ -246,11 +328,41 @@ impl Harness {
 
     /// `--session <id>` (or `latest`): open one session at boot, once the list
     /// has arrived. Consumed, so a later refresh does not re-open it.
+    /// Open the boot session without waiting for `session/list`: a scripted
+    /// run's new session needs only the wire and a project, and an explicit
+    /// `--session <id>` resumes without the list too. Only `--session
+    /// latest` waits for it. Runs at most once per boot: the named session
+    /// is consumed, and the unnamed path is guarded by the in-flight switch.
+    pub(super) fn ensure_boot_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match boot_decision(BootState {
+            active: self.active.is_some(),
+            switch_pending: self.session_switch_pending,
+            attempted: self.boot_session_attempted,
+            connected: self.client.is_some(),
+            session_arg: self.args.session.as_deref(),
+            send: self.args.send.is_some(),
+            steps_pending: !self.args.steps.is_empty(),
+            sessions_loaded: self.sessions_loaded,
+        }) {
+            BootDecision::Idle | BootDecision::WaitForList => return,
+            BootDecision::Open => {}
+        }
+        self.boot_session_attempted = true;
+        self.open_boot_session(window, cx);
+    }
+
+    /// `--session <id>` (or `latest`): open one session at boot, once the list
+    /// has arrived. Consumed, so a later refresh does not re-open it.
     pub(super) fn open_boot_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wanted) = self.args.session.take() else {
             // A scripted turn or a scripted capture with no session named needs
-            // somewhere to go.
-            if (self.args.send.is_some() || !self.args.steps.is_empty()) && self.active.is_none() {
+            // somewhere to go — unless one is already on its way: the list
+            // reply calls this too, and must not start a second session
+            // behind the one [`Self::ensure_boot_session`] issued.
+            if (self.args.send.is_some() || !self.args.steps.is_empty())
+                && self.active.is_none()
+                && !self.session_switch_pending
+            {
                 self.new_session(window, cx);
             }
             return;
@@ -279,18 +391,53 @@ impl Harness {
         });
     }
 
+    /// Whether a scripted `--steps` list may run now: there is one left, and
+    /// the app can execute it. A live run needs the wire and an open
+    /// session; a `--replay` or `--no-connect` run has no wire, so an open
+    /// session alone is enough.
+    ///
+    /// Deliberately not the session list: no verb needs it — the boot
+    /// session opens without it ([`Self::ensure_boot_session`]), and only
+    /// `--session latest` waits for it, via no open session yet. Gating the
+    /// script on the list hung every scripted run behind a `session/list`
+    /// that never answered, while the capture mistook the stalled boot for
+    /// a finished script.
+    pub(crate) fn steps_ready(&self) -> bool {
+        steps_ready_for(
+            !self.args.steps.is_empty(),
+            self.args.replay.is_some(),
+            self.args.offline,
+            self.client.is_some(),
+            self.active.is_some(),
+        )
+    }
+
     /// `--steps`: drive the open session from the command line so a screenshot
-    /// is reproducible. Consumed, so a later refresh does not replay them.
+    /// is reproducible. Runs once, when [`Self::steps_ready`] holds: the
+    /// drain inside ([`Harness::take_steps`]) consumes the list, so a second
+    /// call — a later frame, a later activation — finds nothing to do.
     /// The verbs, and the loop that runs them, are [`crate::steps`].
-    pub(super) fn run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// Called every frame ([`Harness::on_frame`]) and after the replay fold
+    /// ([`Harness::open_replay`]): those are the two transitions that can
+    /// make the predicate true, and the take makes the double call harmless.
+    /// Session activations deliberately do not call this: `activate` fires
+    /// on every swap, including swaps the script itself causes, so draining
+    /// there raced the boot it was meant to follow.
+    pub(super) fn maybe_run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
+        if !self.steps_ready() {
+            return;
+        }
+        self.capture.set_steps_ready(true);
         crate::steps::run_steps(self, cx);
     }
 
     /// `--steps`, taken out of the arguments so a later refresh does not
-    /// replay them.
+    /// replay them. Drains through [`drain_steps`]: the first caller gets
+    /// the script, every later caller gets nothing.
     pub(crate) fn take_steps(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.args.steps)
+        drain_steps(&mut self.args.steps)
     }
 
     // One handler per `--steps` verb that belongs to the window rather than to
@@ -715,6 +862,11 @@ impl Harness {
         let Some(params) =
             projects::start_params(&self.projects, current.as_deref(), &self.args.provider, self.args.approval_mode.clone())
         else {
+            // Nowhere to start: no current project, or its adoption is gone.
+            // Logged, because a scripted `new` that lands here used to read
+            // as a script that ran — exit 0, screenshot written — while
+            // having started nothing.
+            crate::harness_log!("new: no current project; starting nothing");
             return;
         };
         let effort = current
@@ -794,7 +946,10 @@ impl Harness {
             }
             Err(error) => {
                 // No switch is coming: release the session verbs waiting on
-                // it rather than holding them for the whole bound.
+                // it rather than holding them for the whole bound. Logged as
+                // well as dialogued: a headless run's stderr is the only
+                // place this failure would otherwise appear.
+                crate::harness_log!("session/start failed: {error}");
                 this.session_switch_pending = false;
                 this.report(&error, cx);
             }
@@ -875,7 +1030,10 @@ impl Harness {
     /// `drafts` like a started session, carrying the project's effort and a
     /// retargeted draft when one is in flight.
     fn open_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.current_project_id() else { return };
+        let Some(id) = self.current_project_id() else {
+            crate::harness_log!("new: no current project; starting nothing");
+            return;
+        };
         if projects::start_params(
             &self.projects,
             Some(id.as_str()),
@@ -884,6 +1042,7 @@ impl Harness {
         )
         .is_none()
         {
+            crate::harness_log!("new: no current project; starting nothing");
             return;
         }
         let moving = self.pending_draft.take();
@@ -1217,7 +1376,10 @@ impl Harness {
         self.active = Some(view);
         self.focus_composer = true;
         self.send_scripted(window, cx);
-        self.run_steps(window, cx);
+        // No `maybe_run_steps` here: activations fire on every swap,
+        // including swaps the script itself causes, and draining the list
+        // from the swap raced the boot it was meant to follow. The frame
+        // gate ([`Harness::on_frame`]) runs the script once it is ready.
         cx.notify();
     }
 
@@ -1634,5 +1796,111 @@ mod tests {
         );
         // With no drafts the cap is a plain truncate.
         assert_eq!(evict_parked(&ids, &HashSet::new(), 8), ids[..8].to_owned());
+    }
+
+    /// The whole matrix behind `ensure_boot_session`, from a scripted boot
+    /// with no session named and no list yet.
+    fn boot_state() -> BootState<'static> {
+        BootState {
+            active: false,
+            switch_pending: false,
+            attempted: false,
+            connected: true,
+            session_arg: None,
+            send: false,
+            steps_pending: true,
+            sessions_loaded: false,
+        }
+    }
+
+    #[test]
+    fn the_boot_session_opens_once_on_a_live_wire() {
+        // Steps with no session named: open without the list.
+        assert_eq!(boot_decision(boot_state()), BootDecision::Open);
+        // A scripted turn wants its session the same way.
+        assert_eq!(boot_decision(BootState { send: true, steps_pending: false, ..boot_state() }), BootDecision::Open);
+        // An explicit id resumes without the list too.
+        assert_eq!(
+            boot_decision(BootState { session_arg: Some("s-1"), ..boot_state() }),
+            BootDecision::Open
+        );
+        // The second frame, the second caller, the late list reply: idle.
+        assert_eq!(
+            boot_decision(BootState { active: true, attempted: true, sessions_loaded: true, ..boot_state() }),
+            BootDecision::Idle
+        );
+        assert_eq!(
+            boot_decision(BootState { switch_pending: true, attempted: true, ..boot_state() }),
+            BootDecision::Idle
+        );
+        assert_eq!(
+            boot_decision(BootState { attempted: true, sessions_loaded: true, ..boot_state() }),
+            BootDecision::Idle
+        );
+    }
+
+    #[test]
+    fn only_latest_waits_for_the_list() {
+        assert_eq!(
+            boot_decision(BootState { session_arg: Some("latest"), ..boot_state() }),
+            BootDecision::WaitForList
+        );
+        assert_eq!(
+            boot_decision(BootState {
+                session_arg: Some("latest"),
+                sessions_loaded: true,
+                ..boot_state()
+            }),
+            BootDecision::Open
+        );
+    }
+
+    #[test]
+    fn an_unscripted_boot_opens_nothing() {
+        assert_eq!(
+            boot_decision(BootState { steps_pending: false, sessions_loaded: true, ..boot_state() }),
+            BootDecision::Idle
+        );
+        // And nothing opens while the wire is down, however scripted.
+        assert_eq!(
+            boot_decision(BootState { connected: false, ..boot_state() }),
+            BootDecision::Idle
+        );
+        assert_eq!(
+            boot_decision(BootState {
+                connected: false,
+                session_arg: Some("s-1"),
+                sessions_loaded: true,
+                ..boot_state()
+            }),
+            BootDecision::Idle
+        );
+    }
+
+    #[test]
+    fn steps_run_live_only_with_a_wire_and_a_session() {
+        // Live: both.
+        assert!(steps_ready_for(true, false, false, true, true));
+        assert!(!steps_ready_for(true, false, false, true, false));
+        assert!(!steps_ready_for(true, false, false, false, true));
+        assert!(!steps_ready_for(true, false, false, false, false));
+        // Replay and offline have no wire: the open session alone decides,
+        // connected or not.
+        assert!(steps_ready_for(true, true, false, false, true));
+        assert!(steps_ready_for(true, false, true, false, true));
+        assert!(!steps_ready_for(true, true, false, false, false));
+        assert!(!steps_ready_for(true, false, true, false, false));
+        // No script left, nowhere: never ready, in every mode.
+        assert!(!steps_ready_for(false, false, false, true, true));
+        assert!(!steps_ready_for(false, true, false, false, true));
+        assert!(!steps_ready_for(false, false, true, false, true));
+    }
+
+    #[test]
+    fn the_second_drain_finds_nothing_to_do() {
+        let mut holder = vec!["new".to_owned(), "wait:3000".to_owned()];
+        assert_eq!(drain_steps(&mut holder), vec!["new".to_owned(), "wait:3000".to_owned()]);
+        assert!(holder.is_empty());
+        assert!(drain_steps(&mut holder).is_empty());
     }
 }

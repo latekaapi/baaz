@@ -74,20 +74,33 @@ HARNESS_STATE_DIR="$(mktemp -d)" cargo run -p harness -- \
   and screenshots.
 - `--no-connect` draws the chrome (including the login screen, with
   `--login <state>`) without a server. Also free.
-- `--steps 'a;b;c'` applies `;`-separated steps to the session as soon as it
-  opens. Most step verbs are free and read-only from the wire's point of
-  view — `wait:`, `choose:`, `answer:`, `fork`, `settings`, `search:`,
-  `sidebar-wheel:`, and so on. **Two verbs are not**: `send:<text>` and
-  `steer:<text>` submit a real prompt, which on a live connection reaches
-  `turn/start` and spends a turn on whatever plan the signed-in login is on.
-  Never put `send:` or `steer:` in a `--steps` list against a live
-  connection without knowing — and intending — what it will bill; they are
-  harmless against `--replay` (there is no live server to send to).
+- `--steps 'a;b;c'` applies `;`-separated steps to the session, exactly
+  once, as soon as the app can execute them: the wire is connected and a
+  session is open (on `--replay`/`--no-connect` an open session alone is
+  enough). The boot session opens without waiting for `session/list`, and
+  the list is never the gate — a hung list used to stall the whole script
+  while the capture below mistook the stalled boot for a finished run.
+  A step that cannot run never vanishes silently: a session verb with no
+  open session is skipped with a stderr line naming it, as is a `new` with
+  no project to start in. Most step verbs are free and read-only from the
+  wire's point of view — `wait:`, `choose:`, `answer:`, `fork`, `settings`,
+  `search:`, `sidebar-wheel:`, and so on. **Two verbs are not**:
+  `send:<text>` and `steer:<text>` submit a real prompt, which on a live
+  connection reaches `turn/start` and spends a turn on whatever plan the
+  signed-in login is on. Never put `send:` or `steer:` in a `--steps` list
+  against a live connection without knowing — and intending — what it will
+  bill; they are harmless against `--replay` (there is no live server to
+  send to).
 - `--screenshot <out.png>` / `--screenshot-delay <ms>` render a frame to a
   PNG only once every step — including every `wait:` in the list, not just
   the last one — has actually finished running, and then the delay on top
   of that: the delay never races the steps, and it is applied exactly once,
-  after them, never before. `--theme dark|light` picks the theme.
+  after them, never before. `--theme dark|light` picks the theme. Before
+  any of that, a scripted capture waits up to 30 s for the app to become
+  able to run the list at all, then up to 5 s for the run to start; a
+  script that never becomes runnable, or never starts, is a stderr line
+  (`harness: steps never became ready …`, `harness: steps never started
+  …`), never a quiet screenshot of an empty shell passed off as success.
 - On a live connection, a `--screenshot` run also waits, bounded (up to two
   minutes, logged to stderr while it waits), for no turn to still be
   running in any session the window has open before it quits. Quitting

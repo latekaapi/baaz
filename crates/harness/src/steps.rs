@@ -374,6 +374,7 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     if steps.is_empty() {
         return;
     }
+    crate::harness_log!("steps: running {} scripted steps", steps.len());
     let capture = this.capture.clone();
     capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
@@ -411,6 +412,16 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                         "session switch never arrived; `{step}` runs against {active:?}"
                     );
                 }
+                // A session verb with no open session has nowhere to go:
+                // say so and skip it rather than vanishing into
+                // `with_session`'s silent no-op below.
+                let has_session = this
+                    .read_with(cx, |this, cx| this.active_id(cx).is_some())
+                    .unwrap_or(false);
+                if !has_session {
+                    crate::harness_log!("`{step}`: no open session; skipped");
+                    continue;
+                }
             }
             let ran = this.update_in(cx, |this, window, cx| {
                 if !window_step(this, &step, window, cx) {
@@ -418,7 +429,9 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                 }
             });
             if ran.is_err() {
+                crate::harness_log!("steps: `{step}` lost its window; ending script");
                 capture.set_steps_running(false);
+                capture.set_steps_done(true);
                 return;
             }
             // `image:` hands its read and decode to the background executor
@@ -439,21 +452,27 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             }
         }
         capture.set_steps_running(false);
+        capture.set_steps_done(true);
     });
     this.wire_tasks().push(task);
 }
 
 /// `--login-steps`: drive the login screen from the command line.
 ///
-/// Raises the flag the capture waits on exactly like [`run_steps`] does, so a
-/// headless `--screenshot` waits for the login script to finish before the
+/// Raises the flags the capture waits on exactly like [`run_steps`] does, so
+/// a headless `--screenshot` waits for the login script to finish before the
 /// settling delay.
 pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     let steps = this.take_login_steps();
     if steps.is_empty() {
         return;
     }
+    crate::harness_log!("login-steps: running {} scripted steps", steps.len());
     let capture = this.capture.clone();
+    // The login screen is up — the list this runs against needs no boot
+    // session — so readiness holds from the drain, like `maybe_run_steps`
+    // raising it before [`run_steps`].
+    capture.set_steps_ready(true);
     capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
@@ -467,12 +486,15 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             match ran {
                 Ok(true) => {}
                 _ => {
+                    crate::harness_log!("login-steps: `{step}` failed; ending script");
                     capture.set_steps_running(false);
+                    capture.set_steps_done(true);
                     return;
                 }
             }
         }
         capture.set_steps_running(false);
+        capture.set_steps_done(true);
     });
     this.wire_tasks().push(task);
 }
@@ -526,5 +548,18 @@ mod tests {
         assert_eq!(super::split("plan"), ("plan", ""));
         assert_eq!(super::split("draft:hello"), ("draft", "hello"));
         assert_eq!(super::split("select-text:2:0-40"), ("select-text", "2:0-40"));
+    }
+
+    #[test]
+    fn the_window_owns_new_and_the_session_owns_the_rest() {
+        // The skip in `run_steps` ("no open session") keys off this: a
+        // session verb must never classify as a window verb, and `wait:`
+        // never reaches a table at all.
+        assert!(!super::is_session_step("new"));
+        assert!(!super::is_session_step("new:demo"));
+        assert!(super::is_session_step("draft:hello"));
+        assert!(super::is_session_step("send:hi"));
+        assert!(super::is_session_step("wait:3000"));
+        assert!(super::is_session_step("bogusverb"));
     }
 }

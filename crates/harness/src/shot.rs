@@ -35,6 +35,17 @@ pub struct Flags {
     /// so the PNG showed the window before the steps that were the point of
     /// taking it.
     steps_running: AtomicBool,
+    /// Whether the app can execute a `--steps` list at all: the window is
+    /// open, the wire is connected (or the run has none), and the boot
+    /// session has been decided. Set just before the drain, so the capture
+    /// can tell "not ready yet" apart from "ready, and the script already
+    /// finished between two polls".
+    steps_ready: AtomicBool,
+    /// Whether the `--steps`/`--login-steps` task reached the end of its
+    /// list. Set on every exit path, including the early ones, so the
+    /// capture can tell "the script ran to completion" apart from "the drain
+    /// never happened".
+    steps_done: AtomicBool,
 }
 
 impl CaptureToken {
@@ -55,13 +66,46 @@ impl CaptureToken {
     fn steps_running(&self) -> bool {
         self.0.steps_running.load(Ordering::Relaxed)
     }
+
+    /// Called by the application when it first becomes able to execute a
+    /// `--steps` list (see [`Flags::steps_ready`]).
+    pub fn set_steps_ready(&self, ready: bool) {
+        self.0.steps_ready.store(ready, Ordering::Relaxed);
+    }
+
+    fn steps_ready(&self) -> bool {
+        self.0.steps_ready.load(Ordering::Relaxed)
+    }
+
+    /// Called by the application when its `--steps`/`--login-steps` task
+    /// ends, on every exit path (see [`Flags::steps_done`]).
+    pub fn set_steps_done(&self, done: bool) {
+        self.0.steps_done.store(done, Ordering::Relaxed);
+    }
+
+    fn steps_done(&self) -> bool {
+        self.0.steps_done.load(Ordering::Relaxed)
+    }
 }
 
 /// How long a capture that is waiting for an approval will wait.
 const APPROVAL_CEILING: Duration = Duration::from_secs(15);
+/// How long a capture waits for the app to become able to execute a
+/// `--steps`/`--login-steps` list at all — the wire connected and the boot
+/// session decided, or the login screen up — before [`STEPS_START_CEILING`]
+/// even begins. A hung round-trip behind boot (a `session/list` that never
+/// answers) used to sit inside the start ceiling looking exactly like "no
+/// script was given": the capture took its screenshot of an empty shell and
+/// quit 0, which read as a successful scripted run that had sent nothing.
+/// Now the wait for readiness is its own bounded ceiling with its own loud
+/// line, and the start ceiling below guards a real race — drain to task
+/// start, normally a poll or two — rather than masking a boot that never
+/// became ready.
+const STEPS_READY_CEILING: Duration = Duration::from_secs(30);
 /// How long a capture waits for the `--steps`/`--login-steps` task to even
-/// begin. It is spawned from the same frame that opens the window, so this
-/// is normally a poll or two; the ceiling only guards a race, never a script.
+/// begin, once the app is ready to run it. It is spawned from the same frame
+/// that opens the window, so this is normally a poll or two; the ceiling
+/// only guards a race, never a script.
 const STEPS_START_CEILING: Duration = Duration::from_secs(5);
 /// How long a capture waits for a `--steps` script to run to completion,
 /// once it has started — deliberately generous, and never shared with
@@ -180,19 +224,44 @@ pub fn capture_and_quit(
 ) {
     cx.spawn(async move |cx| {
         if await_steps {
-            let start_deadline = std::time::Instant::now() + STEPS_START_CEILING;
-            // The flag is only raised once the steps task is scheduled, so
-            // this first wait is for "the steps have started", not "the
-            // steps are not running yet" — normally a poll or two.
-            while !capture.steps_running() && std::time::Instant::now() < start_deadline {
+            // Readiness first: the app raises it when it can execute the
+            // list at all. Only then does the start ceiling begin, so a
+            // boot that never becomes ready cannot look like a script that
+            // already finished.
+            let ready_deadline = std::time::Instant::now() + STEPS_READY_CEILING;
+            while !capture.steps_ready() && std::time::Instant::now() < ready_deadline {
                 cx.background_executor().timer(POLL).await;
             }
-            let steps_deadline = std::time::Instant::now() + STEPS_CEILING;
-            while capture.steps_running() && std::time::Instant::now() < steps_deadline {
-                cx.background_executor().timer(POLL).await;
-            }
-            if capture.steps_running() {
-                eprintln!("harness: steps still running after {STEPS_CEILING:?}; capturing anyway");
+            if !capture.steps_ready() {
+                eprintln!(
+                    "harness: steps never became ready in {STEPS_READY_CEILING:?} (no boot session); capturing anyway"
+                );
+            } else {
+                let start_deadline = std::time::Instant::now() + STEPS_START_CEILING;
+                // The flag is only raised once the steps task is scheduled, so
+                // this first wait is for "the steps have started", not "the
+                // steps are not running yet" — normally a poll or two. A
+                // script fast enough to finish between two polls still lands
+                // `steps_done`, which is what tells it apart from a drain
+                // that never happened.
+                while !capture.steps_running()
+                    && !capture.steps_done()
+                    && std::time::Instant::now() < start_deadline
+                {
+                    cx.background_executor().timer(POLL).await;
+                }
+                if !capture.steps_running() && !capture.steps_done() {
+                    eprintln!(
+                        "harness: steps never started in {STEPS_START_CEILING:?} after becoming ready; capturing anyway"
+                    );
+                }
+                let steps_deadline = std::time::Instant::now() + STEPS_CEILING;
+                while capture.steps_running() && std::time::Instant::now() < steps_deadline {
+                    cx.background_executor().timer(POLL).await;
+                }
+                if capture.steps_running() {
+                    eprintln!("harness: steps still running after {STEPS_CEILING:?}; capturing anyway");
+                }
             }
         }
         if await_approval {
@@ -280,6 +349,8 @@ mod tests {
         let token = CaptureToken::default();
         assert!(!token.pending_approval());
         assert!(!token.steps_running());
+        assert!(!token.steps_ready());
+        assert!(!token.steps_done());
     }
 
     #[test]
@@ -289,6 +360,15 @@ mod tests {
         assert!(token.steps_running());
         token.set_steps_running(false);
         assert!(!token.steps_running());
+    }
+
+    #[test]
+    fn steps_ready_and_done_round_trip() {
+        let token = CaptureToken::default();
+        token.set_steps_ready(true);
+        assert!(token.steps_ready());
+        token.set_steps_done(true);
+        assert!(token.steps_done());
     }
 
     #[test]
