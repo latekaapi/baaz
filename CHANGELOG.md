@@ -34,3 +34,14 @@ library.
   (`docs/08-keymap.md`).
 - **A scripting surface for captures and testing**: `--replay`, `--no-connect`,
   `--steps`, `--screenshot` — see `CONTRIBUTING.md`.
+- **Titles say what the person said.** A session with no index title used to
+  be named after the first shell command its agent ran; the derived title is
+  now the transcript's earliest user prompt (earliest submission, then
+  earliest folded user turn), with the shell command only as the fallback
+  for sessions with no user text at all, and both cut the row's own way.
+  Replays title their row the same way instead of keeping the file's name.
+- **Deleted folders leave the sidebar.** A project whose root is gone is
+  shown nowhere — sidebar, Projects palette, project menu, rail, current —
+  while its sessions fall back to "Other workspaces" and the adoption stays
+  in `projects.json`, so an unmounted volume or a re-attached worktree comes
+  back by itself.
