@@ -24,7 +24,8 @@
     "updatedAt": "2026-09-16T09:05:00Z",
     "turnCount": 7,
     "status": "idle",
-    "summary": "grouped the list by project"
+    "summary": "grouped the list by project",
+    "ask": "group the sidebar by project"
   },
   {
     "sessionId": "t-fresh",

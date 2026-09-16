@@ -66,6 +66,11 @@ pub struct SessionMeta {
     /// sidebar's description line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_summary: Option<String>,
+    /// The owner's last request in this session, excerpted the free way and
+    /// written beside [`Self::last_summary`] on every completed turn. The
+    /// byline's ask half: together they are the row's two lines, free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ask: Option<String>,
     /// The project this session was started in: the adoption it groups
     /// under even when its folder is a worktree of the project's root.
     /// Written at `session/start`; always serialized, so a file that says
@@ -87,6 +92,7 @@ impl SessionMeta {
             && !self.pinned
             && !self.archived
             && self.last_summary.is_none()
+            && self.last_ask.is_none()
             && self.project.is_none()
     }
 }

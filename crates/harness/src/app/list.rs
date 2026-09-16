@@ -301,18 +301,35 @@ impl Harness {
         self.set_override(&session_id, |meta| meta.archived = false, cx);
     }
 
-    /// A turn completed in this app: leave the first line of its last
-    /// assistant text on the sidebar row. Free — the fold is in memory — and
-    /// skipped when nothing new arrived, so the store is not rewritten on
-    /// every completion.
+    /// A turn completed in this app: leave the free byline excerpt on the
+    /// sidebar row — the owner's last request beside the first meaningful
+    /// line of the latest reply. Free — the fold is already in memory — so
+    /// it refreshes after every completed turn, and skipped when nothing new
+    /// arrived, so the store is not rewritten on every completion.
     pub(super) fn record_last_summary(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
-        let (session_id, summary) = (view.read(cx).session_id.clone(), view.read(cx).last_summary_text());
-        let Some(summary) = summary else { return };
-        if self.overrides.get(&session_id).and_then(|m| m.last_summary.as_deref()) == Some(summary.as_str()) {
+        let (session_id, summary, ask) = (
+            view.read(cx).session_id.clone(),
+            view.read(cx).last_summary_text(),
+            view.read(cx).last_user_text(),
+        );
+        if summary.is_none() && ask.is_none() {
             return;
         }
-        self.set_override(&session_id, |meta| meta.last_summary = Some(summary), cx);
+        let current = self.overrides.get(&session_id);
+        if current.and_then(|m| m.last_summary.as_deref()) == summary.as_deref()
+            && current.and_then(|m| m.last_ask.as_deref()) == ask.as_deref()
+        {
+            return;
+        }
+        self.set_override(&session_id, |meta| {
+            if summary.is_some() {
+                meta.last_summary = summary;
+            }
+            if ask.is_some() {
+                meta.last_ask = ask;
+            }
+        }, cx);
     }
 
     /// The open session's id, which the empty filter never applies to: a

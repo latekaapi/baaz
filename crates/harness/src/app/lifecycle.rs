@@ -85,6 +85,10 @@ struct FixtureSession {
     /// would carry.
     #[serde(default)]
     summary: Option<String>,
+    /// The row's ask line, standing in for the owner's last request: with
+    /// `summary` it draws the two-line byline.
+    #[serde(default)]
+    ask: Option<String>,
 }
 
 /// [`FixtureSession::status`] without the field: settled, never running.
@@ -132,6 +136,9 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     entry.title_pending = row.title_pending;
     if let Some(summary) = row.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         entry.description = summary.to_owned();
+    }
+    if let Some(ask) = row.ask.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entry.last_ask = Some(ask.to_owned());
     }
     entry
 }
@@ -628,6 +635,11 @@ impl Harness {
             // scripted id, so a rejoin must not blank it either.
             if !entry.replayed {
                 entry.description = sidebar::describe(meta, index, text, user_named);
+                entry.last_ask = meta
+                    .and_then(|m| m.last_ask.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
             }
             entry.named = name.is_some();
         }

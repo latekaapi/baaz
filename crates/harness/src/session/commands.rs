@@ -412,21 +412,28 @@ impl SessionView {
         cx.notify();
     }
 
-    /// The sidebar's description line for this session: the first line of
-    /// the newest assistant text block, capped at 120 characters. Free — the
+    /// The sidebar's description line for this session: the first meaningful
+    /// line of the newest assistant text block — blanks, code fences and
+    /// markdown markers skipped — cut to the row's own width. Free — the
     /// fold is already in memory — so a completed turn writes it with no
-    /// model call.
+    /// model call. The byline's result half.
     pub fn last_summary_text(&self) -> Option<String> {
         let text = self.last_assistant_text()?;
-        let first = text.lines().next().unwrap_or("").trim();
-        if first.is_empty() {
-            return None;
-        }
-        let flat: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
-        if flat.chars().count() <= 120 {
-            return Some(flat);
-        }
-        Some(flat.chars().take(119).collect::<String>() + "\u{2026}")
+        crate::byline::excerpt_line(&text)
+    }
+
+    /// The byline's ask half: the owner's newest request in this session,
+    /// excerpted the free way. The newest folded user turn covers replays
+    /// and restarts; the newest recorded submission covers a turn whose
+    /// `userMessage` has not echoed yet.
+    pub fn last_user_text(&self) -> Option<String> {
+        let sent = self.fold.side(&self.session_id)?.command_text.values().next_back().cloned();
+        let said = self.session()?.turns.iter().rev().find_map(|turn| match turn {
+            Turn::User { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = sent.or(said)?;
+        crate::byline::excerpt_line(&text)
     }
 
     /// The prompt behind the newest submission, first line only: the
