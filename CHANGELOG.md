@@ -50,9 +50,12 @@ library.
   word title into `sessions.json` (`generated_title`, ranked under a
   `/name` name); the side session is hidden at once and the server record
   untouched. A `Naming this session…` placeholder holds the row meanwhile;
-  a ~20 s timeout, wire errors and empty replies fall back silently to the
-  first-prompt label, at most one retry, exactly one generation per session
-  ever.
+  a 90 s timeout (set from measured turn times: the title call itself took
+  ~21 s against the old 20 s ceiling), wire errors and empty replies fall
+  back silently to the first-prompt label, at most one retry, exactly one
+  generation per session ever. A reply that arrives after the timeout still
+  lands on the row — the turn was already paid for — unless the session was
+  named or closed meanwhile.
 - **Two-line bylines, uniform rows.** Every session row always shows two
   lines: `Working…` while a turn runs, the pending placeholder while a
   title is in flight, the owner's last request beside the last reply once
@@ -79,4 +82,6 @@ library.
   memory and as `side_session` in `sessions.json` before the start runs), so
   they stay hidden, uncounted, unindexed and untitled, including across a
   restart mid-flight. Cost guards unchanged: one generation per session
-  ever, at most one retry, the ~20 s watchdog, silent first-prompt fallback.
+  ever, at most one retry, the 90 s watchdog, silent first-prompt fallback —
+  with the watchdog standing the row down rather than giving up, so a late
+  answer still lands instead of being billed for nothing.

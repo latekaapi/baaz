@@ -105,7 +105,8 @@
 //! | `auto-title` | flip the automatic session-naming switch |
 //! | `auto-summary` | flip the sidebar-summaries switch |
 //! | `title-pending` | capture aid: the open session reads as if its title generation were in flight (`Naming this session…`), free |
-//! | `title-land:<text>` | capture aid: land `<text>` as the open session's generated title, so the row and the crumb update, free |
+//! | `title-timeout` | capture aid: stand that generation down through the watchdog's own path, so the row falls back to the first prompt, free |
+//! | `title-land:<text>` | capture aid: land `<text>` as the open session's generated title, so the row and the crumb update — after `title-timeout`, like a late answer would — free |
 //! | `remove-project:<name>` | raise the project removal dialog |
 //! | `remove-confirm` | confirm it |
 //! | `new` | the same as ⌘N |
@@ -211,6 +212,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "project-colour", run: |this, rest, _, cx| this.step_project_colour(rest, cx) },
     WindowVerb { verb: "group-by", run: |this, rest, _, cx| this.step_group_by(rest, cx) },
     WindowVerb { verb: "title-pending", run: |this, _, _, cx| this.step_title_pending(cx) },
+    WindowVerb { verb: "title-timeout", run: |this, _, _, cx| this.step_title_timeout(cx) },
     WindowVerb { verb: "title-land", run: |this, rest, _, cx| this.step_title_land(rest, cx) },
     WindowVerb { verb: "auto-title", run: |this, _, _, cx| this.step_auto_title(cx) },
     WindowVerb { verb: "auto-summary", run: |this, _, _, cx| this.step_auto_summary(cx) },

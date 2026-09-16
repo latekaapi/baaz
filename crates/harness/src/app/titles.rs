@@ -16,7 +16,9 @@
 //! Nothing here ever touches the UI thread except through completions: the
 //! real turn is never blocked or delayed by a title. Failure (timeout, wire
 //! error, missing model, switch off) falls back to today's labels with one
-//! log line, never a dialog, and at most one retry per session.
+//! log line, never a dialog, and at most one retry per session — and a
+//! timeout stands the row down without giving the job up, so a reply that
+//! lands late still harvests read-only instead of being thrown away.
 //!
 //! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
 
@@ -164,11 +166,11 @@ impl Harness {
             Ok(side_id) => {
                 // Already hidden by the pre-start record, before any list
                 // refresh could show it.
-                // A timeout that fired while the chain ran already stood
-                // this generation down: hide and ignore, never double-bill.
-                if !this.titles_pending.contains(&real_id) {
-                    return;
-                }
+                // A timeout that fired while the chain ran stood the row
+                // down, but the turn this started is paid for: record the
+                // job anyway, so its `turn/completed` still harvests
+                // read-only below rather than dropping unheard. Recording
+                // starts nothing — no second generation, never a retry.
                 this.title_jobs.insert(
                     side_id.clone(),
                     TitleJob { real_id: real_id.clone(), tries, first_message: retry_message },
@@ -179,7 +181,7 @@ impl Harness {
                 if !this.titles_pending.contains(&real_id) {
                     return;
                 }
-                if tries < titles::TITLE_MAX_ATTEMPTS {
+                if titles::should_retry_title(tries, false) {
                     crate::harness_log!("auto-title for {real_id} failed ({reason}); retrying once");
                     this.run_title_attempt(real_id, retry_message, tries + 1, cx);
                 } else {
@@ -190,13 +192,18 @@ impl Harness {
     }
 
     /// A `turn/completed` on a side session: harvest its answer with a free
-    /// `session/read`, then land the title or retry / give up per budget.
+    /// `session/read`, then land the title or retry / give up per budget. A
+    /// reply that lands after the watchdog stood the job down harvests the
+    /// same way — the turn is already paid for — except it never retries
+    /// into a second generation and lands only while the session still
+    /// wants a name (gone, or named since, and it is dropped).
     pub(super) fn harvest_title(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        let Some(job) = self.title_jobs.get(side_id) else { return };
-        // Stood down already (timeout): the side row stays hidden, the late
-        // answer is ignored rather than landed over the fallback.
-        if !self.titles_pending.contains(&job.real_id) {
-            self.title_jobs.remove(side_id);
+        // Stood down already (timeout): the row fell back to the first
+        // prompt, but the job stays so this late `turn/completed` still
+        // harvests below instead of being dropped unheard. (The closure
+        // re-reads the pending set: a stand-down can land between here and
+        // the read coming back.)
+        if !self.title_jobs.contains_key(side_id) {
             return;
         }
         let Some(client) = self.client.clone() else { return };
@@ -210,14 +217,28 @@ impl Harness {
         };
         self.wire_call(cx, work, move |this, result, cx| {
             let Some(job) = this.title_jobs.get(&side_id).cloned() else { return };
-            if !this.titles_pending.contains(&job.real_id) {
-                this.title_jobs.remove(&side_id);
-                return;
-            }
+            let late = !this.titles_pending.contains(&job.real_id);
             match result {
                 Ok(read) => match titles::harvest_title_text(&read) {
-                    Some(title) => this.land_title(&job.real_id, &side_id, &title, cx),
-                    None if job.tries < titles::TITLE_MAX_ATTEMPTS => {
+                    Some(title) => {
+                        // A late answer lands exactly like an in-time one —
+                        // unless the session went away or someone named it
+                        // while the turn ran, in which case it is dropped.
+                        let known = this.sessions.iter().any(|entry| entry.id == job.real_id);
+                        if late
+                            && (!known
+                                || !titles::should_land_late(this.overrides.get(&job.real_id)))
+                        {
+                            crate::harness_log!(
+                                "late auto-title for {} dropped (renamed or gone); keeping the current label",
+                                job.real_id
+                            );
+                            this.title_jobs.remove(&side_id);
+                            return;
+                        }
+                        this.land_title(&job.real_id, &side_id, &title, cx);
+                    }
+                    None if titles::should_retry_title(job.tries, late) => {
                         crate::harness_log!("auto-title for {} came back empty; retrying once", job.real_id);
                         this.title_jobs.remove(&side_id);
                         this.run_title_attempt(job.real_id, job.first_message, job.tries + 1, cx);
@@ -225,7 +246,7 @@ impl Harness {
                     None => this.fail_title(&job.real_id, "empty reply", cx),
                 },
                 Err(error) => {
-                    if job.tries < titles::TITLE_MAX_ATTEMPTS {
+                    if titles::should_retry_title(job.tries, late) {
                         crate::harness_log!("auto-title read for {} failed ({error}); retrying once", job.real_id);
                         this.title_jobs.remove(&side_id);
                         this.run_title_attempt(job.real_id, job.first_message, job.tries + 1, cx);
@@ -266,14 +287,32 @@ impl Harness {
         cx.notify();
     }
 
-    /// Give up waiting: the row falls back to the first prompt, the side
-    /// session (already hidden) is left to its turn, and a late answer is
-    /// ignored rather than retried — a timeout can never double-bill.
+    /// Give up waiting: the row falls back to the first prompt and the
+    /// placeholder clears, but the job stays — the side session (already
+    /// hidden) is left to its turn, and a late answer still harvests
+    /// read-only rather than being thrown away. Stood down is not given up:
+    /// never a retry, never a second generation, so a timeout can never
+    /// double-bill.
     fn title_timeout(&mut self, real_id: &str, cx: &mut Context<Self>) {
         if !self.titles_pending.contains(real_id) {
             return;
         }
-        self.fail_title(real_id, &format!("no answer in {} s", titles::TITLE_TIMEOUT_SECS), cx);
+        self.stand_down_title(real_id, &format!("no answer in {} s", titles::TITLE_TIMEOUT_SECS), cx);
+    }
+
+    /// Stand down, not give up: the pending placeholder falls back to the
+    /// first prompt — however the job ends, it never lingers — while the
+    /// job stays for a late harvest. The once-ever marker is untouched, so
+    /// no resume, reconnect, replay or restart can start another generation
+    /// off the back of this one.
+    fn stand_down_title(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
+        crate::harness_log!("auto-title for {real_id} failed ({reason}); keeping the first prompt");
+        self.titles_pending.remove(real_id);
+        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
+            entry.title_pending = false;
+        }
+        self.invalidate_list();
+        cx.notify();
     }
 
     /// One watchdog per attempt: [`titles::TITLE_TIMEOUT_SECS`] on the
@@ -319,9 +358,22 @@ impl Harness {
         cx.notify();
     }
 
+    /// `title-timeout`: capture aid — stand the active session's generation
+    /// down through the watchdog's own path, so a `--replay` run screenshots
+    /// the `Naming this session…` fallback to the first prompt without
+    /// spending a turn. A following `title-land:<text>` then lands like a
+    /// late answer would.
+    pub(crate) fn step_title_timeout(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else { return };
+        self.title_timeout(&id, cx);
+    }
+
     /// `title-land:<text>`: capture aid — land `<text>` as the active
     /// session's generated title, so a `--replay` run screenshots the
-    /// placeholder-to-title update in the row and the crumb, free.
+    /// placeholder-to-title update in the row and the crumb, free. After a
+    /// `title-timeout` the same step lands like a late answer: the row fell
+    /// back to the first prompt meanwhile, and the title updates it in
+    /// place — exactly what a stood-down job's harvest does on the wire.
     pub(crate) fn step_title_land(&mut self, rest: &str, cx: &mut Context<Self>) {
         let Some(id) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else { return };
         let Some(title) = titles::clean_title(rest) else { return };
