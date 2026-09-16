@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use aui_tokens::AgentState;
 pub use aui::nav::Grouping;
 
-use aui::nav::{DateGroup, ProjectGroup, SessionSummary};
+use aui::nav::{Byline, DateGroup, ProjectGroup, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
@@ -27,6 +27,19 @@ use crate::sessions::SessionMeta;
 /// The last resort, and the one Phase 4's sidebar reached fourteen times in a
 /// row (finding F10). Every step before it is a real fact about the session.
 pub const UNNAMED: &str = "New session";
+
+/// The second line while a turn is running. Matches the transcript footer's
+/// wording (`session/render.rs`), so the row and the transcript agree about
+/// what the session is doing.
+pub const PLACEHOLDER_WORKING: &str = "Working…";
+
+/// The second line while a generated title is still being written.
+pub const PLACEHOLDER_NAMING: &str = "Naming this session…";
+
+/// The second line when a session has nothing to show yet: no turn, no
+/// title, no summary. Present so the row keeps its two-line height, never
+/// blank.
+pub const PLACEHOLDER_EMPTY: &str = "No reply yet";
 
 /// One row of the sidebar, joined from the wire, the local index and the
 /// harness's own overrides.
@@ -63,6 +76,16 @@ pub struct SessionEntry {
     /// Whether anything but the fallback was found, which is what tells the
     /// application a `session/read` is worth making (finding F10).
     pub needs_title: bool,
+    /// A generated title is in flight for this session (auto-titles): the
+    /// second line reads the pending placeholder until it lands. Owned by
+    /// the titler, which sets it on `turn/started` and clears it on harvest,
+    /// timeout or failure; the ladder below reads it, nothing else writes it.
+    pub title_pending: bool,
+    /// The owner's last request in this session, as the free byline excerpt
+    /// saw it: the ask half of the two-line byline (auto-summaries). `None`
+    /// is "no byline yet" — the ladder falls through to the preview text.
+    /// Owned by the byline recorder; the ladder below reads it.
+    pub last_ask: Option<String>,
     /// The row's own derived workspace branch (`Session.branch`, muse 1.2.1),
     /// shown on the meta line. The live-change signal stays
     /// `session/branchChanged`; this is the index's last derived value.
@@ -151,6 +174,8 @@ impl SessionEntry {
             replayed: false,
             named: name.is_some(),
             needs_title: label.is_none(),
+            title_pending: false,
+            last_ask: None,
             local: false,
             workspace,
             project,
@@ -186,6 +211,8 @@ impl SessionEntry {
             replayed: true,
             named: false,
             needs_title: false,
+            title_pending: false,
+            last_ask: None,
             local: false,
             workspace,
             project,
@@ -221,28 +248,88 @@ impl SessionEntry {
         }
     }
 
+    /// The row's second line, by the placeholder ladder: every session row
+    /// always shows two lines, so a brand-new session is exactly as tall as
+    /// its neighbours (owner screenshot 2026-09-16).
+    ///
+    /// 1. a turn is running → `Working…`, matching the transcript footer's
+    ///    wording;
+    /// 2. a generated title is still pending → `Naming this session…`;
+    /// 3. the byline exists → the ask and the result side by side;
+    /// 4. the session has turns but no byline yet → the legacy meta line
+    ///    (the preview/summary text, the branch, `N turns`), which is why
+    ///    this returns `None`: the caller keeps building `meta` as before;
+    /// 5. a turn-less row that still has something to show (a branch, an
+    ///    Archived tag, a preview) → the legacy meta line, as above;
+    /// 6. nothing at all → `No reply yet`.
+    ///
+    /// `Some` is an explicit [`Byline`] that wins the row's second-line
+    /// slot; `None` is the legacy meta tags (or, with none of those, the
+    /// library's empty-space line — which the last rung makes unreachable
+    /// here). Never blank either way.
+    fn second_line(&self) -> Option<Byline> {
+        if self.running {
+            return Some(Byline::Placeholder(PLACEHOLDER_WORKING.into()));
+        }
+        if self.title_pending {
+            return Some(Byline::Placeholder(PLACEHOLDER_NAMING.into()));
+        }
+        if let Some(ask) = self.last_ask.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(Byline::TwoLines { ask: ask.to_owned().into(), result: self.description.clone().into() });
+        }
+        if self.turns > 0 || self.has_legacy_second_line() {
+            return None;
+        }
+        Some(Byline::Placeholder(PLACEHOLDER_EMPTY.into()))
+    }
+
+    /// Whether the legacy meta tags give this row a second line on their
+    /// own: a preview, the branch, the Archived tag, or the pin. Mirrors
+    /// what [`Self::summary`] puts into `meta`, so the ladder and the row
+    /// cannot disagree about when the legacy line exists.
+    fn has_legacy_second_line(&self) -> bool {
+        !self.description.trim().is_empty()
+            || self.branch.as_deref().map(str::trim).is_some_and(|s| !s.is_empty())
+            || self.archived
+            || self.pinned
+    }
+
     /// The library row for this session, labelled against `now`. No
     /// provider mark: the sidebar rows read title, preview and elapsed only
     /// (owner round 4, O4).
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
-        // The description first, so the second line reads what was done here
-        // last; the turn count stays in the meta after it.
-        if !self.description.is_empty() {
-            row = row.meta(aui::nav::MetaItem::Text(self.description.clone().into()));
-        }
-        // The row's own derived branch (muse 1.2.1), ahead of the turn count:
-        // which line of work this session is on.
-        if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            row = row.meta(aui::nav::MetaItem::Text(branch.to_owned().into()));
-        }
-        if self.turns > 0 {
-            row = row.meta(aui::nav::MetaItem::Text(
-                format!("{} turn{}", self.turns, if self.turns == 1 { "" } else { "s" }).into(),
-            ));
-        }
-        if self.archived {
-            row = row.meta(aui::nav::MetaItem::Tag("Archived".into()));
+        match self.second_line() {
+            Some(Byline::Placeholder(text)) => {
+                row = row.placeholder(text);
+            }
+            Some(Byline::Preview(text)) => {
+                row = row.preview(text);
+            }
+            Some(Byline::TwoLines { ask, result }) => {
+                row = row.byline(ask, result);
+            }
+            // The ladder's fourth and fifth rungs: the preview/summary text
+            // first, so the second line reads what was done here last, then
+            // the branch, then the turn count — exactly as before.
+            None => {
+                if !self.description.is_empty() {
+                    row = row.meta(aui::nav::MetaItem::Text(self.description.clone().into()));
+                }
+                // The row's own derived branch (muse 1.2.1), ahead of the turn count:
+                // which line of work this session is on.
+                if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    row = row.meta(aui::nav::MetaItem::Text(branch.to_owned().into()));
+                }
+                if self.turns > 0 {
+                    row = row.meta(aui::nav::MetaItem::Text(
+                        format!("{} turn{}", self.turns, if self.turns == 1 { "" } else { "s" }).into(),
+                    ));
+                }
+                if self.archived {
+                    row = row.meta(aui::nav::MetaItem::Tag("Archived".into()));
+                }
+            }
         }
         if self.pinned {
             row = row.pinned();
@@ -319,6 +406,8 @@ pub fn local_started_row(
         replayed: false,
         named: false,
         needs_title: false,
+        title_pending: false,
+        last_ask: None,
         local: true,
         workspace,
         project,
@@ -738,6 +827,116 @@ mod tests {
     /// takes the grouping behind an `Rc` too (finding `performance-13`).
     /// Numbers with `--nocapture`; the assertion is only the ordering, so the
     /// test is not a timing flake.
+    /// Rung 1: a running turn reads `Working…`, matching the transcript
+    /// footer's wording — even when a byline and a preview both exist.
+    #[test]
+    fn a_running_turn_reads_working_on_the_second_line() {
+        let mut running = entry("running");
+        running.running = true;
+        running.turns = 3;
+        running.description = "patched the validator".into();
+        running.last_ask = Some("tighten validation".into());
+        running.title_pending = true;
+        assert_eq!(running.second_line(), Some(Byline::Placeholder(PLACEHOLDER_WORKING.into())));
+        assert_eq!(PLACEHOLDER_WORKING, "Working…");
+    }
+
+    /// Rung 2: a pending generated title reads `Naming this session…` until
+    /// it lands — but a running turn still outranks it.
+    #[test]
+    fn a_pending_title_reads_naming_on_the_second_line() {
+        let mut pending = entry("pending");
+        pending.title_pending = true;
+        pending.description = "patched the validator".into();
+        assert_eq!(pending.second_line(), Some(Byline::Placeholder(PLACEHOLDER_NAMING.into())));
+    }
+
+    /// Rung 3: the byline reads the ask and the result side by side, ahead
+    /// of the preview text and the turn count.
+    #[test]
+    fn a_byline_reads_ask_and_result_on_the_second_line() {
+        let mut lined = entry("lined");
+        lined.turns = 2;
+        lined.description = "patched the validator".into();
+        lined.last_ask = Some("tighten validation".into());
+        assert_eq!(
+            lined.second_line(),
+            Some(Byline::TwoLines { ask: "tighten validation".into(), result: "patched the validator".into() })
+        );
+    }
+
+    /// Rung 4: turns but no byline keep the legacy meta line — the preview
+    /// first, then the branch, then `N turns` — so nothing already shown is
+    /// lost to the new row shape.
+    #[test]
+    fn turns_without_a_byline_keep_the_legacy_meta_line() {
+        let mut settled = entry("settled");
+        settled.turns = 3;
+        settled.description = "patched the validator".into();
+        assert_eq!(settled.second_line(), None);
+        let summary = settled.summary(Local::now());
+        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
+    }
+
+    /// Rung 4, else-branch: turns with no preview at all still read `N
+    /// turns` on the second line rather than leaving it blank.
+    #[test]
+    fn turns_without_a_preview_read_the_turn_count() {
+        let mut counted = entry("counted");
+        counted.turns = 2;
+        assert_eq!(counted.second_line(), None);
+        let summary = counted.summary(Local::now());
+        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
+        assert!(summary.meta.iter().any(|item| matches!(item, aui::nav::MetaItem::Text(text) if text.to_string() == "2 turns")));
+    }
+
+    /// Rung 5: a turn-less row that still has something to say (here, an
+    /// Archived tag) keeps the legacy meta line for it.
+    #[test]
+    fn a_turnless_row_with_a_marker_keeps_the_legacy_meta_line() {
+        let mut archived = entry("archived");
+        archived.archived = true;
+        assert_eq!(archived.second_line(), None);
+        let summary = archived.summary(Local::now());
+        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
+    }
+
+    /// Rung 6: nothing at all reads `No reply yet` — the line is never left
+    /// blank, so a fresh session is exactly as tall as its neighbours.
+    #[test]
+    fn a_fresh_session_reads_no_reply_yet_on_the_second_line() {
+        let fresh = entry("fresh");
+        assert_eq!(fresh.second_line(), Some(Byline::Placeholder(PLACEHOLDER_EMPTY.into())));
+        assert_eq!(PLACEHOLDER_EMPTY, "No reply yet");
+        let summary = fresh.summary(Local::now());
+        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Placeholder);
+    }
+
+    /// Every rung through the real `summary()`: each kind reserves exactly
+    /// one second line, so every row is two lines tall whatever state the
+    /// session is in.
+    #[test]
+    fn every_ladder_rung_keeps_the_two_line_height() {
+        let now = Local::now();
+        let mut running = entry("running");
+        running.running = true;
+        let mut pending = entry("pending");
+        pending.title_pending = true;
+        let mut lined = entry("lined");
+        lined.last_ask = Some("tighten validation".into());
+        lined.description = "patched the validator".into();
+        let mut settled = entry("settled");
+        settled.turns = 3;
+        settled.description = "patched the validator".into();
+        let fresh = entry("fresh");
+        for built in [&running, &pending, &lined, &settled, &fresh] {
+            let kind = aui::nav::second_line_kind(&built.summary(now));
+            assert_eq!(kind.lines(), 1, "{kind:?} keeps one second line");
+            assert!(kind.truncate(), "{kind:?} ellipsizes at the row's width");
+            assert!(!kind.wraps(), "{kind:?} never wraps to a third line");
+        }
+    }
+
     #[test]
     fn five_hundred_sidebar_rows_cost_less_from_the_cache() {
         const N: usize = 500;
@@ -863,6 +1062,8 @@ mod tests {
             replayed: false,
             named: false,
             needs_title: false,
+            title_pending: false,
+            last_ask: None,
             local: false,
             workspace: None,
             project: None,

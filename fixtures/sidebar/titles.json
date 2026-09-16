@@ -1,0 +1,37 @@
+[
+  {
+    "sessionId": "t-running",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Rewrite the router",
+    "updatedAt": "2026-09-16T10:20:00Z",
+    "turnCount": 12,
+    "status": "running",
+    "summary": "patched the route matcher"
+  },
+  {
+    "sessionId": "t-naming",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Fix the header overlap",
+    "updatedAt": "2026-09-16T10:18:00Z",
+    "turnCount": 1,
+    "status": "idle",
+    "titlePending": true
+  },
+  {
+    "sessionId": "t-settled",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Sidebar grouping",
+    "updatedAt": "2026-09-16T09:05:00Z",
+    "turnCount": 7,
+    "status": "idle",
+    "summary": "grouped the list by project"
+  },
+  {
+    "sessionId": "t-fresh",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Empty states",
+    "updatedAt": "2026-09-16T08:40:00Z",
+    "turnCount": 0,
+    "status": "idle"
+  }
+]

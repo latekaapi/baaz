@@ -1497,6 +1497,8 @@ mod tests {
                     replayed: false,
                     named: false,
                     needs_title: false,
+                    title_pending: false,
+                    last_ask: None,
                     local: false,
                     workspace: None,
                     project: Some(id.clone()),
