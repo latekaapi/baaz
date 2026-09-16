@@ -187,11 +187,15 @@ impl SessionEntry {
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
             description: describe(meta, index, text, user_named),
+            last_ask: meta
+                .and_then(|m| m.last_ask.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             replayed: false,
             named: name.is_some(),
             needs_title: label.is_none(),
             title_pending: false,
-            last_ask: None,
             local: false,
             workspace,
             project,

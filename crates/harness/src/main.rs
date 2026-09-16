@@ -40,6 +40,7 @@ mod attachments;
 mod auth;
 mod bench;
 mod billing;
+mod byline;
 mod clock;
 mod conn;
 mod dialogs;

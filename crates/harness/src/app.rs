@@ -522,6 +522,13 @@ pub struct Harness {
     /// Side session id → the generation it serves. Harvested off
     /// `turn/completed`, reaped by the watchdog.
     pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
+    /// Side session id → the byline rewrite it serves.
+    pub(crate) byline_jobs: HashMap<String, titles::BylineJob>,
+    /// Real session ids with a rewrite in flight: late answers for a
+    /// stood-down rewrite are hidden and ignored, never landed.
+    pub(crate) byline_live: HashSet<String>,
+    /// Last rewrite start per real session: the 30 s debounce clock.
+    pub(crate) byline_last_start: HashMap<String, std::time::Instant>,
     /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
     pub(crate) show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
@@ -690,6 +697,9 @@ impl Harness {
             show_archived: false,
             titles_pending: HashSet::new(),
             title_jobs: HashMap::new(),
+            byline_jobs: HashMap::new(),
+            byline_live: HashSet::new(),
+            byline_last_start: HashMap::new(),
             search_query: search_query.clone(),
             search_sessions: Vec::new(),
             search_files: Vec::new(),
@@ -1007,6 +1017,8 @@ impl Harness {
                 if let Some(side_id) = session_id.clone() {
                     if self.title_jobs.contains_key(&side_id) {
                         self.harvest_title(&side_id, cx);
+                    } else if self.byline_jobs.contains_key(&side_id) {
+                        self.harvest_byline(&side_id, cx);
                     }
                 }
             }
@@ -1081,6 +1093,9 @@ impl Harness {
             self.load_index(cx);
             self.load_sessions(cx);
             self.record_last_summary(cx);
+            // The free excerpt just landed; a poor one may earn one
+            // debounced rewrite — idle sessions only, never a running turn.
+            self.maybe_rewrite_byline(cx);
         }
         self.title_from_transcript(cx);
         cx.notify();
