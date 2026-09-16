@@ -101,6 +101,8 @@
 //! | `group-bar` | flip the current-project accent bar flag |
 //! | `group-branch` | flip the trailing-branch flag |
 //! | `group-chevron` | flip the group-row chevron flag |
+//! | `auto-title` | flip the automatic session-naming switch |
+//! | `auto-summary` | flip the sidebar-summaries switch |
 //! | `title-pending` | capture aid: the open session reads as if its title generation were in flight (`Naming this session…`), free |
 //! | `title-land:<text>` | capture aid: land `<text>` as the open session's generated title, so the row and the crumb update, free |
 //! | `remove-project:<name>` | raise the project removal dialog |
@@ -209,6 +211,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "group-by", run: |this, rest, _, cx| this.step_group_by(rest, cx) },
     WindowVerb { verb: "title-pending", run: |this, _, _, cx| this.step_title_pending(cx) },
     WindowVerb { verb: "title-land", run: |this, rest, _, cx| this.step_title_land(rest, cx) },
+    WindowVerb { verb: "auto-title", run: |this, _, _, cx| this.step_auto_title(cx) },
+    WindowVerb { verb: "auto-summary", run: |this, _, _, cx| this.step_auto_summary(cx) },
     WindowVerb { verb: "group-bar", run: |this, _, _, cx| this.step_group_bar(cx) },
     WindowVerb { verb: "group-branch", run: |this, _, _, cx| this.step_group_branch(cx) },
     WindowVerb { verb: "group-chevron", run: |this, _, _, cx| this.step_group_chevron(cx) },
