@@ -363,14 +363,21 @@ title for the user's first message and harvesting `turn/completed` with a
 free `session/read`. It lands in `sessions.json` as `generated_title` (never
 via `session/rename`), ranked as above; while in flight the row reads
 `Naming this session…` and an untitled header crumb borrows it, and both
-update in place when it lands. Failure (a ~20 s timeout, a wire error, an
-empty reply) falls back to the first-prompt label with one log line and at
-most one retry — a timeout never retries — and exactly one generation ever
-runs per session: the persisted `title_attempted` marker holds across
-resume, reconnect, replay and restart, and the "Name sessions
-automatically" switch off means no title call ever. `--steps
-title-pending` / `title-land:<text>` stub the in-flight and landed states
-for captures, free.
+update in place when it lands. Failure (a 90 s timeout — grounded in the
+2026-09-17 side-session logs, where the billed title turn ran 20.7 s
+against the old 20 s ceiling while real turns ran 20.8–36.8 s — a wire
+error, an empty reply) falls back to the first-prompt label with one log
+line and at most one retry — a timeout never retries — and exactly one
+generation ever runs per session: the persisted `title_attempted` marker
+holds across resume, reconnect, replay and restart, and the "Name sessions
+automatically" switch off means no title call ever. The timeout stands the
+row down without giving the job up: the placeholder falls back to the first
+prompt at the deadline, and a reply that lands later still harvests through
+the same free read and lands exactly like an in-time answer — dropped only
+if the session is gone or has since been named, never retried into a second
+generation, since the turn is already paid for. `--steps title-pending` /
+`title-timeout` / `title-land:<text>` stub the in-flight, stood-down and
+landed states for captures, free.
 The derived title is the transcript's earliest user prompt — earliest recorded
 submission, then earliest folded user turn, first line, through the same
 one-line cap — or the first shell command when the session has no user text
@@ -481,7 +488,7 @@ sidebar. The window-level
 `show-archived`, `projects`, `project:<path>`, `project-menu[:<name>]`,
 `project-colour:<n>`, `group-by:<date|project>`, `group-bar`,
 `group-branch`, `group-chevron`, `auto-title`, `auto-summary`,
-`title-pending`, `title-land:<text>`, `remove-project:<name>` and
+`title-pending`, `title-timeout`, `title-land:<text>`, `remove-project:<name>` and
 `remove-confirm`, beside the older `search`,
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 

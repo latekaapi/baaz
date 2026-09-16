@@ -22,6 +22,11 @@
 //! * failure is silent and cheap: a timeout ([`TITLE_TIMEOUT_SECS`]), a wire
 //!   error, or a missing model falls back to today's first-prompt label.
 //!   One log line, never a dialog, at most one retry per session.
+//! * a reply that lands after the timeout stood the job down is still
+//!   harvested ([`should_land_late`]): the turn is already paid for, so a
+//!   free `session/read` lands it exactly like an in-time answer — dropped
+//!   only when the session is gone or has since been named, and never
+//!   retried into a second generation ([`should_retry_title`]).
 //!
 //! Spend: one short turn per unnamed session, against the login's tier —
 //! never on resume, reconnect, replay, restart, or a second turn. The
@@ -38,24 +43,49 @@ use crate::sessions::SessionMeta;
 /// the server default — the send path never hard-fails on a model id.
 pub const TITLE_MODEL_ID: &str = "muse-spark-1.3";
 
-/// How long a title turn may run before the app stops waiting for it: ~20 s.
-/// (Side sessions are recognised by explicit record, not by id shape — see
-/// [`side_session_id`] — so no prefix constant lives here to document.)
-/// A 10-token title reply on subscription completes in a few seconds, so 20 s
-/// is several times over a healthy turn — long enough to ride out one slow
-/// tail, short enough that a stuck side session is reaped (hidden, and the
-/// row falls back to the first prompt) while the person is still reading the
-/// real turn's first tokens. Nothing ever waits on it: the real turn does
-/// not block, the row shows the pending placeholder meanwhile, and a late
-/// `turn/completed` after the deadline is ignored rather than retried, so a
-/// timeout can never double-bill.
-pub const TITLE_TIMEOUT_SECS: u64 = 20;
+/// How long a title turn may run before the app stops waiting for it: 90 s.
+///
+/// Grounded in this login's own side-session logs, not a guess. The billed
+/// title turn of 2026-09-17 ran 20_673 ms server-side — its answer text
+/// committed at 3_409 ms while the end-of-turn gate ate the other 17_102 ms —
+/// so the old 20 s ceiling stood the job down a fraction of a second before
+/// `turn/completed` arrived and the paid-for answer was discarded. The real
+/// turn beside it ran 36_774 ms, and another real turn on 2026-09-16 ran
+/// 20_760 ms: the slow tail is server-side (first token to gate), not prompt
+/// length, so a short title prompt earns no shorter ceiling. 90 s clears the
+/// slowest turn seen (~2.5×) and the title sample (~4×) while still reaping
+/// a stuck side session: the row falls back to the first prompt at the
+/// deadline, and a reply that lands later is harvested, never retried (see
+/// [`should_land_late`]), so a timeout can never double-bill. Nothing ever
+/// waits on it: the real turn does not block, and the row shows the pending
+/// placeholder meanwhile.
+pub const TITLE_TIMEOUT_SECS: u64 = 90;
 
 /// Attempts per session, total, this run: the first try plus at most one
 /// retry on a wire error. A timeout never retries (the turn may still be
-/// running server-side). Across restarts the persisted `title_attempted`
-/// marker holds the line at one.
+/// running server-side), and neither does a late harvest after a stand-down
+/// (the turn is already paid for — see [`should_retry_title`]). Across
+/// restarts the persisted `title_attempted` marker holds the line at one.
 pub const TITLE_MAX_ATTEMPTS: u8 = 2;
+
+/// Whether a failed title attempt earns the one retry: an in-time failure on
+/// the first try does, nothing else. A stand-down — the watchdog's timeout,
+/// or a harvest running after one — never retries: the turn may still be
+/// running server-side (timeout) or is already paid for (late harvest), so
+/// another `turn/start` would double-bill a turn this session already owns.
+pub fn should_retry_title(tries: u8, stood_down: bool) -> bool {
+    !stood_down && tries < TITLE_MAX_ATTEMPTS
+}
+
+/// The naming half of the late-harvest question: a stood-down reply still
+/// applies unless the session has since been named. `None` is "nothing
+/// known" (landing would mint a stray override for a dead id); a user-given
+/// name wins over a generated title, so naming one wins over landing one.
+/// The caller additionally requires the row itself to still exist — an
+/// override can outlive a closed session, and that is gone too.
+pub fn should_land_late(meta: Option<&SessionMeta>) -> bool {
+    meta.is_some_and(|meta| meta.name.is_none())
+}
 
 /// The title prompt carries the gist, not the transcript: the first message
 /// past this many characters is cut. Bounds the billed prompt to ~200
@@ -198,6 +228,58 @@ mod tests {
     fn an_attempt_is_forever_one_run_later() {
         let meta = meta_with(None, None, true);
         assert!(!should_title(true, true, Some(&meta), 0, false));
+    }
+
+    #[test]
+    fn the_timeout_clears_the_slowest_turn_seen() {
+        // Grounded 2026-09-17: the billed title turn ran 20_673 ms, the real
+        // turns beside it 36_774 ms and 20_760 ms — so 90 s (≈2.5× the
+        // slowest, ≈4× the title sample), still a stuck-job guard.
+        assert_eq!(TITLE_TIMEOUT_SECS, 90);
+    }
+
+    #[test]
+    fn a_late_answer_lands_on_a_live_unnamed_session() {
+        let meta = meta_with(None, None, true);
+        assert!(should_land_late(Some(&meta)));
+    }
+
+    #[test]
+    fn a_late_answer_is_dropped_once_the_session_is_named() {
+        let meta = meta_with(Some("Ship it"), None, true);
+        assert!(!should_land_late(Some(&meta)));
+    }
+
+    #[test]
+    fn a_late_answer_is_dropped_when_the_session_is_gone() {
+        assert!(!should_land_late(None));
+    }
+
+    #[test]
+    fn an_in_time_failure_retries_once_on_the_first_try() {
+        assert!(should_retry_title(1, false));
+        assert!(!should_retry_title(2, false));
+    }
+
+    #[test]
+    fn a_timeout_never_retries_on_any_try() {
+        assert!(!should_retry_title(1, true));
+        assert!(!should_retry_title(2, true));
+    }
+
+    #[test]
+    fn a_late_harvest_never_retries_the_paid_for_turn() {
+        assert!(!should_retry_title(1, true));
+        assert!(!should_retry_title(TITLE_MAX_ATTEMPTS, true));
+    }
+
+    #[test]
+    fn the_once_ever_marker_outlives_any_retry_budget() {
+        // A stand-down keeps the job for a late harvest but never clears the
+        // marker: whatever the try count, an attempted session earns nothing.
+        let meta = meta_with(None, None, true);
+        assert!(!should_title(true, true, Some(&meta), 0, false));
+        assert!(!should_retry_title(TITLE_MAX_ATTEMPTS, true));
     }
 
     #[test]
