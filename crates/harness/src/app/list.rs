@@ -547,10 +547,16 @@ impl Harness {
         });
     }
 
-    /// F10. The open session's transcript may name it when nothing else does.
+    /// F10. The open session's transcript may name it when nothing else does:
+    /// the first thing the person said, never a command the agent ran. The
+    /// first shell command is only the fallback for a session with no user
+    /// text at all (a shell-only session).
     ///
     /// Free — the fold is in memory — and the one path that reaches a session
-    /// whose history the server will not serve to a `session/read`.
+    /// whose history the server will not serve to a `session/read`. The
+    /// answer lands in `derived_title`, so the next rejoin keeps the label
+    /// a `turn/started` already gave the row (a fresh session reads "New
+    /// session" with its reply as the preview until this runs).
     pub(super) fn title_from_transcript(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
@@ -562,7 +568,13 @@ impl Harness {
         if has_title {
             return;
         }
-        let Some(title) = view.read(cx).first_shell_title() else { return };
+        let view = view.read(cx);
+        // Either form is cut the row's own way: overlong shell commands used
+        // to fill the crumb and the row uncut.
+        let title = view
+            .first_user_title()
+            .or_else(|| view.first_shell_title().map(|shell| crate::sidebar::one_line(&shell)));
+        let Some(title) = title else { return };
         self.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
     }
 }

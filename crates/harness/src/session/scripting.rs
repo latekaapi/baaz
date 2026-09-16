@@ -206,7 +206,28 @@ impl SessionView {
         })
     }
 
+    /// F10. The transcript's own first user prompt, as a title: a session is
+    /// named after what the person said, never after a command the agent
+    /// ran. The newest submission is not the question — the earliest is —
+    /// so this reads the fold's map oldest-first where `first_prompt_text`
+    /// reads it newest-first for the local row.
+    ///
+    /// The fold is already in memory, so this costs nothing at all — and it
+    /// reaches the case `session/read` cannot, because the history of a session
+    /// nobody has loaded is not served.
+    pub fn first_user_title(&self) -> Option<String> {
+        let session = self.session()?;
+        let mut submissions: Vec<&str> = Vec::new();
+        if let Some(side) = self.fold.side(&self.session_id) {
+            submissions.extend(side.command_text.values().map(String::as_str));
+        }
+        crate::sessions::first_user_title(&submissions, &session.turns)
+    }
+
     /// F10. The first shell command in this session's transcript, as a title.
+    ///
+    /// Only the fallback for a session with no user text at all (a
+    /// shell-only session): [`Self::first_user_title`] answers first.
     ///
     /// The fold is already in memory, so this costs nothing at all — and it
     /// reaches the case `session/read` cannot, because the history of a session

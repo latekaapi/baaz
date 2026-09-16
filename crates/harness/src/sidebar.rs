@@ -97,8 +97,10 @@ impl SessionEntry {
     /// 5. the index's `session_name`;
     /// 6. the index's generated `title`;
     /// 7. the index's `first_user_prompt`;
-    /// 8. the first `userShell` command, cached in the store by the
-    ///    application after a `session/read`;
+    /// 8. the transcript's first user prompt — else its first `userShell`
+    ///    command when the session has no user text at all — cached in the
+    ///    store by the application after a `session/read` or straight from
+    ///    the open transcript;
     /// 9. [`UNNAMED`].
     ///
     /// The session id is never a title. "Session 01a081ef" tells a person
@@ -655,8 +657,9 @@ fn parse_time(rfc3339: &str) -> DateTime<Local> {
 }
 
 /// Sidebar rows are one line: a prompt's newlines become spaces and a very long
-/// one is cut where the row would truncate it anyway.
-fn one_line(text: &str) -> String {
+/// one is cut where the row would truncate it anyway. The one truncation
+/// convention: derived titles reuse it rather than cutting their own way.
+pub(crate) fn one_line(text: &str) -> String {
     let flattened: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flattened.chars().count() <= 80 {
         return flattened;
