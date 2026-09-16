@@ -113,10 +113,10 @@ impl Harness {
     }
 
     /// The adoptions in sidebar order: pinned first, then name, never
-    /// recency (owner round 4, O1). What the project menu and the Projects
-    /// palette both list.
+    /// recency (owner round 4, O1) — minus the adoptions whose root is gone.
+    /// What the project menu and the Projects palette both list.
     pub(crate) fn ordered_projects(&self) -> Vec<crate::projects::Project> {
-        self.projects.sorted().into_iter().cloned().collect()
+        self.projects.sorted_available().into_iter().cloned().collect()
     }
 
     /// Pick a project from its menu row: when the active session is an
@@ -200,7 +200,7 @@ impl Harness {
     /// The removal dialog's Remove button, or the `remove-confirm` step:
     /// forget the adoption, clear the project off its sessions (so a later
     /// re-add resolves them by root), hand current to the most recently
-    /// opened remaining adoption, and regroup.
+    /// opened remaining adoption whose root is on disk, and regroup.
     pub(crate) fn confirm_remove_project(&mut self, cx: &mut Context<Self>) {
         let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
             (d.action == crate::overlays::DialogAction::RemoveProject)
@@ -219,7 +219,7 @@ impl Harness {
         // The current project is gone: the most recently opened remaining
         // adoption takes it, or nothing does.
         if self.current_project.as_deref() == Some(id.as_str()) {
-            let next = self.projects.most_recent().map(|p| p.id.clone());
+            let next = self.projects.most_recent_available().map(|p| p.id.clone());
             self.projects.current = next.clone();
             self.current_project = next;
         }

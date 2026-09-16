@@ -76,6 +76,17 @@ fn default_colour() -> u8 {
     1
 }
 
+/// How long a root-exists answer is trusted before the disk is asked again:
+/// short enough that a deleted worktree leaves the sidebar promptly, long
+/// enough that rendering never stats the disk per frame. The list refresh
+/// rechecks every adoption off the UI thread regardless of this.
+const EXISTS_TTL_SECS: u64 = 30;
+
+/// Now as whole seconds since the epoch, for [`EXISTS_TTL_SECS`].
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_secs()).unwrap_or(0)
+}
+
 /// The whole store: the schema version, the current project, and the
 /// adoptions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,11 +101,18 @@ pub struct Projects {
     /// The adoptions, in adoption order.
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Root-exists answers per project id: `(exists, checked_at_secs)`.
+    /// Memory only — never serialized, so a missing root stays adopted in
+    /// `projects.json` and comes back when the path does. Compared by the
+    /// derive like any field; both sides start empty and every read fills
+    /// its own.
+    #[serde(skip)]
+    existence: std::cell::RefCell<std::collections::HashMap<String, (bool, u64)>>,
 }
 
 impl Default for Projects {
     fn default() -> Self {
-        Self { version: VERSION, current: None, projects: Vec::new() }
+        Self { version: VERSION, current: None, projects: Vec::new(), existence: Default::default() }
     }
 }
 
@@ -213,6 +231,8 @@ impl Projects {
         if self.current.as_deref() == Some(id) {
             self.current = None;
         }
+        // A re-adopted id must not inherit the old answer.
+        self.existence.get_mut().remove(id);
         self.projects.len() != before
     }
 
@@ -221,12 +241,6 @@ impl Projects {
         if let Some(project) = self.projects.iter_mut().find(|p| p.id == id) {
             project.last_opened_at = now_utc();
         }
-    }
-
-    /// The most recently opened adoption, for boot when no stored current
-    /// survives.
-    pub fn most_recent(&self) -> Option<&Project> {
-        self.projects.iter().max_by_key(|p| p.last_opened_at.clone())
     }
 
     /// Which project a session belongs to: its stored project id when that
@@ -251,8 +265,8 @@ impl Projects {
     /// created, opened, or got a turn. No drag reorder.
     ///
     /// `last_opened_at` and `added_at` stay on the record for
-    /// [`Projects::most_recent`] (the boot fallback) and for a future
-    /// `projectOrder` — but they decide nothing about this order.
+    /// [`Projects::most_recent_available`] (the boot fallback) and for a
+    /// future `projectOrder` — but they decide nothing about this order.
     pub fn sorted(&self) -> Vec<&Project> {
         let mut out: Vec<&Project> = self.projects.iter().collect();
         out.sort_by(|a, b| {
@@ -263,6 +277,94 @@ impl Projects {
                 .then_with(|| a.id.cmp(&b.id))
         });
         out
+    }
+
+    /// Whether the adoption's root is on disk: a deleted worktree, an
+    /// unmounted volume and a detached worktree all read false, and the
+    /// adoption itself is untouched — it comes back when the path does.
+    ///
+    /// The answer is cached per project for [`EXISTS_TTL_SECS`], so frames
+    /// never touch the disk; the list refresh rechecks every adoption off
+    /// the UI thread (see [`Projects::refresh_availability`]) regardless.
+    /// Purely a read: it never writes `projects.json`.
+    pub fn is_available(&self, id: &str) -> bool {
+        let now = now_secs();
+        if let Some(&(exists, at)) = self.existence.borrow().get(id) {
+            if now.saturating_sub(at) < EXISTS_TTL_SECS {
+                return exists;
+            }
+        }
+        let exists = self.find(id).is_some_and(|project| project.root.is_dir());
+        self.existence.borrow_mut().insert(id.to_owned(), (exists, now));
+        exists
+    }
+
+    /// Record root-exists answers computed off the UI thread (the list
+    /// refresh stats every root beside the branch reads), resetting their
+    /// TTL. Answers for forgotten adoptions are dropped, so the cache never
+    /// outgrows the store. Memory only, like every other existence answer:
+    /// it never writes `projects.json`.
+    pub fn refresh_availability(&mut self, answers: &std::collections::HashMap<String, bool>) {
+        let now = now_secs();
+        let cache = self.existence.get_mut();
+        for (id, exists) in answers {
+            cache.insert(id.clone(), (*exists, now));
+        }
+        cache.retain(|id, _| self.projects.iter().any(|project| &project.id == id));
+    }
+
+    /// The adoption when its root is on disk; a missing root is not shown
+    /// anywhere, but stays adopted.
+    pub fn find_available(&self, id: &str) -> Option<&Project> {
+        self.find(id).filter(|project| self.is_available(&project.id))
+    }
+
+    /// [`Projects::sorted`], minus the adoptions whose root is gone: what
+    /// the sidebar, the Projects palette, the project menu and the rail
+    /// list. Sessions of a skipped project resolve nowhere (see
+    /// [`Projects::resolve_available`]) and fall back to "Other workspaces"
+    /// like any unadopted workspace.
+    pub fn sorted_available(&self) -> Vec<&Project> {
+        self.sorted().into_iter().filter(|project| self.is_available(&project.id)).collect()
+    }
+
+    /// The most recently opened adoption whose root is on disk: the boot
+    /// and removal fallbacks skip a missing current rather than showing it.
+    pub fn most_recent_available(&self) -> Option<&Project> {
+        self.projects
+            .iter()
+            .filter(|project| self.is_available(&project.id))
+            .max_by_key(|project| project.last_opened_at.clone())
+    }
+
+    /// The current adoption when its root is on disk, else the most
+    /// recently opened one that is: a missing root is never current, but
+    /// stays adopted, so it resumes being current when the path does — if
+    /// nothing in between claimed it.
+    pub fn effective_current(&self) -> Option<&Project> {
+        self.current.as_deref().and_then(|id| self.find_available(id)).or_else(|| self.most_recent_available())
+    }
+
+    /// [`Projects::resolve`], but a missing root resolves nowhere: the row
+    /// falls back to "Other workspaces" while the adoption — and the
+    /// session's stored project id — stay put, so the session regroups
+    /// under its project when the path comes back.
+    pub fn resolve_available(
+        &self,
+        workspace_root: Option<&str>,
+        meta_project: Option<&str>,
+    ) -> Option<&Project> {
+        if let Some(id) = meta_project {
+            if let Some(project) = self.find_available(id) {
+                return Some(project);
+            }
+        }
+        let root = workspace_root.filter(|s| !s.is_empty())?;
+        let canonical = canonical_path(Path::new(root));
+        self.projects
+            .iter()
+            .filter(|project| self.is_available(&project.id))
+            .find(|project| canonical_path(&project.root) == canonical)
     }
 }
 
@@ -478,16 +580,23 @@ mod tests {
 
     #[test]
     fn touching_bumps_last_opened_and_most_recent_follows() {
+        let base = state_dir("most-recent");
+        for child in ["a", "b"] {
+            std::fs::create_dir_all(base.join(child)).expect("temp dir");
+        }
         let mut projects = Projects::default();
-        projects.projects.push(project_with("/work/a", 1, false));
-        projects.projects[0].id = "aaa".into();
-        projects.projects[0].last_opened_at = "2020-01-01T00:00:00Z".into();
-        projects.projects.push(project_with("/work/b", 2, false));
-        projects.projects[1].id = "bbb".into();
-        projects.projects[1].last_opened_at = "2021-01-01T00:00:00Z".into();
-        assert_eq!(projects.most_recent().map(|p| p.id.as_str()), Some("bbb"));
+        let mut a = project_with(base.join("a").to_str().expect("utf8"), 1, false);
+        a.id = "aaa".into();
+        a.last_opened_at = "2020-01-01T00:00:00Z".into();
+        projects.projects.push(a);
+        let mut b = project_with(base.join("b").to_str().expect("utf8"), 2, false);
+        b.id = "bbb".into();
+        b.last_opened_at = "2021-01-01T00:00:00Z".into();
+        projects.projects.push(b);
+        assert_eq!(projects.most_recent_available().map(|p| p.id.as_str()), Some("bbb"));
         projects.touch("aaa");
-        assert_eq!(projects.most_recent().map(|p| p.id.as_str()), Some("aaa"));
+        assert_eq!(projects.most_recent_available().map(|p| p.id.as_str()), Some("aaa"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Pinned first whatever the stamps say, then name order: the one
@@ -654,5 +763,116 @@ mod tests {
         let params = start_params(&projects, Some(&id), "meta", Some(ApprovalMode::AllowAll)).expect("params");
         assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two adoptions on disk, one whose root is gone: the store keeps both,
+    /// every listing shows one. The base name is per test: parallel tests
+    /// must never share a temp dir one of them removes at the end.
+    fn availability_store(name: &str) -> (PathBuf, Projects) {
+        let base = state_dir(name);
+        let here = base.join("here");
+        std::fs::create_dir_all(&here).expect("temp dir");
+        let mut projects = Projects::default();
+        let mut present = project_with(here.to_str().expect("utf8"), 1, false);
+        present.id = "present".into();
+        present.name = "present".into();
+        projects.projects.push(present);
+        // Never created: the deleted worktree.
+        let mut gone = project_with(base.join("gone").to_str().expect("utf8"), 2, false);
+        gone.id = "gone".into();
+        gone.name = "gone".into();
+        gone.last_opened_at = "2026-09-14T10:00:00Z".into();
+        projects.projects.push(gone);
+        (base, projects)
+    }
+
+    #[test]
+    fn a_missing_root_is_skipped_but_stays_adopted() {
+        let (base, projects) = availability_store("availability-skipped");
+        // The store still holds both: hiding is a listing rule, and a folder
+        // on an unmounted volume comes back when the path does.
+        assert_eq!(projects.projects.len(), 2);
+        assert!(projects.find("gone").is_some());
+        // Every listing shows one.
+        assert!(!projects.is_available("gone"));
+        assert!(projects.is_available("present"));
+        assert!(projects.find_available("gone").is_none());
+        let listed: Vec<&str> = projects.sorted_available().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(listed, vec!["present"]);
+        // The pure order is untouched: `sorted` still names both.
+        assert_eq!(projects.sorted().len(), 2);
+        // Sessions of the missing root resolve nowhere — "Other workspaces".
+        assert!(projects.resolve_available(Some("gone-root"), Some("gone")).is_none());
+        assert!(projects.resolve_available(Some(projects.projects[1].root.to_str().expect("utf8")), None).is_none());
+        // A present root resolves exactly as before.
+        let root = projects.projects[0].root.to_str().expect("utf8").to_owned();
+        assert_eq!(
+            projects.resolve_available(Some(&root), None).map(|p| p.id.as_str()),
+            projects.resolve(Some(&root), None).map(|p| p.id.as_str()),
+        );
+        assert_eq!(projects.resolve_available(Some(&root), None).map(|p| p.id.as_str()), Some("present"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn filtering_writes_nothing_back_to_the_store() {
+        let dir = state_dir("availability-quiet");
+        let (guard, old) = with_state_dir(&dir);
+        let (base, projects) = availability_store("availability-quiet-store");
+        write(&projects);
+        let before = std::fs::read(path()).expect("projects.json");
+        // Every read in the listing path, twice over for the cache.
+        let _ = projects.sorted_available();
+        let _ = projects.sorted_available();
+        let _ = projects.resolve_available(None, Some("gone"));
+        let _ = projects.most_recent_available();
+        let _ = projects.effective_current();
+        assert_eq!(std::fs::read(path()).expect("projects.json"), before);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
+        restore_state_dir(guard, old);
+    }
+
+    #[test]
+    fn a_missing_current_falls_back_to_the_most_recent_present_root() {
+        let (base, mut projects) = availability_store("availability-current");
+        projects.current = Some("gone".into());
+        assert_eq!(projects.effective_current().map(|p| p.id.as_str()), Some("present"));
+        // Nothing on disk: no current at all, but the adoptions survive.
+        std::fs::remove_dir_all(base.join("here")).expect("remove root");
+        // A fresh store: the removed root reads missing even though nothing
+        // rechecked it in between (no stale positive from the earlier read).
+        let cold = Projects { projects: projects.projects.clone(), ..Projects::default() };
+        assert!(cold.effective_current().is_none());
+        assert_eq!(cold.projects.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_refresh_resets_a_stale_answer_and_prunes_the_forgotten() {
+        let base = state_dir("availability-refresh");
+        let root = base.join("ws");
+        let mut projects = Projects::default();
+        let mut project = project_with(root.to_str().expect("utf8"), 1, false);
+        project.id = "ws".into();
+        projects.projects.push(project);
+        // Missing, and the negative answer sticks inside the TTL.
+        assert!(!projects.is_available("ws"));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        assert!(!projects.is_available("ws"), "the TTL holds the stale answer");
+        // The list refresh rechecks off-thread: its answers reset the TTL.
+        let mut answers = std::collections::HashMap::new();
+        answers.insert("ws".to_owned(), true);
+        answers.insert("forgotten".to_owned(), true);
+        projects.refresh_availability(&answers);
+        assert!(projects.is_available("ws"));
+        // Forgetting drops the adoption and its answer: a re-added id starts cold.
+        assert!(projects.remove("ws"));
+        let mut project = project_with(root.to_str().expect("utf8"), 1, false);
+        project.id = "ws".into();
+        projects.projects.push(project);
+        std::fs::remove_dir_all(&root).expect("remove root");
+        assert!(!projects.is_available("ws"), "no stale positive survives forgetting");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

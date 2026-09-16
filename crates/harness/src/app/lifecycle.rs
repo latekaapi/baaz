@@ -165,18 +165,23 @@ impl Harness {
                 }
             }
             // The branch behind every project group row, read while already
-            // off the UI thread.
+            // off the UI thread — and the root-exists answers beside them,
+            // so the refresh rechecks every adoption without touching the
+            // disk on the UI thread.
             let mut branches = HashMap::new();
+            let mut availability = HashMap::new();
             for project in &projects.projects {
                 if let Some(branch) = crate::projects::branch_of(&project.root) {
                     branches.insert(project.id.clone(), branch);
                 }
+                availability.insert(project.id.clone(), project.root.is_dir());
             }
-            Ok::<_, MuseError>((sessions, branches))
+            Ok::<_, MuseError>((sessions, branches, availability))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
             this.sessions_loaded = true;
-            if let Ok((sessions, branches)) = result {
+            if let Ok((sessions, branches, availability)) = result {
+                this.projects.refresh_availability(&availability);
                 this.invalidate_list();
                 let projects = this.projects.clone();
                 let wire: Vec<SessionEntry> = sessions
@@ -547,9 +552,11 @@ impl Harness {
             // entry, including local and replayed ones, whose labels keep
             // their own rules below.
             let meta = self.overrides.get(&entry.id);
+            // A missing root resolves nowhere: the row falls back to "Other
+            // workspaces" while the adoption stays in the store.
             entry.project = self
                 .projects
-                .resolve(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()))
+                .resolve_available(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()))
                 .map(|p| p.id.clone());
             if entry.local {
                 // A local row predates the wire list: no index or store
@@ -626,13 +633,15 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = project.as_deref().filter(|id| self.projects.find(id).is_some()) {
+        if let Some(id) = project.as_deref().filter(|id| self.projects.find_available(id).is_some()) {
             self.projects.touch(id);
             self.projects.current = Some(id.to_owned());
             self.current_project = Some(id.to_owned());
             projects::write(&self.projects);
         }
-        let current = self.current_project_id();
+        // A missing root is nowhere to start: fall back to the effective
+        // current (a missing current is never current), or start nothing.
+        let current = self.current_project().map(|project| project.id.clone());
         // A live draft in the target project is the session: reopen its view
         // without touching the wire.
         if let Some(id) = current.clone() {
@@ -1051,7 +1060,8 @@ impl Harness {
     /// opening a session must not reorder the groups (owner round 4, O1).
     /// The touch that remains is in [`Self::new_session_in`] (a new session
     /// is itself the freshest thing about its project) and in `adopt_root`,
-    /// and both feed only [`Projects::most_recent`](crate::projects::Projects::most_recent)
+    /// and both feed only the boot and removal fallbacks
+    /// ([`Projects::most_recent_available`](crate::projects::Projects::most_recent_available))
     /// now.
     fn adopt_session_project(&mut self, session_id: &str) {
         let project = self
