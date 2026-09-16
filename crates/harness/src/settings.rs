@@ -1,20 +1,37 @@
 //! The Settings dialog (⌘,, File → Settings…, the account menu's
 //! "Settings…" row, `--steps settings[:<section>]`).
 //!
-//! The three sidebar flags stay in `layout.json` — there is no second store.
+//! The five sidebar flags stay in `layout.json` — there is no second store.
 //! [`crate::app::Harness::settings_sections`] builds the dialog's sections
 //! from that state every frame, and the dialog's `on_switch` intent flips
 //! the matching layout field back through [`crate::layout::write`].
 //!
 //! Extensibility: a later section is one more arm in
-//! [`crate::app::Harness::settings_sections`] and one more id in
-//! [`crate::app::Harness::flip_setting`].
+//! [`crate::app::Harness::settings_sections`], one more id in
+//! [`apply_setting`], and one more row below.
 
 use aui::overlay::{popover_layer, settings_dialog, SettingsRow, SettingsSection};
 use gpui::{prelude::*, AnyElement, Context, SharedString};
 
 use crate::app::Harness;
+use crate::layout::Layout;
 use crate::overlays::Settings;
+
+/// Flip one Sidebar switch in `layout` by row id. `false` is an unknown id,
+/// ignored by every caller. Pure, so tests drive it without a window;
+/// [`Harness::flip_setting`] and the `auto-*` step verbs persist the layout
+/// and redraw around it.
+pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
+    match id {
+        "group_chevron" => layout.group_chevron = on,
+        "group_bar" => layout.group_bar = on,
+        "group_branch" => layout.group_branch = on,
+        "auto_title" => layout.auto_title = on,
+        "auto_summary" => layout.auto_summary = on,
+        _ => return false,
+    }
+    true
+}
 
 impl Harness {
     /// Every section of the Settings dialog, built from state each frame.
@@ -43,6 +60,22 @@ impl Harness {
                     label: SharedString::from("Branch name"),
                     detail: Some(SharedString::from("Show each project's git branch on its row")),
                     on: self.layout.group_branch,
+                },
+                SettingsRow::Switch {
+                    id: SharedString::from("auto_title"),
+                    label: SharedString::from("Name sessions automatically"),
+                    detail: Some(SharedString::from(
+                        "Spend one cheap call naming a new session after its first message",
+                    )),
+                    on: self.layout.auto_title,
+                },
+                SettingsRow::Switch {
+                    id: SharedString::from("auto_summary"),
+                    label: SharedString::from("Summarise sessions in the sidebar"),
+                    detail: Some(SharedString::from(
+                        "Show the last request beside the last reply; rewrite poor ones",
+                    )),
+                    on: self.layout.auto_summary,
                 },
             ],
         }]
@@ -80,14 +113,34 @@ impl Harness {
 
     /// Flip one Settings switch by its row id and persist it.
     ///
-    /// Unknown ids are ignored: a later section adds its own arm here.
+    /// Unknown ids are ignored: a later section adds its own id to
+    /// [`apply_setting`].
     pub(crate) fn flip_setting(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
-        match id {
-            "group_chevron" => self.layout.group_chevron = on,
-            "group_bar" => self.layout.group_bar = on,
-            "group_branch" => self.layout.group_branch = on,
-            _ => return,
+        if !apply_setting(&mut self.layout, id, on) {
+            return;
         }
+        crate::layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `auto-title`: flip the automatic-naming switch and persist it. The
+    /// switch itself lives in the Settings dialog's Sidebar section; this
+    /// verb is what captures flip. Off means no title model call ever.
+    pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) {
+        let on = !self.layout.auto_title;
+        apply_setting(&mut self.layout, "auto_title", on);
+        crate::layout::write(&self.layout);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// `auto-summary`: flip the sidebar-summaries switch and persist it.
+    /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
+    /// the ladder's preview rung still fills every second line.
+    pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) {
+        let on = !self.layout.auto_summary;
+        apply_setting(&mut self.layout, "auto_summary", on);
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
@@ -163,5 +216,43 @@ mod tests {
         let sections = sections();
         assert_eq!(settings_section_index(&sections, "sidebar"), 0);
         assert_eq!(settings_section_index(&sections, "appearance"), 1);
+    }
+
+    /// Every Sidebar switch flips by row id, including the two auto
+    /// switches — and an unknown id is ignored, never a new field by
+    /// accident.
+    #[test]
+    fn every_sidebar_switch_flips_by_id() {
+        let mut layout = Layout::default();
+        assert!(apply_setting(&mut layout, "group_chevron", true));
+        assert!(layout.group_chevron);
+        assert!(apply_setting(&mut layout, "group_bar", true));
+        assert!(layout.group_bar);
+        assert!(apply_setting(&mut layout, "group_branch", true));
+        assert!(layout.group_branch);
+        assert!(apply_setting(&mut layout, "auto_title", false));
+        assert!(!layout.auto_title);
+        assert!(apply_setting(&mut layout, "auto_summary", false));
+        assert!(!layout.auto_summary);
+        assert!(!apply_setting(&mut layout, "nope", true));
+    }
+
+    /// Off means no model call ever for that feature: the flipped layout
+    /// straight into both pure decisions.
+    #[test]
+    fn a_switch_off_blocks_its_model_call() {
+        let mut layout = Layout::default();
+        apply_setting(&mut layout, "auto_title", false);
+        assert!(!crate::titles::should_title(layout.auto_title, true, None, 0, "s"));
+        apply_setting(&mut layout, "auto_summary", false);
+        assert!(!crate::byline::should_rewrite(
+            layout.auto_summary,
+            false,
+            true,
+            (None, None),
+            (Some("fix it"), None),
+            None,
+            std::time::Instant::now(),
+        ));
     }
 }
