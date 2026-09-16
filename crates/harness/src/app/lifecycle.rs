@@ -78,6 +78,13 @@ struct FixtureSession {
     /// `running` for a live session, anything else for a settled one.
     #[serde(default = "fixture_settled")]
     status: String,
+    /// A generated title in flight: the row reads the pending placeholder.
+    #[serde(rename = "titlePending", default)]
+    title_pending: bool,
+    /// The row's preview line, standing in for the last summary a live row
+    /// would carry.
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 /// [`FixtureSession::status`] without the field: settled, never running.
@@ -122,6 +129,10 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     // blank it back to the fallback.
     entry.label = row.label.clone();
     entry.replayed = true;
+    entry.title_pending = row.title_pending;
+    if let Some(summary) = row.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entry.description = summary.to_owned();
+    }
     entry
 }
 
@@ -602,7 +613,12 @@ impl Harness {
             entry.hidden = meta.is_some_and(|m| m.hidden);
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
-            entry.description = sidebar::describe(meta, index, text, user_named);
+            // A fixture or replayed row names its own preview the way it
+            // names its label: no store or index source speaks for a
+            // scripted id, so a rejoin must not blank it either.
+            if !entry.replayed {
+                entry.description = sidebar::describe(meta, index, text, user_named);
+            }
             entry.named = name.is_some();
         }
     }
