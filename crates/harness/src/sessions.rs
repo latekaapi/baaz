@@ -54,6 +54,16 @@ pub struct SessionMeta {
     /// retry budget of one is enforced per session, not per run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_attempted: bool,
+    /// One of this app's throwaway title/summary side sessions. The explicit
+    /// record behind the hide rule: written (with `hidden`) the moment the
+    /// side id is minted — before `session/start` runs — so a crash between
+    /// the start and the hide still hides by record after a restart, and a
+    /// restart mid-flight still hides, counts, indexes and titles nothing.
+    /// muse 1.3.0 rejects any `session/start` id that is not its own id
+    /// shape, so the id carries no namespace to match on; this flag is the
+    /// only recognition.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub side_session: bool,
     /// Pinned to the top of the sidebar's date view, in its own group.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -89,6 +99,7 @@ impl SessionMeta {
             && self.derived_title.is_none()
             && self.generated_title.is_none()
             && !self.title_attempted
+            && !self.side_session
             && !self.pinned
             && !self.archived
             && self.last_summary.is_none()

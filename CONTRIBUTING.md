@@ -101,4 +101,8 @@ HARNESS_STATE_DIR="$(mktemp -d)" cargo run -p harness -- \
 
 See `docs/03-composer.md` and `docs/04-approvals.md` for the full step-verb
 tables, and `scripts/captures.sh` for the capture set this project's own
-docs and tests are built from.
+docs and tests are built from. Two transcript verbs hold a highlight for a
+screenshot without touching the pointer: `select-text:<turn>:<from>-<to>`
+(the turn's first paragraph, byte offsets clamped to it) and
+`select-span:<turn>` (the whole turn as one cross-block span — paragraph,
+list and code block in one highlight).

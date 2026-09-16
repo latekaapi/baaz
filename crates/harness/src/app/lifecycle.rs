@@ -213,7 +213,7 @@ impl Harness {
                         );
                         // Pending rows read pending; side sessions read
                         // hidden — even before their override writes land.
-                        Harness::apply_title_flags(&this.titles_pending, &mut entry);
+                        Harness::apply_title_flags(&this.titles_pending, &this.side_sessions, &mut entry);
                         entry
                     })
                     .collect();
@@ -627,9 +627,10 @@ impl Harness {
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
             // A generation in flight still reads pending after the rejoin,
-            // and a side session still reads hidden — even when a restart
-            // lost the override write that said so.
-            Self::apply_title_flags(&self.titles_pending.clone(), entry);
+            // and a side session still reads hidden — even before its
+            // override write lands (the persisted `hidden` flag carries a
+            // restart).
+            Self::apply_title_flags(&self.titles_pending.clone(), &self.side_sessions.clone(), entry);
             // A fixture or replayed row names its own preview the way it
             // names its label: no store or index source speaks for a
             // scripted id, so a rejoin must not blank it either.

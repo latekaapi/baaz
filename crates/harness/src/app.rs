@@ -519,6 +519,13 @@ pub struct Harness {
     /// the pending placeholder until the title lands or the attempt stands
     /// down (auto-titles).
     pub(crate) titles_pending: HashSet<String>,
+    /// Every throwaway title/summary side session id this run minted, plus
+    /// every `side_session` override the store held at boot. The explicit
+    /// record behind the hide rule: `is_side_session` reads this and the
+    /// persisted flag, never the id shape (muse 1.3.0 rejects any
+    /// `session/start` id that is not its own uuid shape, so side ids carry
+    /// no namespace to match on).
+    pub(crate) side_sessions: HashSet<String>,
     /// Side session id → the generation it serves. Harvested off
     /// `turn/completed`, reaped by the watchdog.
     pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
@@ -696,6 +703,7 @@ impl Harness {
             show_empty: false,
             show_archived: false,
             titles_pending: HashSet::new(),
+            side_sessions: HashSet::new(),
             title_jobs: HashMap::new(),
             byline_jobs: HashMap::new(),
             byline_live: HashSet::new(),
@@ -762,6 +770,14 @@ impl Harness {
             }
         }));
         this.overrides = sessions::read();
+        // A restart mid-flight still hides every side session: the persisted
+        // `side_session` flags rejoin the in-memory record at boot.
+        this.side_sessions = this
+            .overrides
+            .iter()
+            .filter(|(_, meta)| meta.side_session)
+            .map(|(id, _)| id.clone())
+            .collect();
         this.boot_projects();
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the

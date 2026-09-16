@@ -47,8 +47,9 @@ use aui::data::{ContextMeterState, ContextPressure};
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::overlay::popover_layer;
 use aui::transcript::{
-    AssistantTurnAction, LinkTarget, SelectionKey, TextSelection, ToolCardIntent, ToolGroupIntent,
-    UserTurnAction, needs_you_banner, retry_row, status_row, StatusLead, turn_selected_text,
+    AssistantTurnAction, LinkTarget, MessageSelection, SelectionKey, SpanEvent, TextSelection,
+    ToolCardIntent, ToolGroupIntent, UserTurnAction, needs_you_banner, retry_row, status_row,
+    StatusLead,
 };
 use aui_icons::IconName;
 use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
@@ -205,6 +206,7 @@ mod questions;
 mod render;
 mod scripting;
 mod shell;
+pub(crate) mod spans;
 
 /// What every session view is handed by the window that opens it.
 ///
@@ -456,14 +458,17 @@ pub struct SessionView {
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
-    /// The transcript's text selections (library selection model), keyed by
-    /// turn id: `(markdown source, selection)`. One cell at a time — a new
-    /// drag replaces whatever was held — cleared on Escape or a plain click
-    /// elsewhere; ⌘C copies the held one (C8b). Per turn, not one shared
-    /// cell: the library scopes cell keys (`p0`, `b0-0`, …) to the markdown
-    /// view that rendered them, so a single shared selection would light up
-    /// the same key in every turn at once.
-    text_selections: Rc<HashMap<String, (String, TextSelection)>>,
+    /// The transcript's cross-block spans (library span model), keyed by
+    /// turn id: `(markdown source, span)`, plus one drag session per turn.
+    /// One span at a time — a hover or pick that commits in one turn clears
+    /// whatever another held — cleared on Escape or a plain click; ⌘C copies
+    /// the held one (C8b). Per turn, not one shared cell: the library scopes
+    /// cell keys (`p0`, `q0-b0`, …) to the markdown view that rendered them,
+    /// so a single shared span would light up the same key in every turn at
+    /// once. Keyed, not positional, so the span survives the transcript
+    /// scrolling mid-drag.
+    span_held: Rc<HashMap<String, (String, aui::transcript::MessageSelection)>>,
+    span_sessions: HashMap<String, aui::transcript::SpanSession>,
     /// Last elapsed second the turn ticker painted, so the 1 Hz clock
     /// notifies only when the displayed number changes (P2).
     last_tick_secs: Option<u64>,
@@ -682,7 +687,8 @@ impl SessionView {
             cached_full_output: Rc::new(HashMap::new()),
             cached_pending_approval: None,
             follow: true,
-            text_selections: Rc::new(HashMap::new()),
+            span_held: Rc::new(HashMap::new()),
+            span_sessions: HashMap::new(),
             last_tick_secs: None,
             running: None,
             submitting: false,

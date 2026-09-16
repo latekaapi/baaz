@@ -20,8 +20,8 @@ use std::rc::Rc;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
     goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
-    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, QuestionOutcome, TextSelection,
-    ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
+    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, MessageSelection, QuestionOutcome,
+    SpanEvent, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{
     ActivityState, Answer, Block, MarkerKind, PlanSection, PlanState, Step, ThinkingState, ToolBody,
@@ -79,15 +79,16 @@ pub struct Folds {
     pub assistant_action: Option<AssistantActionHandler>,
     /// Bottom-row actions on user turns: turn id plus its text (C6).
     pub user_action: Option<UserActionHandler>,
-    /// What each turn currently holds selected, by turn id (C8b). Per turn
+    /// What each turn currently holds spanned, by turn id (C8b). Per turn
     /// because the library scopes cell keys to the markdown view that
-    /// rendered them — one shared cell would light up every turn at once.
+    /// rendered them — one shared span would light up every turn at once.
     /// The markdown source is carried alongside so the map can be shared
-    /// straight from the view rather than re-collected each frame.
-    pub text_selections: Rc<HashMap<String, (String, TextSelection)>>,
-    /// Selection intents out of the turns: turn id, that turn's markdown
-    /// source, and the intent (C8b).
-    pub selection_change: Option<TextSelectionChangeHandler>,
+    /// straight from the view rather than re-collected each frame. Keyed,
+    /// not positional, so a span survives the transcript scrolling mid-drag.
+    pub span_held: Rc<HashMap<String, (String, MessageSelection)>>,
+    /// Span events out of the turns: turn id, that turn's markdown source,
+    /// and the event, for the turn's drag session (C8b).
+    pub span_event: Option<SpanEventHandler>,
     /// Tool-group header and per-call intents, keyed by the group's fold key (C8).
     pub tool_group: Option<ToolGroupActionHandler>,
 }
@@ -101,12 +102,10 @@ pub type AssistantActionHandler = Rc<dyn Fn(String, AssistantTurnAction, &mut Wi
 /// A user turn's bottom-row action: the turn's id, its text, and what was pressed.
 pub type UserActionHandler = Rc<dyn Fn(String, String, UserTurnAction, &mut Window, &mut App)>;
 
-/// A turn's selection intent: the turn's id, that turn's markdown source
-/// (so ⌘C slices the exact view the person dragged in), and the intent
-/// itself — `Some` on drags and word/paragraph picks, `None` on a plain
-/// click elsewhere in a cell (C8b).
-pub type TextSelectionChangeHandler =
-    Rc<dyn Fn(String, String, Option<TextSelection>, &mut Window, &mut App)>;
+/// A turn's span event: the turn's id, that turn's markdown source (so ⌘C
+/// slices the exact view the person dragged in), and the event itself —
+/// presses, hovers, releases and word/paragraph picks (C8b).
+pub type SpanEventHandler = Rc<dyn Fn(String, String, SpanEvent, &mut Window, &mut App)>;
 
 /// A tool group's intent: the group's fold key and what it asked for.
 pub type ToolGroupActionHandler = Rc<dyn Fn(String, ToolGroupIntent, &mut Window, &mut App)>;
@@ -354,14 +353,17 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 let on_link = on_link.clone();
                 turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
             }
-            // The turn's own held selection, if any (C8b): every turn gets
-            // only its own, because cell keys repeat across turns.
-            turn = turn.selection(folds.text_selections.get(id).map(|(_, held)| held));
-            if let Some(on_change) = &folds.selection_change {
-                let on_change = on_change.clone();
+            // The turn's own held span, if any (C8b): every turn gets
+            // only its own, because cell keys repeat across turns. The
+            // span path replaces the legacy single-cell selection — a drag
+            // that starts in one paragraph and ends in another, or in a
+            // code block, highlights everything between.
+            turn = turn.span_selection(folds.span_held.get(id).map(|(_, held)| held));
+            if let Some(on_event) = &folds.span_event {
+                let on_event = on_event.clone();
                 let (turn_id, source) = (id.clone(), text.clone());
-                turn = turn.on_selection_change(move |next, window, cx| {
-                    on_change(turn_id.clone(), source.clone(), next, window, cx);
+                turn = turn.on_span_event(move |event, window, cx| {
+                    on_event(turn_id.clone(), source.clone(), event, window, cx);
                 });
             }
             if let Some(act) = &folds.user_action {
@@ -489,17 +491,17 @@ fn text_card(
         let on_link = on_link.clone();
         turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
     }
-    // The turn's own held selection, if any (C8b). Sibling text blocks share
-    // the turn id, so a selection over one block's `p0` also tints the
-    // other's — the library scopes keys to the markdown view, and a turn
-    // holds several. The source that travels back with an intent is still
-    // exactly this block's text, so ⌘C copies what was dragged.
-    turn = turn.selection(folds.text_selections.get(turn_id).map(|(_, held)| held));
-    if let Some(on_change) = &folds.selection_change {
-        let on_change = on_change.clone();
+    // The turn's own held span, if any (C8b). Sibling text blocks share
+    // the turn id, so a span over one block's `p0` also tints the other's
+    // — the library scopes keys to the markdown view, and a turn holds
+    // several. The source that travels back with an event is still exactly
+    // this block's text, so ⌘C copies what was dragged.
+    turn = turn.span_selection(folds.span_held.get(turn_id).map(|(_, held)| held));
+    if let Some(on_event) = &folds.span_event {
+        let on_event = on_event.clone();
         let (owner, source) = (turn_id.to_owned(), text.to_owned());
-        turn = turn.on_selection_change(move |next, window, cx| {
-            on_change(owner.clone(), source.clone(), next, window, cx);
+        turn = turn.on_span_event(move |event, window, cx| {
+            on_event(owner.clone(), source.clone(), event, window, cx);
         });
     }
     // The row belongs to the message, so only the closing block carries it.

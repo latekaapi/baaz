@@ -1134,16 +1134,15 @@ impl Harness {
             return None;
         }
         // Title side sessions never reach the counts: they are hidden by
-        // rule, but they are not the person's hidden sessions.
-        let hidden =
-            self.sessions.iter().filter(|e| e.hidden && !crate::titles::is_side_session(&e.id)).count();
+        // record, but they are not the person's hidden sessions.
+        let hidden = self.sessions.iter().filter(|e| e.hidden && !self.is_side_session(&e.id)).count();
         let empty = self
             .sessions
             .iter()
-            .filter(|e| !e.archived && !crate::titles::is_side_session(&e.id) && e.is_empty())
+            .filter(|e| !e.archived && !self.is_side_session(&e.id) && e.is_empty())
             .count();
         let archived =
-            self.sessions.iter().filter(|e| e.archived && !crate::titles::is_side_session(&e.id)).count();
+            self.sessions.iter().filter(|e| e.archived && !self.is_side_session(&e.id)).count();
         let mut rows: Vec<MenuRow> = Vec::new();
         let mut actions: Vec<Option<ViewAction>> = Vec::new();
         // The grouping first: it decides what the list below the menu is.
