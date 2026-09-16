@@ -45,3 +45,23 @@ library.
   while its sessions fall back to "Other workspaces" and the adoption stays
   in `projects.json`, so an unmounted volume or a re-attached worktree comes
   back by itself.
+- **Generated session titles.** On the first send, one cheap model call
+  (`muse-spark-1.3` when listed) in a throwaway side session writes a 3–6
+  word title into `sessions.json` (`generated_title`, ranked under a
+  `/name` name); the side session is hidden at once and the server record
+  untouched. A `Naming this session…` placeholder holds the row meanwhile;
+  a ~20 s timeout, wire errors and empty replies fall back silently to the
+  first-prompt label, at most one retry, exactly one generation per session
+  ever.
+- **Two-line bylines, uniform rows.** Every session row always shows two
+  lines: `Working…` while a turn runs, the pending placeholder while a
+  title is in flight, the owner's last request beside the last reply once
+  known (free excerpt, refreshed every completed turn; one debounced model
+  rewrite only when it is poor), else the preview/`N turns` meta, else `No
+  reply yet` — never blank.
+- **Sidebar switches for both.** "Name sessions automatically" and
+  "Summarise sessions in the sidebar" in the Settings dialog (`layout.json`,
+  both default ON), with `--steps auto-title` / `auto-summary` verbs; off
+  means no model call ever for that feature.
+- **Status card wording.** An unavailable usage reading renders as
+  `Current usage: unavailable`, not `unavailable used`.
