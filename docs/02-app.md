@@ -288,10 +288,13 @@ current-project accent bar and the trailing
 branch are layout flags (`group_chevron`, `group_bar`, `group_branch`, all
 default off). The Settings dialog owns the switches:
 ⌘, (File → Settings…), the account footer menu's "Settings…" row, or
-`--steps settings[:<section>]`; its Sidebar section holds the three flags
-and later sections add arms in `Harness::settings_sections`
-(`crate::settings`). `--steps group-chevron|group-bar|group-branch` flips
-them without opening the dialog.
+`--steps settings[:<section>]`; its Sidebar section holds those three plus
+the two auto switches below — `auto_title` ("Name sessions
+automatically") and `auto_summary` ("Summarise sessions in the sidebar"),
+both default ON — and later sections add arms in
+`Harness::settings_sections` (`crate::settings`). `--steps
+group-chevron|group-bar|group-branch|auto-title|auto-summary` flips them
+without opening the dialog.
 Activating a session from outside the sidebar reveals it: the least scroll
 that brings the row — or, when its group is closed or folded past the cut,
 the group row, never auto-expanded — into view (O6). Past five a group folds: it shows
@@ -317,23 +320,55 @@ project; on Other the menu carries the single row "Add as project…".
 Without the wait, `new:demo` followed at once by `send:` could bill its
 turn on the session that was open before.
 
-Session rows carry no provider mark: each row reads title, then the preview
-line, with the elapsed time at the right). Every row
-carries one muted second line: `last_summary` when a turn completed
-in this app, else the index's first prompt — but only when the row's label is
-not that same prompt (a user-given name or a Muse title); otherwise the row
-shows the "N turns" meta alone, never a repeated first line. Whatever shows
-goes through the row's own one-line cap. `last_summary`
-is written on `turn/completed` from the first line (≤ 120 chars) of the last
-assistant text block: the fold is already in memory, so it costs no model
-call, and it persists through `sessions.json` beside the name, the hidden and
-archived flags, the pin and the derived title.
+Session rows carry no provider mark: each row reads title, then the second
+line, with the elapsed time at the right. Every row always shows two lines
+(the library's `SessionSummary::byline`, one truncating line, never wrapped),
+chosen by a ladder so a brand-new session is exactly as tall as its
+neighbours: a running turn reads `Working…` (the transcript footer's
+wording); a generated title still in flight reads `Naming this session…`;
+an existing byline reads the ask and the result side by side; turns without
+a byline keep the legacy meta line (the preview/summary text, the branch,
+`N turns`); and nothing at all reads `No reply yet` — never blank.
+The preview half is `last_summary` when a turn completed in this app, else
+the index's first prompt — but only when the row's label is not that same
+prompt (a user-given name or a Muse title); otherwise the row shows the
+"N turns" meta alone, never a repeated first line. Whatever shows goes
+through the row's own one-line cap. `last_summary` is written on
+`turn/completed` from the first meaningful line of the last assistant text
+block (fenced code skipped, markdown markers stripped): the fold is already
+in memory, so it costs no model call, and it persists through
+`sessions.json` beside the name, the hidden and archived flags, the pin,
+the derived title — and `last_ask`, the owner's last request in the same
+free excerpt, which together with the summary is the row's two-line
+byline. Only when the "Summarise sessions in the sidebar" switch is on AND
+the free excerpt is poor (either half empty, fence-leading or code-only, or
+the pair past twice the row's width) does one cheap model call rewrite the
+two lines through the title side-session mechanism below: only once the
+session is idle, at most one start per 30 s, skipping turns that changed
+little.
 
 A session is titled by what the person said, never by a command the agent
-ran. The title order is the `/name` name, the row's own name/title/prompt,
-the index's name/title/prompt (its literal "New session" is a placeholder
-and counts as nothing), then the derived title, then "New session". The
-derived title is the transcript's earliest user prompt — earliest recorded
+ran. The title order is the `/name` name, the generated title below, the
+row's own name/title/prompt, the index's name/title/prompt (its literal "New
+session" is a placeholder and counts as nothing), then the derived title,
+then "New session". The generated title is one cheap model call
+(`muse-spark-1.3` when listed, else the server default) on the first send,
+run as one turn in a throwaway side session in the same workspace — a
+namespaced client id, hidden the moment it starts so it never reaches the
+sidebar, the palette, the search index or the counts — asking for a 3–6 word
+title for the user's first message and harvesting `turn/completed` with a
+free `session/read`. It lands in `sessions.json` as `generated_title` (never
+via `session/rename`), ranked as above; while in flight the row reads
+`Naming this session…` and an untitled header crumb borrows it, and both
+update in place when it lands. Failure (a ~20 s timeout, a wire error, an
+empty reply) falls back to the first-prompt label with one log line and at
+most one retry — a timeout never retries — and exactly one generation ever
+runs per session: the persisted `title_attempted` marker holds across
+resume, reconnect, replay and restart, and the "Name sessions
+automatically" switch off means no title call ever. `--steps
+title-pending` / `title-land:<text>` stub the in-flight and landed states
+for captures, free.
+The derived title is the transcript's earliest user prompt — earliest recorded
 submission, then earliest folded user turn, first line, through the same
 one-line cap — or the first shell command when the session has no user text
 at all. It is written from the open transcript (live on every wire event, and
@@ -442,7 +477,8 @@ sidebar. The window-level
 `view-menu`, `account`, `pin`, `archive`, `archive-confirm`,
 `show-archived`, `projects`, `project:<path>`, `project-menu[:<name>]`,
 `project-colour:<n>`, `group-by:<date|project>`, `group-bar`,
-`group-branch`, `group-chevron`, `remove-project:<name>` and
+`group-branch`, `group-chevron`, `auto-title`, `auto-summary`,
+`title-pending`, `title-land:<text>`, `remove-project:<name>` and
 `remove-confirm`, beside the older `search`,
 `palette`, `resume`, `fork-picker`, `rename`, `hidden` and `empty`.
 
