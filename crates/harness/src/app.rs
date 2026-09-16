@@ -1404,6 +1404,10 @@ impl Harness {
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
         self.active = Some(view);
+        // The capture is already folded, and no wire event will ever run
+        // `title_from_transcript` for it: without this the replayed row
+        // keeps the file's name even when the transcript knows better.
+        self.title_from_transcript(cx);
         self.run_steps(window, cx);
         cx.notify();
     }

@@ -265,5 +265,7 @@ mod tests {
         // Muse's own placeholder is not a title (finding F10).
         let placeholder = IndexEntry { title: "New session".into(), ..IndexEntry::default() };
         assert_eq!(placeholder.label(), None);
+        let shout = IndexEntry { title: "NEW SESSION".into(), ..IndexEntry::default() };
+        assert_eq!(shout.label(), None);
     }
 }

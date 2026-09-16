@@ -8,10 +8,12 @@
 //! * **Hidden.** MSP has no archive, no delete and no `hidden` flag. Hiding is
 //!   a decision about *this* window's list, so it lives in *this* window's
 //!   store and never touches Muse's.
-//! * **A derived title.** A session with no user prompt has nothing to be
-//!   called: fourteen rows reading "New session" is what Phase 4's screenshots
-//!   show (finding F10). The first `userShell` command is the honest label, and
-//!   reading it costs a `session/read`, so the answer is cached here.
+//! * **A derived title.** A session with nothing to be called by reads the
+//!   same as every other one: fourteen rows reading "New session" is what
+//!   Phase 4's screenshots show (finding F10). The transcript's first user
+//!   prompt is the honest label — the first `userShell` command only when
+//!   the session has no user text at all — and reading the shell form costs
+//!   a `session/read`, so the answer is cached here.
 //!
 //! The file is `~/Library/Application Support/harness/sessions.json`, written
 //! atomically through [`crate::store`], and every read is best-effort: a
@@ -34,8 +36,10 @@ pub struct SessionMeta {
     /// Hidden from this window's list. A hidden session is never loaded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
-    /// The title derived from the session's first `userShell` command, cached
-    /// so the `session/read` that found it happens once (finding F10).
+    /// The title derived from the transcript — the first user prompt, or the
+    /// first `userShell` command when the session has no user text at all —
+    /// cached so the `session/read` that found the shell form happens once
+    /// (finding F10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
     /// Pinned to the top of the sidebar's date view, in its own group.
@@ -110,6 +114,39 @@ pub fn shell_title(command: &str) -> Option<String> {
     Some(text.to_owned())
 }
 
+/// The transcript's own first user prompt, as a row's title: a session is
+/// named after what the person said, never after a command the agent ran.
+///
+/// `submissions` are the fold's recorded `command_text`s, oldest first (the
+/// map is keyed by time-ordered command id); `turns` are the folded turns in
+/// wire order. The earliest recorded submission wins — at `turn/started`
+/// the server has not echoed the `userMessage` yet, but `submit` already
+/// recorded it — then the earliest folded user turn, which covers replays
+/// and restarts that recorded nothing. A submission wearing the `!`/`$`
+/// shell marker is a shell invocation, not prose, and is skipped: the
+/// shell fallback ([`shell_title`]) names those sessions. First line only,
+/// whitespace-collapsed, cut where a sidebar row would truncate it anyway
+/// ([`crate::sidebar::one_line`]).
+pub fn first_user_title(submissions: &[&str], turns: &[aui_protocol::Turn]) -> Option<String> {
+    fn first_line(text: &str) -> Option<&str> {
+        let line = text.lines().next().map(str::trim).unwrap_or("");
+        (!line.is_empty()).then_some(line)
+    }
+    let said = submissions
+        .iter()
+        .map(|submission| submission.trim())
+        .filter(|submission| !submission.is_empty() && !submission.starts_with(['!', '$']))
+        .find_map(first_line)
+        .or_else(|| {
+            turns.iter().find_map(|turn| match turn {
+                aui_protocol::Turn::User { text, .. } => first_line(text),
+                _ => None,
+            })
+        })?;
+    let title = crate::sidebar::one_line(said);
+    (!title.is_empty()).then_some(title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +197,69 @@ mod tests {
         assert_eq!(shell_title("!cargo test -q").as_deref(), Some("cargo test -q"));
         assert_eq!(shell_title("  $ ls  ").as_deref(), Some("ls"));
         assert_eq!(shell_title("  !  "), None);
+    }
+
+    fn user_turn(text: &str) -> aui_protocol::Turn {
+        aui_protocol::Turn::User {
+            id: "t-user".into(),
+            text: text.into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_user_prompt_names_the_session_not_a_later_one() {
+        // Oldest submission first, as the fold's map orders them: the title
+        // is what the person said first, never the newest send.
+        let title = first_user_title(&["Explain how this project is laid out", "and then refactor it"], &[]);
+        assert_eq!(title.as_deref(), Some("Explain how this project is laid out"));
+    }
+
+    #[test]
+    fn an_earlier_submission_beats_an_earlier_folded_turn() {
+        let turns = vec![user_turn("folded words")];
+        let title = first_user_title(&["typed words"], &turns);
+        assert_eq!(title.as_deref(), Some("typed words"));
+    }
+
+    #[test]
+    fn a_folded_first_turn_names_a_session_that_recorded_nothing() {
+        // Replays and restarts record no submissions: the earliest folded
+        // user turn is the title, first line only.
+        let turns = vec![user_turn("Run the shell command `ls`\nthen describe README"), user_turn("second")];
+        let title = first_user_title(&[], &turns);
+        assert_eq!(title.as_deref(), Some("Run the shell command `ls`"));
+    }
+
+    #[test]
+    fn shell_invocations_are_not_user_prose() {
+        // `!ls` went through the shell hatch, not a turn: it must not win
+        // the user slot (the shell fallback names that session instead).
+        let title = first_user_title(&["!ls -la"], &[]);
+        assert_eq!(title, None);
+        // ...but a real first prompt ahead of one still does.
+        let title = first_user_title(&["what does this do", "!ls -la"], &[]);
+        assert_eq!(title.as_deref(), Some("what does this do"));
+    }
+
+    #[test]
+    fn a_derived_title_is_one_row_long() {
+        let long = "word ".repeat(60);
+        let title = first_user_title(&[long.as_str()], &[]).expect("a title");
+        // The row's own convention (sidebar `one_line`): 80 cells, elided.
+        assert_eq!(title.chars().count(), 80);
+        assert!(title.ends_with('\u{2026}'));
+        // First line only, with the whitespace collapsed.
+        let title = first_user_title(&["  why   does   this   panic  \nsecond line"], &[]);
+        assert_eq!(title.as_deref(), Some("why does this panic"));
+    }
+
+    #[test]
+    fn blank_submissions_and_silence_are_no_title() {
+        assert_eq!(first_user_title(&["   "], &[]), None);
+        assert_eq!(first_user_title(&[], &[]), None);
+        assert_eq!(first_user_title(&[], &[user_turn("  ")]), None);
     }
 
 }
