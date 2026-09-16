@@ -325,7 +325,7 @@ pub fn set_menus(cx: &mut App) {
 }
 
 mod find;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod list;
 mod titles;
 
@@ -565,6 +565,12 @@ pub struct Harness {
     /// wait for the switch (bounded) instead of acting on the session that
     /// is still open; any activation clears it.
     pub(crate) session_switch_pending: bool,
+    /// Whether the boot session has been attempted: [`Harness::ensure_boot_session`]
+    /// opens `--session`/`--send`/`--steps`' first session without waiting
+    /// for `session/list`, at most once — a failed attempt must not retry on
+    /// every frame, and a later list reply must not open a second session
+    /// beside it (see [`Harness::open_boot_session`]'s own guard).
+    pub(crate) boot_session_attempted: bool,
     /// The project being renamed through the header crumb's field: the same
     /// `rename` field does it, and `ConfirmRename` commits the project when
     /// this is set rather than the session row.
@@ -717,6 +723,7 @@ impl Harness {
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
             session_switch_pending: false,
+            boot_session_attempted: false,
             renaming_project: None,
             project_colour_open: false,
             footer_bounds: None,
@@ -1487,7 +1494,7 @@ impl Harness {
         // `title_from_transcript` for it: without this the replayed row
         // keeps the file's name even when the transcript knows better.
         self.title_from_transcript(cx);
-        self.run_steps(window, cx);
+        self.maybe_run_steps(window, cx);
         cx.notify();
     }
 
@@ -1937,6 +1944,13 @@ impl Harness {
         if !matches!(self.auth, Auth::SignedIn(_)) {
             return;
         }
+        // The scripted boot, every frame until it fires: the first session
+        // for `--session`/`--send`/`--steps` opens without waiting for
+        // `session/list`, then the script runs once the session is open.
+        // Both are idempotent (consumed args, drained list), so the
+        // per-frame call is a gate, not a loop.
+        self.ensure_boot_session(window, cx);
+        self.maybe_run_steps(window, cx);
         // A deterministic capture never takes keyboard focus: a focused
         // composer paints the textarea's blinking caret, which lands on a
         // different phase every run.
