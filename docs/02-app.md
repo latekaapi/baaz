@@ -240,14 +240,25 @@ A session resolves to a project in one order only: its stored project id when
 that adoption still exists, else the adoption whose canonical root equals the
 row's `workspace_root`, else "Other workspaces". Never by prefix, never by
 the current project — a worktree session's folder differs from its project's
-root, and a prefix would file it under the wrong project. `session/list` is
+root, and a prefix would file it under the wrong project. An adoption whose
+root is gone (a deleted worktree, an unmounted volume) resolves nowhere at
+any step: its sessions read as "Other workspaces" until the path comes back.
+The adoption itself stays in `projects.json` — hiding is a listing rule, and
+nothing in the listing path writes the store back. Existence is cached per
+project with a 30 s TTL and rechecked for every adoption off the UI thread on
+each list refresh. `session/list` is
 unfiltered and paged (200/page to `nextCursor`), so every workspace's
 sessions arrive; rows carry the canonicalized workspace and the resolved
 project id, re-resolved after adoptions change.
 
-The **current project** is the open session's project, else the last used.
-Boot adopts per D39 (`--workspace` wins and is adopted if new; else the
-stored current; else the most recently opened; on a first run the launch
+The **current project** is the open session's project, else the last used,
+else the most recently opened adoption whose root is on disk: a missing root
+is never current (the header crumb, the accent bar, boot, the removal
+fallback and ⌘N all fall back past it), but it stays adopted, so it can
+become current again when the path does. Boot adopts per D39 (`--workspace`
+wins and is adopted if new; else the
+stored current when its root is on disk; else the most recently opened one
+that is; on a first run the launch
 directory unless it is `/` or `$HOME`, in which case the window opens with no
 project and the hero owns the empty state). ⌘N starts in the current project
 with its root and defaults; picking model, effort or approval mode in a
@@ -317,6 +328,18 @@ is written on `turn/completed` from the first line (≤ 120 chars) of the last
 assistant text block: the fold is already in memory, so it costs no model
 call, and it persists through `sessions.json` beside the name, the hidden and
 archived flags, the pin and the derived title.
+
+A session is titled by what the person said, never by a command the agent
+ran. The title order is the `/name` name, the row's own name/title/prompt,
+the index's name/title/prompt (its literal "New session" is a placeholder
+and counts as nothing), then the derived title, then "New session". The
+derived title is the transcript's earliest user prompt — earliest recorded
+submission, then earliest folded user turn, first line, through the same
+one-line cap — or the first shell command when the session has no user text
+at all. It is written from the open transcript (live on every wire event, and
+once for a replay whose capture is already folded), so a fresh row keeps the
+label its first send gave it instead of falling back to "New session" with
+the reply as its preview.
 
 Above the Sessions caption sit three `nav_item` rows: **New session** (Plus,
 the ⌘N in the sidebar), **Add project** (Folder, the ⌘⇧O in the sidebar) and
