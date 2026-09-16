@@ -243,7 +243,7 @@ mod tests {
     fn a_switch_off_blocks_its_model_call() {
         let mut layout = Layout::default();
         apply_setting(&mut layout, "auto_title", false);
-        assert!(!crate::titles::should_title(layout.auto_title, true, None, 0, "s"));
+        assert!(!crate::titles::should_title(layout.auto_title, true, None, 0, false));
         apply_setting(&mut layout, "auto_summary", false);
         assert!(!crate::byline::should_rewrite(
             layout.auto_summary,

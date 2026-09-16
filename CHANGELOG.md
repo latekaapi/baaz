@@ -65,3 +65,18 @@ library.
   means no model call ever for that feature.
 - **Status card wording.** An unavailable usage reading renders as
   `Current usage: unavailable`, not `unavailable used`.
+- **Cross-block text selection.** Dragging from one paragraph into another —
+  or into a code block — highlights everything between: one span per
+  transcript, held keyed (not positional) so it survives scrolling mid-drag,
+  ⌘C copies it in document order (blank line between blocks, list markers
+  kept, code byte-exact), a plain click or a new drag clears it. New
+  `--steps select-span:<turn>` verb holds a whole turn for captures;
+  `select-text:<turn>:<from>-<to>` works as before.
+- **Side sessions by record, not by id.** Title/summary side sessions start
+  with a bare-UUIDv7 client id — muse 1.3.0 rejects any `session/start` id
+  that is not its own shape (`invalid length: found 50` for the old
+  namespaced id) — and are recognised by an explicit record (remembered in
+  memory and as `side_session` in `sessions.json` before the start runs), so
+  they stay hidden, uncounted, unindexed and untitled, including across a
+  restart mid-flight. Cost guards unchanged: one generation per session
+  ever, at most one retry, the ~20 s watchdog, silent first-prompt fallback.

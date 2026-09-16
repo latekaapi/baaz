@@ -527,9 +527,7 @@ impl Harness {
             .sessions
             .iter()
             .filter(|entry| {
-                entry.needs_title
-                    && !self.titled.contains(&entry.id)
-                    && !crate::titles::is_side_session(&entry.id)
+                entry.needs_title && !self.titled.contains(&entry.id) && !self.is_side_session(&entry.id)
             })
             .map(|entry| entry.id.clone())
             .take(MAX_TITLE_READS)

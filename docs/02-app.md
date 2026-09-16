@@ -354,8 +354,11 @@ session" is a placeholder and counts as nothing), then the derived title,
 then "New session". The generated title is one cheap model call
 (`muse-spark-1.3` when listed, else the server default) on the first send,
 run as one turn in a throwaway side session in the same workspace — a
-namespaced client id, hidden the moment it starts so it never reaches the
-sidebar, the palette, the search index or the counts — asking for a 3–6 word
+bare-UUIDv7 client id (muse 1.3.0 rejects any `session/start` id that is not
+its own shape), recorded in memory and as `side_session` in `sessions.json`
+before the start runs, hidden from the first moment so it never reaches the
+sidebar, the palette, the search index or the counts, including across a
+restart mid-flight — asking for a 3–6 word
 title for the user's first message and harvesting `turn/completed` with a
 free `session/read`. It lands in `sessions.json` as `generated_title` (never
 via `session/rename`), ranked as above; while in flight the row reads
@@ -1036,15 +1039,25 @@ Markdown links click through: URLs open in the browser, workspace paths open in
 their default place — folders in Finder, files in their default app (escapes
 above the workspace are rejected with a toast, missing paths toast). `Block::ToolGroup` renders through the library `tool_group`,
 its open state in `Folds` keyed by the group's fold key. The transcript holds
-one `TextSelection` per turn (keyed by turn id with its markdown source):
-dragging or word/paragraph-picking in a turn highlights it through the turn's
-`selection(..)`/`on_selection_change(..)`, a plain click elsewhere clears that
-turn, ⌘C in the transcript context copies `turn_selected_text` of the held
-turn (never from the composer or a card field), and Escape clears it. Per
-turn because the library scopes cell keys (`p0`, …) to the markdown view that
-rendered them — one shared cell would light up every turn at once. `--steps
-top`, `end`, `expand-groups` and `select-text:<turn>:<from>-<to>` (a scripted
-hold over the turn's first paragraph) drive screenshots.
+one cross-block span per turn (keyed by turn id with its markdown source,
+plus one drag session per turn): a drag that starts in one paragraph and
+ends in another — or in a code block — highlights everything between through
+the turn's `span_selection(..)`/`on_span_event(..)`, a plain click clears,
+and a hover or pick that commits in one turn clears whatever another held,
+so there is ever one span. ⌘C in the transcript context copies
+`turn_span_selected_text` of the held turn — document order, a blank line
+between blocks, list markers kept on wholly selected items, code byte-exact
+(never from the composer or a card field) — and Escape clears it. Per turn
+because the library scopes cell keys (`p0`, …) to the markdown view that
+rendered them — one shared span would light up every turn at once; keyed,
+not positional, so the span survives the transcript scrolling mid-drag, and
+span mode adds no per-frame layout cost (the order walk is keys only, no
+shaping). Link clicks and code-block copy buttons are unaffected: a press
+opens the drag session without disturbing the held span. `--steps top`,
+`end`, `expand-groups`, `select-text:<turn>:<from>-<to>` (a scripted hold
+over the turn's first paragraph, now travelling the span path — verb,
+arguments and screenshot unchanged) and `select-span:<turn>` (the whole turn
+as one cross-block span) drive screenshots.
 
 `aui::composer::composer(...).docked(true)` is the composer. **Enter** sends,
 **Shift+Enter** makes a newline, **Escape on an empty composer** and **⌃C**

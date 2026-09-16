@@ -37,6 +37,34 @@ pub(crate) struct TitleJob {
 }
 
 impl Harness {
+    /// Whether `session_id` names one of this app's throwaway title/summary
+    /// side sessions. The explicit record — the in-memory set this run
+    /// minted, or the persisted `side_session` flag a restart reloaded —
+    /// never the id shape: a side id is a bare uuid, exactly like a real
+    /// session's, because muse 1.3.0 rejects any `session/start` id that is
+    /// not its own shape.
+    pub(crate) fn is_side_session(&self, session_id: &str) -> bool {
+        self.side_sessions.contains(session_id)
+            || self.overrides.get(session_id).is_some_and(|meta| meta.side_session)
+    }
+
+    /// Remember a freshly minted side id before its `session/start` runs:
+    /// the in-memory set, and the persisted `side_session` plus `hidden`
+    /// override. Landing first means a crash between the start and the hide
+    /// still hides by record after a restart — the old prefix rule's one
+    /// job, without an id shape the server rejects.
+    fn remember_side_session(&mut self, side_id: &str, cx: &mut Context<Self>) {
+        self.side_sessions.insert(side_id.to_owned());
+        self.set_override(
+            side_id,
+            |meta| {
+                meta.side_session = true;
+                meta.hidden = true;
+            },
+            cx,
+        );
+    }
+
     /// The first `turn/started` may earn this session a generated title.
     /// Pure decision first ([`titles::should_title`]), then — and only then —
     /// the persisted attempt marker, the pending placeholder, and the
@@ -55,7 +83,7 @@ impl Harness {
             self.client.is_some(),
             self.overrides.get(session_id),
             turns,
-            session_id,
+            self.is_side_session(session_id),
         );
         if !eligible {
             return;
@@ -98,6 +126,9 @@ impl Harness {
         }
         let workspace = self.session_workspace(&real_id);
         let side_id = titles::side_session_id();
+        // Recorded before the start runs, so a crash between the start and
+        // the hide still hides by record after a restart.
+        self.remember_side_session(&side_id, cx);
         let prompt = titles::title_prompt(&first_message);
         let retry_message = first_message.clone();
         let work = move || -> Result<String, String> {
@@ -131,9 +162,8 @@ impl Harness {
         };
         self.wire_call(cx, work, move |this, result, cx| match result {
             Ok(side_id) => {
-                // Hidden at once, before any list refresh can show it: the
-                // override persists, and the prefix rule covers a lost write.
-                this.set_override(&side_id, |meta| meta.hidden = true, cx);
+                // Already hidden by the pre-start record, before any list
+                // refresh could show it.
                 // A timeout that fired while the chain ran already stood
                 // this generation down: hide and ignore, never double-bill.
                 if !this.titles_pending.contains(&real_id) {
@@ -260,14 +290,18 @@ impl Harness {
 
     /// Re-apply the titler's ephemeral flags after a list rebuild: pending
     /// rows read pending, side sessions read hidden — even before their
-    /// override writes land, and even when a restart lost one. A free
-    /// function of the pending set (rather than `&self`) so [`Self::rejoin`]
-    /// can call it mid-iteration over its own rows.
-    pub(super) fn apply_title_flags(pending: &std::collections::HashSet<String>, entry: &mut crate::sidebar::SessionEntry) {
+    /// override writes land. A free function of the two sets (rather than
+    /// `&self`) so [`Self::rejoin`] can call it mid-iteration over its own
+    /// rows; the persisted `hidden` override is what carries a restart.
+    pub(super) fn apply_title_flags(
+        pending: &std::collections::HashSet<String>,
+        sides: &std::collections::HashSet<String>,
+        entry: &mut crate::sidebar::SessionEntry,
+    ) {
         if pending.contains(&entry.id) {
             entry.title_pending = true;
         }
-        if titles::is_side_session(&entry.id) {
+        if sides.contains(&entry.id) {
             entry.hidden = true;
         }
     }
@@ -328,7 +362,7 @@ impl Harness {
         }
         let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
-        if titles::is_side_session(&session_id) {
+        if self.is_side_session(&session_id) {
             return;
         }
         let running = view.read(cx).is_sending();
@@ -385,6 +419,8 @@ impl Harness {
         }
         let workspace = self.session_workspace(&real_id);
         let side_id = titles::side_session_id();
+        // Recorded before the start runs, like a title side session.
+        self.remember_side_session(&side_id, cx);
         let prompt = byline::rewrite_prompt(&ask, &result);
         let retry = (ask.clone(), result.clone());
         let work = move || -> Result<String, String> {
@@ -416,8 +452,7 @@ impl Harness {
         };
         self.wire_call(cx, work, move |this, result, cx| match result {
             Ok(side_id) => {
-                // Hidden at once, whatever follows.
-                this.set_override(&side_id, |meta| meta.hidden = true, cx);
+                // Already hidden by the pre-start record, whatever follows.
                 // Stood down while the chain ran: hide and ignore, never
                 // land a late answer over the free excerpt.
                 if !this.byline_live.contains(&real_id) {

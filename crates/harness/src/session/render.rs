@@ -289,24 +289,25 @@ impl SessionView {
                           cx: &mut gpui::App| { act(&(id, text, action), window, cx) },
                 ))
             },
-            // Text selection (C8b): every turn gets its own held cell, and
-            // every intent carries its turn's markdown source back.
-            text_selections: Rc::clone(&self.text_selections),
-            selection_change: {
+            // Cross-block spans (C8b): every turn gets its own held span,
+            // and every event carries its turn's markdown source back, so
+            // the fold slices the exact view the person dragged in.
+            span_held: Rc::clone(&self.span_held),
+            span_event: {
                 let changed = cx.listener(
                     |this: &mut Self,
-                     (turn_id, source, next): &(String, String, Option<TextSelection>),
+                     (turn_id, source, event): &(String, String, SpanEvent),
                      _,
                      cx| {
-                        this.set_text_selection(turn_id.clone(), source.clone(), next.clone(), cx);
+                        this.apply_span(turn_id.clone(), source.clone(), event.clone(), cx);
                     },
                 );
                 Some(Rc::new(
                     move |turn_id: String,
                           source: String,
-                          next: Option<TextSelection>,
+                          event: SpanEvent,
                           window: &mut Window,
-                          cx: &mut gpui::App| { changed(&(turn_id, source, next), window, cx) },
+                          cx: &mut gpui::App| { changed(&(turn_id, source, event), window, cx) },
                 ))
             },
             tool_group: {
@@ -832,67 +833,73 @@ impl SessionView {
         None
     }
 
-    /// A turn's selection intent (C8b): a drag or a word/paragraph pick
-    /// replaces whatever was held (one cell at a time); a plain click
-    /// elsewhere in a cell arrives as `None` and clears that turn. The
-    /// turn's markdown source travels with the intent so ⌘C slices the
-    /// exact view the person dragged in.
-    pub(super) fn set_text_selection(
+    /// A turn's span event (C8b): folded through the turn's drag session
+    /// into the held span. A drag that starts in one paragraph and ends in
+    /// another — or in a code block — highlights everything between; a
+    /// plain click clears; a new drag clears the old span. The turn's
+    /// markdown source travels with the event so ⌘C slices the exact view
+    /// the person dragged in. Keyed, not positional, so the span survives
+    /// the transcript scrolling mid-drag.
+    pub(super) fn apply_span(
         &mut self,
         turn_id: String,
         source: String,
-        next: Option<TextSelection>,
+        event: SpanEvent,
         cx: &mut Context<Self>,
     ) {
-        let changed = match next {
-            Some(selection) => {
-                let fresh = self
-                    .text_selections
-                    .get(&turn_id)
-                    .map(|(_, held)| held != &selection)
-                    .unwrap_or(true);
-                let held = Rc::make_mut(&mut self.text_selections);
-                held.clear();
-                held.insert(turn_id, (source, selection));
-                // One cell at a time: the clear above leaves exactly this
-                // one, so any fresh intent changed what is held.
-                fresh
-            }
-            None => Rc::make_mut(&mut self.text_selections).remove(&turn_id).is_some(),
-        };
-        if changed {
+        let held = Rc::make_mut(&mut self.span_held);
+        if super::spans::apply_span_event(held, &mut self.span_sessions, turn_id, source, &event) {
             cx.notify();
         }
     }
 
-    /// ⌘C in the transcript context (C8b): copy the held selection, if
-    /// any, sliced out of its own turn's markdown source. The binding's own
+    /// ⌘C in the transcript context (C8b): copy the held span, if any,
+    /// sliced out of its own turn's markdown source — document order, a
+    /// blank line between blocks, list markers kept, code byte-exact. With
+    /// no span held this does nothing, exactly as before: the binding's own
     /// predicate already excludes the composer and card fields, so this
     /// never steals copy from an editor.
     pub fn copy_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let entry = self.text_selections.values().next().cloned();
-        let Some((source, selection)) = entry else { return };
-        if let Some(text) = turn_selected_text(&source, &selection) {
+        if let Some(text) = super::spans::span_copy_text(&self.span_held) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
-    /// Clear the transcript text selections (C8b). Returns whether one was
-    /// held, so Escape prefers it over heavier dismissals.
+    /// Clear the transcript spans (C8b). Returns whether one was held, so
+    /// Escape prefers it over heavier dismissals.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.text_selections.is_empty() {
-            return false;
+        let held = Rc::make_mut(&mut self.span_held);
+        if super::spans::clear_spans(held, &mut self.span_sessions) {
+            cx.notify();
+            true
+        } else {
+            false
         }
-        Rc::make_mut(&mut self.text_selections).clear();
-        cx.notify();
-        true
+    }
+
+    /// The turn's own markdown source for the scripted selection steps: a
+    /// user turn is one view, an assistant turn's first text block is the
+    /// source the step holds. `None` for a turn with no text to hold.
+    fn step_turn_source(&self, index: usize) -> Option<(String, String)> {
+        self.fold.session(&self.session_id).and_then(|session| {
+            session.turns.get(index).and_then(|turn| match turn {
+                Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
+                Turn::Assistant { id, blocks, .. } => blocks.iter().find_map(|block| match block {
+                    Block::Text { text, .. } => Some((id.clone(), text.clone())),
+                    _ => None,
+                }),
+            })
+        })
     }
 
     /// `--steps select-text:<turn>:<from>-<to>`: hold a scripted selection
     /// over the turn's first paragraph (`p0`), for the selection screenshot.
     /// `<turn>` is the turn's index in the live transcript; the range is
     /// byte offsets, clamped to the paragraph. A turn with no text paragraph
-    /// (or a bad range) holds nothing rather than a lie.
+    /// (or a bad range) holds nothing rather than a lie. The hold travels
+    /// the span path — a single-cell span renders exactly like the legacy
+    /// single-cell selection it replaces — so the verb, its arguments and
+    /// its screenshot are unchanged.
     pub(crate) fn select_text_step(&mut self, rest: &str, cx: &mut Context<Self>) {
         let (turn, range) = rest.split_once(':').unwrap_or((rest, ""));
         let (from, to) = range.split_once('-').unwrap_or((range, ""));
@@ -904,18 +911,7 @@ impl SessionView {
         if from > to {
             std::mem::swap(&mut from, &mut to);
         }
-        // The turn's own markdown source: a user turn is one view, an
-        // assistant turn's first text block is the `p0` this step holds.
-        let found = self.fold.session(&self.session_id).and_then(|session| {
-            session.turns.get(index).and_then(|turn| match turn {
-                Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
-                Turn::Assistant { id, blocks, .. } => blocks.iter().find_map(|block| match block {
-                    Block::Text { text, .. } => Some((id.clone(), text.clone())),
-                    _ => None,
-                }),
-            })
-        });
-        let Some((turn_id, source)) = found else { return };
+        let Some((turn_id, source)) = self.step_turn_source(index) else { return };
         // Clamp to the source so the highlight never addresses bytes that
         // are not there; an emptied range holds nothing rather than a lie.
         from = from.min(source.len());
@@ -923,8 +919,27 @@ impl SessionView {
         if from >= to {
             return;
         }
-        let selection = TextSelection { cell: SelectionKey::paragraph("", 0), range: from..to };
-        self.set_text_selection(turn_id, source, Some(selection), cx);
+        let single = TextSelection { cell: SelectionKey::paragraph("", 0), range: from..to };
+        let span = MessageSelection::from_single(single);
+        let held = Rc::make_mut(&mut self.span_held);
+        if super::spans::hold_span(held, turn_id, source, Some(span)) {
+            cx.notify();
+        }
+    }
+
+    /// `--steps select-span:<turn>`: hold the whole turn — first non-empty
+    /// cell to last — for the cross-block highlight screenshot (a paragraph,
+    /// a list and a code block in one drag's span). `<turn>` is the turn's
+    /// index in the live transcript; a turn with no selectable text holds
+    /// nothing rather than a lie.
+    pub(crate) fn select_span_step(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let Ok(index) = rest.trim().parse::<usize>() else { return };
+        let Some((turn_id, source)) = self.step_turn_source(index) else { return };
+        let span = aui::transcript::message_select_all(&source);
+        let held = Rc::make_mut(&mut self.span_held);
+        if super::spans::hold_span(held, turn_id, source, span) {
+            cx.notify();
+        }
     }
 
     /// Open every tool group for a screenshot: group keys default closed, so

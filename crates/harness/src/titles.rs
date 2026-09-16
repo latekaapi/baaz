@@ -12,8 +12,8 @@
 //! * [`should_title`] decides, on the first `turn/started`, whether this
 //!   session earns a generation. Exactly one per session, ever.
 //! * the app starts a side session (`session/start` in the same workspace,
-//!   `modelId` pinned, a namespaced client id), sends ONE short prompt
-//!   ([`title_prompt`]) asking for a 3–6 word title, and harvests
+//!   `modelId` pinned, a bare-UUIDv7 client id recorded before the start),
+//!   sends ONE short prompt ([`title_prompt`]) for a 3–6 word title, and
 //!   `turn/completed` with a free `session/read` ([`harvest_title_text`]).
 //! * the result lands in `sessions.json` as `generated_title`, ranked under
 //!   a user-given name in the label order; the server record is never
@@ -38,14 +38,9 @@ use crate::sessions::SessionMeta;
 /// the server default — the send path never hard-fails on a model id.
 pub const TITLE_MODEL_ID: &str = "muse-spark-1.3";
 
-/// Client-chosen side-session ids start here, so a hide write that was lost
-/// (a crash between `session/start` and the override) still hides by rule:
-/// any listed id under this namespace reads as hidden. Never a real session
-/// id: `session/start` rejects a retained id with `session_id_conflict`, so
-/// the namespace only ever names sessions this app started.
-pub const SIDE_SESSION_PREFIX: &str = "harness-title-";
-
 /// How long a title turn may run before the app stops waiting for it: ~20 s.
+/// (Side sessions are recognised by explicit record, not by id shape — see
+/// [`side_session_id`] — so no prefix constant lives here to document.)
 /// A 10-token title reply on subscription completes in a few seconds, so 20 s
 /// is several times over a healthy turn — long enough to ride out one slow
 /// tail, short enough that a stuck side session is reaped (hidden, and the
@@ -67,33 +62,36 @@ pub const TITLE_MAX_ATTEMPTS: u8 = 2;
 /// tokens of instruction plus a short quote.
 pub const TITLE_PROMPT_CHARS: usize = 500;
 
-/// Whether `session_id` names one of this app's throwaway title sessions.
-pub fn is_side_session(session_id: &str) -> bool {
-    session_id.starts_with(SIDE_SESSION_PREFIX)
-}
-
-/// A fresh client id for one title side session: the namespace plus a UUIDv7
-/// command id, so two generations never share an identity.
+/// A fresh client id for one title side session: a bare UUIDv7 command id —
+/// exactly the shape the server mints itself when `sessionId` is omitted
+/// (and the shape `session/start` accepts: 36 characters, where the old
+/// namespaced id failed with `invalid length: found 50`). Minting
+/// client-side rather than letting the server assign one means the id is
+/// known before the start runs, so the explicit record (memory plus the
+/// `side_session` override) lands first and a crash between the start and
+/// the hide still hides by record. Two generations never share an identity.
 pub fn side_session_id() -> String {
-    format!("{SIDE_SESSION_PREFIX}{}", muse_client::new_command_id())
+    muse_client::new_command_id()
 }
 
 /// Whether this session earns a title generation now: the first
 /// `turn/started` of a session with no name and no generated title.
 ///
 /// False when the switch is off, when there is no client (replay,
-/// `--no-connect`), for a side session itself, for a session that already
-/// has a name, a generated title, or turns (a resume, a reconnect, a
-/// restart), and for one that already attempted — which is what makes the
-/// "exactly one generation per session, ever" rule hold across restarts.
+/// `--no-connect`), for a side session itself (by the caller's explicit
+/// record — this module never inspects id shapes), for a session that
+/// already has a name, a generated title, or turns (a resume, a reconnect,
+/// a restart), and for one that already attempted — which is what makes
+/// the "exactly one generation per session, ever" rule hold across
+/// restarts.
 pub fn should_title(
     auto_on: bool,
     has_client: bool,
     meta: Option<&SessionMeta>,
     turns: u64,
-    session_id: &str,
+    is_side: bool,
 ) -> bool {
-    if !auto_on || !has_client || turns != 0 || is_side_session(session_id) {
+    if !auto_on || !has_client || turns != 0 || is_side {
         return false;
     }
     match meta {
@@ -166,54 +164,61 @@ mod tests {
 
     #[test]
     fn a_fresh_first_turn_earns_exactly_one_generation() {
-        assert!(should_title(true, true, None, 0, "01a09b58-0769-7801-86d5-365ce9213f8e"));
+        assert!(should_title(true, true, None, 0, false));
     }
 
     #[test]
     fn the_switch_off_means_no_model_call_ever() {
-        assert!(!should_title(false, true, None, 0, "01a09b58-0769-7801-86d5-365ce9213f8e"));
+        assert!(!should_title(false, true, None, 0, false));
     }
 
     #[test]
     fn replay_and_offline_runs_never_title() {
-        assert!(!should_title(true, false, None, 0, "01a09b58-0769-7801-86d5-365ce9213f8e"));
+        assert!(!should_title(true, false, None, 0, false));
     }
 
     #[test]
     fn named_sessions_keep_their_name() {
         let meta = meta_with(Some("Ship it"), None, false);
-        assert!(!should_title(true, true, Some(&meta), 0, "s"));
+        assert!(!should_title(true, true, Some(&meta), 0, false));
     }
 
     #[test]
     fn a_generated_title_is_never_regenerated() {
         let meta = meta_with(None, Some("Tighten validation"), false);
-        assert!(!should_title(true, true, Some(&meta), 0, "s"));
+        assert!(!should_title(true, true, Some(&meta), 0, false));
     }
 
     #[test]
     fn sessions_with_turns_are_resumes_not_first_sends() {
-        assert!(!should_title(true, true, None, 3, "s"));
+        assert!(!should_title(true, true, None, 3, false));
     }
 
     #[test]
     fn an_attempt_is_forever_one_run_later() {
         let meta = meta_with(None, None, true);
-        assert!(!should_title(true, true, Some(&meta), 0, "s"));
+        assert!(!should_title(true, true, Some(&meta), 0, false));
     }
 
     #[test]
     fn a_side_session_never_titles_itself() {
-        assert!(!should_title(true, true, None, 0, &format!("{SIDE_SESSION_PREFIX}abc")));
+        // Recognition is the caller's explicit record, not the id shape: a
+        // side id is a bare uuid, exactly like a real session's.
+        assert!(!should_title(true, true, None, 0, true));
+        assert!(should_title(true, true, None, 0, false));
     }
 
     #[test]
-    fn side_session_ids_carry_the_namespace_and_never_repeat() {
+    fn side_session_ids_are_bare_uuids_and_never_repeat() {
         let first = side_session_id();
         let second = side_session_id();
-        assert!(is_side_session(&first));
         assert_ne!(first, second);
-        assert!(!is_side_session("01a09b58-0769-7801-86d5-365ce9213f8e"));
+        for id in [&first, &second] {
+            // 36 characters, uuid-shaped: what `session/start` accepts, where
+            // the old 50-character namespaced id failed `invalid length`.
+            assert_eq!(id.len(), 36);
+            assert!(id.parse::<uuid::Uuid>().is_ok());
+        }
     }
 
     #[test]
