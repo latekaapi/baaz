@@ -1471,10 +1471,14 @@ mod tests {
     #[gpui::test]
     fn virtual_sidebar_builds_only_visible_rows_for_a_stress_sidebar(cx: &mut TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // On disk, or availability hides every group and the model shrinks
+        // to one closed row.
+        for i in 0..8 {
+            std::fs::create_dir_all(format!("/tmp/r6c-probe-{i}")).expect("temp root");
+        }
         let mut projects = Projects::default();
-        let ids: Vec<String> = (0..8)
-            .map(|i| projects.add(Path::new(&format!("/tmp/r6c-probe-{i}"))).id.clone())
-            .collect();
+        let ids: Vec<String> =
+            (0..8).map(|i| projects.add(Path::new(&format!("/tmp/r6c-probe-{i}"))).id.clone()).collect();
         let now = chrono::Local::now();
         let entries: Vec<SessionEntry> = ids
             .iter()

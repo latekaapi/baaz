@@ -133,8 +133,10 @@ impl SessionEntry {
                 .is_some_and(|s| !s.is_empty());
         let text = label.unwrap_or(UNNAMED);
         let workspace = session.workspace_root.as_deref().map(crate::projects::canonical_str);
+        // A missing root resolves nowhere: the row falls back to "Other
+        // workspaces" while the adoption stays in the store.
         let project = projects
-            .resolve(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()))
+            .resolve_available(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()))
             .map(|p| p.id.clone());
         Self {
             id: session.session_id.clone(),
@@ -169,7 +171,7 @@ impl SessionEntry {
         let workspace = replay_workspace(capture).map(|root| crate::projects::canonical_str(&root));
         let project = workspace
             .as_deref()
-            .and_then(|root| projects.resolve(Some(root), None))
+            .and_then(|root| projects.resolve_available(Some(root), None))
             .map(|p| p.id.clone());
         Self {
             id: session_id.to_owned(),
@@ -457,7 +459,9 @@ pub fn grouping_by_project(
     let mut by_project: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
     let mut other: Vec<&SessionEntry> = Vec::new();
     for entry in entries {
-        match entry.project.as_deref().and_then(|id| projects.find(id)) {
+        // A missing root is no project: the row lands in "Other workspaces"
+        // even when its stored id still names the adoption.
+        match entry.project.as_deref().and_then(|id| projects.find_available(id)) {
             Some(project) => {
                 by_project.entry(project.id.as_str()).or_default().push(entry);
             }
@@ -467,14 +471,19 @@ pub fn grouping_by_project(
     // D4: the project the open session belongs to wears the accent bar. With
     // no session open the store's current project wears it instead — that is
     // the project the header crumb names and the one a new session would land
-    // in, so the bar keeps pointing at the same place either way.
+    // in, so the bar keeps pointing at the same place either way. Either
+    // falls back past a missing root, exactly as the crumb does.
     let current_project: Option<&str> = view
         .active
         .and_then(|open| entries.iter().find(|e| e.id == open))
         .and_then(|e| e.project.as_deref())
-        .or(projects.current.as_deref());
+        .and_then(|id| projects.find_available(id))
+        .map(|p| p.id.as_str())
+        .or_else(|| projects.effective_current().map(|p| p.id.as_str()));
     let mut groups = Vec::new();
-    for project in projects.sorted() {
+    // Missing roots get no group at all — but stay adopted, so they come
+    // back when the path does.
+    for project in projects.sorted_available() {
         let mut rows = by_project.remove(project.id.as_str()).unwrap_or_default();
         rows.sort_by_key(|e| (!e.pinned, std::cmp::Reverse(e.updated)));
         // Pinned rows always show and never count toward the five; the open
@@ -963,10 +972,22 @@ mod tests {
         assert_eq!(row.label, "My name");
     }
 
+    /// The grouping tests' roots on disk: availability hides a missing root,
+    /// so fake `/work` paths would group everything into "Other workspaces".
+    /// One shared base per test-binary run; `create_dir_all` is idempotent
+    /// across the parallel tests that share it.
+    fn roots_base() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("harness-sidebar-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("temp roots");
+        base
+    }
+
     fn project(id: &str, name: &str, colour: u8, pinned: bool) -> crate::projects::Project {
+        let root = roots_base().join(id);
+        std::fs::create_dir_all(&root).expect("temp root");
         crate::projects::Project {
             id: id.to_owned(),
-            root: std::path::PathBuf::from(format!("/work/{id}")),
+            root,
             name: name.to_owned(),
             colour,
             pinned,
@@ -977,15 +998,13 @@ mod tests {
     }
 
     fn grouped_projects() -> crate::projects::Projects {
-        crate::projects::Projects {
-            version: 1,
-            current: None,
-            projects: vec![
-                project("p-harness", "harness", 1, false),
-                project("p-agentic", "agentic-ui", 2, false),
-                project("p-empty", "empty", 3, false),
-            ],
-        }
+        let mut store = crate::projects::Projects::default();
+        store.projects = vec![
+            project("p-harness", "harness", 1, false),
+            project("p-agentic", "agentic-ui", 2, false),
+            project("p-empty", "empty", 3, false),
+        ];
+        store
     }
 
     fn grouped_entry(id: &str, project: Option<&str>, workspace: Option<&str>, days_ago: i64) -> SessionEntry {
@@ -1034,6 +1053,41 @@ mod tests {
 
     fn folded_group<'a>(groups: &'a [ProjectGroup], id: &str) -> &'a ProjectGroup {
         groups.iter().find(|g| g.id.as_ref() == id).expect("the group")
+    }
+
+    #[test]
+    fn a_missing_root_gets_no_group_and_its_sessions_land_in_other() {
+        let mut projects = grouped_projects();
+        // Adopted, then deleted: never created on disk.
+        let gone = crate::projects::Project {
+            id: "p-gone".to_owned(),
+            root: roots_base().join("p-gone"),
+            name: "gone".to_owned(),
+            colour: 4,
+            pinned: false,
+            added_at: "2026-09-13T10:00:00Z".into(),
+            last_opened_at: "2026-09-13T10:00:00Z".into(),
+            defaults: crate::projects::ProjectDefaults::default(),
+        };
+        assert!(!gone.root.is_dir(), "the test root must stay missing");
+        projects.projects.push(gone);
+        let entries = vec![
+            grouped_entry("s1", Some("p-harness"), Some("ws"), 0),
+            grouped_entry("s2", Some("p-gone"), Some("ws"), 0),
+        ];
+        let Grouping::Project(groups) = by_project(&entries, &projects) else {
+            panic!("project grouping must yield project groups");
+        };
+        // No group for the missing root — but it stays adopted.
+        assert!(groups.iter().all(|g| g.id.as_ref() != "p-gone"));
+        assert!(projects.find("p-gone").is_some());
+        // Its session is not lost: it falls back to "Other workspaces" with
+        // the harness session.
+        let harness = folded_group(&groups, "p-harness");
+        assert_eq!(harness.sessions.len(), 1);
+        let other = groups.last().expect("other group");
+        assert_eq!(other.id.as_ref(), OTHER_GROUP);
+        assert_eq!(other.count.as_ref(), "1");
     }
 
     #[test]

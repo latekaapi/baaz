@@ -810,9 +810,14 @@ impl Harness {
         }
     }
 
-    /// The current project: the open session's project, else the last used.
+    /// The current project: the open session's project, else the last used —
+    /// else the most recently opened adoption whose root is on disk. A
+    /// missing root is never current, but stays adopted.
     pub(crate) fn current_project(&self) -> Option<&Project> {
-        self.current_project.as_deref().and_then(|id| self.projects.find(id))
+        self.current_project
+            .as_deref()
+            .and_then(|id| self.projects.find_available(id))
+            .or_else(|| self.projects.most_recent_available())
     }
 
     /// What the window's own title bar says: the open session against its
@@ -863,9 +868,11 @@ impl Harness {
                 self.projects.current = Some(id);
             }
             dirty = true;
-        } else if self.projects.current.as_deref().is_some_and(|id| self.projects.find(id).is_some()) {
-            // The stored current project still exists: keep it, untouched.
-        } else if let Some(recent) = self.projects.most_recent().map(|p| p.id.clone()) {
+        } else if self.projects.current.as_deref().is_some_and(|id| self.projects.find_available(id).is_some()) {
+            // The stored current project still exists on disk: keep it, untouched.
+            // A missing root is not current (it stays adopted, and comes back
+            // when the path does).
+        } else if let Some(recent) = self.projects.most_recent_available().map(|p| p.id.clone()) {
             self.projects.current = Some(recent);
             dirty = true;
         } else {
