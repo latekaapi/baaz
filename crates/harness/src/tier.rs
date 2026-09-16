@@ -136,20 +136,25 @@ impl Tier {
     }
 
     /// The `/status` and `/usage` lines for this tier.
+    ///
+    /// A measured percentage reads as "N% used" and the still-drawing dash
+    /// as "— used", but the card's own word `unavailable` stands alone —
+    /// "unavailable used" is the owner's screenshot, and the same rule
+    /// [`print_tier_field`] already applies to `--print-tier`.
     pub fn status_lines(&self) -> String {
         match self {
             Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable } => {
-                let pct = |p: &Option<u32>| {
+                let usage = |p: &Option<u32>| {
                     match p {
-                        Some(p) => format!("{p}%"),
+                        Some(p) => format!("{p}% used"),
                         None if *usage_unavailable => "unavailable".to_owned(),
-                        None => "—".to_owned(),
+                        None => "— used".to_owned(),
                     }
                 };
                 let mut text = format!(
-                    "Plan: {plan}\nCurrent usage: {} used\nWeekly usage: {} used",
-                    pct(current_pct),
-                    pct(weekly_pct)
+                    "Plan: {plan}\nCurrent usage: {}\nWeekly usage: {}",
+                    usage(current_pct),
+                    usage(weekly_pct)
                 );
                 for reset in resets {
                     text.push('\n');
@@ -1068,6 +1073,34 @@ mod tests {
         assert_eq!(weekly_pct, Some(4));
     }
 
+    /// Owner screenshot 2026-09-16: the status card read "Current usage:
+    /// unavailable" while the footer meter read 0%. Neither surface
+    /// misreads muse 1.3.0's card — the probe parses the two windows and
+    /// the unavailable sentence independently, so one consistent parse
+    /// carries all three facts: the current window unreported, the sentence
+    /// present, and a reported weekly zero. The status card names the first
+    /// two, the meter draws the third. (A stale-cache race between the
+    /// footer's paint and the card's open could split them the same way;
+    /// both read `self.tier` on their own frames, so only the card's own
+    /// bytes — pinned here in `parse_card`'s style, not copied — would close
+    /// it. Do not "fix" either surface: each reports what it parsed.)
+    #[test]
+    fn an_unavailable_current_window_keeps_a_reported_weekly_zero() {
+        let card = "You are currently subscribed to the Team plan. \
+                    Usage currently unavailable. Weekly 0% used";
+        let Some(tier @ Tier::Subscription { current_pct, weekly_pct, usage_unavailable, .. }) =
+            parse_card(card)
+        else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(current_pct, None);
+        assert_eq!(weekly_pct, Some(0));
+        assert!(usage_unavailable);
+        assert!(tier.status_lines().contains("Current usage: unavailable"));
+        assert!(tier.status_lines().contains("Weekly usage: 0% used"));
+        assert_eq!(tier.weekly_fraction(), Some(0.0));
+    }
+
     #[test]
     fn the_footer_row_names_the_plan_and_warns_on_anything_else() {
         let plan = Tier::Subscription {
@@ -1110,8 +1143,9 @@ mod tests {
             resets: vec![],
             usage_unavailable: true,
         };
-        assert!(unavailable.status_lines().contains("Current usage: unavailable used"));
-        assert!(unavailable.status_lines().contains("Weekly usage: unavailable used"));
+        assert!(unavailable.status_lines().contains("Current usage: unavailable"));
+        assert!(unavailable.status_lines().contains("Weekly usage: unavailable"));
+        assert!(!unavailable.status_lines().contains("unavailable used"));
         // Naming the plan either way — this is what keeps a known plan from
         // ever reading as the generic "Muse did not say which plan" banner.
         assert!(unavailable.status_lines().contains("Plan: Power Usage"));
