@@ -93,6 +93,9 @@ impl Harness {
         let rows: Vec<crate::search::SessionRow> = self
             .index
             .iter()
+            // Title side sessions never reach the search palette: their
+            // only transcript is the title prompt itself.
+            .filter(|(session_id, _)| !crate::titles::is_side_session(session_id))
             .map(|(session_id, entry)| {
                 let meta = self.overrides.get(session_id);
                 let name =

@@ -42,7 +42,7 @@
 //! * [`crate::wire`] — background call, then update.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -327,6 +327,7 @@ pub fn set_menus(cx: &mut App) {
 mod find;
 mod lifecycle;
 mod list;
+mod titles;
 
 /// The connection's own state, which is what the reconnect banner reads.
 pub(crate) enum Wire {
@@ -514,6 +515,13 @@ pub struct Harness {
     pub(crate) layout: layout::Layout,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
     pub(crate) show_hidden: bool,
+    /// Real session ids with a title generation in flight: their rows read
+    /// the pending placeholder until the title lands or the attempt stands
+    /// down (auto-titles).
+    pub(crate) titles_pending: HashSet<String>,
+    /// Side session id → the generation it serves. Harvested off
+    /// `turn/completed`, reaped by the watchdog.
+    pub(crate) title_jobs: HashMap<String, titles::TitleJob>,
     /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
     pub(crate) show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
@@ -680,6 +688,8 @@ impl Harness {
             show_hidden: false,
             show_empty: false,
             show_archived: false,
+            titles_pending: HashSet::new(),
+            title_jobs: HashMap::new(),
             search_query: search_query.clone(),
             search_sessions: Vec::new(),
             search_files: Vec::new(),
@@ -824,7 +834,12 @@ impl Harness {
     /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
         let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-        let label = session.and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()));
+        let label = session.and_then(|id| {
+            self.sessions.iter().find(|e| e.id == id).map(|e| {
+                let pending = e.title_pending || self.titles_pending.contains(&e.id);
+                crate::sidebar::display_label(&e.label, pending).to_owned()
+            })
+        });
         match self.current_project() {
             Some(project) => match label {
                 Some(label) => format!("{label} \u{2014} {}", project.name),
@@ -984,6 +999,18 @@ impl Harness {
                 .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)),
             _ => None,
         };
+        // A side session's turn completed: harvest its answer for the title
+        // it serves. The open view ignores foreign ids on apply, so this is
+        // the only place a side session's events land.
+        if let MuseEvent::Notification { method, session_id, .. } = &event {
+            if method == "turn/completed" {
+                if let Some(side_id) = session_id.clone() {
+                    if self.title_jobs.contains_key(&side_id) {
+                        self.harvest_title(&side_id, cx);
+                    }
+                }
+            }
+        }
         if let Some(active) = &self.active {
             active.update(cx, |view, cx| view.apply(event, cx));
         }
@@ -1039,6 +1066,15 @@ impl Harness {
                 self.sessions.retain(|entry| entry.id != session_id);
                 self.sessions.push(row);
                 self.invalidate_list();
+            }
+            // A first send may earn a generated title: one cheap model call
+            // in a throwaway side session, never blocking this turn. Only
+            // the open view's own turn qualifies — its prompt is the title's
+            // source, and a turn no open view sent names nothing this window
+            // can title.
+            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                let prompt = self.active.as_ref().and_then(|view| view.read(cx).first_prompt_text());
+                self.maybe_start_title(&session_id, prompt, cx);
             }
         }
         if completed {
@@ -1196,7 +1232,12 @@ impl Harness {
         // header answers on the click's own frame, before any page arrives.
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        let label = target.and_then(|id| self.sessions.iter().find(|e| e.id == id).map(|e| e.label.clone()));
+        let label = target.and_then(|id| {
+            self.sessions.iter().find(|e| e.id == id).map(|e| {
+                let pending = e.title_pending || self.titles_pending.contains(&e.id);
+                crate::sidebar::display_label(&e.label, pending).to_owned()
+            })
+        });
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         // The project crumb: name and chevron as one click target that opens
