@@ -336,10 +336,17 @@ turn (its own elapsed), `Needs approval`, `Asked: "…"` with the question's
 words, `Settled · 12m · 5 turns`, `Failed · 1h`, or `No reply yet` —
 waiting on a person outranks running, so an approval mid-turn never reads
 `Working`. Hovering a row past a short beat opens the hover detail beside
-it: the full title, ask and latest reply, the status with its detail (the
-pending question, the approval command, the terminal error), project,
-branch, turn count and last change — only what the app knows, the rest
-omitted. The rows report hover enter/leave themselves carrying the row's own bounds,
+it, the dense 320 px card: the full title wrapping with the relative time
+right-aligned, the owner's last message quoted and muted, the latest reply's
+first line in the state colour (which carries the status — green settled,
+accent working, danger failed — so there is no separate status row), one
+inline meta row (branch, bare turn count, updated), and a mono muted footer
+merging project and workspace path. A session waiting on the owner replaces
+the reply line with the highlighted attention box: warning-tinted border and
+fill, `Asked:` or `Needs approval:` in semibold, then the pending
+question's words or the approval's exact command, read live from the open
+session's fold. Only what the app knows — a field it does not have leaves
+no empty row. The rows report hover enter/leave themselves carrying the row's own bounds,
 so the delay arms even on a settled sidebar that re-renders nothing — and
 the report seats the card from the row, because the timer's notify reaches
 only the root, whose cached pane never re-renders to poll one. The card's

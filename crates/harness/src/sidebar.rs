@@ -430,10 +430,11 @@ impl SessionEntry {
     /// The hover detail's content: the whole picture the row truncates —
     /// full title, ask and latest reply, the status with its detail (the
     /// pending question, the approval command, the terminal error),
-    /// project, branch, turn count and last change. Only what the app
-    /// knows: empty words stay unset and never draw. The `Failed` status
-    /// carries the terminal error where it fits; every other state reuses
-    /// the row's own status words.
+    /// project, branch, turn count, last change, workspace path and the
+    /// open session's pending words. Only what the app knows: empty words
+    /// stay unset and never draw. The `Failed` status carries the terminal
+    /// error where it fits; every other state reuses the row's own status
+    /// words.
     pub fn detail_data(&self, now: DateTime<Local>) -> aui::nav::SessionDetailData {
         let status = self.row_status(now);
         let status = if status.kind == RowStatusKind::Failed {
@@ -456,6 +457,9 @@ impl SessionEntry {
             branch: self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
             turns: Some(usize::try_from(self.turns).unwrap_or(usize::MAX)),
             updated: Some(if elapsed == "now" { "now".into() } else { format!("{elapsed} ago").into() }),
+            workspace: self.workspace.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
+            pending_question: self.question_text().map(|s| s.to_owned().into()),
+            pending_approval: self.approval_text().map(|s| s.to_owned().into()),
         }
     }
 
@@ -1200,8 +1204,9 @@ mod tests {
     }
 
     /// The hover detail carries the whole picture and omits what the app
-    /// does not know: full title/ask/reply, the status with its detail,
-    /// project, branch, turns and last change, in card order.
+    /// does not know: full title/ask, the status with its detail, branch,
+    /// turns, last change and the path footer, in card order — with the
+    /// pending question standing the reply line down for the attention box.
     #[test]
     fn detail_data_carries_the_full_picture_in_card_order() {
         use aui::nav::detail_keys;
@@ -1216,20 +1221,23 @@ mod tests {
         full.turns = 5;
         full.updated = now - chrono::Duration::minutes(8);
         let data = full.detail_data(now);
+        assert_eq!(data.pending_question.as_deref(), Some("Which bucket for staging?"));
+        assert_eq!(data.pending_approval, None);
         assert_eq!(
             detail_keys(&data),
-            vec!["Title", "Ask", "Reply", "Status", "Project", "Branch", "Turns", "Updated"]
+            vec!["Title", "Ask", "Attention", "Branch", "Turns", "Updated", "Path"]
         );
         assert_eq!(data.status.as_ref().map(|s| s.text().to_string()).as_deref(), Some("Asked: \"Which bucket for staging?\""));
         assert_eq!(data.updated.as_deref(), Some("8m ago"));
         // A failure carries the terminal error on its status; a bare row
-        // draws title, status, turns and age only.
+        // draws title, the muted reply line, turns and age only.
         let mut failed = entry("failed");
         failed.turns = 2;
         failed.last_error = Some("modelError: overloaded".into());
         let data = failed.detail_data(now);
         assert_eq!(data.status.as_ref().map(|s| s.text().to_string()).as_deref(), Some("Failed · modelError: overloaded"));
-        assert_eq!(detail_keys(&entry("fresh").detail_data(now)), vec!["Title", "Status", "Turns", "Updated"]);
+        assert_eq!(detail_keys(&data), vec!["Title", "Reply", "Turns", "Updated"]);
+        assert_eq!(detail_keys(&entry("fresh").detail_data(now)), vec!["Title", "Reply", "Turns", "Updated"]);
     }
 
     /// Every state through the real `summary()`: the context line keeps one
