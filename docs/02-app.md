@@ -1094,13 +1094,20 @@ stays their words even when a later phase prefixes the model-visible input. Stop
 is `turn/interrupt { retract: true }`; when the retraction lands, the fold hands
 the prompt back through `take_restored_prompt` and it goes into the composer.
 
-The status row while a turn runs is "Working…" with the elapsed time and the
-`esc to interrupt` hint, plus the queued count when there is one. Once the
-running turn's reply has fully arrived but the turn is still open — Muse runs
-`reminderChild` items (memory reminders) for 30–70 s after the `agentMessage`
-before `turn/completed` — the row reads "Finishing up…" instead, with the same
-clock and hint and a "memory reminders" note, so the quiet tail does not read
-as stuck.
+The status row while a turn runs is one calm line: the most specific phase
+the fold can source truthfully, with the elapsed time and the `esc to
+interrupt` hint, plus the queued count when there is one. A pending approval
+reads "Waiting for approval…", an unanswered question "Waiting for your
+answer…"; a running tool names its family ("Running command…", "Running
+edit…", an MCP tool by the server's own tool name; a group with several in
+flight reads "Running tools…"); a growing reasoning trace reads "Thinking…".
+Nothing else is named — no guessed activity, no per-file verbs — so the row
+never states what the wire did not say, and the default remains "Working…".
+Once the running turn's reply has fully arrived but the turn is still open —
+Muse runs `reminderChild` items (memory reminders) for 30–70 s after the
+`agentMessage` before `turn/completed` — the row reads "Finishing up…"
+instead, with the same clock and hint and a "memory reminders" note, so the
+quiet tail does not read as stuck.
 
 The model, effort, mode and context chips render the **server's** current values,
 read back out of `SideState`; their menus arrived in Phase 3
