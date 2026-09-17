@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use aui_tokens::AgentState;
 pub use aui::nav::Grouping;
 
-use aui::nav::{Byline, DateGroup, ProjectGroup, SessionSummary};
+use aui::nav::{Byline, DateGroup, ProjectGroup, RowStatus, RowStatusKind, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
@@ -42,17 +42,18 @@ pub fn display_label(label: &str, title_pending: bool) -> &str {
     }
 }
 
-/// The second line while a turn is running. Matches the transcript footer's
-/// wording (`session/render.rs`), so the row and the transcript agree about
-/// what the session is doing.
+/// The wording a running row used to carry on its second line, kept for the
+/// match with the transcript footer's wording (`session/render.rs`). The
+/// option-B status line owns it now (`Working · 14m`); the context line no
+/// longer reads it.
 pub const PLACEHOLDER_WORKING: &str = "Working…";
 
 /// The second line while a generated title is still being written.
 pub const PLACEHOLDER_NAMING: &str = "Naming this session…";
 
-/// The second line when a session has nothing to show yet: no turn, no
-/// title, no summary. Present so the row keeps its two-line height, never
-/// blank.
+/// The wording a session with nothing to show yet used to carry: no turn,
+/// no title, no summary. The option-B status line owns it now (`No reply
+/// yet`); the context line keeps its height as empty space instead.
 pub const PLACEHOLDER_EMPTY: &str = "No reply yet";
 
 /// One row of the sidebar, joined from the wire, the local index and the
@@ -117,6 +118,37 @@ pub struct SessionEntry {
     /// project, else the adoption whose root equals [`Self::workspace`].
     /// `None` is "Other workspaces".
     pub project: Option<String>,
+    /// The resolved project's display name, for the context line's
+    /// `project · branch` fallback. Resolved beside [`Self::project`];
+    /// `None` renders the branch alone (or empty space with neither).
+    pub project_name: Option<String>,
+    /// The wire's attention flags (`Session.attention`, muse 1.3.0): a
+    /// pending approval or question parked on a session other than the open
+    /// one. Absence is a non-assertion — nothing pending, or a `notLoaded`
+    /// row whose pending source declined to answer — so an empty vec reads
+    /// exactly as `None` did on the wire.
+    pub attention: Vec<muse_client::schema::AttentionFlag>,
+    /// The pending approval's exact command, when the open session holds
+    /// one: the context line's first priority, and what the status line's
+    /// `Needs approval` stands on. The wire carries flags only, never text,
+    /// so this is live from the open view's fold and `None` everywhere
+    /// else — a closed session with the flag still reads `Needs approval`,
+    /// over its byline.
+    pub approval_command: Option<String>,
+    /// The pending question's prompt, when the open session holds one: the
+    /// context line when no approval is pending, and the `Asked` status
+    /// line's quoted words. Live from the open view's fold, like
+    /// [`Self::approval_command`].
+    pub pending_question: Option<String>,
+    /// When the running turn started, for the `Working` status line's
+    /// elapsed (`Working · 14m`). Set on `turn/started`, overtaken by the
+    /// next `session/list` rejoin; `None` falls back to [`Self::updated`].
+    pub turn_started: Option<DateTime<Local>>,
+    /// The last turn's terminal error message, when it failed: what the
+    /// `Failed` status line stands on. Recorded from `turn/completed`'s
+    /// `error` (terminal `"failed"`), cleared by the next turn's start or
+    /// its success.
+    pub last_error: Option<String>,
 }
 
 impl SessionEntry {
@@ -174,9 +206,10 @@ impl SessionEntry {
         let workspace = session.workspace_root.as_deref().map(crate::projects::canonical_str);
         // A missing root resolves nowhere: the row falls back to "Other
         // workspaces" while the adoption stays in the store.
-        let project = projects
-            .resolve_available(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()))
-            .map(|p| p.id.clone());
+        let resolved = projects
+            .resolve_available(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()));
+        let project = resolved.as_ref().map(|p| p.id.clone());
+        let project_name = resolved.as_ref().map(|p| p.name.clone());
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
@@ -199,6 +232,12 @@ impl SessionEntry {
             local: false,
             workspace,
             project,
+            project_name,
+            attention: session.attention.clone().unwrap_or_default(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
             branch: session.branch.clone(),
         }
     }
@@ -214,10 +253,11 @@ impl SessionEntry {
     pub fn replayed(session_id: &str, capture: &std::path::Path, projects: &crate::projects::Projects) -> Self {
         let label = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
         let workspace = replay_workspace(capture).map(|root| crate::projects::canonical_str(&root));
-        let project = workspace
+        let resolved = workspace
             .as_deref()
-            .and_then(|root| projects.resolve_available(Some(root), None))
-            .map(|p| p.id.clone());
+            .and_then(|root| projects.resolve_available(Some(root), None));
+        let project = resolved.as_ref().map(|p| p.id.clone());
+        let project_name = resolved.as_ref().map(|p| p.name.clone());
         Self {
             id: session_id.to_owned(),
             label,
@@ -236,6 +276,12 @@ impl SessionEntry {
             local: false,
             workspace,
             project,
+            project_name,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
             branch: None,
         }
     }
@@ -268,50 +314,94 @@ impl SessionEntry {
         }
     }
 
-    /// The row's second line, by the placeholder ladder: every session row
-    /// always shows two lines, so a brand-new session is exactly as tall as
-    /// its neighbours (owner screenshot 2026-09-16).
+    /// The pending approval's command, trimmed, when the open session holds
+    /// one.
+    fn approval_text(&self) -> Option<&str> {
+        self.approval_command.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// The pending question's prompt, trimmed, when the open session holds
+    /// one.
+    fn question_text(&self) -> Option<&str> {
+        self.pending_question.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// Whether the row waits on a person for an approval: a live command on
+    /// the open session, or the wire's `approvalPending` flag on any other.
+    /// Unknown flag values never count (the schema declares the domain
+    /// open; a future kind is not an approval).
+    pub fn needs_approval(&self) -> bool {
+        use muse_client::schema::AttentionFlag;
+        self.approval_text().is_some()
+            || self.attention.iter().any(|flag| matches!(flag, AttentionFlag::ApprovalPending))
+    }
+
+    /// Whether the row asked a question: a live prompt on the open session,
+    /// or the wire's `inputPending` flag on any other. Like
+    /// [`Self::needs_approval`], unknown flags never count.
+    pub fn asked(&self) -> bool {
+        use muse_client::schema::AttentionFlag;
+        self.question_text().is_some() || self.attention.iter().any(|flag| matches!(flag, AttentionFlag::InputPending))
+    }
+
+    /// The row's third line, option B's status verb: which sentence it draws
+    /// and in which colour, against `now`. Total — every entry maps to
+    /// exactly one state, so every row keeps its third line whatever the
+    /// caller passes:
     ///
-    /// 1. a turn is running → `Working…`, matching the transcript footer's
-    ///    wording;
-    /// 2. a generated title is still pending → `Naming this session…`;
-    /// 3. the byline exists → the ask and the result side by side;
-    /// 4. the session has turns but no byline yet → the legacy meta line
-    ///    (the preview/summary text, the branch, `N turns`), which is why
-    ///    this returns `None`: the caller keeps building `meta` as before;
-    /// 5. a turn-less row that still has something to show (a branch, an
-    ///    Archived tag, a preview) → the legacy meta line, as above;
-    /// 6. nothing at all → `No reply yet`.
-    ///
-    /// `Some` is an explicit [`Byline`] that wins the row's second-line
-    /// slot; `None` is the legacy meta tags (or, with none of those, the
-    /// library's empty-space line — which the last rung makes unreachable
-    /// here). Never blank either way.
-    fn second_line(&self) -> Option<Byline> {
-        if self.running {
-            return Some(Byline::Placeholder(PLACEHOLDER_WORKING.into()));
+    /// 1. waiting on a person beats everything (an approval mid-turn still
+    ///    reads `Needs approval`, never `Working`);
+    /// 2. a running turn reads `Working` with its own elapsed;
+    /// 3. the last turn's terminal error reads `Failed` with the session's
+    ///    elapsed (`Failed · 1h` — the message itself lives in the hover
+    ///    detail, where it fits);
+    /// 4. a session with turns reads `Settled` with elapsed and turn count;
+    /// 5. anything else never replied.
+    pub fn row_status(&self, now: DateTime<Local>) -> RowStatus {
+        if self.needs_approval() {
+            return RowStatus::new(RowStatusKind::NeedsApproval, "");
         }
+        if self.asked() {
+            return RowStatus::new(RowStatusKind::Asked, self.question_text().unwrap_or_default());
+        }
+        if self.running {
+            let start = self.turn_started.unwrap_or(self.updated);
+            return RowStatus::new(RowStatusKind::Working, elapsed_at(start, now));
+        }
+        if self.last_error.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
+            return RowStatus::new(RowStatusKind::Failed, elapsed_at(self.updated, now));
+        }
+        if self.turns > 0 {
+            let elapsed = elapsed_at(self.updated, now);
+            let detail = format!("{elapsed} · {} turn{}", self.turns, if self.turns == 1 { "" } else { "s" });
+            return RowStatus::new(RowStatusKind::Settled, detail);
+        }
+        RowStatus::new(RowStatusKind::NoReply, "")
+    }
+
+    /// The row's second line, option B's context: the approval command or
+    /// pending question when one exists, else the ask/result byline, else a
+    /// one-line preview, else nothing — the library keeps the line's height
+    /// in every state, so a brand-new session is exactly as tall as its
+    /// neighbours. The `Working…` and `No reply yet` placeholders retired
+    /// with the status line, which owns those words now; `Naming this
+    /// session…` stays, for a session with nothing else to say while its
+    /// generated title is in flight.
+    ///
+    /// `Some` is an explicit [`Byline`] that wins the slot; `None` falls
+    /// through to `project · branch` (via `repo`/`branch`), the Archived
+    /// tag, or the library's empty-space line.
+    fn second_line(&self) -> Option<Byline> {
         if self.title_pending {
             return Some(Byline::Placeholder(PLACEHOLDER_NAMING.into()));
         }
         if let Some(ask) = self.last_ask.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             return Some(Byline::TwoLines { ask: ask.to_owned().into(), result: self.description.clone().into() });
         }
-        if self.turns > 0 || self.has_legacy_second_line() {
-            return None;
+        if !self.description.trim().is_empty() {
+            return Some(Byline::Preview(self.description.clone().into()));
         }
-        Some(Byline::Placeholder(PLACEHOLDER_EMPTY.into()))
-    }
-
-    /// Whether the legacy meta tags give this row a second line on their
-    /// own: a preview, the branch, the Archived tag, or the pin. Mirrors
-    /// what [`Self::summary`] puts into `meta`, so the ladder and the row
-    /// cannot disagree about when the legacy line exists.
-    fn has_legacy_second_line(&self) -> bool {
-        !self.description.trim().is_empty()
-            || self.branch.as_deref().map(str::trim).is_some_and(|s| !s.is_empty())
-            || self.archived
-            || self.pinned
+        None
     }
 
     /// The library row for this session, labelled against `now`. No
@@ -319,38 +409,41 @@ impl SessionEntry {
     /// (owner round 4, O4).
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
-        match self.second_line() {
-            Some(Byline::Placeholder(text)) => {
-                row = row.placeholder(text);
-            }
-            Some(Byline::Preview(text)) => {
-                row = row.preview(text);
-            }
-            Some(Byline::TwoLines { ask, result }) => {
-                row = row.byline(ask, result);
-            }
-            // The ladder's fourth and fifth rungs: the preview/summary text
-            // first, so the second line reads what was done here last, then
-            // the branch, then the turn count — exactly as before.
-            None => {
-                if !self.description.is_empty() {
-                    row = row.meta(aui::nav::MetaItem::Text(self.description.clone().into()));
+        // Option B's context priority: the live approval/question override
+        // first, then the ladder below.
+        if let Some(command) = self.approval_text() {
+            row = row.attention(command.to_owned());
+        } else if let Some(question) = self.question_text() {
+            row = row.attention(question.to_owned());
+        } else {
+            match self.second_line() {
+                Some(Byline::Placeholder(text)) => {
+                    row = row.placeholder(text);
                 }
-                // The row's own derived branch (muse 1.2.1), ahead of the turn count:
-                // which line of work this session is on.
-                if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    row = row.meta(aui::nav::MetaItem::Text(branch.to_owned().into()));
+                Some(Byline::Preview(text)) => {
+                    row = row.preview(text);
                 }
-                if self.turns > 0 {
-                    row = row.meta(aui::nav::MetaItem::Text(
-                        format!("{} turn{}", self.turns, if self.turns == 1 { "" } else { "s" }).into(),
-                    ));
+                Some(Byline::TwoLines { ask, result }) => {
+                    row = row.byline(ask, result);
                 }
-                if self.archived {
-                    row = row.meta(aui::nav::MetaItem::Tag("Archived".into()));
+                // No byline and no preview: `project · branch` where either
+                // half exists, the Archived tag on a bare archived row, else
+                // the library's empty space — one line in every case.
+                None => {
+                    if let Some(project) = self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        row = row.repo(project.to_owned());
+                    }
+                    if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        row = row.branch(branch.to_owned());
+                    }
+                    if self.archived {
+                        row = row.meta(aui::nav::MetaItem::Tag("Archived".into()));
+                    }
                 }
             }
         }
+        let status = self.row_status(now);
+        row = row.status(status.kind, status.detail);
         if self.pinned {
             row = row.pinned();
         }
@@ -431,6 +524,12 @@ pub fn local_started_row(
         local: true,
         workspace,
         project,
+        project_name: None,
+        attention: Vec::new(),
+        approval_command: None,
+        pending_question: None,
+        turn_started: Some(updated),
+        last_error: None,
         branch: None,
     }
 }
@@ -462,6 +561,8 @@ pub fn first_send_update(entry: &mut SessionEntry, prompt: Option<&str>, now: Da
         }
     }
     entry.updated = now;
+    entry.turn_started = Some(now);
+    entry.last_error = None;
     true
 }
 
@@ -847,22 +948,8 @@ mod tests {
     /// takes the grouping behind an `Rc` too (finding `performance-13`).
     /// Numbers with `--nocapture`; the assertion is only the ordering, so the
     /// test is not a timing flake.
-    /// Rung 1: a running turn reads `Working…`, matching the transcript
-    /// footer's wording — even when a byline and a preview both exist.
-    #[test]
-    fn a_running_turn_reads_working_on_the_second_line() {
-        let mut running = entry("running");
-        running.running = true;
-        running.turns = 3;
-        running.description = "patched the validator".into();
-        running.last_ask = Some("tighten validation".into());
-        running.title_pending = true;
-        assert_eq!(running.second_line(), Some(Byline::Placeholder(PLACEHOLDER_WORKING.into())));
-        assert_eq!(PLACEHOLDER_WORKING, "Working…");
-    }
-
-    /// Rung 2: a pending generated title reads `Naming this session…` until
-    /// it lands — but a running turn still outranks it.
+    /// A pending generated title reads `Naming this session…` until it
+    /// lands — the one placeholder the status line did not retire.
     #[test]
     fn a_pending_title_reads_naming_on_the_second_line() {
         let mut pending = entry("pending");
@@ -871,8 +958,8 @@ mod tests {
         assert_eq!(pending.second_line(), Some(Byline::Placeholder(PLACEHOLDER_NAMING.into())));
     }
 
-    /// Rung 3: the byline reads the ask and the result side by side, ahead
-    /// of the preview text and the turn count.
+    /// The byline reads the ask and the result side by side, ahead of the
+    /// preview text.
     #[test]
     fn a_byline_reads_ask_and_result_on_the_second_line() {
         let mut lined = entry("lined");
@@ -885,75 +972,174 @@ mod tests {
         );
     }
 
-    /// Rung 4: turns but no byline keep the legacy meta line — the preview
-    /// first, then the branch, then `N turns` — so nothing already shown is
-    /// lost to the new row shape.
+    /// No byline but a preview: the summary reads alone on the context
+    /// line — the branch and the turn count moved to the status line and
+    /// `project · branch`, so they no longer share it.
     #[test]
-    fn turns_without_a_byline_keep_the_legacy_meta_line() {
+    fn a_preview_without_a_byline_reads_alone() {
         let mut settled = entry("settled");
         settled.turns = 3;
         settled.description = "patched the validator".into();
-        assert_eq!(settled.second_line(), None);
-        let summary = settled.summary(Local::now());
-        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
+        assert_eq!(settled.second_line(), Some(Byline::Preview("patched the validator".into())));
     }
 
-    /// Rung 4, else-branch: turns with no preview at all still read `N
-    /// turns` on the second line rather than leaving it blank.
+    /// Option B's context priority, end to end through `summary()`: the
+    /// approval command beats the pending question, which beats the byline,
+    /// which beats the preview, which beats `project · branch`, which beats
+    /// empty space.
     #[test]
-    fn turns_without_a_preview_read_the_turn_count() {
-        let mut counted = entry("counted");
-        counted.turns = 2;
-        assert_eq!(counted.second_line(), None);
-        let summary = counted.summary(Local::now());
-        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
-        assert!(summary.meta.iter().any(|item| matches!(item, aui::nav::MetaItem::Text(text) if text.as_ref() == "2 turns")));
+    fn context_priority_runs_approval_question_byline_preview_project() {
+        use aui::nav::{context_line_kind, ContextLineKind};
+        let now = Local::now();
+        let mut full = entry("full");
+        full.last_ask = Some("tighten validation".into());
+        full.description = "patched the validator".into();
+        full.project_name = Some("acme-web".into());
+        full.branch = Some("feature-x".into());
+        full.pending_question = Some("Which bucket for staging?".into());
+        full.approval_command = Some("sudo apt install notifierd".into());
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Attention);
+        assert_eq!(full.summary(now).attention.as_deref(), Some("sudo apt install notifierd"));
+        full.approval_command = None;
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Attention);
+        assert_eq!(full.summary(now).attention.as_deref(), Some("Which bucket for staging?"));
+        full.pending_question = None;
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Byline);
+        full.last_ask = None;
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Preview);
+        full.description.clear();
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Project);
+        full.project_name = None;
+        full.branch = None;
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Empty);
     }
 
-    /// Rung 5: a turn-less row that still has something to say (here, an
-    /// Archived tag) keeps the legacy meta line for it.
+    /// The status vocabulary, one state at a time: the exact sentence the
+    /// third line draws.
     #[test]
-    fn a_turnless_row_with_a_marker_keeps_the_legacy_meta_line() {
-        let mut archived = entry("archived");
-        archived.archived = true;
-        assert_eq!(archived.second_line(), None);
-        let summary = archived.summary(Local::now());
-        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Meta);
-    }
-
-    /// Rung 6: nothing at all reads `No reply yet` — the line is never left
-    /// blank, so a fresh session is exactly as tall as its neighbours.
-    #[test]
-    fn a_fresh_session_reads_no_reply_yet_on_the_second_line() {
+    fn status_vocabulary_per_state() {
+        use muse_client::schema::AttentionFlag;
+        let now = Local::now();
+        let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
+        // Running with its own elapsed.
+        let mut running = entry("running");
+        running.running = true;
+        running.turns = 3;
+        running.updated = ago(60);
+        running.turn_started = Some(ago(14));
+        assert_eq!(running.row_status(now).text().as_ref(), "Working · 14m");
+        // Running without a tracked start falls back to the session's age.
+        let mut running_fallback = entry("running-fallback");
+        running_fallback.running = true;
+        running_fallback.updated = ago(14);
+        assert_eq!(running_fallback.row_status(now).text().as_ref(), "Working · 14m");
+        // An approval mid-turn still reads `Needs approval`, never
+        // `Working` — live command or wire flag alike.
+        let mut approval = entry("approval");
+        approval.running = true;
+        approval.turns = 2;
+        approval.updated = ago(8);
+        approval.approval_command = Some("sudo apt install notifierd".into());
+        assert_eq!(approval.row_status(now).text().as_ref(), "Needs approval");
+        let mut flagged_approval = entry("flagged-approval");
+        flagged_approval.turns = 2;
+        flagged_approval.updated = ago(8);
+        flagged_approval.attention = vec![AttentionFlag::ApprovalPending];
+        assert_eq!(flagged_approval.row_status(now).text().as_ref(), "Needs approval");
+        // A pending question quotes its words; the bare flag reads `Asked`.
+        let mut asked = entry("asked");
+        asked.turns = 4;
+        asked.updated = ago(8);
+        asked.pending_question = Some("Which bucket for staging?".into());
+        assert_eq!(asked.row_status(now).text().as_ref(), "Asked: \"Which bucket for staging?\"");
+        let mut flagged_asked = entry("flagged-asked");
+        flagged_asked.turns = 4;
+        flagged_asked.updated = ago(8);
+        flagged_asked.attention = vec![AttentionFlag::InputPending];
+        assert_eq!(flagged_asked.row_status(now).text().as_ref(), "Asked");
+        // The last turn's terminal error, with the session's elapsed.
+        let mut failed = entry("failed");
+        failed.turns = 6;
+        failed.updated = ago(90);
+        failed.last_error = Some("modelError: the model was overloaded".into());
+        assert_eq!(failed.row_status(now).text().as_ref(), "Failed · 1h");
+        // A settled session carries elapsed and turn count; one turn reads
+        // singular.
+        let mut settled = entry("settled");
+        settled.turns = 5;
+        settled.updated = ago(12);
+        assert_eq!(settled.row_status(now).text().as_ref(), "Settled · 12m · 5 turns");
+        let mut one = entry("one");
+        one.turns = 1;
+        one.updated = ago(12);
+        assert_eq!(one.row_status(now).text().as_ref(), "Settled · 12m · 1 turn");
+        // Nothing ever replied.
         let fresh = entry("fresh");
-        assert_eq!(fresh.second_line(), Some(Byline::Placeholder(PLACEHOLDER_EMPTY.into())));
-        assert_eq!(PLACEHOLDER_EMPTY, "No reply yet");
-        let summary = fresh.summary(Local::now());
-        assert_eq!(aui::nav::second_line_kind(&summary), aui::nav::SecondLineKind::Placeholder);
+        assert_eq!(fresh.row_status(now).text().as_ref(), "No reply yet");
     }
 
-    /// Every rung through the real `summary()`: each kind reserves exactly
-    /// one second line, so every row is two lines tall whatever state the
-    /// session is in.
+    /// The `attention` mapping: both known flags light their state, and a
+    /// future flag the schema left open lights nothing.
     #[test]
-    fn every_ladder_rung_keeps_the_two_line_height() {
+    fn attention_flags_map_to_their_states_only() {
+        use muse_client::schema::AttentionFlag;
+        let mut both = entry("both");
+        both.attention = vec![AttentionFlag::ApprovalPending, AttentionFlag::InputPending];
+        assert!(both.needs_approval());
+        assert!(both.asked());
+        // Approval outranks the question, mirroring the transcript's own
+        // phase priority.
+        assert_eq!(both.row_status(Local::now()).text().as_ref(), "Needs approval");
+        let mut future = entry("future");
+        future.attention = vec![AttentionFlag::Unknown("somethingNew".into())];
+        assert!(!future.needs_approval());
+        assert!(!future.asked());
+        assert_eq!(future.row_status(Local::now()).text().as_ref(), "No reply yet");
+        let mut empty = entry("empty");
+        empty.attention = Vec::new();
+        assert!(!empty.needs_approval());
+        assert!(!empty.asked());
+    }
+
+    /// Every state through the real `summary()`: the context line keeps one
+    /// line and the status line is always set, so every row is three lines
+    /// tall whatever the session is in.
+    #[test]
+    fn every_state_keeps_the_three_line_height() {
+        use aui::nav::context_line_kind;
+        use muse_client::schema::AttentionFlag;
         let now = Local::now();
         let mut running = entry("running");
         running.running = true;
+        running.turn_started = Some(now);
         let mut pending = entry("pending");
         pending.title_pending = true;
         let mut lined = entry("lined");
         lined.last_ask = Some("tighten validation".into());
         lined.description = "patched the validator".into();
+        let mut approval = entry("approval");
+        approval.attention = vec![AttentionFlag::ApprovalPending];
+        approval.last_ask = Some("install it".into());
+        let mut asked = entry("asked");
+        asked.pending_question = Some("Which bucket?".into());
         let mut settled = entry("settled");
         settled.turns = 3;
         settled.description = "patched the validator".into();
+        let mut failed = entry("failed");
+        failed.turns = 2;
+        failed.last_error = Some("boom".into());
+        let mut branched = entry("branched");
+        branched.turns = 2;
+        branched.project_name = Some("acme-web".into());
+        branched.branch = Some("feature-x".into());
         let fresh = entry("fresh");
-        for built in [&running, &pending, &lined, &settled, &fresh] {
-            let kind = aui::nav::second_line_kind(&built.summary(now));
-            assert_eq!(kind.lines(), 1, "{kind:?} keeps one second line");
+        for built in [&running, &pending, &lined, &approval, &asked, &settled, &failed, &branched, &fresh] {
+            let summary = built.summary(now);
+            let kind = context_line_kind(&summary);
+            assert_eq!(kind.lines(), 1, "{kind:?} keeps one context line");
             assert!(kind.truncate(), "{kind:?} ellipsizes at the row's width");
-            assert!(!kind.wraps(), "{kind:?} never wraps to a third line");
+            assert!(!kind.wraps(), "{kind:?} never wraps onto another line");
+            assert!(summary.status.is_some(), "every state sets the status line");
         }
     }
 
@@ -1133,6 +1319,12 @@ mod tests {
             local: false,
             workspace: None,
             project: None,
+            project_name: None,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
             branch: None,
         }
     }

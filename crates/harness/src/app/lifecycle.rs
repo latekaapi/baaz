@@ -723,10 +723,11 @@ impl Harness {
             let meta = self.overrides.get(&entry.id);
             // A missing root resolves nowhere: the row falls back to "Other
             // workspaces" while the adoption stays in the store.
-            entry.project = self
+            let resolved = self
                 .projects
-                .resolve_available(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()))
-                .map(|p| p.id.clone());
+                .resolve_available(entry.workspace.as_deref(), meta.and_then(|m| m.project.as_deref()));
+            entry.project = resolved.as_ref().map(|p| p.id.clone());
+            entry.project_name = resolved.as_ref().map(|p| p.name.clone());
             if entry.local {
                 // A local row predates the wire list: no index or store
                 // source speaks for it, so its label ("New session", or the

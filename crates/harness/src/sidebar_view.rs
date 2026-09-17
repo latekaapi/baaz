@@ -1509,6 +1509,12 @@ mod tests {
                     local: false,
                     workspace: None,
                     project: Some(id.clone()),
+                    project_name: None,
+                    attention: Vec::new(),
+                    approval_command: None,
+                    pending_question: None,
+                    turn_started: None,
+                    last_error: None,
                     branch: None,
                 })
             })

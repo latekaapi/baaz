@@ -332,6 +332,72 @@ impl Harness {
         }, cx);
     }
 
+    /// Keep one row's live facts current without waiting for `session/list`.
+    ///
+    /// A started turn reads running with its start (and stands down any
+    /// recorded failure — the new turn supersedes it); an approval or
+    /// question event re-reads the open view's pending words, which the
+    /// wire never carries as text; anything else re-reads the open view's
+    /// running bit, so a completed turn stands the row down even before the
+    /// list reply lands. The open view is authoritative for its own
+    /// attention: once it holds no pending words, stale wire flags clear
+    /// rather than pinning the row on `Needs approval` until the next
+    /// listing. Side sessions never touch rows — hidden title/byline
+    /// workers, not sidebar state. Call after the event reached the view,
+    /// so the fold already holds the event's world.
+    pub(crate) fn sync_row_live(&mut self, session_id: &str, started: bool, cx: &mut Context<Self>) {
+        if self.is_side_session(session_id) {
+            return;
+        }
+        let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) else {
+            return;
+        };
+        let mut changed = false;
+        if started {
+            let now = crate::clock::now_local();
+            if !entry.running {
+                entry.running = true;
+                changed = true;
+            }
+            entry.turn_started = Some(now);
+            entry.updated = now;
+            changed = true;
+            if entry.last_error.is_some() {
+                entry.last_error = None;
+                changed = true;
+            }
+        }
+        if let Some(view) = self.active.clone() {
+            if view.read(cx).session_id == session_id {
+                let (approval, question) = view.read(cx).row_pending();
+                if entry.approval_command != approval {
+                    entry.approval_command = approval;
+                    changed = true;
+                }
+                if entry.pending_question != question {
+                    entry.pending_question = question;
+                    changed = true;
+                }
+                if !started {
+                    let running = view.read(cx).busy();
+                    if entry.running != running {
+                        entry.running = running;
+                        changed = true;
+                    }
+                }
+                // The view just spoke: no pending words means no pending
+                // attention, whatever the last listing said.
+                if entry.approval_command.is_none() && entry.pending_question.is_none() && !entry.attention.is_empty() {
+                    entry.attention.clear();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.invalidate_list();
+        }
+    }
+
     /// The open session's id, which the empty filter never applies to: a
     /// session just created has no turns yet and must stay visible.
     pub(crate) fn active_id(&self, cx: &gpui::App) -> Option<String> {
