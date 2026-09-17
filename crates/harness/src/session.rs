@@ -469,6 +469,10 @@ pub struct SessionView {
     /// scrolling mid-drag.
     span_held: Rc<HashMap<String, (String, aui::transcript::MessageSelection)>>,
     span_sessions: HashMap<String, aui::transcript::SpanSession>,
+    /// The turn whose copy button shows the success check, if any: set on
+    /// the copy intent and cleared after the library's `COPY_HOLD`, so the
+    /// tick reads as a confirmation and then the copy glyph returns.
+    copied_turn: Option<String>,
     /// Last elapsed second the turn ticker painted, so the 1 Hz clock
     /// notifies only when the displayed number changes (P2).
     last_tick_secs: Option<u64>,
@@ -689,6 +693,7 @@ impl SessionView {
             follow: true,
             span_held: Rc::new(HashMap::new()),
             span_sessions: HashMap::new(),
+            copied_turn: None,
             last_tick_secs: None,
             running: None,
             submitting: false,

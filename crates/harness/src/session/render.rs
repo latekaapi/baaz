@@ -243,8 +243,10 @@ impl SessionView {
             cards: Some(self.card_intents(window, cx)),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
-            // One clock per frame for every turn age.
+            // One clock per frame for every turn age, and the one turn (if
+            // any) holding its copy check.
             now_ms: transcript::transcript_now_ms(&self.cached_turns),
+            copied: Rc::new(self.copied_turn.iter().cloned().collect()),
             full_output: Rc::clone(&self.cached_full_output),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {
@@ -684,6 +686,24 @@ impl SessionView {
         }
     }
 
+    /// Hold a turn's copy button on its success check for the library's
+    /// hold, then clear it. Only one turn holds the check at a time — a
+    /// second copy moves it, and the first timer clears nothing that is no
+    /// longer its own.
+    fn hold_copy(&mut self, turn_id: String, cx: &mut Context<Self>) {
+        self.copied_turn = Some(turn_id.clone());
+        cx.notify();
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(aui::transcript::COPY_HOLD).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_turn.as_ref() == Some(&turn_id) {
+                    this.copied_turn = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     /// An assistant turn's bottom-row action (C6): Copy is local; Retry
     /// resends the user input behind the turn; Fork opens the turn picker.
     /// Pin is hidden on turns (it lives on sidebar sessions) and its arm is
@@ -702,6 +722,7 @@ impl SessionView {
                 let text = self.assistant_text(&turn_id).unwrap_or_default();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    self.hold_copy(turn_id, cx);
                 }
             }
             AssistantTurnAction::Retry => {
@@ -739,10 +760,12 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = turn_id;
         match action {
             aui::transcript::UserTurnAction::Copy => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    self.hold_copy(turn_id, cx);
+                }
             }
             aui::transcript::UserTurnAction::Edit => {
                 self.set_draft(text, window, cx);
@@ -941,6 +964,24 @@ impl SessionView {
         let held = Rc::make_mut(&mut self.span_held);
         if super::spans::hold_span(held, turn_id, source, span) {
             cx.notify();
+        }
+    }
+
+    /// `--steps copy:<turn>`: press the turn's copy button for the copy-tick
+    /// screenshot. `<turn>` is the turn's index in the live transcript, like
+    /// `select-span`; it travels the same button arms a press would, so the
+    /// hold the capture shows is the hold a person sees.
+    pub(crate) fn step_copy(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(index) = rest.trim().parse::<usize>() else { return };
+        let Some(session) = self.fold.session(&self.session_id).cloned() else { return };
+        let Some(turn) = session.turns.get(index) else { return };
+        match turn {
+            Turn::User { id, text, .. } => {
+                self.user_action(id.clone(), text.clone(), aui::transcript::UserTurnAction::Copy, window, cx);
+            }
+            Turn::Assistant { id, .. } => {
+                self.assistant_action(id.clone(), AssistantTurnAction::Copy, window, cx);
+            }
         }
     }
 

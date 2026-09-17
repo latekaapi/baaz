@@ -76,6 +76,12 @@ pub struct Folds {
     /// The clock a frame formats turn ages against, read once per frame
     /// ([`transcript_now_ms`]) so one frame formats once.
     pub now_ms: u64,
+    /// Turn ids whose copy button shows the success check: the app sets the
+    /// id on the copy intent and clears it after the library's `COPY_HOLD`
+    /// (`aui::transcript::COPY_HOLD`), which the code-block header honours
+    /// on its own. Empty almost always, so the steady-state frame clones
+    /// nothing per turn.
+    pub copied: Rc<HashSet<String>>,
     /// Link clicks from markdown bodies (C5): URLs and workspace paths.
     pub link: Option<TurnLinkHandler>,
     /// Bottom-row actions on assistant turns, keyed by turn id (C6).
@@ -435,6 +441,9 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             if let Some(age) = turn_age(*timestamp, folds.now_ms) {
                 turn = turn.age(age);
             }
+            if folds.copied.contains(id) {
+                turn = turn.copied(true);
+            }
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
                 turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
@@ -591,6 +600,9 @@ fn text_card(
             if let Some(age) = turn_age(timestamp, folds.now_ms) {
                 turn = turn.age(age);
             }
+        }
+        if folds.copied.contains(turn_id) {
+            turn = turn.copied(true);
         }
     }
     if let Some(on_link) = &folds.link {
