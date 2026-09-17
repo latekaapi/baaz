@@ -485,7 +485,14 @@ impl Harness {
         // missed report.
         let hover = cx.listener(
             |this: &mut Self, (id, hovered): &(SharedString, bool), window, cx| {
-                this.note_row_hover(id.to_string(), *hovered, window.mouse_position(), cx);
+                let at = window.mouse_position();
+                crate::hover_trace!(
+                    "report id={id} {} at={:.0},{:.0}",
+                    if *hovered { "entered" } else { "left" },
+                    f32::from(at.x),
+                    f32::from(at.y)
+                );
+                this.note_row_hover(id.to_string(), *hovered, at, cx);
             },
         );
         // A group row's hover tray: `+` starts a session in that project
@@ -639,28 +646,63 @@ impl Harness {
     /// on the card only dismisses it. It closes on leave, scroll and click
     /// through [`Self::close_row_detail`] and the listeners that call it.
     pub(crate) fn render_row_detail(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (element, reason) = self.build_row_detail(cx);
+        let shown = element.is_some();
+        // Diagnosis only (`HARNESS_HOVER_TRACE=1`): one line per result
+        // change, never per frame — the root calls this every frame.
+        let changed = self.hover_trace_last_shown != Some(shown);
+        self.hover_trace_last_shown = Some(shown);
+        if changed {
+            crate::hover_trace!(
+                "render result={} reason={reason} id={:?} hovered={:?} shown={} trigger={}",
+                if shown { "Some" } else { "None" },
+                self.forced_detail.clone().or_else(|| self.hovered_row.clone()),
+                self.hovered_row,
+                self.hover_shown,
+                self.hover_trigger.is_some()
+            );
+        }
+        element
+    }
+
+    /// The card builder behind [`Self::render_row_detail`], with the reason
+    /// a missing card is missing: `not-shown` (still inside the delay),
+    /// `no-hovered-row`, `no-trigger`, or the forced pin's own misses and
+    /// unknown rows under `unknown-row` / `forced-*`.
+    fn build_row_detail(&mut self, cx: &mut Context<Self>) -> (Option<AnyElement>, &'static str) {
         let (id, trigger) = match self.forced_detail.clone() {
             Some(id) => {
-                let (known, bounds) = self.selected_row_bounds.clone()?;
+                let Some((known, bounds)) = self.selected_row_bounds.clone() else {
+                    return (None, "forced-no-bounds");
+                };
                 if known != id {
-                    return None;
+                    return (None, "forced-id-mismatch");
                 }
                 (id, bounds)
             }
             None => {
                 if !self.hover_shown {
-                    return None;
+                    return (None, "not-shown");
                 }
-                (self.hovered_row.clone()?, self.hover_trigger?)
+                let Some(hovered) = self.hovered_row.clone() else {
+                    return (None, "no-hovered-row");
+                };
+                let Some(trigger) = self.hover_trigger else {
+                    return (None, "no-trigger");
+                };
+                (hovered, trigger)
             }
         };
         let visible = self.visible_sessions(cx);
         // The visible rows first, then the whole list: a card pinned to a
         // filtered-out row still names it honestly.
-        let entry = visible
+        let Some(entry) = visible
             .iter()
             .find(|entry| entry.id == id)
-            .or_else(|| self.sessions.iter().find(|entry| entry.id == id))?;
+            .or_else(|| self.sessions.iter().find(|entry| entry.id == id))
+        else {
+            return (None, "unknown-row");
+        };
         let now = crate::sidebar::grouping_now(&visible);
         let data = entry.detail_data(now);
         let card_id: ElementId = (ElementId::from("row-detail"), SharedString::from(id.clone())).into();
@@ -697,7 +739,7 @@ impl Harness {
         // lands on its row (the card hangs below-start of the trigger,
         // never over it) and dismisses through the select/action
         // listeners; leave and scroll close through the poll above.
-        Some(aui::nav::anchored_session_detail(trigger, card).into_any_element())
+        (Some(aui::nav::anchored_session_detail(trigger, card).into_any_element()), "shown")
     }
 
     /// What a regroup or filter change looks like to the virtual list
@@ -861,6 +903,17 @@ impl Harness {
     /// pointer that keeps travelling past the delay.
     fn poll_sidebar_hover(&mut self, grouping: &Grouping, window: &mut Window, cx: &mut Context<Self>) {
         let hovered = self.polled_hover_row(grouping, window, cx);
+        // Diagnosis only (`HARNESS_HOVER_TRACE=1`): whether hover reaches
+        // the rows' own GPUI state — the same `Interaction.hovered` flags
+        // the row's hover affordances (the action icons) read — at most
+        // once per second, beside what the app has armed.
+        if crate::log::hover_trace_enabled() {
+            let now = std::time::Instant::now();
+            if self.hover_trace_last_poll.is_none_or(|at| now.duration_since(at).as_secs() >= 1) {
+                self.hover_trace_last_poll = Some(now);
+                crate::hover_trace!("poll gpui-hover={hovered:?} armed={:?}", self.hovered_row);
+            }
+        }
         if hovered != self.hovered_row {
             self.hovered_row = hovered.clone();
             self.hover_since = hovered.as_ref().map(|_| std::time::Instant::now());
@@ -874,10 +927,15 @@ impl Harness {
                 self.tasks.push(cx.spawn(async move |_, cx| {
                     cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
                     let _ = pending.update(cx, |this, cx| {
-                        if this.hovered_row.as_deref() == Some(&id) && !this.hover_shown {
+                        let matches = this.hovered_row.as_deref() == Some(&id);
+                        if matches && !this.hover_shown {
                             this.hover_shown = true;
                             cx.notify();
                         }
+                        crate::hover_trace!(
+                            "timer src=poll id={id} matches={matches} shown={}",
+                            this.hover_shown
+                        );
                     });
                 }));
             }
@@ -914,8 +972,14 @@ impl Harness {
     ) {
         if hovered {
             if self.hovered_row.as_deref() == Some(id.as_str()) {
+                crate::hover_trace!("note id={id} entered already-armed");
                 return;
             }
+            crate::hover_trace!(
+                "note id={id} entered arm trigger={:.0},{:.0}",
+                f32::from(at.x),
+                f32::from(at.y)
+            );
             self.hovered_row = Some(id.clone());
             self.hover_since = Some(std::time::Instant::now());
             self.hover_shown = false;
@@ -924,17 +988,25 @@ impl Harness {
             self.tasks.push(cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
                 let _ = pending.update(cx, |this, cx| {
-                    if this.hovered_row.as_deref() == Some(&id) && !this.hover_shown {
+                    let matches = this.hovered_row.as_deref() == Some(&id);
+                    if matches && !this.hover_shown {
                         this.hover_shown = true;
                         cx.notify();
                     }
+                    crate::hover_trace!(
+                        "timer src=note id={id} matches={matches} shown={}",
+                        this.hover_shown
+                    );
                 });
             }));
             return;
         }
         if self.hovered_row.as_deref() == Some(id.as_str()) {
+            crate::hover_trace!("note id={id} left close shown={}", self.hover_shown);
             self.close_row_detail();
             cx.notify();
+        } else {
+            crate::hover_trace!("note id={id} left ignored armed={:?}", self.hovered_row);
         }
     }
 

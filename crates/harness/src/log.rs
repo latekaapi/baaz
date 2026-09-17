@@ -19,6 +19,25 @@ fn trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("HARNESS_TRACE").is_ok_and(|v| v == "1"))
 }
 
+/// Whether `HARNESS_HOVER_TRACE=1` hover-card tracing is on, read once.
+pub(crate) fn hover_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("HARNESS_HOVER_TRACE").is_ok_and(|v| v == "1"))
+}
+
+/// Print one hover-trace line to stderr, prefixed `harness-hover: `.
+///
+/// A no-op unless `HARNESS_HOVER_TRACE=1`; the format arguments are
+/// evaluated only when enabled, so call sites stay cheap when off.
+#[macro_export]
+macro_rules! hover_trace {
+    ($($arg:tt)*) => {
+        if $crate::log::hover_trace_enabled() {
+            eprintln!("harness-hover: {}", format_args!($($arg)*))
+        }
+    };
+}
+
 /// The click (a sidebar row, or `--session` at boot) every trace mark is
 /// measured from. Reset by [`trace_reset`]; read by [`trace_mark`].
 static TRACE_ORIGIN: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
