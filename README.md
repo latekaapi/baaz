@@ -1,6 +1,6 @@
 # Harness
 
-A native macOS chat client for [Muse Code](https://github.com/facebookresearch/muse) —
+A native macOS chat client for Muse Code —
 built with [gpui](https://www.gpui.rs) (the UI framework behind
 [Zed](https://zed.dev)) and the `aui` component library.
 
@@ -46,6 +46,14 @@ printed.
 - **Billing-tier awareness.** The harness probes which plan a login is on and
   warns before a turn would bill pay-as-you-go, rather than finding out
   after the fact (see **Cost**, below).
+- **Session rows that explain themselves.** Every row is title, status verb,
+  context: `Working · 14m`, `Needs approval`, `Asked: "…"`, `Settled · 12m`,
+  `Failed · 1h`. Titles are generated on the first send; hovering a row
+  opens the full picture in a detail card that never steals focus.
+- **A transcript you can read and reuse.** Cross-block text selection with
+  copy, per-turn timestamps (`just now` … `yesterday`), copy buttons that
+  confirm, file paths and links that open, and a status line that names the
+  turn's current phase instead of just spinning.
 - Both light and dark themes, a command palette, and a keyboard-first keymap.
 
 ## Requirements

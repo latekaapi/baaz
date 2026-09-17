@@ -1,6 +1,6 @@
 # Harness — Muse Code chat slice: specification
 
-Status: frozen 2026-09-08. Change only with the owner's agreement; record changes in
+Status: frozen 2026-09-08. Change only by agreement; record changes in
 `docs/CHANGELOG.md`.
 
 This repository is the agentic coding **harness**. Its first slice is a feature-complete

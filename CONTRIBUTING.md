@@ -124,4 +124,8 @@ card: `row-detail:<session_id>` pins it open (pair with `click:` on the
 same id), and `hover:<session_id>` delivers the row's own hover report —
 what its hover event sends — so the card opens past the delay exactly as
 for a real pointer (pair with `click:` on the same id and a `wait:` past
-the delay; empty means the selected row).
+the delay; empty means the selected row). A scripted resize drag runs
+through the real divider handler as `resize-begin:<x>` / `resize-move:<x>` /
+`resize-end`, or frame-paced as `resize-sweep:<to_w,step_px>`; the full verb
+tables live in `crates/harness/src/steps.rs` with the composer verbs in
+`docs/03-composer.md` and the approval verbs in `docs/04-approvals.md`.

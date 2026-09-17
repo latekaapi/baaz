@@ -337,11 +337,11 @@ words, `Settled · 12m · 5 turns`, `Failed · 1h`, or `No reply yet` —
 waiting on a person outranks running, so an approval mid-turn never reads
 `Working`. Hovering a row past a short beat opens the hover detail beside
 it, the dense 320 px card: the full title wrapping with the relative time
-right-aligned, the owner's last message quoted and muted, the latest reply's
+right-aligned, the user's last message quoted and muted, the latest reply's
 first line in the state colour (which carries the status — green settled,
 accent working, danger failed — so there is no separate status row), one
 inline meta row (branch, bare turn count, updated), and a mono muted footer
-merging project and workspace path. A session waiting on the owner replaces
+merging project and workspace path. A session waiting on the user replaces
 the reply line with the highlighted attention box: warning-tinted border and
 fill, `Asked:` or `Needs approval:` in semibold, then the pending
 question's words or the approval's exact command, read live from the open
@@ -380,7 +380,7 @@ through the row's own one-line cap. `last_summary` is written on
 block (fenced code skipped, markdown markers stripped): the fold is already
 in memory, so it costs no model call, and it persists through
 `sessions.json` beside the name, the hidden and archived flags, the pin,
-the derived title — and `last_ask`, the owner's last request in the same
+the derived title — and `last_ask`, the user's last request in the same
 free excerpt, which together with the summary is the row's two-line
 byline. Only when the "Summarise sessions in the sidebar" switch is on AND
 the free excerpt is poor (either half empty, fence-leading or code-only, or
