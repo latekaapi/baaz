@@ -475,14 +475,19 @@ impl Harness {
         let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
             this.toggle_group(id.to_string(), cx);
         });
-        // A session row's hover report: the hover card's arm. The rows fire
-        // this from their own hover events, so the delay arms even when the
-        // sidebar pane renders nothing (a settled sidebar re-renders on no
-        // pointer movement at all) — the render-time poll below only tracks
-        // the trigger point and heals a missed report.
-        let hover = cx.listener(|this: &mut Self, (id, hovered): &(SharedString, bool), _, cx| {
-            this.note_row_hover(id.to_string(), *hovered, cx);
-        });
+        // A session row's hover report: the hover card's arm and seat. The
+        // rows fire this from their own hover events, so the delay arms —
+        // and the trigger point lands — even when the sidebar pane renders
+        // nothing (a settled sidebar re-renders on no pointer movement at
+        // all): the timer's notify reaches only the root, whose cached
+        // pane never re-renders to poll one. The render-time poll below
+        // only refreshes the point while the pane renders, and heals a
+        // missed report.
+        let hover = cx.listener(
+            |this: &mut Self, (id, hovered): &(SharedString, bool), window, cx| {
+                this.note_row_hover(id.to_string(), *hovered, window.mouse_position(), cx);
+            },
+        );
         // A group row's hover tray: `+` starts a session in that project
         // (and makes it current), `…` opens its project menu. On "Other
         // workspaces" `+` has nowhere to start, so it offers adoption, and
@@ -860,7 +865,10 @@ impl Harness {
             self.hovered_row = hovered.clone();
             self.hover_since = hovered.as_ref().map(|_| std::time::Instant::now());
             self.hover_shown = false;
-            self.hover_trigger = None;
+            // A healed report seats its own trigger too: the arm below may
+            // be the only render before the timer opens the card, and a
+            // settled pane never re-renders to poll one later.
+            self.hover_trigger = hovered.as_ref().map(|_| point_trigger(window.mouse_position()));
             if let Some(id) = hovered {
                 let pending = cx.entity().downgrade();
                 self.tasks.push(cx.spawn(async move |_, cx| {
@@ -887,14 +895,23 @@ impl Harness {
     }
 
     /// Fold one row hover report into the hover state: entering a new row
-    /// arms the detail's delay, leaving the armed row closes it, and
-    /// anything else changes nothing. Fires from the rows' own hover
-    /// events, so this runs even when the sidebar pane itself renders
-    /// nothing — the render-time poll below only tracks the trigger point
-    /// and heals a missed report. Entering never notifies (nothing shows
-    /// until the delay elapses); the timer notifies when the card opens,
-    /// and leaving notifies when an open card closes.
-    pub(crate) fn note_row_hover(&mut self, id: String, hovered: bool, cx: &mut Context<Self>) {
+    /// arms the detail's delay and seats its trigger at the reporting
+    /// pointer, leaving the armed row closes it, and anything else changes
+    /// nothing. Fires from the rows' own hover events, so this runs even
+    /// when the sidebar pane itself renders nothing — the timer's notify
+    /// reaches only the root, whose cached pane never re-renders, which is
+    /// why the trigger must land here rather than in a later render poll.
+    /// That poll only refreshes the point while the pane renders, and heals
+    /// a missed report. Entering never notifies (nothing shows until the
+    /// delay elapses); the timer notifies when the card opens, and leaving
+    /// notifies when an open card closes.
+    pub(crate) fn note_row_hover(
+        &mut self,
+        id: String,
+        hovered: bool,
+        at: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if hovered {
             if self.hovered_row.as_deref() == Some(id.as_str()) {
                 return;
@@ -902,7 +919,7 @@ impl Harness {
             self.hovered_row = Some(id.clone());
             self.hover_since = Some(std::time::Instant::now());
             self.hover_shown = false;
-            self.hover_trigger = None;
+            self.hover_trigger = Some(point_trigger(at));
             let pending = cx.entity().downgrade();
             self.tasks.push(cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
@@ -1832,6 +1849,170 @@ mod tests {
         assert!(hit, "some sweep position must hover the one session row");
         vc.simulate_mouse_move(point(px(150.), px(690.)), None::<gpui::MouseButton>, gpui::Modifiers::default());
         assert!(left.borrow().iter().any(|id| id == "s-1"), "leaving the row reports the leave");
+    }
+
+    /// The hover report itself seats the card — no pane render involved. A
+    /// settled sidebar re-renders nothing, so the delay timer's notify
+    /// reaches only the root (the pane stays cached): the trigger point
+    /// must come from the row's own hover report, never from a later
+    /// render poll. The real root as the app builds it (the cached pane,
+    /// the app's own handlers): sweep the pointer over a row with no
+    /// redraw between moves, require the trigger set at the pointer, let
+    /// `SESSION_DETAIL_DELAY` elapse with still no redraw, and require the
+    /// card builder to return its element (what the root mounts).
+    #[gpui::test]
+    fn hover_report_seats_the_card_without_a_pane_render(cx: &mut TestAppContext) {
+        use aui::nav::SESSION_DETAIL_DELAY;
+        use muse_client::schema::AccountStateKind;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // Hermetic state: boot adopts the workspace into the projects
+        // store, so the temp dir keeps the owner's store untouched.
+        let dir = std::env::temp_dir().join(format!("harness-hover-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let old = std::env::var_os("HARNESS_STATE_DIR");
+        std::env::set_var("HARNESS_STATE_DIR", &dir);
+        let args = crate::Args {
+            workspace: dir.clone(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        };
+        let vc = cx.add_empty_window();
+        let harness = vc.update(|window, cx| {
+            let harness =
+                cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            harness.update(cx, |h, _| {
+                h.auth = crate::login::Auth::SignedIn(crate::auth::Identity {
+                    lane: AccountStateKind::AccountLogin,
+                    name: "Probe".into(),
+                    email: String::new(),
+                });
+                h.sessions.push(SessionEntry {
+                    id: "s-hover-1".into(),
+                    label: "Rewrite the router".into(),
+                    updated: chrono::Local::now(),
+                    running: false,
+                    turns: 3,
+                    hidden: false,
+                    pinned: false,
+                    archived: false,
+                    description: "the ask".into(),
+                    replayed: false,
+                    named: true,
+                    needs_title: false,
+                    title_pending: false,
+                    last_ask: Some("the ask".into()),
+                    local: false,
+                    workspace: None,
+                    project: None,
+                    project_name: None,
+                    attention: Vec::new(),
+                    approval_command: None,
+                    pending_question: None,
+                    turn_started: None,
+                    last_error: None,
+                    branch: None,
+                });
+                h.invalidate_list();
+            });
+            harness
+        });
+        // The real root as the app builds it: the cached pane, the app's
+        // own row handlers, the card mounted from `render_row_detail`.
+        take_sidebar_pane_renders();
+        vc.draw(point(px(0.), px(0.)), gpui::size(px(1280.), px(800.)), |_, _| {
+            harness.clone().into_any_element()
+        });
+        // Park where no session row lives, so the sweep below starts from
+        // a neutral pointer with nothing armed.
+        vc.simulate_mouse_move(
+            point(px(1200.), px(780.)),
+            None::<gpui::MouseButton>,
+            gpui::Modifiers::default(),
+        );
+        assert!(
+            vc.update(|_, cx| harness.read(cx).hovered_row.clone()).is_none(),
+            "the parked pointer arms no row"
+        );
+        // The settled sidebar: no redraw between moves.
+        take_sidebar_pane_renders();
+        let mut hit: Option<f32> = None;
+        for y in (100..780).step_by(10) {
+            vc.simulate_mouse_move(
+                point(px(100.), px(y as f32)),
+                None::<gpui::MouseButton>,
+                gpui::Modifiers::default(),
+            );
+            let hovered = vc.update(|_, cx| harness.read(cx).hovered_row.clone());
+            if hovered.as_deref() == Some("s-hover-1") {
+                hit = Some(y as f32);
+                break;
+            }
+        }
+        let y = hit.expect("some sweep position must hover the session row");
+        assert_eq!(
+            take_sidebar_pane_renders(),
+            0,
+            "a settled sidebar re-renders on no pointer movement"
+        );
+        // The report itself seats the card: the trigger is set, at the
+        // pointer — with no pane render to poll one from.
+        let trigger = vc
+            .update(|_, cx| harness.read(cx).hover_trigger)
+            .expect("the hover report must seat the card's trigger");
+        assert!(
+            (f32::from(trigger.origin.x) - 100.0).abs() < 2.0
+                && (f32::from(trigger.origin.y) - y).abs() < 2.0,
+            "the trigger sits at the reporting pointer, got {:?} for a report at (100, {y})",
+            trigger.origin
+        );
+        // Past the delay with still no redraw: the timer opens the card
+        // for the still-hovered row, and the builder returns its element.
+        vc.cx
+            .executor()
+            .advance_clock(SESSION_DETAIL_DELAY + std::time::Duration::from_millis(100));
+        vc.run_until_parked();
+        assert_eq!(
+            take_sidebar_pane_renders(),
+            0,
+            "the delay timer must not need a pane render to open the card"
+        );
+        let (shown, card) = vc.update(|_, cx| {
+            harness.update(cx, |h, cx| (h.hover_shown, h.render_row_detail(cx).is_some()))
+        });
+        assert!(shown, "the delay timer opens the card for the still-hovered row");
+        assert!(card, "the card element is mounted once the delay elapses");
+        match old {
+            Some(value) => std::env::set_var("HARNESS_STATE_DIR", value),
+            None => std::env::remove_var("HARNESS_STATE_DIR"),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

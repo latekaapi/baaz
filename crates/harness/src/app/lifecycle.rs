@@ -720,6 +720,37 @@ impl Harness {
         cx.notify();
     }
 
+    /// `hover:<session_id>`: capture aid — deliver the selected row's own
+    /// hover report, exactly what the row's hover event sends: arms the
+    /// card's delay and seats its trigger at the row's bounds centre (pair
+    /// with `click:` on the same id and a `wait:` past the delay; empty
+    /// means the selected row). A real mouse-move event cannot be
+    /// dispatched from a step — steps run inside a `Harness` update, and
+    /// the row's hover handler updates the entity, which panics
+    /// re-entrantly (the wheel steps survive it only because their handlers
+    /// never touch the entity) — so this makes the report's own call. The
+    /// pointer-to-report half lives in the
+    /// `hover_report_seats_the_card_without_a_pane_render` test, which
+    /// sweeps a real pointer over the real pane. Free: no turn, no wire.
+    pub(crate) fn step_hover(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let id = rest.trim();
+        let Some((known, bounds)) = self.selected_row_bounds.clone() else {
+            crate::harness_log!(
+                "hover: no selected row bounds yet (pair with `click:` and a `wait:`)"
+            );
+            return;
+        };
+        if !id.is_empty() && known != id {
+            crate::harness_log!(
+                "hover: `{id}` is not the selected row (`{known}`); pair with `click:{id}` first"
+            );
+            return;
+        }
+        let at = bounds.center();
+        self.note_row_hover(known.clone(), true, at, cx);
+        crate::harness_log!("hover id={known} at={:.0},{:.0}", f32::from(at.x), f32::from(at.y));
+    }
+
     /// `new`: the same as ⌘N, in the current project. `new:<project name>`:
     /// the group row's `+` for the project named — an unknown name only logs.
     pub(crate) fn step_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
