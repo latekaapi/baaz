@@ -475,6 +475,14 @@ impl Harness {
         let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
             this.toggle_group(id.to_string(), cx);
         });
+        // A session row's hover report: the hover card's arm. The rows fire
+        // this from their own hover events, so the delay arms even when the
+        // sidebar pane renders nothing (a settled sidebar re-renders on no
+        // pointer movement at all) — the render-time poll below only tracks
+        // the trigger point and heals a missed report.
+        let hover = cx.listener(|this: &mut Self, (id, hovered): &(SharedString, bool), _, cx| {
+            this.note_row_hover(id.to_string(), *hovered, cx);
+        });
         // A group row's hover tray: `+` starts a session in that project
         // (and makes it current), `…` opens its project menu. On "Other
         // workspaces" `+` has nowhere to start, so it offers adoption, and
@@ -543,7 +551,8 @@ impl Harness {
                     }
                 });
             })
-            .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx));
+            .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx))
+            .on_row_hover(move |id, hovered, w, cx| hover(&(id.clone(), hovered), w, cx));
         if let Some(renaming) = self.renaming.clone() {
             // The library builds the renaming row more than once per frame,
             // so the editor arrives as a builder it calls on every build —
@@ -769,11 +778,13 @@ impl Harness {
     /// rows — exactly as the flattener mints them, open groups only (a
     /// closed group's rows are never built, so they can never be hovered).
     ///
-    /// The app re-derives rather than the library reporting hovers because
-    /// the elements belong to the library while hover ownership belongs to
-    /// the app. The coupling is one-directional and fail-silent: if the
-    /// library ever reseats its keys, the poll reads `hovered: false`
-    /// everywhere and the card never opens.
+    /// The render-time fallback beside the rows' own hover reports (see
+    /// [`Harness::note_row_hover`]): the elements belong to the library
+    /// while hover ownership belongs to the app, so the poll re-derives
+    /// row element ids under this same root to track the trigger point and
+    /// heal a missed report. The coupling is one-directional and
+    /// fail-silent: if the library ever reseats its keys, the poll reads
+    /// `hovered: false` everywhere and the reports alone arm the card.
     pub(crate) fn sidebar_hover_rows(grouping: &Grouping) -> Vec<(String, ElementId)> {
         let view: ElementId = Self::SIDEBAR_VIEW_ID.into();
         let mut out = Vec::new();
@@ -872,6 +883,41 @@ impl Harness {
                 self.hover_shown = true;
                 cx.notify();
             }
+        }
+    }
+
+    /// Fold one row hover report into the hover state: entering a new row
+    /// arms the detail's delay, leaving the armed row closes it, and
+    /// anything else changes nothing. Fires from the rows' own hover
+    /// events, so this runs even when the sidebar pane itself renders
+    /// nothing — the render-time poll below only tracks the trigger point
+    /// and heals a missed report. Entering never notifies (nothing shows
+    /// until the delay elapses); the timer notifies when the card opens,
+    /// and leaving notifies when an open card closes.
+    pub(crate) fn note_row_hover(&mut self, id: String, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.hovered_row.as_deref() == Some(id.as_str()) {
+                return;
+            }
+            self.hovered_row = Some(id.clone());
+            self.hover_since = Some(std::time::Instant::now());
+            self.hover_shown = false;
+            self.hover_trigger = None;
+            let pending = cx.entity().downgrade();
+            self.tasks.push(cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
+                let _ = pending.update(cx, |this, cx| {
+                    if this.hovered_row.as_deref() == Some(&id) && !this.hover_shown {
+                        this.hover_shown = true;
+                        cx.notify();
+                    }
+                });
+            }));
+            return;
+        }
+        if self.hovered_row.as_deref() == Some(id.as_str()) {
+            self.close_row_detail();
+            cx.notify();
         }
     }
 
@@ -1701,6 +1747,91 @@ mod tests {
         let at = point_trigger(gpui::point(px(100.0), px(200.0)));
         assert_eq!(at.origin, gpui::point(px(100.0), px(200.0)));
         assert_eq!((at.size.width, at.size.height), (px(1.0), px(1.0)));
+    }
+
+    /// Item 1: session rows report hover enter/leave to the caller. A
+    /// settled sidebar re-renders on no pointer movement, so the
+    /// render-time poll alone could never arm the detail card — the rows'
+    /// own hover events must reach the caller. One status group with one
+    /// session: sweep the pointer down until the session reports entered
+    /// (no redraw between moves, the way a settled sidebar behaves), then
+    /// park it past the content and require the matching leave.
+    struct HoverProbe {
+        grouping: Grouping,
+        state: gpui::ListState,
+        entered: Rc<std::cell::RefCell<Vec<String>>>,
+        left: Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Render for HoverProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let entered = self.entered.clone();
+            let left = self.left.clone();
+            v_flex().w(px(300.)).h(px(700.)).child(
+                virtual_sidebar_view("hover-probe", self.grouping.clone(), self.state.clone()).on_row_hover(
+                    move |id, hovered, _, _| {
+                        if hovered {
+                            entered.borrow_mut().push(id.to_string());
+                        } else {
+                            left.borrow_mut().push(id.to_string());
+                        }
+                    },
+                ),
+            )
+        }
+    }
+
+    fn draw_hover(
+        vc: &mut gpui::VisualTestContext,
+        grouping: &Grouping,
+        state: &gpui::ListState,
+        entered: &Rc<std::cell::RefCell<Vec<String>>>,
+        left: &Rc<std::cell::RefCell<Vec<String>>>,
+    ) {
+        let probe = HoverProbe { grouping: grouping.clone(), state: state.clone(), entered: entered.clone(), left: left.clone() };
+        vc.draw(point(px(0.), px(0.)), gpui::size(px(300.), px(700.)), |_, cx| {
+            cx.new(|_| probe).into_any_element()
+        });
+    }
+
+    #[gpui::test]
+    fn session_rows_report_hover_enter_and_leave(cx: &mut TestAppContext) {
+        use aui::nav::{SessionSummary, StatusGroup};
+        use aui_tokens::AgentState;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let grouping = Grouping::Status(vec![StatusGroup::new(
+            "done",
+            "Done",
+            "1",
+            vec![SessionSummary::new("s-1", "checkout-flow-v2", AgentState::Idle, "now")],
+        )]);
+        let total = flatten_sidebar(&grouping, false).len();
+        let state = sidebar_list_state(total);
+        let entered = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let left = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let vc = cx.add_empty_window();
+        draw_hover(vc, &grouping, &state, &entered, &left);
+        // Park past the content first: whatever the platform's initial
+        // pointer position hovered reports at most a leave, never an enter.
+        vc.simulate_mouse_move(point(px(150.), px(690.)), None::<gpui::MouseButton>, gpui::Modifiers::default());
+        assert!(entered.borrow().is_empty(), "empty list area reports no enter");
+        entered.borrow_mut().clear();
+        left.borrow_mut().clear();
+        let mut hit = false;
+        for y in (10..300).step_by(10) {
+            vc.simulate_mouse_move(
+                point(px(150.), px(y as f32)),
+                None::<gpui::MouseButton>,
+                gpui::Modifiers::default(),
+            );
+            if entered.borrow().iter().any(|id| id == "s-1") {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "some sweep position must hover the one session row");
+        vc.simulate_mouse_move(point(px(150.), px(690.)), None::<gpui::MouseButton>, gpui::Modifiers::default());
+        assert!(left.borrow().iter().any(|id| id == "s-1"), "leaving the row reports the leave");
     }
 
     #[test]
