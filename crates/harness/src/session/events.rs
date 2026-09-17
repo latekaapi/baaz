@@ -44,14 +44,31 @@ impl SessionView {
             match method.as_str() {
                 "turn/started" => {
                     if let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) {
-                        self.running = Some(Running { turn_id: turn_id.to_owned(), started: crate::clock::now_instant() });
-                        self.submitting = false;
-                        self.last_tick_secs = None;
-                        self.start_ticker(cx);
+                        // A start for a turn this view already saw complete
+                        // is the re-attach replay (`session/resume` streams
+                        // the suffix, which re-delivers the open turn's
+                        // start), not new work: it folds below like any
+                        // repeat, but it never marks running — otherwise a
+                        // click that re-attaches an interrupted session
+                        // shows a fresh `Working…` for a turn that is not
+                        // running (item 3). Genuinely new work always
+                        // carries a new turn id.
+                        if !self.completed_turns.contains(turn_id) {
+                            self.running = Some(Running { turn_id: turn_id.to_owned(), started: crate::clock::now_instant() });
+                            self.submitting = false;
+                            self.last_tick_secs = None;
+                            self.start_ticker(cx);
+                        }
                     }
                 }
                 "turn/completed" => {
                     let ours = params.get("turnId").and_then(|v| v.as_str());
+                    if let Some(turn_id) = ours {
+                        if self.completed_turns.len() >= super::MAX_COMPLETED_TURNS {
+                            self.completed_turns.clear();
+                        }
+                        self.completed_turns.insert(turn_id.to_owned());
+                    }
                     if self.running.as_ref().is_some_and(|r| Some(r.turn_id.as_str()) == ours) {
                         self.running = None;
                         self.ticker = None;
@@ -345,6 +362,47 @@ mod tests {
         }))
         .expect("error object decodes");
         MuseError::Rpc(Box::new(object))
+    }
+
+    /// Item 3: a `turn/started` for a turn this view already saw complete is
+    /// the re-attach replay, not new work — clicking a session with an
+    /// interrupted turn re-attaches (`session/resume` streams the suffix,
+    /// re-delivering the turn's start), and the view must not mark running
+    /// for it. A start with a new id still marks running, and its
+    /// completion still stands the view down.
+    #[gpui::test]
+    fn a_redelivered_start_for_a_completed_turn_marks_nothing_running(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: "/tmp/item3-probe".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+            };
+            let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
+            let event = |method: &str, turn: &str| {
+                muse_client::MuseEvent::Notification {
+                    method: method.to_owned(),
+                    params: serde_json::json!({"turnId": turn}),
+                    cursor: None,
+                    session_id: Some("s-1".to_owned()),
+                }
+            };
+            // The interrupted turn completes, then its start is re-delivered
+            // by a re-attach: still idle, never `Working`.
+            view.update(cx, |view, cx| view.apply(event("turn/completed", "t-1"), cx));
+            assert!(!view.read(cx).busy());
+            view.update(cx, |view, cx| view.apply(event("turn/started", "t-1"), cx));
+            assert!(!view.read(cx).busy(), "a completed turn's redelivered start is not work");
+            // Genuinely new work still marks running, and its completion
+            // still stands the view down.
+            view.update(cx, |view, cx| view.apply(event("turn/started", "t-2"), cx));
+            assert!(view.read(cx).busy(), "a new turn id still marks running");
+            view.update(cx, |view, cx| view.apply(event("turn/completed", "t-2"), cx));
+            assert!(!view.read(cx).busy());
+        });
     }
 
     /// Owner round 2 S2: a stale page retries exactly once; any other error

@@ -345,6 +345,12 @@ struct Running {
     started: Instant,
 }
 
+/// How many completed turn ids a view remembers. A `turn/started` for a
+/// remembered id is a re-delivered start from a re-attach, not new work —
+/// and must not mark the view running (item 3). Turn ids accumulate one per
+/// turn; past this many the set resets rather than growing without bound.
+const MAX_COMPLETED_TURNS: usize = 1024;
+
 /// Why a queued row is being unqueued, which decides what happens to its text
 /// when `turn/unqueued` lands.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -477,6 +483,9 @@ pub struct SessionView {
     /// notifies only when the displayed number changes (P2).
     last_tick_secs: Option<u64>,
     running: Option<Running>,
+    /// Turn ids this view already saw complete. A `turn/started` for one of
+    /// them is the re-attach replay, not new work, and never marks running.
+    completed_turns: HashSet<String>,
     /// A `turn/start` is in flight and no `turn/started` has arrived yet.
     submitting: bool,
     /// History is still being paged in behind the live stream.
@@ -696,6 +705,7 @@ impl SessionView {
             copied_turn: None,
             last_tick_secs: None,
             running: None,
+            completed_turns: HashSet::new(),
             submitting: false,
             loading_history: false,
             backfill_running: false,

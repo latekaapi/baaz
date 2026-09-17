@@ -353,7 +353,20 @@ impl Harness {
             return;
         };
         let mut changed = false;
+        // The open view just applied this event (the route applies before
+        // it syncs): when it declined a re-delivered start for a turn it
+        // already saw complete, the row declines it too instead of
+        // manufacturing a fresh `Working · now` (item 3). A session with no
+        // open view keeps the wire's word.
+        let mut started_running = started;
         if started {
+            if let Some(view) = self.active.clone() {
+                if view.read(cx).session_id == session_id && !view.read(cx).busy() {
+                    started_running = false;
+                }
+            }
+        }
+        if started_running {
             let now = crate::clock::now_local();
             if !entry.running {
                 entry.running = true;

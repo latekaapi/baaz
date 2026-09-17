@@ -121,3 +121,8 @@ library.
 - **Byline reads as one line.** The ask/result halves no longer split the
   row 50/50: each hugs its content around a single `·` separator and both
   truncate with an ellipsis when squeezed.
+- **A click never starts work.** Clicking a session only re-attaches
+  (`session/resume` + `view/page`); a `turn/started` the re-attach
+  re-delivers for an already-completed turn no longer marks the view or its
+  row running, so an interrupted session keeps its terminal state instead
+  of showing a fresh `Working`.

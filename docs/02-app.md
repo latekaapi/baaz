@@ -351,7 +351,11 @@ pending words come live from its own fold, which is the only place the
 command and question text exist. `Failed` rides the last turn's terminal
 error from `turn/completed`'s `error`, persisted in `sessions.json` beside
 the name and the byline halves, cleared by the next turn's start or its
-success.
+success. A sidebar click only re-attaches (`session/resume` +
+`view/page`); it never sends `turn/start`. A `turn/started` the re-attach
+re-delivers for a turn the view already saw complete never marks running —
+the row keeps its terminal state instead of manufacturing a fresh
+`Working`.
 The preview half is `last_summary` when a turn completed in this app, else
 the index's first prompt — but only when the row's label is not that same
 prompt (a user-given name or a Muse title); otherwise the row shows the
