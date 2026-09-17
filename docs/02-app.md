@@ -73,7 +73,7 @@ the signed-in shell on the API-key lane.
 |---|---|
 | `HARNESS_PROVIDER=echo` | route turns through `echo`. **Not free** — see the note above; it is simply the cheapest route and the one scripted runs default to. The spec caps real turns at five per phase and every provider's turns count. |
 | `HARNESS_MUSE=<path>` | the `muse` binary to drive; `muse` on `PATH` otherwise. |
-| `HARNESS_DETERMINISTIC=1` | freeze the clocks and draw every card settled, so a `--replay … --screenshot` capture is byte-identical run to run. One clock (`src/clock.rs`): sidebar grouping/elapsed read "now" once per frame — under the flag "now" is the newest `updated` in the data, so the newest row reads `now` however old the fixture is — and every `Instant` behind a label or countdown is frozen, so elapsed cells vanish and countdowns show their full duration. The boot holds the platform's reduced-motion switch, so every motion primitive (spinner and shimmer loops, tweens, enter presence, springs, the streaming caret) resolves to its resting state — including components with no `at_rest` of their own, like the library's `StatusRow` or a pending approval's header spinner. On top of that the harness passes `at_rest` everywhere it constructs an animated component (turn reveals, the login card, dialogs, toasts, palettes, all composer menus, approval cards, suggestion chips); a capture never takes keyboard focus, so the composer's blinking caret (which honors no motion switch) never paints. |
+| `HARNESS_DETERMINISTIC=1` | freeze the clocks and draw every card settled, so a `--replay … --screenshot` capture is byte-identical run to run. One clock (`src/clock.rs`): sidebar grouping/elapsed and turn ages read "now" once per frame — under the flag "now" is the newest stamp in the data (the sidebar's `updated`, the transcript's reported `recorded_at`), so the newest row reads `now` however old the fixture is — and every `Instant` behind a label or countdown is frozen, so elapsed cells vanish and countdowns show their full duration. The boot holds the platform's reduced-motion switch, so every motion primitive (spinner and shimmer loops, tweens, enter presence, springs, the streaming caret) resolves to its resting state — including components with no `at_rest` of their own, like the library's `StatusRow` or a pending approval's header spinner. On top of that the harness passes `at_rest` everywhere it constructs an animated component (turn reveals, the login card, dialogs, toasts, palettes, all composer menus, approval cards, suggestion chips); a capture never takes keyboard focus, so the composer's blinking caret (which honors no motion switch) never paints. |
 
 The window is 1440×900 and titled **Harness**. It boots exactly as
 `aui/examples/minimal.rs` does — `gpui_kit::application().with_assets(AuiAssets)`,
@@ -1042,6 +1042,22 @@ turns through the library's `AssistantTurn::actions(..)` (it lives on sidebar
 sessions, whose rows keep the Pin action). User: Copy, Edit (text into the
 composer draft), Resend. Wire actions are live-only: in a replayed capture
 they answer with a toast.
+check for the library's `COPY_HOLD` (1.2 s, the same hold the code-block
+header keeps on its own) and then clears it — at most one turn holds the
+check at a time — so the tick reads as a confirmation and the copy glyph
+returns. `copy:<turn>` (0-based, like `select-span`) presses the button for
+a screenshot; it is free.
+
+Every turn the wire timed carries its age beside that row: the user bubble's
+caption under it, the assistant's last cell in the footer. The fold keeps the
+item's `recorded_at` (RFC3339) on the turn — the latest revision of each item
+wins, so live and backfilled transcripts agree, and the turn keeps the
+earliest across its items — and the harness formats it in words (`just now`,
+minutes, hours, `yesterday`, else the date) against one clock read once per
+frame (`transcript_now_ms`: wall time, or the newest reported stamp under
+`HARNESS_DETERMINISTIC=1`, the sibling of the sidebar's `grouping_now`). A
+turn the wire never timed draws no caption and no extra cell, keeping its old
+height.
 Markdown links click through: URLs open in the browser, workspace paths open in
 their default place — folders in Finder, files in their default app (escapes
 above the workspace are rejected with a toast, missing paths toast). `Block::ToolGroup` renders through the library `tool_group`,

@@ -18,7 +18,8 @@
           "id": "31f43df4-4d4f-4cc5-93a4-23e554a563f9",
           "text": "Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it.",
           "attachments": [],
-          "mentions": []
+          "mentions": [],
+          "timestamp": 1788937854940
         },
         {
           "kind": "assistant",
@@ -62,7 +63,8 @@
             "tokens_out": 337,
             "reasoning_tokens": 227,
             "cost_usd": 0.0
-          }
+          },
+          "timestamp": 1788938599200
         }
       ]
     },

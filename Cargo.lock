@@ -4461,6 +4461,7 @@ name = "muse-adapter"
 version = "0.1.0"
 dependencies = [
  "aui-protocol",
+ "chrono",
  "muse-client",
  "serde",
  "serde_json",

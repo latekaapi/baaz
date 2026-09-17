@@ -75,6 +75,11 @@ library.
   kept, code byte-exact), a plain click or a new drag clears it. New
   `--steps select-span:<turn>` verb holds a whole turn for captures;
   `select-text:<turn>:<from>-<to>` works as before.
+- **Turns show their age.** The fold keeps the wire's `recorded_at` on each
+  turn (live and backfilled transcripts agree), and the transcript renders
+  it beside the action row — under the person's bubble, in the reply's
+  footer (`just now`, minutes, hours, `yesterday`, else the date). Turns the
+  wire never timed look exactly as before.
 - **Side sessions by record, not by id.** Title/summary side sessions start
   with a bare-UUIDv7 client id — muse 1.3.0 rejects any `session/start` id
   that is not its own shape (`invalid length: found 50` for the old

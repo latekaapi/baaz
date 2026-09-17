@@ -243,6 +243,8 @@ impl SessionView {
             cards: Some(self.card_intents(window, cx)),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
+            // One clock per frame for every turn age.
+            now_ms: transcript::transcript_now_ms(&self.cached_turns),
             full_output: Rc::clone(&self.cached_full_output),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {

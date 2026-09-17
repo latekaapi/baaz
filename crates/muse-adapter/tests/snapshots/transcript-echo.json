@@ -18,7 +18,8 @@
           "id": "0f47e444-3e8f-4933-8e71-d2881590a7ee",
           "text": "hello from the probe",
           "attachments": [],
-          "mentions": []
+          "mentions": [],
+          "timestamp": 1788885677114
         },
         {
           "kind": "assistant",
@@ -37,7 +38,8 @@
             "tokens_out": 115,
             "reasoning_tokens": 94,
             "cost_usd": 0.0
-          }
+          },
+          "timestamp": 1788885682093
         },
         {
           "kind": "assistant",

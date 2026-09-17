@@ -100,7 +100,7 @@ impl SessionView {
         for turn in session.turns.iter() {
             match turn {
                 aui_protocol::Turn::User { text, .. } => prompt = text.clone(),
-                aui_protocol::Turn::Assistant { id, blocks, meta } => {
+                aui_protocol::Turn::Assistant { id, blocks, meta, .. } => {
                     if Some(id.as_str()) == running {
                         continue;
                     }

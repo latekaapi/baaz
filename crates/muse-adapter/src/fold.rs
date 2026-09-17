@@ -28,6 +28,16 @@ struct Folded {
     /// `itemId` → highest revision applied. The apply rule is **replace iff
     /// higher**; `item/delta` never bumps a revision.
     revisions: HashMap<String, u32>,
+    /// Turn handle → (`itemId` → the stamp of that item's latest revision).
+    /// Revisions arrive in increasing order per item on both paths (live and
+    /// backfilled), so the last sighting is the durable stamp, never the
+    /// ephemeral one — and the turn keeps the earliest across its items
+    /// ("when the turn started"). Live and backfill therefore converge no
+    /// matter what order items arrive in (finding F3).
+    turn_stamps: HashMap<TurnKey, HashMap<String, u64>>,
+    /// The `itemId` of a `userMessage`'s `Turn::User` → its handle, so a
+    /// later revision of the same message re-stamps the turn it made.
+    user_keys: HashMap<String, TurnKey>,
     /// Turn handles, parallel to `session.turns`: index → the key minted for
     /// the turn that sits there.
     turn_keys: Vec<TurnKey>,
@@ -410,6 +420,8 @@ impl Folded {
             side: SideState::default(),
             slots: Slots::default(),
             revisions: HashMap::new(),
+            turn_stamps: HashMap::new(),
+            user_keys: HashMap::new(),
             turn_keys: Vec::new(),
             turn_index: HashMap::new(),
             next_turn_key: 0,
@@ -973,9 +985,12 @@ impl Folded {
     fn user_message(&mut self, item: &msp::Item, seen: bool) -> Vec<Delta> {
         if seen {
             // A `userMessage` is a whole `Turn::User`, and `Delta` has no
-            // variant that edits one. The only revision the wire produces is the
-            // `retracted: true` flag, and `turn/retracted` removes the turn
-            // anyway, so there is nothing to do here.
+            // variant that edits one — but a later revision still re-stamps
+            // it, so live and backfill agree on the durable stamp, not the
+            // ephemeral one.
+            if let Some(&key) = self.user_keys.get(&item.item_id) {
+                self.stamp_item(key, item);
+            }
             return Vec::new();
         }
         if let (Some(command_id), text) = (item.command_id.as_ref(), item.text.clone()) {
@@ -1006,12 +1021,15 @@ impl Folded {
             text,
             attachments,
             mentions: Vec::new(),
+            timestamp: None,
         };
         let delta = Delta::TurnStarted { turn };
         self.session.apply(delta.clone());
         // A user message is a whole turn of its own, appended here rather
         // than through `ensure_assistant_turn`, so it mints its handle here.
-        self.mint_turn_key();
+        let key = self.mint_turn_key();
+        self.user_keys.insert(item.item_id.clone(), key);
+        self.stamp_item(key, item);
         if let Some(turn_id) = &item.turn_id {
             self.user_turns.insert(item.item_id.clone(), turn_id.clone());
         }
@@ -1056,7 +1074,13 @@ impl Folded {
             self.break_groups();
         }
         match self.slots.item(&item.item_id) {
-            Some(slot) => self.update_call(slot, item, block, groupable),
+            Some(slot) => {
+                // A newer revision of a known item re-stamps its turn, like
+                // a first sighting does — the durable stamp wins on both
+                // paths.
+                self.stamp_item(slot.turn, item);
+                self.update_call(slot, item, block, groupable)
+            }
             None => {
                 let mut deltas = Vec::new();
                 let turn = self.item_host_turn(item, &mut deltas);
@@ -1674,6 +1698,7 @@ impl Folded {
                 id: turn_id.to_owned(),
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
+                timestamp: None,
             },
         };
         self.session.apply(delta.clone());
@@ -1690,7 +1715,29 @@ impl Folded {
     /// raises reports as its `turnId`.
     fn item_host_turn(&mut self, item: &msp::Item, deltas: &mut Vec<Delta>) -> TurnKey {
         let turn_id = host_turn_id(item);
-        self.ensure_assistant_turn(&turn_id, deltas)
+        let key = self.ensure_assistant_turn(&turn_id, deltas);
+        self.stamp_item(key, item);
+        key
+    }
+
+    /// Record an item's wire clock (`recorded_at`, RFC3339) on its turn. The
+    /// latest revision of each item wins — revisions arrive in increasing
+    /// order per item on both paths, so the last sighting is the durable
+    /// stamp, never the ephemeral one — and the turn keeps the earliest
+    /// across its items ("when the turn started"). A turn the app built by
+    /// hand (a marker, a todo card) has no items and keeps `None`.
+    fn stamp_item(&mut self, key: TurnKey, item: &msp::Item) {
+        let Some(ms) = recorded_at_ms(item) else { return };
+        let stamps = self.turn_stamps.entry(key).or_default();
+        stamps.insert(item.item_id.clone(), ms);
+        let earliest = stamps.values().copied().min();
+        let Some(at) = self.turn_at(key) else { return };
+        if let Some(earliest) = earliest {
+            let slot = match &mut self.session.turns[at] {
+                Turn::User { timestamp, .. } | Turn::Assistant { timestamp, .. } => timestamp,
+            };
+            *slot = Some(earliest);
+        }
     }
 
     /// A turn of its own for a session-level card.
@@ -1870,6 +1917,7 @@ impl Folded {
         }
         self.slots.drop_turn(gone);
         self.assistant_turns.retain(|_, key| *key != gone);
+        self.turn_stamps.remove(&gone);
         self.open_groups.remove(turn_id);
         // A turn that is gone takes its block ordering with it, or a turn id
         // reused after a retraction would inherit the old turn's keys.
@@ -1904,6 +1952,17 @@ fn host_turn_id(item: &msp::Item) -> String {
         .clone()
         .or_else(|| item.command_id.clone())
         .unwrap_or_else(|| item.item_id.clone())
+}
+
+/// Unix milliseconds from an item's `recorded_at` (RFC3339), if present and
+/// parseable. `None` on ephemeral-opened items until their first durable
+/// re-emission, and on anything unparseable — both read as "no time", never
+/// as the epoch.
+fn recorded_at_ms(item: &msp::Item) -> Option<u64> {
+    let at = item.recorded_at.as_deref()?;
+    chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .and_then(|t| u64::try_from(t.timestamp_millis()).ok())
 }
 
 /// The last block of `blocks` that renders `item_id`'s tool call, and how.
@@ -2659,6 +2718,81 @@ mod tests {
             session_id: Some(session.to_owned()),
         });
         assert_eq!(fold.sessions["s"].slots.len(), 0, "and goes with the turn");
+    }
+
+    fn complete_item(item_id: &str, turn_id: &str, kind: &str, status: &str, revision: u32, recorded_at: Option<&str>) -> Value {
+        let mut item = serde_json::json!({
+            "itemId": item_id,
+            "turnId": turn_id,
+            "kind": kind,
+            "status": status,
+            "revision": revision,
+        });
+        if let Some(at) = recorded_at {
+            item["recordedAt"] = Value::String(at.to_owned());
+        }
+        serde_json::json!({ "item": item })
+    }
+
+    #[test]
+    fn a_user_turn_carries_the_wire_clock() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        fold.apply(MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: complete_item("m-1", "t-1", "userMessage", "completed", 1, Some("2026-09-09T07:23:19.200000Z")),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+        let session = &fold.sessions["s"].session;
+        let turn = session.turns.iter().find(|turn| turn.id() == "m-1").expect("user turn");
+        assert_eq!(turn.timestamp(), Some(1_788_938_599_200));
+    }
+
+    #[test]
+    fn a_turn_without_a_wire_clock_stays_untimed() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        fold.apply(MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: complete_item("m-1", "t-1", "userMessage", "completed", 1, None),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+        let session = &fold.sessions["s"].session;
+        let turn = session.turns.iter().find(|turn| turn.id() == "m-1").expect("user turn");
+        assert_eq!(turn.timestamp(), None);
+    }
+
+    #[test]
+    fn a_turn_keeps_the_durable_stamp_not_the_ephemeral_one() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        for (method, status, revision, at) in [
+            ("item/started", "inProgress", 1, "2026-09-09T07:23:19.000000Z"),
+            ("item/completed", "completed", 2, "2026-09-09T07:23:19.200000Z"),
+        ] {
+            let params = serde_json::json!({
+                "item": {
+                    "itemId": "i-1",
+                    "turnId": "t-1",
+                    "kind": "agentMessage",
+                    "status": status,
+                    "revision": revision,
+                    "text": "done",
+                    "recordedAt": at,
+                }
+            });
+            fold.apply(MuseEvent::Notification {
+                method: method.to_owned(),
+                params,
+                cursor: None,
+                session_id: Some("s".to_owned()),
+            });
+        }
+        let session = &fold.sessions["s"].session;
+        let turn = session.turns.iter().find(|turn| turn.id() == "t-1").expect("assistant turn");
+        assert_eq!(turn.timestamp(), Some(1_788_938_599_200));
     }
 
     #[test]

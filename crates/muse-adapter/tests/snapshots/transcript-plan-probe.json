@@ -18,7 +18,8 @@
           "id": "26a55ebf-7ebc-4227-afd8-8c1f296b68bd",
           "text": "/plan reply with a one-line plan for printing hello",
           "attachments": [],
-          "mentions": []
+          "mentions": [],
+          "timestamp": 1788896188868
         },
         {
           "kind": "assistant",
@@ -52,7 +53,8 @@
             "tokens_out": 1143,
             "reasoning_tokens": 1018,
             "cost_usd": 0.0
-          }
+          },
+          "timestamp": 1788896197859
         }
       ]
     },
