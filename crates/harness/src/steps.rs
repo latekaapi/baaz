@@ -83,7 +83,7 @@
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
-//! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay with its trigger at the row's bounds centre (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
+//! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
 //! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `harness: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
 //! | `resize-move:<x>` | move a scripted resize drag through the real divider handler (same log) |
 //! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
