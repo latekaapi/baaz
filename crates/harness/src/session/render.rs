@@ -8,7 +8,7 @@ use super::*;
 use std::path::Path;
 use aui_tokens::ActiveAui;
 
-/// The transcript column as its own cached entity (owner round 6, part 4):
+/// The transcript column as its own cached entity:
 /// the root embeds the active [`SessionView`] through gpui's `.cached`, so
 /// a sidebar-only frame (wheel, reveal, resize tick) reuses the retained
 /// transcript instead of rebuilding it. The cache reuses only while the
@@ -149,10 +149,10 @@ impl SessionView {
     pub(super) fn render_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         crate::log::trace_first_frame();
         let frame_start = std::time::Instant::now();
-        // Owner round 4 §2: one offset per frame. The capture handler only
+        // One offset per frame. The capture handler only
         // accumulates; this drain is the frame's single `scroll_by`.
         self.drain_pending_wheel();
-        // Owner round 4 §4: keep presenting through the tail. A frame every
+        // Keep presenting through the tail. A frame every
         // tick while the gesture is open — what `InputRateTracker` does for
         // a second after ≥ 60 inputs/s, but the 60 Hz momentum tail sits on
         // its threshold. A settled transcript requests nothing once it
@@ -335,7 +335,7 @@ impl SessionView {
     /// turn: gpui lays a visible item out whole every frame, and a real turn
     /// can run to hundreds of blocks, so per-turn items cost a frame what
     /// the biggest visible turn cost — 8 ms p90 on a real session, past a
-    /// 120 Hz budget (owner round 2026-09-13, item 2).
+    /// 120 Hz budget.
     ///
     /// Heights: an unmeasured row with no hint counts as 0 px in the list's
     /// sum tree, so an upward flick over such rows clamps at the head and
@@ -351,7 +351,7 @@ impl SessionView {
     pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)]) {
         let count: usize = counts.iter().map(|(_, n)| n).sum();
         let changed = count != self.list_len || counts != self.synced_counts.as_slice();
-        // Owner round 4 §4: never re-anchor under a gesture. While one is in
+        // Never re-anchor under a gesture. While one is in
         // flight no `reset` runs and the tail does not re-engage; whatever
         // is owed lands on the first frame after it lapses.
         let gesture = self.gesture_active();
@@ -409,7 +409,7 @@ impl SessionView {
     /// position is put back by hand; one frame of dropped wheel events is the
     /// price, paid only on a page landing or a width change.
     ///
-    /// The hint stays uniform (owner round 4 §5): gpui-pre 0.3.3 exposes no
+    /// The hint stays uniform: gpui-pre 0.3.3 exposes no
     /// per-item hint — `ListItem` is a private enum, and `splice` and
     /// `splice_focusable` both build `Unmeasured { size_hint: None }`, so
     /// only `reset_with_uniform_height` can hint at all. Per-kind estimates
@@ -491,7 +491,7 @@ impl SessionView {
                     // D7. The wheel accumulates on the view here, in the
                     // capture phase, and never reaches `list()`'s own handler;
                     // `render_transcript` drains the sum into one `scroll_by`
-                    // per frame (owner round 4 §2).
+                    // per frame.
                     //
                     // `list()` accumulates a frame's wheel deltas with
                     // `ScrollDelta::coalesce` and applies the running sum
@@ -505,8 +505,8 @@ impl SessionView {
                     // nothing when it is positive. Measured on the 300-turn
                     // capture: a six-event burst with one zero in it kept
                     // 432 px of 864 scrolling up and all 864 scrolling down.
-                    // That is the owner's "visibly stepped", and it is
-                    // asymmetric by direction.
+                    // That is the "visibly stepped" scrolling the
+                    // measurement showed, and it is asymmetric by direction.
                     //
                     // `scroll_by` is what every other scrollable surface in
                     // the app already does — gpui's `div` adds each event's
@@ -1247,7 +1247,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         } else if guard.checking {
             // The probe is already running — pressing again reaches
             // `probe_tier`, which refuses a second probe, so the button only
-            // says what is happening (owner round 2, S4).
+            // says what is happening.
             row.action("Checking…", BannerActionStyle::Ghost)
                 .on_action(move |window, cx| recheck(&(), window, cx))
         } else {
@@ -1733,7 +1733,7 @@ pub(super) fn resolve_link_path(workspace: &Path, raw: &str) -> PathBuf {
 
 /// The transcript's wheel handler: a zero-size canvas over the list that
 /// takes every scroll event in the **capture** phase and accumulates its
-/// vertical delta on the view (owner round 4 §2). `render_transcript` drains
+/// vertical delta on the view. `render_transcript` drains
 /// the sum into exactly one [`gpui::ListState::scroll_by`] per frame, so one
 /// frame's work no longer grows with the event rate.
 ///

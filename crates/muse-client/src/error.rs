@@ -116,7 +116,7 @@ mod tests {
         MuseError::Rpc(Box::new(object))
     }
 
-    /// Owner round 2 S2: the stale-sidecar `-32603` classifies, and nothing
+    /// The stale-sidecar `-32603` classifies, and nothing
     /// else does — a different `-32603`, a different code, or a dead child.
     #[test]
     fn only_the_stale_sidecar_32603_classifies() {

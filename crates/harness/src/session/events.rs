@@ -218,7 +218,7 @@ impl SessionView {
     /// with the paging instead of waiting for the whole transcript; page 1
     /// already draws before page 2 is requested.
     /// A view opened for an existing session starts loading its history on
-    /// its very first frame — never the new-session hero (owner round 6).
+    /// its very first frame — never the new-session hero.
     /// Called synchronously on the open path before any paint (the resume
     /// ack and its `backfill` land frames later); the hero stays reachable
     /// only for proven-new sessions and for backfills that complete with
@@ -333,7 +333,7 @@ impl SessionView {
     }
 }
 
-/// Whether a failed backfill page gets one more attempt (owner round 2 S2):
+/// Whether a failed backfill page gets one more attempt:
 /// exactly the stale-sidecar `-32603`, and only once per chain. A second
 /// stale failure — and any other error — reports instead of looping.
 fn should_retry_stale_page(error: &MuseError, retried: bool) -> bool {
@@ -405,7 +405,7 @@ mod tests {
         });
     }
 
-    /// Owner round 2 S2: a stale page retries exactly once; any other error
+    /// A stale page retries exactly once; any other error
     /// never retries.
     #[test]
     fn a_stale_page_retries_once_and_then_reports() {

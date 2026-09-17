@@ -164,11 +164,11 @@ fn reply_complete(turn: &Turn) -> bool {
     }
     saw_text
 }
-/// Top inset: the first turn's first line must clear the header (C8 — the
-/// owner's screenshot showed it cut off). Same step as the horizontal gutter.
+/// Top inset: the first turn's first line must clear the header (a
+/// screenshot showed it cut off). Same step as the horizontal gutter.
 const TRANSCRIPT_PAD_TOP: f32 = scale::SP_7;
 /// The key context the transcript list wears, so ⌘C reaches the selection
-/// copy without ever matching inside the composer or a card field (C8b).
+/// copy without ever matching inside the composer or a card field.
 pub const TRANSCRIPT_CONTEXT: &str = "HarnessTranscript";
 /// The ⌘C predicate for that copy: the transcript holds focus context, but
 /// never the composer, a card field or the rename field.
@@ -180,7 +180,7 @@ pub const TRANSCRIPT_COPY_KEYS: &str =
 /// enough that a flick over unmeasured rows lands where it should.
 pub(crate) const ROW_HEIGHT_HINT: f32 = 72.0;
 /// The trailing spacer's row id in `row_counts`: one fixed-height row below
-/// the final block (owner round 2, P7). No turn carries this id, so the one
+/// the final block. No turn carries this id, so the one
 /// frame where the list runs ahead of its cache still renders it as the
 /// spacer rather than as a turn.
 pub(crate) const TAIL_SPACER_ID: &str = "tail-spacer";
@@ -335,7 +335,7 @@ pub struct TierBanner {
     /// Whether a turn is refused until the person presses "Send anyway".
     pub blocking: bool,
     /// A probe is in flight: the unknown-plan banner's "Check again" reads
-    /// "Checking…" and pressing it again is a no-op (owner round 2, S4).
+    /// "Checking…" and pressing it again is a no-op.
     pub checking: bool,
 }
 
@@ -403,7 +403,7 @@ pub struct SessionView {
     /// every cached turn, rebuilt with the render cache. One item per
     /// **row** — a block, a bubble, a silent footer — never per turn: a
     /// visible list item is laid out whole every frame, and a real turn can
-    /// run to hundreds of blocks (owner round 2026-09-13, item 2).
+    /// run to hundreds of blocks.
     rows: Rc<Vec<(usize, usize)>>,
     /// Per cached turn, `(turn id, row count)`, so the next sync can find the
     /// first turn whose rows changed and splice from there, keeping the rows
@@ -418,30 +418,29 @@ pub struct SessionView {
     /// The `(turn id, row count)` list the virtual list was last synced to.
     synced_counts: Vec<(String, usize)>,
     /// Wheel events applied since the last traced paint, and when the last
-    /// one landed (`HARNESS_FRAME_TRACE`, owner round 4 §1: the hand-gesture
-    /// instrument). Counted by the capture handler, drained by the next
+    /// one landed (`HARNESS_FRAME_TRACE`, the hand-gesture instrument).
+    /// Counted by the capture handler, drained by the next
     /// traced paint; both stay untouched unless the trace is on.
     trace_wheel_pending: usize,
     trace_last_wheel: Option<Instant>,
     /// A re-hint ran since the last traced paint (`HARNESS_FRAME_TRACE`,
-    /// owner round 6: the resize instrument). Set beside the `rehint_rows`
+    /// the resize instrument). Set beside the `rehint_rows`
     /// call, drained by the next traced paint; untouched unless the trace
     /// is on.
     trace_rehint: bool,
-    /// Wheel travel accumulated since the last frame, in pixels (owner round
-    /// 4 §2: one offset per frame). The capture handler only adds to this;
+    /// Wheel travel accumulated since the last frame, in pixels (one
+    /// offset per frame). The capture handler only adds to this;
     /// `render_transcript` drains it into exactly one `scroll_by` per frame,
     /// so per-frame work no longer grows with the event rate and the main
     /// queue is free for the display-link tick between events.
     pending_wheel: Pixels,
-    /// How long the current wheel gesture stays open after its last event
-    /// (owner round 4 §2/§4). The momentum tail arrives at 60 Hz, so 150 ms
+    /// How long the current wheel gesture stays open after its last event.
+    /// The momentum tail arrives at 60 Hz, so 150 ms
     /// covers a missed sample; while it is in the future the transcript
     /// keeps presenting every tick, never re-hints, and never re-anchors
     /// the tail under the gesture.
     gesture_until: Option<Instant>,
-    /// A re-hint owed but deferred past an in-flight gesture (owner round 4
-    /// §4): a page landing or a width change while `gesture_until` is armed.
+    /// A re-hint owed but deferred past an in-flight gesture: a page landing or a width change while `gesture_until` is armed.
     /// The next frame after the gesture lapses pays it.
     rehint_deferred: bool,
     /// What `render_transcript` reads every frame (C1): one snapshot shared
@@ -493,14 +492,14 @@ pub struct SessionView {
     /// A `view/page` chain is in flight. Separate from `loading_history`,
     /// which the open path raises before the resume ack so the first frame
     /// shows the loading row: guarding the chain on the display flag made
-    /// `backfill` skip every cache-miss open (owner round 6 regression).
+    /// `backfill` skip every cache-miss open.
     backfill_running: bool,
     /// A stale-sidecar page failure was already retried once in this backfill
-    /// chain (owner round 2 S2): the second failure reports instead.
+    /// chain: the second failure reports instead.
     backfill_stale_retried: bool,
     /// The lease is gone — the session is open in another window (or the
     /// child that held it exited) — so nothing is sent until a later resume
-    /// succeeds (owner round 2 S3). `Some` is the banner text, re-shown on
+    /// succeeds. `Some` is the banner text, re-shown on
     /// every refused send so a dismissal cannot strand a silent refusal.
     lease_notice: Option<String>,
     /// The inline banner over the composer: one recoverable command error.
@@ -971,8 +970,7 @@ impl SessionView {
 
     /// Point the view at the respawned child after a reconnect. The fold and
     /// the transcript are untouched: the resume streamed only the suffix.
-    /// Notifies: the cached centre reuses a clean view (owner round 6,
-    /// part 4).
+    /// Notifies: the cached centre reuses a clean view.
     pub fn reconnected(&mut self, client: Arc<MuseClient>, cx: &mut Context<Self>) {
         self.client = Some(client);
         // A reconnect can have missed an `approval/request`, and the server does
@@ -1493,7 +1491,7 @@ pub(crate) fn take_frame_times() -> Vec<std::time::Instant> {
     times.lock().map(|mut times| std::mem::take(&mut *times)).unwrap_or_default()
 }
 
-/// Whole-frame timing (`bench-draw`, owner round 4 §1): the root render
+/// Whole-frame timing (`bench-draw`): the root render
 /// stamps the start; a zero-size canvas painted last in the same frame
 /// stamps the end. Paint order is depth-first, so the trailing child closes
 /// the frame's own paint — `window.on_next_frame` would not: gpui runs
@@ -1565,10 +1563,9 @@ pub(crate) fn take_draw_samples() -> Vec<u128> {
 }
 
 /// Whether the per-tick frame trace is on: `HARNESS_FRAME_TRACE=1` in the
-/// normal window, read once. The trace is how the owner's own hand gesture
-/// on `--replay` becomes a measurement: every root render appends one row
-/// (owner round 6, part C3 — every display tick that does anything, not
-/// only the ones that rebuild the transcript), and `scripts/frame-trace.py`
+/// normal window, read once. The trace is how a hand gesture on `--replay`
+/// becomes a measurement: every root render appends one row
+///, and `scripts/frame-trace.py`
 /// summarises the log. `pub(crate)` so [`crate::sidebar_view`] can gate its
 /// own trace-only counter the same way.
 pub(crate) fn frame_trace_enabled() -> bool {
@@ -1579,15 +1576,15 @@ pub(crate) fn frame_trace_enabled() -> bool {
 
 /// How long after the last applied wheel event a traced paint still counts
 /// as mid-gesture: the momentum tail arrives at 60 Hz, so 150 ms covers a
-/// missed sample (owner round 4 §2 arms the same horizon).
+/// missed sample.
 const TRACE_GESTURE_MS: u128 = 150;
 
-/// How long after a wheel event its gesture stays open (owner round 4 §2):
+/// How long after a wheel event its gesture stays open:
 /// the momentum tail arrives at 60 Hz, so 150 ms covers a missed sample.
 /// Deliberately the same horizon the frame trace displays above.
 const GESTURE_HORIZON: Duration = Duration::from_millis(150);
 
-/// Wheel drains actually applied since process start (owner round 4 §2):
+/// Wheel drains actually applied since process start:
 /// one per frame that had accumulated travel, against one `scroll_by` per
 /// event before. The bench drains it for its report; the count is what shows
 /// per-frame work no longer growing with the event rate.
@@ -1598,7 +1595,7 @@ pub(crate) fn take_wheel_scroll_bys() -> u64 {
     WHEEL_SCROLL_BYS.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Hero vs loading paints since process start (owner round 6): what the
+/// Hero vs loading paints since process start: what the
 /// empty transcript showed, per render. Relaxed atomics, drained per
 /// `centre` log line, so a scripted open's first frames read as
 /// `hero=0 loading=N` (fixed) rather than `hero=N` (the flicker).
@@ -1623,7 +1620,7 @@ pub(crate) fn take_centre_paints() -> (u64, u64) {
     )
 }
 
-/// Centre builds since process start (owner round 6, part 4): how many
+/// Centre builds since process start: how many
 /// times the cached centre actually rebuilt, per render. Relaxed atomic,
 /// drained per `sbwheel` log line, so a sidebar wheel burst reads
 /// `centre=0` (reused) while typing, streaming and switching bump it.
@@ -1642,7 +1639,7 @@ pub(crate) fn take_centre_renders() -> u64 {
     CENTRE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Centre builds since the last traced root tick (owner round 6, part C3):
+/// Centre builds since the last traced root tick:
 /// a `sbwheel`/`centre` drain and the frame trace's own row must not fight
 /// over the same counter, so this one exists solely for
 /// [`note_root_frame_trace`] and is never touched by the step instruments.
@@ -1691,7 +1688,7 @@ fn frame_trace_slot() -> Option<std::sync::MutexGuard<'static, Option<FrameTrace
 }
 
 impl SessionView {
-    /// Accumulate one capture-phase wheel delta (owner round 4 §2). The
+    /// Accumulate one capture-phase wheel delta. The
     /// handler applies nothing: `render_transcript` drains the sum into one
     /// `scroll_by` per frame. An upward delta leaves the tail, as everywhere
     /// else; every event re-arms the gesture horizon for the momentum tail.
@@ -1704,15 +1701,15 @@ impl SessionView {
         self.note_wheel_event();
     }
 
-    /// Whether a wheel gesture is in flight (owner round 4 §4): an event
+    /// Whether a wheel gesture is in flight: an event
     /// landed within the horizon. While this holds the transcript presents
     /// every tick and neither re-hints nor re-anchors under the gesture.
     fn gesture_active(&self) -> bool {
         self.gesture_until.is_some_and(|until| Instant::now() < until)
     }
 
-    /// Drain the accumulated wheel travel into exactly one `scroll_by`
-    /// (owner round 4 §2). Called once per frame from `render_transcript`,
+    /// Drain the accumulated wheel travel into exactly one `scroll_by`.
+    /// Called once per frame from `render_transcript`,
     /// before the cache sync, so N events between paints become one SumTree
     /// seek with their full travel. A zero delta is gpui's own early-return,
     /// so an idle frame pays one comparison; only applied drains count.
@@ -1751,14 +1748,13 @@ impl SessionView {
         std::mem::take(&mut self.trace_rehint)
     }
 
-    /// Peek and drain this session's per-tick trace fields (owner round 6,
-    /// part C3): the transcript list's pixel offset, the wheel events
+    /// Peek and drain this session's per-tick trace fields: the transcript list's pixel offset, the wheel events
     /// applied since the last traced tick, and whether a wheel gesture is
     /// still active. Replaces the old centre-scoped `note_frame_trace`
     /// (v2), which only ever fired when the cached transcript column itself
     /// rebuilt — silent through a sidebar-only or resize-only tick since
-    /// owner round 6 parts 4/C1/C2 stopped those from touching the centre
-    /// at all. Called once per root render from `Harness::on_frame`, not
+    /// those stopped touching the centre at all. Called once per root
+    /// render from `Harness::on_frame`, not
     /// from `render_transcript`, so it sees every tick regardless of which
     /// subtree actually rebuilt.
     pub(crate) fn trace_tick(&mut self) -> (f32, usize, bool) {
@@ -1769,14 +1765,14 @@ impl SessionView {
     }
 }
 
-/// Append one frame-trace row (owner round 6, part C3; v3 format — see the
-/// header line `frame_trace_slot` writes): micros since the trace opened;
+/// Append one frame-trace row (v3 format — see the header line
+/// `frame_trace_slot` writes): micros since the trace opened;
 /// `root` (always 1 — one row is written per `Harness::render`, so this
 /// documents the tick model rather than measuring anything); `pane` and
 /// `centre`, how many times the sidebar pane and the cached transcript
 /// column actually rebuilt since the last row (0 most ticks — that they
 /// stay 0 during a sidebar-only or resize-only gesture is the point of
-/// parts 4/C1/C2, and this column is how a regression would show up);
+/// that isolation, and this column is how a regression would show up);
 /// the sidebar list's `ListOffset` (`sidebar_ix`+`sidebar_off`, same shape
 /// as the `sbwheel` step's log); the sidebar divider's current width;
 /// `resize_active`, whether a divider drag is in flight this tick; the
@@ -1791,8 +1787,7 @@ impl SessionView {
 ///
 /// Called once from `Harness::on_frame`, which runs first in
 /// `Harness::render` — i.e. once per display tick that renders anything at
-/// all, matching owner round 6 part C1's zero-idle-frames fix: an idle
-/// window writes no rows.
+/// all, matching the zero-idle-frames rule: an idle window writes no rows.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn note_root_frame_trace(
     sidebar_ix: usize,
@@ -1997,8 +1992,8 @@ mod tests {
         assert_eq!(hinted.logical_scroll_top().item_ix, 592 - climbed);
     }
 
-    /// The owner-round fix (2026-09-13, item 2): rows appended after the
-    /// first fill — a history page — used to arrive with no hint, so the
+    /// Rows appended after the first fill — a history page — used to arrive
+    /// with no hint, so the
     /// H2 stack came back on any session longer than one page. Re-hinting
     /// keeps measured heights (they become their own hints) and gives the
     /// new rows the row hint, and the tail pin survives it.

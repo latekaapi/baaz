@@ -24,8 +24,8 @@ __pycache__/
 /docs/05-handoff.md
 /docs/09-handoff-improvements.md
 /docs/11-muse-workflows.md
-/docs/13-naming-handoff.md
-/docs/14-terminal.md
-/docs/15-skills.md
+/docs/13-*
+/docs/14-*
+/docs/15-*
 # The old phase-by-phase internal diary; superseded by the root CHANGELOG.md.
 /docs/CHANGELOG.md

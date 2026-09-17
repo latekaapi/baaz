@@ -57,7 +57,7 @@ enum ViewAction {
     SearchAllProjects,
 }
 
-/// The sidebar column as its own view (owner round 4 §3).
+/// The sidebar column as its own view.
 ///
 /// `Harness::render` used to rebuild the sidebar element on every frame —
 /// including every wheel notify, whose transcript centre is the only thing
@@ -69,11 +69,10 @@ enum ViewAction {
 /// listeners, so what the column draws cannot drift. [`SidebarKey`] is what
 /// re-arms it: [`Harness::sync_sidebar_pane`] notifies it from `on_frame`
 /// whenever its inputs change, and notifies from inside its own subtree
-/// (hover, its scroll container, the rename editor, and — since owner
-/// round 6 replaced the old reveal prepaint intents with `ListState`
-/// steering — the reveal's own outside-the-draw pane-notify task in
-/// [`Harness::reveal_sidebar_row`]) dirty it directly through the view
-/// tree.
+/// (hover, its scroll container, the rename editor, and — since the reveal
+/// steers through `ListState` rather than prepaint intents — the reveal's
+/// own outside-the-draw pane-notify task in [`Harness::reveal_sidebar_row`])
+/// dirty it directly through the view tree.
 pub(crate) struct SidebarPane {
     harness: WeakEntity<Harness>,
 }
@@ -84,7 +83,7 @@ impl SidebarPane {
     }
 }
 
-/// Sidebar-pane renders since process start (owner round 5 §A1.6): the
+/// Sidebar-pane renders since process start: the
 /// sidebar analogue of `WHEEL_SCROLL_BYS`. Relaxed atomics, drained per
 /// `sidebar-wheel:` log line, so a burst's pane/root renders per event are
 /// readable off a scripted run.
@@ -96,7 +95,7 @@ pub(crate) fn take_sidebar_pane_renders() -> u64 {
     SIDEBAR_PANE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Pane rebuilds since the last traced root tick (owner round 6, part C3):
+/// Pane rebuilds since the last traced root tick:
 /// a dedicated counter so the frame trace's per-row drain never steals from
 /// the `sidebar-wheel:`/`resize-sweep:` steps' own accumulation, which spans
 /// many ticks between their own explicit drains.
@@ -113,14 +112,14 @@ pub(crate) fn take_harness_root_renders() -> u64 {
 }
 
 /// How long a sidebar wheel gesture stays open after its last event
-/// (owner round 5 §A1): the momentum tail arrives at 60 Hz, so 150 ms
+///: the momentum tail arrives at 60 Hz, so 150 ms
 /// covers a missed sample. Deliberately the same 150 ms the transcript
 /// keeps; while it is in the future the pane presents every tick and no
 /// reveal may move the list.
 const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// How many consecutive `reveal_sidebar_row` misses an id with no row yet
-/// gets before the reveal gives up (owner round 6, part C4 review #1): a
+/// gets before the reveal gives up: a
 /// bound, not a real deadline — the row-birth sites (the `turn/started`
 /// local-row insert, a `load_sessions` reply) already notify, so a normal
 /// wait is one or two attempts; this only guards against an id that never
@@ -129,7 +128,7 @@ pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 
 /// The bookkeeping [`Harness::reveal_sidebar_row`] does for an unknown
 /// reveal id, pulled out pure so it is unit-testable without a window
-/// (owner round 6, part C4 review #1): a miss for the *same* id the
+///: a miss for the *same* id the
 /// previous call saw extends its streak; a miss for a *different* id (a
 /// fresh arm since) starts a new one at 1.
 fn next_reveal_unknown_streak(current: Option<(String, u32)>, reveal_id: &str) -> (String, u32) {
@@ -139,7 +138,7 @@ fn next_reveal_unknown_streak(current: Option<(String, u32)>, reveal_id: &str) -
     }
 }
 
-/// Sidebar drains actually applied since process start (owner round 5 §A1):
+/// Sidebar drains actually applied since process start:
 /// one per frame that had accumulated travel, against one offset write per
 /// event before. Drained per `sidebar-wheel:` line, like `take_wheel_scroll_bys`.
 static SIDEBAR_WHEEL_DRAINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -149,7 +148,7 @@ pub(crate) fn take_sidebar_wheel_drains() -> u64 {
     SIDEBAR_WHEEL_DRAINS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The sidebar wheel's input-side state (owner round 5 §A1): what the
+/// The sidebar wheel's input-side state: what the
 /// capture handler writes and `render_sidebar` applies. Shared behind
 /// `RefCell` (see `Harness::sidebar_wheel`) so the push never borrows the
 /// entity — a wheel event can arrive inside a `Harness` update, where an
@@ -185,7 +184,7 @@ impl Render for SidebarPane {
     }
 }
 
-/// What the sidebar pane shows, as an equality key (owner round 4 §3).
+/// What the sidebar pane shows, as an equality key.
 ///
 /// Every input `render_sidebar` reads: the cached rows and grouping behind
 /// their `Rc` pointers (this comparison calls both getters every frame, so
@@ -273,7 +272,7 @@ pub(crate) fn row_detail_seat(
 }
 
 impl Harness {
-    /// Re-arm the sidebar pane when its inputs changed (owner round 4 §3).
+    /// Re-arm the sidebar pane when its inputs changed.
     ///
     /// Called from `on_frame`, before anything draws: while the key matches,
     /// wheel notifies leave the pane clean and gpui reuses its cached
@@ -287,7 +286,7 @@ impl Harness {
         }
     }
 
-    /// The sessions list's current scroll position (owner round 6): what
+    /// The sessions list's current scroll position: what
     /// `sidebar-wheel:` and the resize drag log sample. The list walks down
     /// as `item_ix` grows, with `offset_in_item` the pixels into that row —
     /// the sidebar analogue of `SessionView::bench_list_top`.
@@ -295,7 +294,7 @@ impl Harness {
         self.sidebar_list.logical_scroll_top()
     }
 
-    /// Whether a sidebar wheel gesture is in flight (owner round 5 §A1):
+    /// Whether a sidebar wheel gesture is in flight:
     /// an event landed within the horizon. While this holds the pane
     /// presents every tick and no reveal installs.
     pub(crate) fn sidebar_gesture_active(&self) -> bool {
@@ -303,7 +302,7 @@ impl Harness {
     }
 
     /// Push one frame-paced sweep delta into the sidebar's accumulator
-    /// (owner round 6, part C3): the same three writes
+    ///: the same three writes
     /// [`sidebar_wheel_capture`]'s real event handler makes — accumulate,
     /// re-arm the gesture horizon, mark scrolled — so a `sidebar-scroll-
     /// sweep:` tick is indistinguishable from a real wheel event to
@@ -320,7 +319,7 @@ impl Harness {
         self.sidebar_pane.update(cx, |_, cx| cx.notify());
     }
 
-    /// Apply the capture handler's input (owner round 5 §A1, owner round 6):
+    /// Apply the capture handler's input:
     /// take the accumulated travel into exactly one `ListState::scroll_by`
     /// per frame, disarm any armed reveal (the user's scroll wins), and mark
     /// scrolled-since-armed so none reinstalls until the next activation.
@@ -353,8 +352,7 @@ impl Harness {
     /// Automations behind a Soon tag until it has somewhere to go. No side
     /// inset of its own: the library's gutter positions the nav rows, and
     /// the harness block inset shifted them 4 px off the session rows'
-    /// gutter (ruler on the round-4 captures: nav icon centre 41 vs session
-    /// dot centre 36 before; owner round 4, O3).
+    /// gutter (measured: nav icon centre 41 vs session dot centre 36).
     fn render_nav_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
         let add_project =
@@ -375,8 +373,7 @@ impl Harness {
             .into_any_element()
     }
 
-    /// The Sessions caption, fixed above the scrolling list (owner round 4
-    /// fixup): the header stays put with its spacing at any scroll offset,
+    /// The Sessions caption, fixed above the scrolling list: the header stays put with its spacing at any scroll offset,
     /// so the list below it always clips at its own top edge and never butts
     /// against the nav block. The row is the library's caption row with the
     /// same 8 px top margin and 28 px height it had as the scroll content's
@@ -406,13 +403,12 @@ impl Harness {
     }
 
     pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Owner round 5 §A1, owner round 6: one travel per frame. The capture
+        // One travel per frame. The capture
         // handler only accumulates; this drain is the frame's single
         // `scroll_by`, before the list lays out.
         let user_scrolled = self.drain_sidebar_wheel();
         // A list that moved under an open group menu leaves it mis-seated:
-        // group menus dismiss on scroll (owner round 6, the calm option —
-        // the bounds intents re-seat a reopened menu on the next frame).
+        // group menus dismiss on scroll.
         // The header menu seats from the fixed crumb and stays. Mid-render
         // the close needs no notify: the overlay reads it below on this
         // same frame.
@@ -597,14 +593,14 @@ impl Harness {
         if let Some(phase) = self.pulse_phase_value(cx) {
             view = view.pulse_phase(phase);
         }
-        // The one-shot reveal (owner round 4, O6; owner round 5 §A1; owner
-        // round 6: armed only by outside-the-sidebar activations, steering
-        // the virtual list to the row with the least move). Never from a
+        // The one-shot reveal (armed only by outside-the-sidebar
+        // activations, steering the virtual list to the row with the least
+        // move). Never from a
         // sidebar click, a list refresh, a regroup, during a wheel gesture,
         // or after the user has scrolled — the flag only exists between an
         // outside activation and the row reporting visible, and a wheel
         // disarms it outright. A resize drag owns the list the same way:
-        // nothing steers while one is in flight (owner round 6).
+        // nothing steers while one is in flight.
         if !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
             if let Some(reveal_id) = self.reveal.clone() {
                 self.reveal_sidebar_row(&rows, &grouping, &reveal_id, cx);
@@ -623,8 +619,7 @@ impl Harness {
             .size_full()
             .child(self.render_nav_block(cx))
             .child(self.render_sessions_caption(cx))
-            // The list's positioned wrapper (owner round 5 §A1, owner round
-            // 6): `relative` only establishes the containing block — the
+            // The list's positioned wrapper: `relative` only establishes the containing block — the
             // capture canvas below resolves against this instead of the
             // window (the same load-bearing `relative` the transcript
             // wrapper wears for its own `wheel_capture`). A flex column
@@ -812,7 +807,7 @@ impl Harness {
     }
 
     /// What a regroup or filter change looks like to the virtual list
-    /// (owner round 6): the mode and the three list-management toggles.
+    ///: the mode and the three list-management toggles.
     /// Group open/close and fold expand are NOT in the key — they splice
     /// like any other local insert or remove, so the offset survives them.
     /// Compared in `render_sidebar` before anything draws; a change resets
@@ -826,9 +821,9 @@ impl Harness {
         }
     }
 
-    /// Keep the caller-owned list state on the flattened rows (owner round
-    /// 6, the library's adoption guide): re-flattened per frame by the
-    /// caller; `reset` after a regroup or filter change (the one sync that
+    /// Keep the caller-owned list state on the flattened rows:
+    /// re-flattened per frame by the caller; `reset` after a regroup or
+    /// filter change (the one sync that
     /// drops the offset — the old offset is meaningless against a rebuilt
     /// model), `splice` after a local insert or remove (open/close, fold
     /// expand, sessions arriving or leaving), `remeasure_items` after a
@@ -966,16 +961,16 @@ impl Harness {
     }
 
     /// Steer the virtual list to the outside-activated session, moving the
-    /// least distance that shows its row whole (owner round 6): the row
+    /// least distance that shows its row whole: the row
     /// itself when the flattened model has one — folds rescue held-back
     /// rows for the pending target, so no expansion dance — else its group
     /// head for a closed group (never auto-expanded, like before), else
     /// wait for an id with no row yet (a draft before its first send, a
     /// fork before `load_sessions`'s reply lands) up to
     /// [`REVEAL_UNKNOWN_FRAMES`] attempts, else clear a flag with nowhere
-    /// to go (owner round 6, part C4 review #1: a *known* session that
-    /// still has no landing row gives up on the first miss, same as
-    /// before — only an unrecognised id gets the grace period). A sidebar
+    /// to go (a *known* session that still has no landing row gives up
+    /// on the first miss, same as before — only an unrecognised id gets
+    /// the grace period). A sidebar
     /// click never sets the flag; wheel and resize disarm it. Called on
     /// selection change and the frames after, until the row reports
     /// visible: before the first layout the viewport is unknown and the
@@ -992,7 +987,7 @@ impl Harness {
             .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
         let Some(ix) = target else {
             if self.sessions.iter().any(|e| e.id == reveal_id) {
-                // A known session with nowhere to go (owner round 5 §A1): a
+                // A known session with nowhere to go: a
                 // waiting flag outlives its activation and can move a list
                 // the user scrolled meanwhile.
                 self.reveal = None;
@@ -1029,8 +1024,7 @@ impl Harness {
         if above == Some(false) && below == Some(false) {
             self.reveal = None;
         } else if above.is_none() || below.is_none() {
-            // The list has not laid out yet (owner round 6, part C4 review
-            // #4): a degenerate zero-height sidebar rect would otherwise
+            // The list has not laid out yet: a degenerate zero-height sidebar rect would otherwise
             // have every pane render spawn another pane-notify task, which
             // renders, which pokes again, forever — `bench-idle` never
             // settling. Leave the flag armed with nothing scheduled;
@@ -1370,8 +1364,7 @@ impl Harness {
     /// the sessions a person reaches for from a rail — the open one and the
     /// most recent of the visible list, each a tile bearing its initial with
     /// the title as its tooltip, running ones pulsing — and the account
-    /// avatar. A rail of two glyphs and an empty column served nothing
-    /// (owner round 2026-09-13, follow-up).
+    /// avatar. A rail of two glyphs and an empty column served nothing.
     pub(crate) fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let active = self.active_id(cx);
         let mut items = vec![
@@ -1396,7 +1389,7 @@ impl Harness {
         for entry in shown {
             let state = if entry.running { AgentState::Running } else { AgentState::Idle };
             // A plain initial on the surface step: rail tiles wear no label
-            // tint anywhere (owner round 4, O4).
+            // tint anywhere.
             let mut cell = RailItem::session(entry.id.clone(), state).label(entry.label.clone());
             if entry.running {
                 cell = cell.pulse();
@@ -1417,13 +1410,13 @@ impl Harness {
         }
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             // The rail's rows are visible by definition, like the sidebar's:
-            // no reveal (owner round 6).
+            // no reveal.
             this.resume_quiet(id.to_string(), window, cx);
         });
         let action = cx.listener(|this: &mut Self, name: &str, window, cx| match name {
             "new" => this.new_session(window, cx),
-            // Task E has landed: the rail cell opens the full-text search
-            // palette, like the header search icon and ⌘⇧F.
+            // The rail cell opens the full-text search palette, like the
+            // header search icon and ⌘⇧F.
             "search" => this.open_search(window, cx),
             "projects" => this.open_projects(false, window, cx),
             "account" => this.open_menu(MenuKind::Account, cx),
@@ -1559,7 +1552,7 @@ impl Harness {
         };
         let pop = div().absolute().top(px(top)).left(px(left));
         // A click anywhere outside closes it: the catcher is a sibling of
-        // the menu inside the same deferred draw (owner round 2, P4).
+        // the menu inside the same deferred draw.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
@@ -1622,7 +1615,7 @@ impl Harness {
             return None;
         };
         // A click anywhere outside closes it: the catcher is a sibling of
-        // the menu inside the same draw (owner round 2, P4).
+        // the menu inside the same draw.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
@@ -1647,7 +1640,7 @@ impl Harness {
     }
 }
 
-/// The sidebar's wheel, taken in the capture phase (owner round 5 §A1):
+/// The sidebar's wheel, taken in the capture phase:
 /// the transcript's `wheel_capture` twin. Capture runs in registration
 /// order ahead of every bubble handler, so this stops the event before the
 /// scroll div's own listener can apply it per event; the div keeps its
@@ -1703,7 +1696,7 @@ fn sidebar_wheel_capture(harness: &Harness) -> gpui::AnyElement {
     .into_any_element()
 }
 
-/// The Sessions view menu's seat for a fixed caption (owner round 4 fixup):
+/// The Sessions view menu's seat for a fixed caption:
 /// 4 px under the caption's bottom edge, right edge aligned to the caption's
 /// right edge under its 12 px of row padding; the menu is a fixed 250 px
 /// wide, so a sidebar narrower than that clamps the seat's left at 8 px into
@@ -1905,7 +1898,7 @@ mod tests {
         }
     }
 
-    /// The owner's live trace, replayed: a row armed through the real report
+    /// A live trace, replayed: a row armed through the real report
     /// path stays armed across pane renders that observe no GPUI hover, and
     /// the delay timer opens its card. Before the fix the render-time poll
     /// read `gpui-hover=None` on every pane render and cleared the armed
@@ -1919,8 +1912,8 @@ mod tests {
 
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         // Hermetic state: boot adopts the workspace into the projects
-        // store, so the temp dir keeps the owner's store untouched.
-        let dir = std::env::temp_dir().join(format!("harness-hover-poll-{}", std::process::id()));
+        // store, so the temp dir keeps the real store untouched.
+        let dir = std::env::temp_dir().join(format!("harness-armed-hover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("probe state dir");
         let guard = crate::store::test_env_lock().lock().expect("test env lock");
         let old = std::env::var_os("HARNESS_STATE_DIR");
@@ -2089,7 +2082,7 @@ mod tests {
 
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         // Hermetic state: boot adopts the workspace into the projects
-        // store, so the temp dir keeps the owner's store untouched.
+        // store, so the temp dir keeps the real store untouched.
         let dir = std::env::temp_dir().join(format!("harness-hover-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("probe state dir");
         let guard = crate::store::test_env_lock().lock().expect("test env lock");
@@ -2302,7 +2295,7 @@ mod tests {
     }
 
     /// The virtual sidebar builds only visible rows for a stress sidebar
-    /// (owner round 6): 200 sessions across 8 projects through the
+    ///: 200 sessions across 8 projects through the
     /// harness's own grouping (flags, folds, rescue) into the library's
     /// virtual view — the per-frame build budget the div-scroll path could
     /// never keep. Reverting the sessions area to div-scroll builds all
@@ -2422,7 +2415,7 @@ mod tests {
 
     #[test]
     fn render_counters_drain_what_they_counted() {
-        // The idle instrument's contract (owner round 6): `take_*` zeroes,
+        // The idle instrument's contract: `take_*` zeroes,
         // so the take after a window holds only that window's renders. The
         // counters are process-global and only the render paths note them,
         // which unit tests never reach — drain first to stay hermetic.
@@ -2445,7 +2438,7 @@ mod tests {
     }
 
     /// An id with no row yet keeps its reveal armed across misses instead
-    /// of dropping it on the first one (owner round 6, part C4 review #1):
+    /// of dropping it on the first one:
     /// a draft before its first send, a fork before `load_sessions`'s
     /// reply lands. The streak counts up for the same id and past
     /// `REVEAL_UNKNOWN_FRAMES` the caller gives up.

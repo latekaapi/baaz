@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarise a `frame-trace.log` from a `HARNESS_FRAME_TRACE=1` run.
 
-v3 format (owner round 6, part C3), one row per `Harness::render` — i.e.
+v3 format, one row per `Harness::render` — i.e.
 once per display tick that renders anything at all, not only the ticks
 that happen to rebuild the transcript column (the old v2 format's blind
 spot: a sidebar-only or resize-only gesture went untraced once parts
@@ -35,8 +35,8 @@ For each of the three interactions this instrument exists to measure
 - p50/p90 frame ms (`draw_us` column) over the gesture-active rows.
 - `longest_gap_ms`: the same longest silent stretch in raw wall-clock
   milliseconds, needing no tick calibration — the more trustworthy number
-  on a machine with no real display link (owner round 6, part C3: this
-  machine's `screencapture` returned solid black and
+  on a machine with no real display link (a headless session's
+  `screencapture` returns solid black and
   `NSRunningApplication.activate()` returned `false`, both signs there is
   no attached compositor pacing `request_animation_frame` to a genuine
   60/120 Hz — `densest_tick_us` below can then read a rate faster than any

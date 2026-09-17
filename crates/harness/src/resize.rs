@@ -78,7 +78,7 @@ impl ResizeSweep {
     }
 }
 
-/// One frame-paced scroll sweep (owner round 6, part C3): applies a wheel
+/// One frame-paced scroll sweep: applies a wheel
 /// delta once per rendered frame — the display link's pace on a real
 /// display — standing in for a posted trackpad gesture when the
 /// environment cannot deliver real `CGEvent`s to the window (this
@@ -158,8 +158,8 @@ impl ResizeDrag {
 impl Harness {
     /// The press on the resize strip: arm the drag from the grab point.
     ///
-    /// A resize drag owns the list exactly like a wheel gesture does (owner
-    /// round 5 §A1, owner round 6): it disarms any armed reveal — a drag
+    /// A resize drag owns the list exactly like a wheel gesture does: it
+    /// disarms any armed reveal — a drag
     /// starting within a few frames of an outside open must not scroll the
     /// sessions list itself — and no reveal installs while it is in flight.
     pub(crate) fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
@@ -217,7 +217,7 @@ mod tests {
     use super::*;
 
     /// The sweep marches one step per tick, snaps when the step would
-    /// overshoot, and never leaves the divider's range (owner round 6).
+    /// overshoot, and never leaves the divider's range.
     #[test]
     fn a_sweep_marches_by_the_step_and_snaps_at_the_target() {
         let mut sweep = ResizeSweep::new(412.0, 4.0);
@@ -243,8 +243,7 @@ mod tests {
     }
 
     /// A scroll sweep holds a constant delta for the finger phase, then
-    /// decays to 5% of it over the tail, then stops (owner round 6, part
-    /// C3).
+    /// decays to 5% of it over the tail, then stops.
     #[test]
     fn a_scroll_sweep_holds_then_decays_then_stops() {
         let mut sweep = ScrollSweep::new(-20.0, 3, 2);

@@ -85,7 +85,7 @@ pub struct SessionEntry {
     /// the titler, which sets it on `turn/started` and clears it on harvest,
     /// timeout or failure; the ladder below reads it, nothing else writes it.
     pub title_pending: bool,
-    /// The owner's last request in this session, as the free byline excerpt
+    /// The user's last request in this session, as the free byline excerpt
     /// saw it: the ask half of the two-line byline (auto-summaries). `None`
     /// is "no byline yet" — the ladder falls through to the preview text.
     /// Owned by the byline recorder; the ladder below reads it.
@@ -464,8 +464,7 @@ impl SessionEntry {
     }
 
     /// The library row for this session, labelled against `now`. No
-    /// provider mark: the sidebar rows read title, preview and elapsed only
-    /// (owner round 4, O4).
+    /// provider mark: the sidebar rows read title, preview and elapsed only.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
         // Option B's context priority: the live approval/question override
@@ -675,7 +674,7 @@ pub const OTHER_GROUP: &str = "other";
 /// How many of a project's newest unpinned sessions a folded group shows.
 ///
 /// Pinned rows always show and never count toward this; the open session is
-/// appended past it when it would otherwise be cut (owner round 2, P3).
+/// appended past it when it would otherwise be cut.
 pub const VISIBLE_RECENT: usize = 5;
 
 /// What the project grouping shows beyond the rows: which groups stand
@@ -697,7 +696,7 @@ pub struct GroupView<'a> {
 /// Group the entries by project, against an explicit clock.
 ///
 /// One group per adoption in [`Projects::sorted`] order — pinned first, then
-/// name, never recency (owner round 4, O1) — each a plain muted label with
+/// name, never recency — each a plain muted label with
 /// the visible-session count (an empty project still gets its row, counting
 /// `"0"`), a running dot when any of its sessions runs, and, only when the
 /// layout flags ask, the collapse chevron, the current-project bar and the
@@ -797,10 +796,9 @@ pub fn grouping_by_project(
         };
         // A count says how much is inside; at zero it says only that the row
         // is empty, which the absent rows already say, and it puts a
-        // meaningless digit on the same baseline as the meaningful ones
-        // (audit 2026-09-13).
+        // meaningless digit on the same baseline as the meaningful ones.
         let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
-        // The plain default group row (owner round 4, O4): no mark, the
+        // The plain default group row: no mark, the
         // chevron, the current bar and the trailing branch only when the
         // layout flags ask. The count stays.
         let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count)
@@ -1358,7 +1356,7 @@ mod tests {
         }
     }
 
-    /// Owner round 2 S1: the row's own `name` / `title` / `firstUserPrompt`
+    /// The row's own `name` / `title` / `firstUserPrompt`
     /// come before the index's copies, and the index stays the fallback for
     /// older rows that predate the derivation.
     #[test]
@@ -1701,7 +1699,7 @@ mod tests {
         let Grouping::Project(groups) = by_project(&entries, &projects) else {
             panic!("project grouping must yield project groups");
         };
-        // Name order, never recency (owner round 4, O1): agentic-ui, empty,
+        // Name order, never recency: agentic-ui, empty,
         // harness — even though the harness rows are the newest — then Other
         // workspaces last.
         assert_eq!(groups.len(), 4);
@@ -1853,7 +1851,7 @@ mod tests {
         assert!(!group.sessions[1].pinned);
     }
 
-    /// Owner round 2, P3: nine sessions fold to the five newest, holding
+    /// Nine sessions fold to the five newest, holding
     /// four back. The count still names all nine.
     #[test]
     fn nine_sessions_fold_to_five_plus_four_hidden() {

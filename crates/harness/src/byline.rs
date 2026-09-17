@@ -1,6 +1,6 @@
-//! The sidebar's two-line byline (part 3).
+//! The sidebar's two-line byline.
 //!
-//! Line 1 is the owner's last request, line 2 is what came back. Computed
+//! Line 1 is the user's last request, line 2 is what came back. Computed
 //! **free by default**: the last user message and the first meaningful line
 //! of the latest assistant reply, collapsed, stripped of code fences and
 //! markdown noise, and truncated to the row's own width ([`excerpt_line`]).

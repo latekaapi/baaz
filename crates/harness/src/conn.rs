@@ -119,7 +119,7 @@ pub fn severity(error: &MuseError) -> Severity {
 }
 
 /// Whether a failed `session/resume` is about *this session* rather than the
-/// transport (owner round 2 S3).
+/// transport.
 ///
 /// A session-scoped rejection leaves the wire `Ready`: the child is alive
 /// and the handshake passed, so the sidebar, the palette and ⌘N keep
@@ -176,7 +176,7 @@ pub fn is_session_scoped(error: &MuseError) -> bool {
 }
 
 /// The banner a session-scoped resume rejection becomes on that session's
-/// view (owner round 2 S3).
+/// view.
 pub fn lease_banner(error: &MuseError) -> String {
     if matches!(error.kind(), Some(ErrorKind::SessionInUse)) {
         return "This session is open in another window. Close it there, or start a new session.".to_owned();
@@ -239,7 +239,7 @@ mod tests {
         MuseError::Rpc(Box::new(object))
     }
 
-    /// Owner round 2 S3: a resume rejection about the session banners the
+    /// A resume rejection about the session banners the
     /// view and keeps the wire up; a dead child or a server-level kind takes
     /// the wire down.
     #[test]

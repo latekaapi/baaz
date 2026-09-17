@@ -113,7 +113,7 @@ impl Harness {
     }
 
     /// The adoptions in sidebar order: pinned first, then name, never
-    /// recency (owner round 4, O1) — minus the adoptions whose root is gone.
+    /// recency — minus the adoptions whose root is gone.
     /// What the project menu and the Projects palette both list.
     pub(crate) fn ordered_projects(&self) -> Vec<crate::projects::Project> {
         self.projects.sorted_available().into_iter().cloned().collect()
@@ -160,7 +160,7 @@ impl Harness {
     /// current (its name is what the crumb shows), the field is seeded with
     /// it, and `ConfirmRename` commits through [`Self::commit_project_rename`].
     /// Renaming never touches the project: opening the field must not
-    /// reorder the groups (owner round 4, O1).
+    /// reorder the groups.
     fn start_project_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.projects.find(&id).cloned() else { return };
         self.projects.current = Some(id.clone());
@@ -332,7 +332,7 @@ impl Harness {
     }
 
     /// `group-chevron`: flip the group-row chevron flag and persist it. The
-    /// switch itself lives in the Settings dialog (owner round 4, O4); this
+    /// switch itself lives in the Settings dialog; this
     /// verb is what captures flip until it exists.
     pub(crate) fn step_group_chevron(&mut self, cx: &mut Context<Self>) {
         self.layout.group_chevron = !self.layout.group_chevron;
@@ -518,7 +518,7 @@ impl Harness {
         // A click anywhere outside closes the menu and its colour submenu:
         // the catcher is a sibling of the menu inside the same deferred
         // draw, so it covers the window without covering the menu — the same
-        // shape the composer's chip pickers use (owner round 2, P4).
+        // shape the composer's chip pickers use.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             this.project_colour_open = false;

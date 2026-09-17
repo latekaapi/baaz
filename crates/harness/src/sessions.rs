@@ -76,7 +76,7 @@ pub struct SessionMeta {
     /// sidebar's description line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_summary: Option<String>,
-    /// The owner's last request in this session, excerpted the free way and
+    /// The user's last request in this session, excerpted the free way and
     /// written beside [`Self::last_summary`] on every completed turn. The
     /// byline's ask half: together they are the row's two lines, free.
     #[serde(default, skip_serializing_if = "Option::is_none")]

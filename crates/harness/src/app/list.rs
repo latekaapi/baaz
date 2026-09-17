@@ -302,7 +302,7 @@ impl Harness {
     }
 
     /// A turn completed in this app: leave the free byline excerpt on the
-    /// sidebar row — the owner's last request beside the first meaningful
+    /// sidebar row — the user's last request beside the first meaningful
     /// line of the latest reply. Free — the fold is already in memory — so
     /// it refreshes after every completed turn, and skipped when nothing new
     /// arrived, so the store is not rewritten on every completion.

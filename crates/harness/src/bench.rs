@@ -231,7 +231,7 @@ const BURST_REPEATS: usize = 12;
 /// let the frame land and measure how far the list actually went.
 ///
 /// Every dispatched event and every landed frame appends the absolute pixel
-/// offset to `offsets` (owner round 4 §1): the per-frame series that tells
+/// offset to `offsets`: the per-frame series that tells
 /// hint re-basing (first-difference steps as rows measure) apart from frame
 /// overrun (uniform large steps).
 async fn drive_bursts(
@@ -347,13 +347,13 @@ async fn wait_for_frame(cx: &mut AsyncApp, since: u64) -> usize {
 }
 
 /// The wheel instrument's outcome: per-phase stats, per-burst stats, and the
-/// per-frame offset series (owner round 4 §1).
+/// per-frame offset series.
 struct WheelOutcome {
     tail_ix: usize,
     phases: Vec<WheelPhaseStats>,
     bursts: Vec<BurstStats>,
     offsets: Vec<f32>,
-    /// Applied wheel drains (owner round 4 §2): one per frame that carried
+    /// Applied wheel drains: one per frame that carried
     /// accumulated travel, against one `scroll_by` per event before.
     scroll_bys: u64,
 }
@@ -487,7 +487,7 @@ impl Render for BenchRoot {
 const FRAME_BUDGET: Duration = Duration::from_micros(16_700);
 /// How long the idle assertion watches a settled transcript.
 const IDLE_WINDOW: Duration = Duration::from_secs(2);
-/// Quiet required before the idle window opens (owner round 6): the driver
+/// Quiet required before the idle window opens: the driver
 /// stopping is not the same as settled — trailing async work (list measure,
 /// enter presences, a tier answer) lands in the first frames after the last
 /// driven update, and counting it flakes 0–32 run to run on the same binary.
@@ -550,7 +550,7 @@ fn git_hash() -> String {
 }
 
 /// What a `--bench` run drives: the bare transcript view, or the normal
-/// shell with its replayed session active (owner round 4 §1).
+/// shell with its replayed session active.
 pub enum BenchSeed {
     /// The transcript alone (`--bench-bare`): the transcript-only number.
     Bare(Entity<BenchRoot>),

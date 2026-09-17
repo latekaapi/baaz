@@ -318,7 +318,7 @@ impl SessionView {
         cx.notify();
     }
 
-    /// The lease is gone (owner round 2 S3): banner the view and refuse sends
+    /// The lease is gone: banner the view and refuse sends
     /// until a later resume succeeds. The banner dismisses like any other;
     /// the refusal re-shows it, so the notice outlives a dismissal everywhere
     /// except a successful resume.
@@ -422,7 +422,7 @@ impl SessionView {
         crate::byline::excerpt_line(&text)
     }
 
-    /// The byline's ask half: the owner's newest request in this session,
+    /// The byline's ask half: the user's newest request in this session,
     /// excerpted the free way. The newest folded user turn covers replays
     /// and restarts; the newest recorded submission covers a turn whose
     /// `userMessage` has not echoed yet.

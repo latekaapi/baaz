@@ -259,7 +259,7 @@ impl Projects {
         self.projects.iter().find(|p| canonical_path(&p.root) == canonical)
     }
 
-    /// The sidebar order (decision D37, owner round 4, O1): pinned projects
+    /// The sidebar order: pinned projects
     /// first, then by name case-insensitively, ties by `added_at` then id.
     /// Never recency: a project never moves because a session in it was
     /// created, opened, or got a turn. No drag reorder.

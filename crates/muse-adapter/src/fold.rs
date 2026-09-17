@@ -796,7 +796,7 @@ impl Folded {
     /// Muse keeps as a live session is only closed by a later turn's
     /// `bash_input` (seen 30 minutes after the fact), and until then the
     /// card spun and its approval read "Running" under a finished reply
-    /// (owner round 2026-09-13, follow-up). Nothing here is optimistic —
+    ///. Nothing here is optimistic —
     /// the turn's terminal is the server's word that no more work runs in
     /// it — so a still-running call becomes done on a completed turn and
     /// cancelled on a cancelled or failed one, and an approval still
@@ -1432,8 +1432,8 @@ impl Folded {
                 text: compaction_text(item),
             },
             // `reminderChild` renders as nothing at all: it is a
-            // Muse-internal child-session record the owner asked to drop
-            // (presentation policy, `docs/01-transport.md`).
+            // Muse-internal child-session record, dropped from the
+            // transcript (presentation policy, `docs/01-transport.md`).
             msp::ItemKind::ReminderChild => return None,
             // `workflow` has no home in the library yet, so it takes the
             // mandated generic rendering: kind + status + `fallbackText`.
@@ -2349,8 +2349,8 @@ fn tool_presentation(
 }
 
 /// A shell result carried as one JSON object rather than as plain text: the
-/// shape the owner saw painted raw (`command`, `description`, `exit_code`,
-/// `terminal_status`, an output field).
+/// shape painted raw in the transcript (`command`, `description`,
+/// `exit_code`, `terminal_status`, an output field).
 struct ShellEnvelope {
     command: String,
     description: String,
