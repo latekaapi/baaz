@@ -126,3 +126,8 @@ library.
   re-delivers for an already-completed turn no longer marks the view or its
   row running, so an interrupted session keeps its terminal state instead
   of showing a fresh `Working`.
+- **Every existing file path opens.** Transcript paths open in their
+  default app (folders in Finder) wherever they live — absolute paths as
+  is, relative ones against the workspace — gated on existence: only an
+  existing path opens (never executed, never created), anything else toasts
+  `No such file` quietly. http(s) links behave as before.
