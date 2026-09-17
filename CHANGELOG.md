@@ -114,3 +114,7 @@ library.
   ever, at most one retry, the 90 s watchdog, silent first-prompt fallback —
   with the watchdog standing the row down rather than giving up, so a late
   answer still lands instead of being billed for nothing.
+- **Hover detail arms on hover.** Rows report hover enter/leave themselves
+  (new `on_row_hover` in the library), so the detail card's delay arms even
+  on a settled sidebar that re-renders nothing; the render-time hover poll
+  stays as the trigger tracker and fallback.

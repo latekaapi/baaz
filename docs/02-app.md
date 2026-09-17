@@ -336,7 +336,10 @@ waiting on a person outranks running, so an approval mid-turn never reads
 it: the full title, ask and latest reply, the status with its detail (the
 pending question, the approval command, the terminal error), project,
 branch, turn count and last change — only what the app knows, the rest
-omitted. The card takes no focus and never covers its own row, so the
+omitted. The rows report hover enter/leave themselves, so the delay arms
+even on a settled sidebar that re-renders nothing (the render-time poll
+only tracks the trigger point and heals a missed report). The card takes
+no focus and never covers its own row, so the
 row's click still lands; it closes on leave, scroll and click. Scripted,
 `row-detail:<session_id>` pins it open (pair with `click:` on the same id).
 The attention states ride the wire's `Session.attention` (muse 1.3.0:
