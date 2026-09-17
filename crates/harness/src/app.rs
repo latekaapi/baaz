@@ -1032,6 +1032,27 @@ impl Harness {
                 .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)),
             _ => None,
         };
+        // The row's live facts, straight from the event — extracted before
+        // the view takes the event below, applied after, so the fold
+        // already holds the event's world (see the call past `apply`).
+        let live: Option<(bool, String)> = match &event {
+            MuseEvent::Notification { method, params, session_id, .. } => {
+                let id = session_id
+                    .clone()
+                    .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned));
+                match (method.as_str(), id) {
+                    ("turn/started", Some(id)) => Some((true, id)),
+                    ("turn/completed", Some(id))
+                    | ("approval/requested", Some(id))
+                    | ("approval/updated", Some(id))
+                    | ("approval/resolved", Some(id))
+                    | ("userInput/requested", Some(id))
+                    | ("userInput/settled", Some(id)) => Some((false, id)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         // A side session's turn completed: harvest its answer for the title
         // it serves. The open view ignores foreign ids on apply, so this is
         // the only place a side session's events land.
@@ -1048,6 +1069,14 @@ impl Harness {
         }
         if let Some(active) = &self.active {
             active.update(cx, |view, cx| view.apply(event, cx));
+        }
+        // The row's live facts, straight from the event — no `session/list`
+        // round trip: a started turn reads running now, a completed one (or
+        // an approval/question event) re-reads the open view's pending
+        // words. Runs after `apply`, so the fold already holds the event's
+        // world. `session/statusChanged` joins them in part 3.
+        if let Some((is_start, id)) = live {
+            self.sync_row_live(&id, is_start, cx);
         }
         if let Some(session_id) = started {
             let prompt = self

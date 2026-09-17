@@ -812,6 +812,35 @@ impl SessionView {
         self.running.is_some() || self.submitting
     }
 
+    /// What the sidebar row stands on while this session waits on a person:
+    /// the newest pending approval's exact command and the newest
+    /// unanswered question's prompt, in fold order (forward walk, last hit
+    /// wins — the same block the transcript's own phase scan reads first).
+    /// Live off the fold, so a caller that just applied an event reads the
+    /// event's world, never a stale snapshot.
+    pub fn row_pending(&self) -> (Option<String>, Option<String>) {
+        use aui_protocol::ApprovalState;
+        let Some(session) = self.fold.session(&self.session_id) else {
+            return (None, None);
+        };
+        let mut approval: Option<String> = None;
+        let mut question: Option<String> = None;
+        for turn in session.turns.iter() {
+            for block in turn.blocks() {
+                match block {
+                    Block::Approval { command, state: ApprovalState::Pending, .. } => {
+                        approval = Some(command.clone());
+                    }
+                    Block::Question { prompt, answer: None, .. } => {
+                        question = Some(prompt.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (approval, question)
+    }
+
     /// Whether the running turn's reply has fully arrived while the turn is
     /// still open: after the `agentMessage` completes and `session/tokenUsage`
     /// arrives, Muse runs `reminderChild` items (memory reminders) for 30–70 s
