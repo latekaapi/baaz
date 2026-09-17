@@ -397,6 +397,42 @@ impl Harness {
         }
     }
 
+    /// Record one turn's terminal on its row and in the store: a failed
+    /// turn's message is what `Failed` stands on (taken from
+    /// `turn/completed`'s `error`, the only place a mid-turn failure
+    /// reaches the client — never as a JSON-RPC error), and any other
+    /// terminal stands a recorded error down. Side sessions never touch
+    /// rows. Skipped when nothing would change, so the store is not
+    /// rewritten on every completion.
+    pub(crate) fn record_turn_outcome(
+        &mut self,
+        session_id: &str,
+        failed: bool,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_side_session(session_id) {
+            return;
+        }
+        let message = error.map(str::trim).filter(|s| !s.is_empty());
+        let next = if failed { message.map(str::to_owned) } else { None };
+        let changed_entry = self
+            .sessions
+            .iter_mut()
+            .find(|entry| entry.id == session_id)
+            .is_some_and(|entry| {
+                let before = entry.last_error.clone();
+                entry.apply_turn_outcome(failed, error);
+                entry.last_error != before
+            });
+        let current = self.overrides.get(session_id).and_then(|m| m.last_error.clone());
+        if current != next {
+            self.set_override(session_id, |meta| meta.last_error = next, cx);
+        } else if changed_entry {
+            self.invalidate_list();
+        }
+    }
+
     /// The open session's id, which the empty filter never applies to: a
     /// session just created has no turns yet and must stay visible.
     pub(crate) fn active_id(&self, cx: &gpui::App) -> Option<String> {
