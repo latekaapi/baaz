@@ -677,6 +677,15 @@ impl Harness {
         cx.notify();
     }
 
+    /// `row-detail:<session_id>`: capture aid — pin the hover card open for
+    /// one row, seated at the selected row's bounds (pair with `click:` on
+    /// the same id). Empty clears the pin. Free: no pointer, no turn.
+    pub(crate) fn step_row_detail(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let id = rest.trim();
+        self.forced_detail = if id.is_empty() { None } else { Some(id.to_owned()) };
+        cx.notify();
+    }
+
     /// `new`: the same as ⌘N, in the current project. `new:<project name>`:
     /// the group row's `+` for the project named — an unknown name only logs.
     pub(crate) fn step_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {

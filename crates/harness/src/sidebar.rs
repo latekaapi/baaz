@@ -42,19 +42,8 @@ pub fn display_label(label: &str, title_pending: bool) -> &str {
     }
 }
 
-/// The wording a running row used to carry on its second line, kept for the
-/// match with the transcript footer's wording (`session/render.rs`). The
-/// option-B status line owns it now (`Working · 14m`); the context line no
-/// longer reads it.
-pub const PLACEHOLDER_WORKING: &str = "Working…";
-
 /// The second line while a generated title is still being written.
 pub const PLACEHOLDER_NAMING: &str = "Naming this session…";
-
-/// The wording a session with nothing to show yet used to carry: no turn,
-/// no title, no summary. The option-B status line owns it now (`No reply
-/// yet`); the context line keeps its height as empty space instead.
-pub const PLACEHOLDER_EMPTY: &str = "No reply yet";
 
 /// One row of the sidebar, joined from the wire, the local index and the
 /// harness's own overrides.
@@ -402,6 +391,38 @@ impl SessionEntry {
             return Some(Byline::Preview(self.description.clone().into()));
         }
         None
+    }
+
+    /// The hover detail's content: the whole picture the row truncates —
+    /// full title, ask and latest reply, the status with its detail (the
+    /// pending question, the approval command, the terminal error),
+    /// project, branch, turn count and last change. Only what the app
+    /// knows: empty words stay unset and never draw. The `Failed` status
+    /// carries the terminal error where it fits; every other state reuses
+    /// the row's own status words.
+    pub fn detail_data(&self, now: DateTime<Local>) -> aui::nav::SessionDetailData {
+        let status = self.row_status(now);
+        let status = if status.kind == RowStatusKind::Failed {
+            RowStatus::new(
+                RowStatusKind::Failed,
+                self.last_error.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or_default(),
+            )
+        } else if status.kind == RowStatusKind::NeedsApproval {
+            RowStatus::new(RowStatusKind::NeedsApproval, self.approval_text().unwrap_or_default())
+        } else {
+            status
+        };
+        let elapsed = elapsed_at(self.updated, now);
+        aui::nav::SessionDetailData {
+            title: Some(self.label.clone().into()),
+            ask: self.last_ask.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
+            reply: (!self.description.trim().is_empty()).then(|| self.description.clone().into()),
+            status: Some(status),
+            project: self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
+            branch: self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
+            turns: Some(usize::try_from(self.turns).unwrap_or(usize::MAX)),
+            updated: Some(if elapsed == "now" { "now".into() } else { format!("{elapsed} ago").into() }),
+        }
     }
 
     /// The library row for this session, labelled against `now`. No
@@ -1099,6 +1120,39 @@ mod tests {
         empty.attention = Vec::new();
         assert!(!empty.needs_approval());
         assert!(!empty.asked());
+    }
+
+    /// The hover detail carries the whole picture and omits what the app
+    /// does not know: full title/ask/reply, the status with its detail,
+    /// project, branch, turns and last change, in card order.
+    #[test]
+    fn detail_data_carries_the_full_picture_in_card_order() {
+        use aui::nav::detail_keys;
+        let now = Local::now();
+        let mut full = entry("full");
+        full.label = "auth-session-refresh".into();
+        full.last_ask = Some("Refresh the session tokens".into());
+        full.description = "Which bucket should I use?".into();
+        full.pending_question = Some("Which bucket for staging?".into());
+        full.project_name = Some("acme-web".into());
+        full.branch = Some("feature/auth-refresh".into());
+        full.turns = 5;
+        full.updated = now - chrono::Duration::minutes(8);
+        let data = full.detail_data(now);
+        assert_eq!(
+            detail_keys(&data),
+            vec!["Title", "Ask", "Reply", "Status", "Project", "Branch", "Turns", "Updated"]
+        );
+        assert_eq!(data.status.as_ref().map(|s| s.text().to_string()).as_deref(), Some("Asked: \"Which bucket for staging?\""));
+        assert_eq!(data.updated.as_deref(), Some("8m ago"));
+        // A failure carries the terminal error on its status; a bare row
+        // draws title, status, turns and age only.
+        let mut failed = entry("failed");
+        failed.turns = 2;
+        failed.last_error = Some("modelError: overloaded".into());
+        let data = failed.detail_data(now);
+        assert_eq!(data.status.as_ref().map(|s| s.text().to_string()).as_deref(), Some("Failed · modelError: overloaded"));
+        assert_eq!(detail_keys(&entry("fresh").detail_data(now)), vec!["Title", "Status", "Turns", "Updated"]);
     }
 
     /// Every state through the real `summary()`: the context line keeps one

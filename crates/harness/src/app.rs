@@ -628,6 +628,25 @@ pub struct Harness {
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
     /// accepted the bill this morning should be asked again tomorrow.
     pub(crate) send_anyway: bool,
+    /// The sidebar row under the pointer, if any: the hover detail's owner.
+    /// Polled off the rows' own interaction state every sidebar frame (the
+    /// library owns the elements; the app owns which row is hovered).
+    pub(crate) hovered_row: Option<String>,
+    /// When the current hover started: the detail opens past
+    /// [`aui::nav::SESSION_DETAIL_DELAY`], so a pointer travelling past
+    /// rows never flashes the card.
+    pub(crate) hover_since: Option<std::time::Instant>,
+    /// The hover card is past its delay and showing.
+    pub(crate) hover_shown: bool,
+    /// Where the showing card seats: the pointer's point when it opened,
+    /// frozen so the card never chases the mouse.
+    pub(crate) hover_trigger: Option<Bounds<Pixels>>,
+    /// Capture aid (`row-detail:<id>`): pins the hover card open for one
+    /// row, seated at the selected row's bounds — free, no pointer.
+    pub(crate) forced_detail: Option<String>,
+    /// The selected row's window bounds, from the virtual list's
+    /// `on_selected_prepainted`: what the pinned card seats at.
+    pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
     pub(crate) tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -739,6 +758,12 @@ impl Harness {
             window_title_key: None,
             search_status: RefCell::new(None),
             send_anyway: false,
+            hovered_row: None,
+            hover_since: None,
+            hover_shown: false,
+            hover_trigger: None,
+            forced_detail: None,
+            selected_row_bounds: None,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
@@ -2089,6 +2114,7 @@ impl Render for Harness {
                 .into_any_element()
         });
         let overflow = self.render_overflow_menu(cx);
+        let row_detail = self.render_row_detail(cx);
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
         let project_menu = self.render_project_menu(cx);
@@ -2151,6 +2177,7 @@ impl Render for Harness {
                 .children(palette)
                 .children(dialog)
                 .children(settings)
+                .children(row_detail)
                 .children(overflow)
                 .children(view_options)
                 .children(account)
