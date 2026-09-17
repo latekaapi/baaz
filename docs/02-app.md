@@ -325,8 +325,10 @@ the elapsed time at the right, a context line, and a semibold status verb
 line coloured by state — each truncating with an ellipsis at the sidebar's
 width, never wrapped, so a brand-new session is exactly as tall as its
 neighbours. The context line reads the pending approval's exact command or
-the pending question when one exists, else the ask/result byline side by
-side, else a one-line preview, else `project · branch`, else blank space
+the pending question when one exists, else the ask/result byline as one
+line — the ask hugging its content, a single `·` separator, the result
+taking the rest, each truncating with an ellipsis when squeezed — else a
+one-line preview, else `project · branch`, else blank space
 that still keeps the line's height; a generated title still in flight reads
 `Naming this session…`. The status line reads `Working · 14m` for a running
 turn (its own elapsed), `Needs approval`, `Asked: "…"` with the question's
