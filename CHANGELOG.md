@@ -61,7 +61,22 @@ library.
   title is in flight, the owner's last request beside the last reply once
   known (free excerpt, refreshed every completed turn; one debounced model
   rewrite only when it is poor), else the preview/`N turns` meta, else `No
-  reply yet` — never blank.
+  reply yet` — never blank. (Superseded below by the three-line status
+  rows.)
+- **Three-line status rows, hover detail.** Every session row is title,
+  context, status verb: the context reads the pending approval command or
+  question, else the ask/result byline, else a preview, else
+  `project · branch`, else blank space at full height; the status reads
+  `Working · 14m`, `Needs approval`, `Asked: "…"`, `Settled · 12m · 5
+  turns`, `Failed · 1h` or `No reply yet`, coloured by state. Hovering a
+  row opens the full picture (title, ask, reply, status with detail,
+  project, branch, turns, last change) in a card that takes no focus and
+  never covers the row. `Needs approval` / `Asked` ride the wire's
+  `Session.attention` plus the `session/statusChanged` broadcast (the open
+  session's pending words come live from its fold); `Failed` rides the last
+  turn's terminal error from `turn/completed`, persisted in
+  `sessions.json`. New `--steps row-detail:<session_id>` verb pins the card
+  for captures.
 - **Sidebar switches for both.** "Name sessions automatically" and
   "Summarise sessions in the sidebar" in the Settings dialog (`layout.json`,
   both default ON), with `--steps auto-title` / `auto-summary` verbs; off

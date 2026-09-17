@@ -320,15 +320,33 @@ project; on Other the menu carries the single row "Add as project…".
 Without the wait, `new:demo` followed at once by `send:` could bill its
 turn on the session that was open before.
 
-Session rows carry no provider mark: each row reads title, then the second
-line, with the elapsed time at the right. Every row always shows two lines
-(the library's `SessionSummary::byline`, one truncating line, never wrapped),
-chosen by a ladder so a brand-new session is exactly as tall as its
-neighbours: a running turn reads `Working…` (the transcript footer's
-wording); a generated title still in flight reads `Naming this session…`;
-an existing byline reads the ask and the result side by side; turns without
-a byline keep the legacy meta line (the preview/summary text, the branch,
-`N turns`); and nothing at all reads `No reply yet` — never blank.
+Session rows carry no provider mark. Every row is three lines — title with
+the elapsed time at the right, a context line, and a semibold status verb
+line coloured by state — each truncating with an ellipsis at the sidebar's
+width, never wrapped, so a brand-new session is exactly as tall as its
+neighbours. The context line reads the pending approval's exact command or
+the pending question when one exists, else the ask/result byline side by
+side, else a one-line preview, else `project · branch`, else blank space
+that still keeps the line's height; a generated title still in flight reads
+`Naming this session…`. The status line reads `Working · 14m` for a running
+turn (its own elapsed), `Needs approval`, `Asked: "…"` with the question's
+words, `Settled · 12m · 5 turns`, `Failed · 1h`, or `No reply yet` —
+waiting on a person outranks running, so an approval mid-turn never reads
+`Working`. Hovering a row past a short beat opens the hover detail beside
+it: the full title, ask and latest reply, the status with its detail (the
+pending question, the approval command, the terminal error), project,
+branch, turn count and last change — only what the app knows, the rest
+omitted. The card takes no focus and never covers its own row, so the
+row's click still lands; it closes on leave, scroll and click. Scripted,
+`row-detail:<session_id>` pins it open (pair with `click:` on the same id).
+The attention states ride the wire's `Session.attention` (muse 1.3.0:
+`approvalPending`, `inputPending`) carried through the sidebar join and
+kept fresh off the `session/statusChanged` broadcast; the open session's
+pending words come live from its own fold, which is the only place the
+command and question text exist. `Failed` rides the last turn's terminal
+error from `turn/completed`'s `error`, persisted in `sessions.json` beside
+the name and the byline halves, cleared by the next turn's start or its
+success.
 The preview half is `last_summary` when a turn completed in this app, else
 the index's first prompt — but only when the row's label is not that same
 prompt (a user-given name or a Muse title); otherwise the row shows the
