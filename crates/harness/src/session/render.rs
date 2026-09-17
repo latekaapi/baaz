@@ -1017,6 +1017,34 @@ impl SessionView {
         }
     }
 
+    /// The status row's leading words: the most specific phase the fold can
+    /// source truthfully, one calm line. A turn blocked on the person (a
+    /// pending approval, an unanswered question) says so rather than reading
+    /// as working; a running tool names its family; a growing reasoning
+    /// trace reads as thinking; otherwise the generic working/finishing pair
+    /// the row always had. The timer, the `esc` hint and the queued/memory
+    /// notes are unchanged.
+    fn status_phase(&self) -> String {
+        if let Some(running) = self.running.as_ref() {
+            let blocks = self.cached_turns.iter().find(|turn| turn.id() == running.turn_id).and_then(
+                |turn| match turn.as_ref() {
+                    Turn::Assistant { blocks, .. } => Some(blocks.as_slice()),
+                    Turn::User { .. } => None,
+                },
+            );
+            if let Some(blocks) = blocks {
+                if let Some(phase) = Self::status_phase_for_blocks(blocks) {
+                    return phase;
+                }
+            }
+        }
+        if self.reply_complete_for_running_turn() {
+            "Finishing up…".to_owned()
+        } else {
+            "Working…".to_owned()
+        }
+    }
+
     /// The live status line: history loading, or a running turn with its
     /// elapsed time and the interrupt hint.
     pub(super) fn render_status(&self) -> Option<AnyElement> {
@@ -1039,7 +1067,7 @@ impl SessionView {
             // The reply arrived whole but the turn is still open: Muse is on
             // the `reminderChild` tail (memory reminders), not stuck.
             let finishing = self.reply_complete_for_running_turn();
-            let mut row = status_row("status", if finishing { "Finishing up\u{2026}" } else { "Working\u{2026}" })
+            let mut row = status_row("status", self.status_phase())
                 .lead(StatusLead::Braille)
                 .shimmer(true)
                 .key_hint("esc", "to interrupt");
@@ -1069,6 +1097,68 @@ impl SessionView {
                 .into_any_element(),
         )
     }
+
+/// The specific phase for a running turn's blocks, when one reads truthfully
+/// off the fold: waiting (a pending approval, an unanswered question)
+/// outranks running (a tool in flight names its family), which outranks a
+/// growing reasoning trace. `None` is the generic working/finishing pair —
+/// nothing here was specific enough to name.
+fn status_phase_for_blocks(blocks: &[Block]) -> Option<String> {
+    use aui_protocol::{ApprovalState, ThinkingState};
+    if blocks.iter().any(|block| matches!(block, Block::Approval { state: ApprovalState::Pending, .. })) {
+        return Some("Waiting for approval…".to_owned());
+    }
+    if blocks.iter().any(|block| matches!(block, Block::Question { answer: None, .. })) {
+        return Some("Waiting for your answer…".to_owned());
+    }
+    if let Some(word) = blocks.iter().find_map(Self::running_tool_word) {
+        return Some(format!("Running {word}…"));
+    }
+    if blocks
+        .iter()
+        .any(|block| matches!(block, Block::Thinking { state: ThinkingState::Thinking, .. }))
+    {
+        return Some("Thinking…".to_owned());
+    }
+    None
+}
+
+/// The family word of the first still-running call in `block`, if any: the
+/// fold's own kind, never a guessed activity. A group with more than one
+/// call in flight reads as tools.
+fn running_tool_word(block: &Block) -> Option<String> {
+    use aui_protocol::{ActivityState, ToolStatus};
+    let open = |status: &ToolStatus| matches!(status, ToolStatus::Pending | ToolStatus::Running);
+    match block {
+        Block::ToolCall { kind, status, .. } if open(status) => Some(Self::tool_word(kind).to_owned()),
+        Block::ToolGroup { calls, state, .. }
+            if *state == ActivityState::Working || calls.iter().any(|call| open(&call.status)) =>
+        {
+            let mut running = calls.iter().filter(|call| open(&call.status));
+            match (running.next(), running.next()) {
+                (Some(call), None) => Some(Self::tool_word(&call.kind).to_owned()),
+                _ => Some("tools".to_owned()),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// One calm word for a tool family, from the fold's kind. An MCP tool keeps
+/// the server's own tool name, verbatim.
+fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
+    match kind {
+        aui_protocol::ToolKind::Shell => "command",
+        aui_protocol::ToolKind::Read => "read",
+        aui_protocol::ToolKind::Edit => "edit",
+        aui_protocol::ToolKind::Write => "write",
+        aui_protocol::ToolKind::Search => "search",
+        aui_protocol::ToolKind::Web => "web lookup",
+        aui_protocol::ToolKind::Browser => "browser task",
+        aui_protocol::ToolKind::SubAgent => "subagent",
+        aui_protocol::ToolKind::Mcp { tool, .. } => tool,
+    }
+}
 
     /// The inline banner over the composer, for a recoverable command error.
     ///
@@ -1709,6 +1799,68 @@ mod tests {
             resolve_workspace_path(&workspace(), "assets/../src/main.rs"),
             Ok(PathBuf::from("/Users/someone/Projects/harness/src/main.rs"))
         );
+    }
+
+    fn tool_block(kind: aui_protocol::ToolKind, status: aui_protocol::ToolStatus) -> Block {
+        Block::ToolCall {
+            id: "call-1".to_owned(),
+            kind,
+            verb: "Ran".to_owned(),
+            target: "npm test".to_owned(),
+            status,
+            duration_ms: None,
+            body: aui_protocol::ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
+        }
+    }
+
+    fn approval_block(state: aui_protocol::ApprovalState) -> Block {
+        Block::Approval {
+            id: "appr-1".to_owned(),
+            tool: "Bash".to_owned(),
+            command: "rm -rf /tmp/x".to_owned(),
+            reason: "clean up".to_owned(),
+            cwd: "/tmp".to_owned(),
+            capabilities: Vec::new(),
+            scope: aui_protocol::ApprovalScope::ThisCommand,
+            state,
+            rule: None,
+            choices: Vec::new(),
+            stages: Vec::new(),
+            current_stage: None,
+            badges: aui_protocol::ApprovalBadges::default(),
+            feedback: None,
+            resolved_by: None,
+        }
+    }
+
+    #[test]
+    fn a_pending_approval_outranks_a_running_tool() {
+        let blocks = vec![
+            tool_block(aui_protocol::ToolKind::Shell, aui_protocol::ToolStatus::Running),
+            approval_block(aui_protocol::ApprovalState::Pending),
+        ];
+        assert_eq!(SessionView::status_phase_for_blocks(&blocks).as_deref(), Some("Waiting for approval…"));
+    }
+
+    #[test]
+    fn a_running_tool_names_its_family() {
+        let blocks = vec![tool_block(aui_protocol::ToolKind::Shell, aui_protocol::ToolStatus::Running)];
+        assert_eq!(SessionView::status_phase_for_blocks(&blocks).as_deref(), Some("Running command…"));
+        let done = vec![tool_block(aui_protocol::ToolKind::Shell, aui_protocol::ToolStatus::Success)];
+        assert_eq!(SessionView::status_phase_for_blocks(&done), None);
+    }
+
+    #[test]
+    fn a_growing_trace_reads_as_thinking() {
+        let blocks = vec![Block::Thinking {
+            text: "hmm".to_owned(),
+            elapsed_ms: 0,
+            summary: None,
+            state: aui_protocol::ThinkingState::Thinking,
+        }];
+        assert_eq!(SessionView::status_phase_for_blocks(&blocks).as_deref(), Some("Thinking…"));
+        let settled = vec![Block::Text { text: "done".into(), streaming: false }];
+        assert_eq!(SessionView::status_phase_for_blocks(&settled), None);
     }
 
     #[test]

@@ -75,6 +75,12 @@ library.
   kept, code byte-exact), a plain click or a new drag clears it. New
   `--steps select-span:<turn>` verb holds a whole turn for captures;
   `select-text:<turn>:<from>-<to>` works as before.
+- **The status row names the phase.** While a turn runs the row reads the
+  most specific phase the transcript can source truthfully — waiting on an
+  approval or an answer, the running tool's family, a growing reasoning
+  trace — falling back to `Working…` (and `Finishing up…` on the memory
+  tail) when nothing is specific. Still one calm line with the timer and
+  the `esc` hint.
 - **Turns show their age.** The fold keeps the wire's `recorded_at` on each
   turn (live and backfilled transcripts agree), and the transcript renders
   it beside the action row — under the person's bubble, in the reply's
