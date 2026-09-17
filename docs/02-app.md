@@ -275,8 +275,9 @@ The rows are the library's `SessionSummary`, grouped by **calendar day** —
 Today / Yesterday / This week / This month / Earlier — or by **project**:
 one collapsible group per adoption in sidebar order (pinned first, then name
 case-insensitively, never recency, no drag reorder), each
-a plain muted label with the count, a running dot when any of its sessions
-runs, and hover `+` and `…`; sessions inside run newest-first with pinned
+a plain muted label with the count, a left-edge accent bar in the state
+colour when any of its sessions runs (breathing with the shared pulse while
+running, solid otherwise), and hover `+` and `…`; sessions inside run newest-first with pinned
 first; then the muted "Other workspaces" group, always last and closed until
 opened. The plain label's first glyph starts at the leading centre (x = 18,
 the line the nav icons and the session dots sit on); with the chevron flag

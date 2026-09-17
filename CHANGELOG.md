@@ -131,3 +131,7 @@ library.
   is, relative ones against the workspace — gated on existence: only an
   existing path opens (never executed, never created), anything else toasts
   `No such file` quietly. http(s) links behave as before.
+- **Project running state is a left-edge bar.** A group with a running
+  session draws a small accent bar at the row's left edge in the state
+  colour (breathing with the shared pulse while running) instead of a
+  pulsing dot beside the name; the current-project bar shares the slot.
