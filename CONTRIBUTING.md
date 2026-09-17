@@ -51,6 +51,7 @@ See `docs/06-billing.md` for the full picture.
 | `HARNESS_STATE_DIR` | Overrides where the harness's own state lives (sessions metadata, search index, settings, tier cache — everything under `~/Library/Application Support/harness` normally). **Always set this to a fresh `$(mktemp -d)` for any scripted or automated run** — otherwise it reads and writes your real local state. |
 | `HARNESS_MUSE` | The `muse` binary to spawn (defaults to `muse` on `PATH`). |
 | `HARNESS_TRACE=1` | Verbose switch/state tracing to stderr. |
+| `HARNESS_HOVER_TRACE=1` | Hover-card diagnosis tracing to stderr (`harness-hover:` lines for the row report, `note_row_hover`, the delay timer, card-builder result changes, and the rows' GPUI hover state at most once per second). Off by default and cheap when off. |
 | `HARNESS_FRAME_STATS=1` | Records per-frame render timing (see `--bench` and `docs/02-app.md`). |
 | `HARNESS_FRAME_TRACE=1` | Traces the normal window's paint cadence to `$HARNESS_STATE_DIR/frame-trace.log`, so a scripted gesture on `--replay` becomes a measurement (`scripts/frame-trace.py`). |
 | `HARNESS_DETERMINISTIC=1` | Freezes anything that would otherwise vary run to run (relative timestamps, etc.), so a `--screenshot` capture is byte-identical across runs. Used throughout `scripts/captures.sh`. |

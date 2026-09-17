@@ -647,6 +647,12 @@ pub struct Harness {
     /// The selected row's window bounds, from the virtual list's
     /// `on_selected_prepainted`: what the pinned card seats at.
     pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
+    /// Hover-trace state (`HARNESS_HOVER_TRACE=1`, diagnosis only): the last
+    /// card result `render_row_detail` returned, so the trace logs only on
+    /// change, and the last poll log, so the GPUI hover readout fires at
+    /// most once per second.
+    pub(crate) hover_trace_last_shown: Option<bool>,
+    pub(crate) hover_trace_last_poll: Option<std::time::Instant>,
     pub(crate) tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -764,6 +770,8 @@ impl Harness {
             hover_trigger: None,
             forced_detail: None,
             selected_row_bounds: None,
+            hover_trace_last_shown: None,
+            hover_trace_last_poll: None,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
