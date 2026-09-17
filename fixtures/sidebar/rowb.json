@@ -1,0 +1,52 @@
+[
+  {
+    "sessionId": "s-rowb-running",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "checkout-flow-v2",
+    "updatedAt": "2026-09-13T11:38:00Z",
+    "turnCount": 3,
+    "status": "running",
+    "ask": "Tighten checkout validation",
+    "summary": "Patched the validator"
+  },
+  {
+    "sessionId": "s-rowb-approval",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "infra/notifier",
+    "updatedAt": "2026-09-13T11:44:00Z",
+    "turnCount": 2,
+    "attention": ["approvalPending"],
+    "approval": "sudo apt install notifierd",
+    "ask": "Install the notifier daemon",
+    "summary": "Waiting on approval to install"
+  },
+  {
+    "sessionId": "s-rowb-asked",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "auth-session-refresh",
+    "updatedAt": "2026-09-13T11:52:00Z",
+    "turnCount": 4,
+    "question": "Which bucket for staging?",
+    "ask": "Refresh the session tokens for staging",
+    "summary": "Drafted the token refresh"
+  },
+  {
+    "sessionId": "s-rowb-settled",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "cart-recovery-email",
+    "updatedAt": "2026-09-13T11:40:00Z",
+    "turnCount": 5,
+    "ask": "Draft the recovery email",
+    "summary": "Drafted three recovery variants"
+  },
+  {
+    "sessionId": "s-rowb-failed",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Observability tiles",
+    "updatedAt": "2026-09-13T10:52:00Z",
+    "turnCount": 6,
+    "error": "modelError: the model was overloaded",
+    "ask": "Tile the latency dashboard",
+    "summary": "Built the tile query"
+  }
+]

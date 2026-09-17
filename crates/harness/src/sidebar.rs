@@ -226,7 +226,14 @@ impl SessionEntry {
             approval_command: None,
             pending_question: None,
             turn_started: None,
-            last_error: None,
+            // The last turn's terminal error, persisted across restarts: a
+            // failure the harness recorded (see `apply_turn_outcome`) still
+            // reads `Failed` after one.
+            last_error: meta
+                .and_then(|m| m.last_error.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             branch: session.branch.clone(),
         }
     }
@@ -315,6 +322,33 @@ impl SessionEntry {
         self.pending_question.as_deref().map(str::trim).filter(|s| !s.is_empty())
     }
 
+    /// Fold a `session/statusChanged` broadcast into the row: the load state
+    /// after the transition, and the attention flags after it. The flags
+    /// ride present-only-when-nonempty, so an absent list clears — the
+    /// broadcast is the whole truth, not a delta.
+    pub fn apply_status_changed(
+        &mut self,
+        running: bool,
+        attention: Option<Vec<muse_client::schema::AttentionFlag>>,
+    ) {
+        self.running = running;
+        self.attention = attention.unwrap_or_default();
+    }
+
+    /// Fold a `turn/completed` terminal into the row: a failed turn records
+    /// its error message for the `Failed` state; any other terminal stands
+    /// a recorded error down (a retry's start clears it sooner, in
+    /// `sync_row_live`). Blank messages record nothing.
+    pub fn apply_turn_outcome(&mut self, failed: bool, error: Option<&str>) {
+        if failed {
+            if let Some(message) = error.map(str::trim).filter(|s| !s.is_empty()) {
+                self.last_error = Some(message.to_owned());
+            }
+        } else if self.last_error.is_some() {
+            self.last_error = None;
+        }
+    }
+
     /// Whether the row waits on a person for an approval: a live command on
     /// the open session, or the wire's `approvalPending` flag on any other.
     /// Unknown flag values never count (the schema declares the domain
@@ -370,16 +404,16 @@ impl SessionEntry {
 
     /// The row's second line, option B's context: the approval command or
     /// pending question when one exists, else the ask/result byline, else a
-    /// one-line preview, else nothing — the library keeps the line's height
-    /// in every state, so a brand-new session is exactly as tall as its
-    /// neighbours. The `Working…` and `No reply yet` placeholders retired
-    /// with the status line, which owns those words now; `Naming this
-    /// session…` stays, for a session with nothing else to say while its
-    /// generated title is in flight.
+    /// one-line preview, else nothing. The `Working…` and `No reply yet`
+    /// placeholders retired with the status line, which owns those words
+    /// now; `Naming this session…` stays, for a session with nothing else
+    /// to say while its generated title is in flight.
     ///
     /// `Some` is an explicit [`Byline`] that wins the slot; `None` falls
     /// through to `project · branch` (via `repo`/`branch`), the Archived
-    /// tag, or the library's empty-space line.
+    /// tag, or the library's empty-space line — which keeps its height as
+    /// blank space, so a brand-new session is exactly as tall as its
+    /// neighbours.
     fn second_line(&self) -> Option<Byline> {
         if self.title_pending {
             return Some(Byline::Placeholder(PLACEHOLDER_NAMING.into()));
@@ -449,7 +483,9 @@ impl SessionEntry {
                 }
                 // No byline and no preview: `project · branch` where either
                 // half exists, the Archived tag on a bare archived row, else
-                // the library's empty space — one line in every case.
+                // the library's empty space — one line in every case (the
+                // empty line keeps its height as blank space, measured
+                // pixel-identical against text lines in the row-B captures).
                 None => {
                     if let Some(project) = self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         row = row.repo(project.to_owned());
@@ -1120,6 +1156,47 @@ mod tests {
         empty.attention = Vec::new();
         assert!(!empty.needs_approval());
         assert!(!empty.asked());
+    }
+
+    /// The `session/statusChanged` broadcast folds whole truth, not a
+    /// delta: flags ride present-only-when-nonempty, so absence clears.
+    #[test]
+    fn status_changed_folds_running_and_attention() {
+        use muse_client::schema::AttentionFlag;
+        let mut row = entry("s");
+        row.turns = 2;
+        row.apply_status_changed(true, Some(vec![AttentionFlag::ApprovalPending]));
+        assert!(row.running);
+        assert!(row.needs_approval());
+        assert_eq!(row.row_status(Local::now()).text().as_ref(), "Needs approval");
+        // The stand-down clears both: no flags, no longer running.
+        row.apply_status_changed(false, None);
+        assert!(!row.running);
+        assert!(!row.needs_approval());
+        assert!(!row.asked());
+        assert!(row.row_status(Local::now()).text().starts_with("Settled"));
+    }
+
+    /// The turn's terminal folds into the row: a failure records its
+    /// message for `Failed`; success (or a blank message) records nothing
+    /// and stands a recorded error down.
+    #[test]
+    fn turn_outcome_records_and_stands_down_the_error() {
+        let mut row = entry("s");
+        row.turns = 2;
+        row.apply_turn_outcome(true, Some("modelError: overloaded"));
+        assert_eq!(row.last_error.as_deref(), Some("modelError: overloaded"));
+        assert!(row.row_status(Local::now()).text().starts_with("Failed"));
+        // A blank message is not an error worth keeping.
+        let mut blank = entry("b");
+        blank.turns = 1;
+        blank.apply_turn_outcome(true, Some("   "));
+        assert_eq!(blank.last_error, None);
+        assert!(blank.row_status(Local::now()).text().starts_with("Settled"));
+        // Success stands the recorded error down.
+        row.apply_turn_outcome(false, None);
+        assert_eq!(row.last_error, None);
+        assert!(row.row_status(Local::now()).text().starts_with("Settled"));
     }
 
     /// The hover detail carries the whole picture and omits what the app

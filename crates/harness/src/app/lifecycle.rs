@@ -171,6 +171,24 @@ struct FixtureSession {
     /// `summary` it draws the two-line byline.
     #[serde(default)]
     ask: Option<String>,
+    /// Wire attention flags, spelled as the server sends them
+    /// (`approvalPending`, `inputPending`): what `Needs approval` and the
+    /// bare `Asked` stand on for rows whose view is not open. Unknown
+    /// spellings are ignored, like the client ignores them.
+    #[serde(default)]
+    attention: Vec<String>,
+    /// The pending approval's exact command, standing in for the open
+    /// view's fold: the context line's first priority.
+    #[serde(default)]
+    approval: Option<String>,
+    /// The pending question's prompt, standing in for the open view's
+    /// fold: the context line and the quoted `Asked` words.
+    #[serde(default)]
+    question: Option<String>,
+    /// The last turn's terminal error message, standing in for the
+    /// `turn/completed` record: what `Failed` stands on.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// [`FixtureSession::status`] without the field: settled, never running.
@@ -221,6 +239,22 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
     }
     if let Some(ask) = row.ask.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         entry.last_ask = Some(ask.to_owned());
+    }
+    for flag in &row.attention {
+        match flag.as_str() {
+            "approvalPending" => entry.attention.push(muse_client::schema::AttentionFlag::ApprovalPending),
+            "inputPending" => entry.attention.push(muse_client::schema::AttentionFlag::InputPending),
+            _ => {}
+        }
+    }
+    if let Some(approval) = row.approval.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entry.approval_command = Some(approval.to_owned());
+    }
+    if let Some(question) = row.question.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entry.pending_question = Some(question.to_owned());
+    }
+    if let Some(error) = row.error.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        entry.last_error = Some(error.to_owned());
     }
     entry
 }
@@ -795,6 +829,11 @@ impl Harness {
                 entry.description = sidebar::describe(meta, index, text, user_named);
                 entry.last_ask = meta
                     .and_then(|m| m.last_ask.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                entry.last_error = meta
+                    .and_then(|m| m.last_error.as_deref())
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);

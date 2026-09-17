@@ -1057,6 +1057,40 @@ impl Harness {
                 .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)),
             _ => None,
         };
+        // A loaded session's projected `(status, attention)` flipped: the
+        // command-plane broadcast (muse 1.3.0) that keeps rows other than
+        // the open session fresh without a `session/list` round trip.
+        // Extracted before the view takes the event, applied after.
+        let status_changed: Option<(String, bool, Option<Vec<muse_client::schema::AttentionFlag>>)> = match &event {
+            MuseEvent::Notification { method, params, session_id, .. } if method == "session/statusChanged" => {
+                serde_json::from_value::<muse_client::schema::SessionStatusChangedParams>(params.clone())
+                    .ok()
+                    .map(|change| {
+                        let id = session_id.clone().unwrap_or(change.session_id.clone());
+                        let running = matches!(change.status, muse_client::schema::SessionStatus::Running);
+                        (id, running, change.attention)
+                    })
+            }
+            _ => None,
+        };
+        // A turn's terminal: which session, whether it failed, and the
+        // failure's message when it did. Recorded into the row (and the
+        // store) after `apply`, so `Failed` survives the session closing.
+        let turn_outcome: Option<(String, bool, Option<String>)> = match &event {
+            MuseEvent::Notification { method, params, session_id, .. } if method == "turn/completed" => {
+                let id = session_id
+                    .clone()
+                    .or_else(|| params.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned));
+                let failed = params.get("terminal").and_then(|v| v.as_str()).is_some_and(|t| t == "failed");
+                let error = params
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                id.map(|id| (id, failed, error))
+            }
+            _ => None,
+        };
         // The row's live facts, straight from the event — extracted before
         // the view takes the event below, applied after, so the fold
         // already holds the event's world (see the call past `apply`).
@@ -1099,9 +1133,27 @@ impl Harness {
         // round trip: a started turn reads running now, a completed one (or
         // an approval/question event) re-reads the open view's pending
         // words. Runs after `apply`, so the fold already holds the event's
-        // world. `session/statusChanged` joins them in part 3.
+        // world.
         if let Some((is_start, id)) = live {
             self.sync_row_live(&id, is_start, cx);
+        }
+        // The broadcast's `(status, attention)`, folded into the row for
+        // sessions whose view is not open; the open session then overlays
+        // its own truth, which is fresher than any listing.
+        if let Some((id, running, attention)) = status_changed {
+            if !self.is_side_session(&id) {
+                if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == id) {
+                    entry.apply_status_changed(running, attention);
+                    self.invalidate_list();
+                }
+            }
+            self.sync_row_live(&id, false, cx);
+        }
+        // The turn's terminal, recorded into the row and the store: a
+        // failed turn's message is what `Failed` stands on, and a later
+        // success (or a retry's start) stands it down.
+        if let Some((id, failed, error)) = turn_outcome {
+            self.record_turn_outcome(&id, failed, error.as_deref(), cx);
         }
         if let Some(session_id) = started {
             let prompt = self

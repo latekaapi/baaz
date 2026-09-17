@@ -81,6 +81,12 @@ pub struct SessionMeta {
     /// byline's ask half: together they are the row's two lines, free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ask: Option<String>,
+    /// The last turn's terminal error message, written on `turn/completed`
+    /// with terminal `"failed"` and cleared by the next turn's start or its
+    /// success. What a closed session's `Failed` row stands on — the wire
+    /// carries no per-session error, so the harness remembers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     /// The project this session was started in: the adoption it groups
     /// under even when its folder is a worktree of the project's root.
     /// Written at `session/start`; always serialized, so a file that says
@@ -104,6 +110,7 @@ impl SessionMeta {
             && !self.archived
             && self.last_summary.is_none()
             && self.last_ask.is_none()
+            && self.last_error.is_none()
             && self.project.is_none()
     }
 }
