@@ -1234,6 +1234,13 @@ impl Harness {
             // land here — they keep their client-shaped early return below
             // because `args.offline` is false for them.
             if self.args.offline {
+                // The row is already open on this view (a `--replay` window
+                // whose capture is folded): keep it, so a click on the open
+                // row selects without wiping the folded transcript for a
+                // blank local view. The highlight above already moved.
+                if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                    return;
+                }
                 if let Some(view) = self.cache_take(&session_id) {
                     self.activate(view, quiet, window, cx);
                 } else {

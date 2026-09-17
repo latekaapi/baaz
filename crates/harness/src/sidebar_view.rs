@@ -736,6 +736,31 @@ impl Harness {
             return (None, "unknown-row");
         };
         let now = crate::sidebar::grouping_now(&visible);
+        // The open session's own fold is fresher than the joined row: no
+        // wire event will ever sync it on a `--replay` window, and the
+        // pending words live only there. A presentation-local overlay, never
+        // a write to the list — the wire sync owns the entries.
+        let mut entry = entry.clone();
+        if let Some(view) = self.active.clone() {
+            let view = view.read(cx);
+            if view.session_id == id {
+                let (approval, question) = view.row_pending();
+                if approval.is_some() {
+                    entry.approval_command = approval;
+                }
+                if question.is_some() {
+                    entry.pending_question = question;
+                }
+                if entry.last_ask.as_deref().map(str::trim).is_none_or(|s| s.is_empty()) {
+                    entry.last_ask = view.last_user_text();
+                }
+                if entry.description.trim().is_empty() {
+                    if let Some(summary) = view.last_summary_text() {
+                        entry.description = summary;
+                    }
+                }
+            }
+        }
         let data = entry.detail_data(now);
         let card_id: ElementId = (ElementId::from("row-detail"), SharedString::from(id.clone())).into();
         let mut card = aui::nav::session_detail(card_id);
@@ -762,6 +787,15 @@ impl Harness {
         }
         if let Some(updated) = data.updated {
             card = card.updated(updated);
+        }
+        if let Some(workspace) = data.workspace {
+            card = card.workspace(workspace);
+        }
+        if let Some(question) = data.pending_question {
+            card = card.pending_question(question);
+        }
+        if let Some(approval) = data.pending_approval {
+            card = card.pending_approval(approval);
         }
         // `anchored_session_detail_at_sidebar` takes the card itself, so no
         // wrapper rides along: the card carries no click handler of its own,

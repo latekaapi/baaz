@@ -1586,6 +1586,28 @@ impl Harness {
         // click moved `-1262 → -1198` on the clamp, not on the reveal).
         let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects);
         replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
+        // The replayed row stands for the folded capture, and no wire event
+        // will ever sync it the way `session/list` does live: read the open
+        // session's own words off the view here — the same overlay
+        // `render_row_detail` applies every frame.
+        {
+            let view = view.read(cx);
+            let (approval, question) = view.row_pending();
+            if approval.is_some() {
+                replayed.approval_command = approval;
+            }
+            if question.is_some() {
+                replayed.pending_question = question;
+            }
+            if replayed.last_ask.as_deref().map(str::trim).is_none_or(|s| s.is_empty()) {
+                replayed.last_ask = view.last_user_text();
+            }
+            if replayed.description.trim().is_empty() {
+                if let Some(summary) = view.last_summary_text() {
+                    replayed.description = summary;
+                }
+            }
+        }
         self.sessions = vec![replayed];
         // A scripted sidebar joins the replayed row, as if the wire had
         // listed it beside the capture.
