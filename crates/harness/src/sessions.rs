@@ -236,6 +236,7 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
             mentions: Vec::new(),
+            timestamp: None,
         }
     }
 

@@ -1837,7 +1837,7 @@ mod tests {
     use super::*;
 
     fn assistant_turn(blocks: Vec<Block>) -> Turn {
-        Turn::Assistant { id: "t-1".to_owned(), blocks, meta: aui_protocol::TurnMeta::default() }
+        Turn::Assistant { id: "t-1".to_owned(), blocks, meta: aui_protocol::TurnMeta::default(), timestamp: None }
     }
 
     #[test]
@@ -1879,6 +1879,7 @@ mod tests {
             text: "hi".into(),
             attachments: Vec::new(),
             mentions: Vec::new(),
+            timestamp: None,
         };
         assert!(!reply_complete(&turn));
     }

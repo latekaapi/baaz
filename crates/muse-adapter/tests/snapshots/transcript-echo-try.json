@@ -18,7 +18,8 @@
           "id": "7c42696d-2971-443a-bad9-0febe8c0b192",
           "text": "say hi",
           "attachments": [],
-          "mentions": []
+          "mentions": [],
+          "timestamp": 1788885720072
         },
         {
           "kind": "assistant",
@@ -37,7 +38,8 @@
             "tokens_out": 95,
             "reasoning_tokens": 83,
             "cost_usd": 0.0
-          }
+          },
+          "timestamp": 1788885724592
         }
       ]
     },

@@ -73,6 +73,9 @@ pub struct Folds {
     /// Draw the cards settled rather than entering, for a `--screenshot` run
     /// that renders a few frames and quits.
     pub at_rest: bool,
+    /// The clock a frame formats turn ages against, read once per frame
+    /// ([`transcript_now_ms`]) so one frame formats once.
+    pub now_ms: u64,
     /// Link clicks from markdown bodies (C5): URLs and workspace paths.
     pub link: Option<TurnLinkHandler>,
     /// Bottom-row actions on assistant turns, keyed by turn id (C6).
@@ -293,8 +296,9 @@ fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
 }
 
 /// The single footer line for a silent turn: the library footer's own row
-/// (mono, `FS_11`, `ink_4`, `·` separators) with the silent reasoning cell.
-fn silent_footer_row(meta: &TurnMeta, count: u64, cx: &mut App) -> AnyElement {
+/// (mono, `FS_11`, `ink_4`, `·` separators) with the silent reasoning cell,
+/// plus the turn's age when the wire timed it.
+fn silent_footer_row(meta: &TurnMeta, count: u64, age: Option<String>, cx: &mut App) -> AnyElement {
     use aui_tokens::{ActiveAui, AuiStyled};
     let p = cx.aui().colors;
     let mut footer = h_flex()
@@ -306,13 +310,89 @@ fn silent_footer_row(meta: &TurnMeta, count: u64, cx: &mut App) -> AnyElement {
         .line_height(relative(1.0))
         .medium()
         .text_color(p.ink_4);
-    for (i, item) in silent_footer_items(meta, count).into_iter().enumerate() {
+    let mut items = silent_footer_items(meta, count);
+    if let Some(age) = age {
+        items.push(age);
+    }
+    for (i, item) in items.into_iter().enumerate() {
         if i > 0 {
             footer = footer.child("·");
         }
         footer = footer.child(item);
     }
     footer.into_any_element()
+}
+
+/// The clock a frame formats turn ages against: wall time, except under
+/// `HARNESS_DETERMINISTIC=1`, where it is the newest reported timestamp in
+/// the data — so a `--replay … --screenshot` capture reads the same words
+/// run to run however old the fixture is. The same discipline as
+/// [`crate::sidebar::grouping_now`], the sibling formatter's clock.
+pub fn transcript_now_ms(turns: &[Rc<Turn>]) -> u64 {
+    if crate::clock::deterministic() {
+        turns
+            .iter()
+            .filter_map(|turn| turn.timestamp())
+            .max()
+            .unwrap_or_else(wall_now_ms)
+    } else {
+        wall_now_ms()
+    }
+}
+
+/// Wall time as Unix milliseconds. The fallback when no turn reported a
+/// timestamp, and the whole clock outside deterministic captures.
+fn wall_now_ms() -> u64 {
+    chrono::Local::now().timestamp_millis().max(0) as u64
+}
+
+/// How-long-ago words for a turn's timestamp: `just now`, `N minutes ago`,
+/// `N hours ago`, `yesterday`, else the calendar date (`Sep 8`, with the
+/// year when it is not this one).
+///
+/// The sibling of the sidebar's `elapsed_at` and the library's `format_age`:
+/// the same explicit-clock discipline — the caller reads its clock once per
+/// frame ([`transcript_now_ms`]) and hands both instants in, so one frame
+/// formats once — the same quantisation against the same saturation (a stamp
+/// from the future reads `just now`), with the words a caption needs.
+pub fn relative_words(sent_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(sent_ms) / 1000;
+    match seconds {
+        s if s < 60 => "just now".to_owned(),
+        s if s < 3_600 => {
+            let minutes = s / 60;
+            if minutes == 1 {
+                "1 minute ago".to_owned()
+            } else {
+                format!("{minutes} minutes ago")
+            }
+        }
+        s if s < 86_400 => {
+            let hours = s / 3_600;
+            if hours == 1 {
+                "1 hour ago".to_owned()
+            } else {
+                format!("{hours} hours ago")
+            }
+        }
+        s if s < 172_800 => "yesterday".to_owned(),
+        _ => {
+            use chrono::{Datelike, TimeZone};
+            let sent = chrono::Local.timestamp_millis_opt(sent_ms as i64).single();
+            let now = chrono::Local.timestamp_millis_opt(now_ms as i64).single();
+            match (sent, now) {
+                (Some(sent), Some(now)) if sent.year() == now.year() => sent.format("%b %-d").to_string(),
+                (Some(sent), Some(_)) => sent.format("%b %-d, %Y").to_string(),
+                _ => "older".to_owned(),
+            }
+        }
+    }
+}
+
+/// The age caption for a turn with a reported timestamp, else `None` — a
+/// turn the wire never timed draws no caption and keeps its old height.
+fn turn_age(timestamp: Option<u64>, now_ms: u64) -> Option<String> {
+    timestamp.map(|sent| relative_words(sent, now_ms))
 }
 
 /// How many transcript rows a turn occupies: one for the person's bubble;
@@ -344,11 +424,17 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
     // draw its own underneath.
     let silent = silent_reasoning(turn);
     match turn {
-        Turn::User { id, text, .. } => {
+        Turn::User { id, text, timestamp, .. } => {
             if row != 0 {
                 return div().into_any_element();
             }
             let mut turn = user_turn(SharedString::from(id.clone()), text.clone()).actions_bottom(true);
+            // The how-long-ago caption under the bubble, beside the action
+            // rail. A turn the wire never timed draws no caption and keeps
+            // its old height.
+            if let Some(age) = turn_age(*timestamp, folds.now_ms) {
+                turn = turn.age(age);
+            }
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
                 turn = turn.on_link(move |target, window, cx| on_link(target, window, cx));
@@ -374,7 +460,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             }
             div().w_full().flex().justify_end().child(turn).into_any_element()
         }
-        Turn::Assistant { id, blocks, meta } => {
+        Turn::Assistant { id, blocks, meta, timestamp, .. } => {
             let last = blocks.len().saturating_sub(1);
             // A silent turn gets the harness's own footer row, so its blocks
             // carry no library footer.
@@ -383,11 +469,13 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 Some(b) => {
                     let key = block_key(id, row);
                     let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), row, settled, window, cx);
-                    let body = block(&key, id, b, row == last, library_meta, folds, cx);
+                    let body = block(&key, id, b, row == last, library_meta, *timestamp, folds, cx);
                     div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
                 }
                 None => match silent {
-                    Some(count) if row == blocks.len() => silent_footer_row(meta, count, cx),
+                    Some(count) if row == blocks.len() => {
+                        silent_footer_row(meta, count, turn_age(*timestamp, folds.now_ms), cx)
+                    }
                     _ => div().into_any_element(),
                 },
             }
@@ -402,18 +490,22 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
 /// the turn's closing text block is the one that carries the meta. `meta` is
 /// `None` on a silent turn, which gets the harness's own footer row instead
 /// (see [`silent_footer_row`]): the library must not draw its own underneath.
+/// `timestamp` is the turn's wire time, carried so the closing block can sign
+/// off with the same age caption the user bubble draws.
+#[allow(clippy::too_many_arguments)]
 fn block(
     key: &str,
     turn_id: &str,
     block: &Block,
     last: bool,
     meta: Option<&TurnMeta>,
+    timestamp: Option<u64>,
     folds: &Folds,
     cx: &mut App,
 ) -> AnyElement {
     let id = ElementId::from(SharedString::from(key.to_owned()));
     match block {
-        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, folds),
+        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds),
         Block::Thinking { text, elapsed_ms, summary, state } => {
             thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
         }
@@ -467,6 +559,7 @@ fn fold_toggle(key: &str, folds: &Folds) -> impl Fn(&gpui::ClickEvent, &mut Wind
 /// numbers to show yet, and neither has a turn the server measured nothing
 /// for. A silent turn carries no library footer — `meta` is `None` there —
 /// because the harness draws its own row.
+#[allow(clippy::too_many_arguments)]
 fn text_card(
     id: ElementId,
     turn_id: &str,
@@ -474,6 +567,7 @@ fn text_card(
     streaming: bool,
     last: bool,
     meta: Option<&TurnMeta>,
+    timestamp: Option<u64>,
     folds: &Folds,
 ) -> AnyElement {
     // Pin has no meaning on a turn — it lives on sidebar sessions — so the
@@ -485,6 +579,18 @@ fn text_card(
     if let Some(meta) = meta {
         if last && !streaming && meta != &TurnMeta::default() {
             turn = turn.meta(meta.clone());
+        }
+    }
+    // The how-long-ago cell at the end of the footer, beside the action
+    // rail — but only on the closing block, and never without a wire time,
+    // so an untimed turn keeps its old footer and its old height. A silent
+    // turn carries no library footer (`meta` is `None` there): its age rides
+    // the harness's own footer row instead, so it is not drawn twice.
+    if last {
+        if meta.is_some() {
+            if let Some(age) = turn_age(timestamp, folds.now_ms) {
+                turn = turn.age(age);
+            }
         }
     }
     if let Some(on_link) = &folds.link {
@@ -992,6 +1098,7 @@ mod tests {
                 reasoning_tokens,
                 cost_usd: 0.0,
             },
+            timestamp: None,
         }
     }
 
@@ -1030,7 +1137,7 @@ mod tests {
     /// virtual list's item count is the sum of these over the cached turns.
     #[test]
     fn rows_are_blocks_and_the_silent_footer() {
-        let user = Turn::User { id: "u".to_owned(), text: "hi".to_owned(), attachments: vec![], mentions: vec![] };
+        let user = Turn::User { id: "u".to_owned(), text: "hi".to_owned(), attachments: vec![], mentions: vec![], timestamp: None };
         assert_eq!(turn_rows(&user), 1);
         assert_eq!(turn_rows(&assistant(vec![text_block(), text_block(), text_block()], 0)), 3);
         // Reasoning tokens with no reasoning block: the footer row is added.
@@ -1044,6 +1151,7 @@ mod tests {
             text: "hi".to_owned(),
             attachments: Vec::new(),
             mentions: Vec::new(),
+            timestamp: None,
         };
         assert_eq!(silent_reasoning(&turn), None);
     }
@@ -1051,6 +1159,51 @@ mod tests {
     #[test]
     fn the_silent_cell_names_the_footer_count() {
         assert_eq!(silent_reasoning_text(419), "419 reasoning, thought silently");
+    }
+
+    #[test]
+    fn turn_ages_are_just_now_under_a_minute() {
+        let now = 1_800_000_000_000;
+        assert_eq!(relative_words(now, now), "just now");
+        assert_eq!(relative_words(now - 59_000, now), "just now");
+        // A stamp from the future reads as now, never negative.
+        assert_eq!(relative_words(now + 60_000, now), "just now");
+    }
+
+    #[test]
+    fn turn_ages_count_minutes_then_hours() {
+        let now = 1_800_000_000_000;
+        assert_eq!(relative_words(now - 60_000, now), "1 minute ago");
+        assert_eq!(relative_words(now - 59 * 60_000, now), "59 minutes ago");
+        assert_eq!(relative_words(now - 3_600_000, now), "1 hour ago");
+        assert_eq!(relative_words(now - 23 * 3_600_000, now), "23 hours ago");
+    }
+
+    #[test]
+    fn turn_ages_say_yesterday_for_the_second_day() {
+        let now = 1_800_000_000_000;
+        assert_eq!(relative_words(now - 86_400_000, now), "yesterday");
+        assert_eq!(relative_words(now - 47 * 3_600_000, now), "yesterday");
+    }
+
+    #[test]
+    fn turn_ages_fall_back_to_the_calendar_date() {
+        use chrono::{Datelike, TimeZone};
+        let now = chrono::Local::now().timestamp_millis().max(0) as u64;
+        let sent = now - 5 * 86_400_000;
+        let date = chrono::Local.timestamp_millis_opt(sent as i64).single().expect("representable");
+        let expected = if date.year() == chrono::Local::now().year() {
+            date.format("%b %-d").to_string()
+        } else {
+            date.format("%b %-d, %Y").to_string()
+        };
+        assert_eq!(relative_words(sent, now), expected);
+    }
+
+    #[test]
+    fn an_untimed_turn_has_no_age_caption() {
+        assert_eq!(turn_age(None, 1_800_000_000_000), None);
+        assert_eq!(turn_age(Some(1_800_000_000_000), 1_800_000_000_000).as_deref(), Some("just now"));
     }
 
     #[test]
