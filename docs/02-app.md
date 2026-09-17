@@ -1041,7 +1041,7 @@ the user input behind the turn, Fork opens the turn picker; Pin is hidden on
 turns through the library's `AssistantTurn::actions(..)` (it lives on sidebar
 sessions, whose rows keep the Pin action). User: Copy, Edit (text into the
 composer draft), Resend. Wire actions are live-only: in a replayed capture
-they answer with a toast.
+they answer with a toast. Either role's Copy holds its button on the success
 check for the library's `COPY_HOLD` (1.2 s, the same hold the code-block
 header keeps on its own) and then clears it — at most one turn holds the
 check at a time — so the tick reads as a confirmation and the copy glyph

@@ -86,6 +86,9 @@ library.
   it beside the action row — under the person's bubble, in the reply's
   footer (`just now`, minutes, hours, `yesterday`, else the date). Turns the
   wire never timed look exactly as before.
+- **Copy confirms, then clears.** Either role's Copy button holds the
+  success check for 1.2 s and then returns to the copy glyph; a free
+  `--steps copy:<turn>` verb presses it for captures.
 - **Side sessions by record, not by id.** Title/summary side sessions start
   with a bare-UUIDv7 client id — muse 1.3.0 rejects any `session/start` id
   that is not its own shape (`invalid length: found 50` for the old

@@ -62,6 +62,7 @@
 //! | `skip` | decline the newest question |
 //! | `select-text:<turn>:<from>-<to>` | hold a text selection over a turn |
 //! | `select-span:<turn>` | hold the whole turn as one cross-block span |
+//! | `copy:<turn>` | capture aid: press the turn's copy button (0-based, like `select-span`), so the success check holds for the screenshot, free |
 //! | `top` | jump to the head of the transcript |
 //! | `mid` | jump to the middle of the transcript |
 //! | `end` | jump to the tail of the transcript |
@@ -271,6 +272,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // selection, and open every tool group for its screenshot.
     SessionVerb { verb: "select-text", run: |v, rest, _, cx| v.select_text_step(rest, cx) },
     SessionVerb { verb: "select-span", run: |v, rest, _, cx| v.select_span_step(rest, cx) },
+    SessionVerb { verb: "copy", run: |v, rest, window, cx| v.step_copy(rest, window, cx) },
     SessionVerb { verb: "top", run: |v, _, _, cx| v.step_top(cx) },
     SessionVerb { verb: "end", run: |v, _, _, cx| v.step_end(cx) },
     SessionVerb { verb: "mid", run: |v, _, _, cx| v.step_mid(cx) },
