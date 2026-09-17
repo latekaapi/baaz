@@ -1085,9 +1085,12 @@ frame (`transcript_now_ms`: wall time, or the newest reported stamp under
 `HARNESS_DETERMINISTIC=1`, the sibling of the sidebar's `grouping_now`). A
 turn the wire never timed draws no caption and no extra cell, keeping its old
 height.
-Markdown links click through: URLs open in the browser, workspace paths open in
-their default place — folders in Finder, files in their default app (escapes
-above the workspace are rejected with a toast, missing paths toast). `Block::ToolGroup` renders through the library `tool_group`,
+Markdown links click through: URLs open in the browser, file paths open in
+their default place — folders in Finder, files in their default app.
+Absolute paths open as is, even outside the session workspace; relative
+ones resolve against it. Only an existing path ever opens — through the OS
+dispatch, never executed and never created (these paths come from model
+output) — and a missing path toasts quietly. `Block::ToolGroup` renders through the library `tool_group`,
 its open state in `Folds` keyed by the group's fold key. The transcript holds
 one cross-block span per turn (keyed by turn id with its markdown source,
 plus one drag session per turn): a drag that starts in one paragraph and
