@@ -629,8 +629,8 @@ pub struct Harness {
     /// accepted the bill this morning should be asked again tomorrow.
     pub(crate) send_anyway: bool,
     /// The sidebar row under the pointer, if any: the hover detail's owner.
-    /// Polled off the rows' own interaction state every sidebar frame (the
-    /// library owns the elements; the app owns which row is hovered).
+    /// Written only by the rows' own hover reports (see
+    /// [`Harness::note_row_hover`]); pane renders never touch it.
     pub(crate) hovered_row: Option<String>,
     /// When the current hover started: the detail opens past
     /// [`aui::nav::SESSION_DETAIL_DELAY`], so a pointer travelling past
@@ -649,10 +649,8 @@ pub struct Harness {
     pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
     /// Hover-trace state (`HARNESS_HOVER_TRACE=1`, diagnosis only): the last
     /// card result `render_row_detail` returned, so the trace logs only on
-    /// change, and the last poll log, so the GPUI hover readout fires at
-    /// most once per second.
+    /// change.
     pub(crate) hover_trace_last_shown: Option<bool>,
-    pub(crate) hover_trace_last_poll: Option<std::time::Instant>,
     pub(crate) tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -771,7 +769,6 @@ impl Harness {
             forced_detail: None,
             selected_row_bounds: None,
             hover_trace_last_shown: None,
-            hover_trace_last_poll: None,
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
