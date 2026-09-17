@@ -436,9 +436,10 @@ impl Harness {
         // text-only height change.
         let rows = flatten_sidebar(&grouping, false);
         self.sync_sidebar_list(&rows, &grouping);
-        // The pointer's row, before anything builds on it: arming never
-        // notifies (this frame is already drawing); opening does.
-        self.poll_sidebar_hover(&grouping, window, cx);
+        // No render-time hover poll: the rows' own hover reports below own
+        // the hover state, and a pane render must never disarm it (a live
+        // trace showed every poll reading GPUI hover None while the pointer
+        // rested on a row, clearing the armed row before the delay elapsed).
         // The click's target first: the row highlights on the click's own
         // frame, before the new view (or any page) exists.
         let selected =
@@ -475,14 +476,14 @@ impl Harness {
         let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
             this.toggle_group(id.to_string(), cx);
         });
-        // A session row's hover report: the hover card's arm and seat. The
-        // rows fire this from their own hover events, so the delay arms —
-        // and the trigger point lands — even when the sidebar pane renders
-        // nothing (a settled sidebar re-renders on no pointer movement at
-        // all): the timer's notify reaches only the root, whose cached
-        // pane never re-renders to poll one. The render-time poll below
-        // only refreshes the point while the pane renders, and heals a
-        // missed report.
+        // A session row's hover report: the hover card's arm and seat, and
+        // the only thing that arms it. The rows fire this from their own
+        // hover events, so the delay arms — and the trigger point lands —
+        // even when the sidebar pane renders nothing (a settled sidebar
+        // re-renders on no pointer movement at all): the timer's notify
+        // reaches only the root, whose cached pane never re-renders. Pane
+        // renders never touch the hover state: only this report, a wheel or
+        // scroll, or a click may arm or close the card.
         let hover = cx.listener(
             |this: &mut Self, (id, hovered): &(SharedString, bool), window, cx| {
                 let at = window.mouse_position();
@@ -738,7 +739,7 @@ impl Harness {
         // the row, and leaving closes it — while every row click still
         // lands on its row (the card hangs below-start of the trigger,
         // never over it) and dismisses through the select/action
-        // listeners; leave and scroll close through the poll above.
+        // listeners; the row's own leave report and scroll close it.
         (Some(aui::nav::anchored_session_detail(trigger, card).into_any_element()), "shown")
     }
 
@@ -812,156 +813,19 @@ impl Harness {
         );
     }
 
-    /// The id `render_sidebar` hands the virtual list: the hover poll below
-    /// re-derives row element ids under this same root, so the two must
-    /// never disagree.
+    /// The id `render_sidebar` hands the virtual list.
     pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
-
-    /// One rendered session row's element id, mirroring the library's own
-    /// key recipe (`render_flat_row` in `aui::nav::virtual_sidebar`): the
-    /// view id, the group key, the session id. Group keys: the group id for
-    /// status/project rows, `"pinned"` for the lifted pinned section, and
-    /// `"date-{n}"` counting only buckets that still have rows for date
-    /// rows — exactly as the flattener mints them, open groups only (a
-    /// closed group's rows are never built, so they can never be hovered).
-    ///
-    /// The render-time fallback beside the rows' own hover reports (see
-    /// [`Harness::note_row_hover`]): the elements belong to the library
-    /// while hover ownership belongs to the app, so the poll re-derives
-    /// row element ids under this same root to track the trigger point and
-    /// heal a missed report. The coupling is one-directional and
-    /// fail-silent: if the library ever reseats its keys, the poll reads
-    /// `hovered: false` everywhere and the reports alone arm the card.
-    pub(crate) fn sidebar_hover_rows(grouping: &Grouping) -> Vec<(String, ElementId)> {
-        let view: ElementId = Self::SIDEBAR_VIEW_ID.into();
-        let mut out = Vec::new();
-        let mut push = |key: ElementId, id: &SharedString| {
-            let row: ElementId = (key, id.clone()).into();
-            out.push((id.to_string(), row));
-        };
-        match grouping {
-            Grouping::Status(groups) => {
-                for group in groups.iter().filter(|g| g.open) {
-                    let key: ElementId = (view.clone(), group.id.clone()).into();
-                    for session in &group.sessions {
-                        push(key.clone(), &session.id);
-                    }
-                }
-            }
-            Grouping::Project(groups) => {
-                for group in groups.iter().filter(|g| g.open) {
-                    let key: ElementId = (view.clone(), group.id.clone()).into();
-                    for session in &group.sessions {
-                        push(key.clone(), &session.id);
-                    }
-                }
-            }
-            Grouping::Date(groups) => {
-                let pinned: ElementId = (view.clone(), "pinned").into();
-                for group in groups.iter() {
-                    for session in group.sessions.iter().filter(|s| s.pinned) {
-                        push(pinned.clone(), &session.id);
-                    }
-                }
-                let mut dated = 0usize;
-                for group in groups.iter() {
-                    if group.sessions.iter().any(|s| !s.pinned) {
-                        let key: ElementId =
-                            (view.clone(), SharedString::from(format!("date-{dated}"))).into();
-                        for session in group.sessions.iter().filter(|s| !s.pinned) {
-                            push(key.clone(), &session.id);
-                        }
-                        dated += 1;
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// Which session row the pointer is over, if any, read off the rows'
-    /// own interaction state. One frame behind the pointer (rows report
-    /// into window state when they build; the poll reads it here), which a
-    /// hover card never notices.
-    fn polled_hover_row(&self, grouping: &Grouping, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
-        for (id, row) in Self::sidebar_hover_rows(grouping) {
-            let (_, flags) = aui::util::interaction_flags(row, window, cx);
-            if flags.hovered {
-                return Some(id);
-            }
-        }
-        None
-    }
-
-    /// Fold the poll above into the hover state: a new row arms the delay,
-    /// the same row past it opens the card, no row (or a wheel, which
-    /// clears through [`Self::close_row_detail`]) closes it. Runs inside
-    /// the pane's render, so arming never notifies — the pane is already
-    /// drawing — while opening does: the card itself renders at the root.
-    /// The spawned timer is the reliable opener for a still pointer (no
-    /// frames render while nothing moves); the in-render opening covers a
-    /// pointer that keeps travelling past the delay.
-    fn poll_sidebar_hover(&mut self, grouping: &Grouping, window: &mut Window, cx: &mut Context<Self>) {
-        let hovered = self.polled_hover_row(grouping, window, cx);
-        // Diagnosis only (`HARNESS_HOVER_TRACE=1`): whether hover reaches
-        // the rows' own GPUI state — the same `Interaction.hovered` flags
-        // the row's hover affordances (the action icons) read — at most
-        // once per second, beside what the app has armed.
-        if crate::log::hover_trace_enabled() {
-            let now = std::time::Instant::now();
-            if self.hover_trace_last_poll.is_none_or(|at| now.duration_since(at).as_secs() >= 1) {
-                self.hover_trace_last_poll = Some(now);
-                crate::hover_trace!("poll gpui-hover={hovered:?} armed={:?}", self.hovered_row);
-            }
-        }
-        if hovered != self.hovered_row {
-            self.hovered_row = hovered.clone();
-            self.hover_since = hovered.as_ref().map(|_| std::time::Instant::now());
-            self.hover_shown = false;
-            // A healed report seats its own trigger too: the arm below may
-            // be the only render before the timer opens the card, and a
-            // settled pane never re-renders to poll one later.
-            self.hover_trigger = hovered.as_ref().map(|_| point_trigger(window.mouse_position()));
-            if let Some(id) = hovered {
-                let pending = cx.entity().downgrade();
-                self.tasks.push(cx.spawn(async move |_, cx| {
-                    cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
-                    let _ = pending.update(cx, |this, cx| {
-                        let matches = this.hovered_row.as_deref() == Some(&id);
-                        if matches && !this.hover_shown {
-                            this.hover_shown = true;
-                            cx.notify();
-                        }
-                        crate::hover_trace!(
-                            "timer src=poll id={id} matches={matches} shown={}",
-                            this.hover_shown
-                        );
-                    });
-                }));
-            }
-            return;
-        }
-        if hovered.is_some() {
-            self.hover_trigger = Some(point_trigger(window.mouse_position()));
-            if !self.hover_shown
-                && self.hover_since.is_some_and(|since| since.elapsed() >= aui::nav::SESSION_DETAIL_DELAY)
-            {
-                self.hover_shown = true;
-                cx.notify();
-            }
-        }
-    }
 
     /// Fold one row hover report into the hover state: entering a new row
     /// arms the detail's delay and seats its trigger at the reporting
     /// pointer, leaving the armed row closes it, and anything else changes
-    /// nothing. Fires from the rows' own hover events, so this runs even
-    /// when the sidebar pane itself renders nothing — the timer's notify
-    /// reaches only the root, whose cached pane never re-renders, which is
-    /// why the trigger must land here rather than in a later render poll.
-    /// That poll only refreshes the point while the pane renders, and heals
-    /// a missed report. Entering never notifies (nothing shows until the
-    /// delay elapses); the timer notifies when the card opens, and leaving
+    /// nothing. This is the only writer: pane renders never touch the hover
+    /// state, so a render can neither arm nor disarm a row. Fires from the
+    /// rows' own hover events, so this runs even when the sidebar pane
+    /// itself renders nothing — the timer's notify reaches only the root,
+    /// whose cached pane never re-renders, which is why the trigger lands
+    /// here. Entering never notifies (nothing shows until the delay
+    /// elapses); the timer notifies when the card opens, and leaving
     /// notifies when an open card closes.
     pub(crate) fn note_row_hover(
         &mut self,
@@ -1794,40 +1658,6 @@ mod tests {
         Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
     }
 
-    /// The hover poll's row ids mirror the library's key recipe: the view
-    /// id, the group key, the session id — `date-{n}` counting only buckets
-    /// that still have rows, closed groups contributing nothing.
-    #[test]
-    fn hover_row_ids_mirror_the_library_key_recipe() {
-        use aui::nav::{DateGroup, ProjectGroup, SessionSummary, StatusGroup};
-        use aui_tokens::AgentState;
-        let row = |id: &str| SessionSummary::new(id, id, AgentState::Idle, "now");
-        // Date: the pinned session lifts under `pinned`, and the bucket
-        // index skips the bucket left with only pinned rows.
-        let grouping = Grouping::Date(vec![
-            DateGroup::new("Today", vec![row("a").pinned(), row("b")]),
-            DateGroup::new("Yesterday", vec![row("c").pinned()]),
-            DateGroup::new("Earlier", vec![row("d")]),
-        ]);
-        let ids: Vec<(String, ElementId)> = Harness::sidebar_hover_rows(&grouping);
-        let view: ElementId = Harness::SIDEBAR_VIEW_ID.into();
-        let key = |group: &str| -> ElementId { (view.clone(), SharedString::from(group)).into() };
-        let at = |group: &str, id: &str| -> (String, ElementId) {
-            (id.to_owned(), (key(group), SharedString::from(id)).into())
-        };
-        assert_eq!(ids, vec![at("pinned", "a"), at("pinned", "c"), at("date-0", "b"), at("date-1", "d")]);
-        // Project: closed groups contribute no rows; the key is the group id.
-        let mut shut = ProjectGroup::new("p-shut", "Shut", "1");
-        shut.sessions = vec![row("f")];
-        let grouping = Grouping::Project(vec![ProjectGroup::new("p-open", "Open", "1").open(vec![row("e")]), shut]);
-        let ids = Harness::sidebar_hover_rows(&grouping);
-        assert_eq!(ids, vec![at("p-open", "e")]);
-        // Status: same group-id keys, open groups only.
-        let grouping = Grouping::Status(vec![StatusGroup::new("s-done", "Done", "1", vec![row("g")])]);
-        let ids = Harness::sidebar_hover_rows(&grouping);
-        assert_eq!(ids, vec![at("s-done", "g")]);
-    }
-
     /// The trigger the hover card seats at: the cursor's point, one pixel
     /// square — below-start of it hangs the card under the pointer without
     /// covering the row.
@@ -1923,17 +1753,214 @@ mod tests {
         assert!(left.borrow().iter().any(|id| id == "s-1"), "leaving the row reports the leave");
     }
 
-    /// The hover report itself seats the card — no pane render involved. A
+    /// Re-render the sidebar pane on demand. A test draw reuses the cached
+    /// pane's retained subtree while its bounds match, so redraws at an
+    /// unchanged size never rebuild it: growing the draw size a pixel per
+    /// pass busts the cache key, and the next draw re-renders down through
+    /// the cached pane — `render_sidebar` runs for real. The returned count
+    /// proves the renders happened — a hover test that never rendered its
+    /// pane would pass vacuously.
+    fn redraw_sidebar_pane(vc: &mut gpui::VisualTestContext, harness: &Entity<Harness>) -> u64 {
+        take_sidebar_pane_renders();
+        for step in 0..3 {
+            let size = gpui::size(px(1280.0), px(801.0 + step as f32));
+            vc.draw(point(px(0.), px(0.)), size, |_, _| {
+                harness.clone().into_any_element()
+            });
+            vc.run_until_parked();
+        }
+        take_sidebar_pane_renders()
+    }
+
+    /// One hover-fixture row: the live trace rested on one row at a time,
+    /// and the move-off case needs a second row to move to.
+    fn hover_entry(id: &str) -> SessionEntry {
+        SessionEntry {
+            id: id.into(),
+            label: format!("Session {id}"),
+            updated: chrono::Local::now(),
+            running: false,
+            turns: 3,
+            hidden: false,
+            pinned: false,
+            archived: false,
+            description: "the ask".into(),
+            replayed: false,
+            named: true,
+            needs_title: false,
+            title_pending: false,
+            last_ask: Some("the ask".into()),
+            local: false,
+            workspace: None,
+            project: None,
+            project_name: None,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
+            branch: None,
+        }
+    }
+
+    /// The owner's live trace, replayed: a row armed through the real report
+    /// path stays armed across pane renders that observe no GPUI hover, and
+    /// the delay timer opens its card. Before the fix the render-time poll
+    /// read `gpui-hover=None` on every pane render and cleared the armed
+    /// row, so every timer ended `matches=false shown=false` and no card
+    /// ever opened. A `left` report closes the card; a second row's
+    /// `entered` moves it.
+    #[gpui::test]
+    fn pane_renders_never_disarm_an_armed_hover(cx: &mut TestAppContext) {
+        use aui::nav::SESSION_DETAIL_DELAY;
+        use muse_client::schema::AccountStateKind;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // Hermetic state: boot adopts the workspace into the projects
+        // store, so the temp dir keeps the owner's store untouched.
+        let dir = std::env::temp_dir().join(format!("harness-hover-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let old = std::env::var_os("HARNESS_STATE_DIR");
+        std::env::set_var("HARNESS_STATE_DIR", &dir);
+        let args = crate::Args {
+            workspace: dir.clone(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        };
+        let vc = cx.add_empty_window();
+        let harness = vc.update(|window, cx| {
+            let harness =
+                cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            harness.update(cx, |h, _| {
+                h.auth = crate::login::Auth::SignedIn(crate::auth::Identity {
+                    lane: AccountStateKind::AccountLogin,
+                    name: "Probe".into(),
+                    email: String::new(),
+                });
+                h.sessions.push(hover_entry("s-hover-1"));
+                h.sessions.push(hover_entry("s-hover-2"));
+                h.invalidate_list();
+            });
+            harness
+        });
+        // The real root as the app builds it: the cached pane, the app's
+        // own row handlers, the card mounted from `render_row_detail`.
+        take_sidebar_pane_renders();
+        vc.draw(point(px(0.), px(0.)), gpui::size(px(1280.), px(800.)), |_, _| {
+            harness.clone().into_any_element()
+        });
+        // A neutral pointer: no row is GPUI-hovered, so the removed poll
+        // would have read `gpui-hover=None` here — the trace's readout.
+        vc.simulate_mouse_move(
+            point(px(1200.), px(780.)),
+            None::<gpui::MouseButton>,
+            gpui::Modifiers::default(),
+        );
+        // Arm through the real report path: what the row's own hover event
+        // hands the app.
+        vc.update(|_, cx| {
+            harness.update(cx, |h, cx| {
+                h.note_row_hover("s-hover-1".into(), true, gpui::point(px(100.), px(200.)), cx);
+            });
+        });
+        assert_eq!(
+            vc.update(|_, cx| harness.read(cx).hovered_row.clone()).as_deref(),
+            Some("s-hover-1"),
+            "the report arms the row"
+        );
+        // Pane renders while GPUI reports no hover: the armed row survives.
+        let renders = redraw_sidebar_pane(vc, &harness);
+        assert!(renders > 0, "the test must really render the pane, or it proves nothing");
+        assert_eq!(
+            vc.update(|_, cx| harness.read(cx).hovered_row.clone()).as_deref(),
+            Some("s-hover-1"),
+            "pane renders never disarm a reported hover"
+        );
+        // Past the delay: the timer opens the card and the builder mounts it.
+        vc.cx
+            .executor()
+            .advance_clock(SESSION_DETAIL_DELAY + std::time::Duration::from_millis(100));
+        vc.run_until_parked();
+        let (shown, card) = vc.update(|_, cx| {
+            harness.update(cx, |h, cx| (h.hover_shown, h.render_row_detail(cx).is_some()))
+        });
+        assert!(shown, "the delay timer opens the card for the still-armed row");
+        assert!(card, "the card element is mounted once the delay elapses");
+        // The row's own leave closes it.
+        vc.update(|_, cx| {
+            harness.update(cx, |h, cx| {
+                h.note_row_hover("s-hover-1".into(), false, gpui::point(px(1200.), px(780.)), cx);
+            });
+        });
+        let (armed, shown, card) = vc.update(|_, cx| {
+            harness.update(cx, |h, cx| {
+                (h.hovered_row.clone(), h.hover_shown, h.render_row_detail(cx).is_some())
+            })
+        });
+        assert!(armed.is_none() && !shown && !card, "the leave report closes the card");
+        // A second row's enter moves the arm; its card opens past the delay.
+        vc.update(|_, cx| {
+            harness.update(cx, |h, cx| {
+                h.note_row_hover("s-hover-2".into(), true, gpui::point(px(100.), px(260.)), cx);
+            });
+        });
+        assert_eq!(
+            vc.update(|_, cx| harness.read(cx).hovered_row.clone()).as_deref(),
+            Some("s-hover-2"),
+            "a second row's enter moves the arm"
+        );
+        vc.cx
+            .executor()
+            .advance_clock(SESSION_DETAIL_DELAY + std::time::Duration::from_millis(100));
+        vc.run_until_parked();
+        let (shown, card) = vc.update(|_, cx| {
+            harness.update(cx, |h, cx| (h.hover_shown, h.render_row_detail(cx).is_some()))
+        });
+        assert!(shown && card, "the moved row's card opens past the delay");
+        match old {
+            Some(value) => std::env::set_var("HARNESS_STATE_DIR", value),
+            None => std::env::remove_var("HARNESS_STATE_DIR"),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hover report itself seats the card, across pane renders. A
     /// settled sidebar re-renders nothing, so the delay timer's notify
     /// reaches only the root (the pane stays cached): the trigger point
-    /// must come from the row's own hover report, never from a later
-    /// render poll. The real root as the app builds it (the cached pane,
-    /// the app's own handlers): sweep the pointer over a row with no
-    /// redraw between moves, require the trigger set at the pointer, let
-    /// `SESSION_DETAIL_DELAY` elapse with still no redraw, and require the
+    /// comes from the row's own hover report. The real root as the app
+    /// builds it (the cached pane, the app's own handlers): sweep the
+    /// pointer over a row with no redraw between moves, require the trigger
+    /// set at the pointer, force pane renders, re-sweep to restore the
+    /// resting hover, let `SESSION_DETAIL_DELAY` elapse, and require the
     /// card builder to return its element (what the root mounts).
     #[gpui::test]
-    fn hover_report_seats_the_card_without_a_pane_render(cx: &mut TestAppContext) {
+    fn hover_report_seats_the_card_across_pane_renders(cx: &mut TestAppContext) {
         use aui::nav::SESSION_DETAIL_DELAY;
         use muse_client::schema::AccountStateKind;
 
@@ -2053,10 +2080,42 @@ mod tests {
             "a settled sidebar re-renders on no pointer movement"
         );
         // The report itself seats the card: the trigger is set, at the
-        // pointer — with no pane render to poll one from.
+        // pointer.
         let trigger = vc
             .update(|_, cx| harness.read(cx).hover_trigger)
             .expect("the hover report must seat the card's trigger");
+        assert!(
+            (f32::from(trigger.origin.x) - 100.0).abs() < 2.0
+                && (f32::from(trigger.origin.y) - y).abs() < 2.0,
+            "the trigger sits at the reporting pointer, got {:?} for a report at (100, {y})",
+            trigger.origin
+        );
+        // Pane renders while a row is armed: the renders really happen, and
+        // the report path re-arms afterwards. A test draw drops the retained
+        // tree, so the rebuilt rows report the teardown as a leave although
+        // the pointer never moved — production reuses retained state across
+        // frames (the live trace shows no resting leave), so no leave fires
+        // there. Re-sweep to restore the resting hover the renders found.
+        let renders = redraw_sidebar_pane(vc, &harness);
+        assert!(renders > 0, "the test must really render the pane, or it proves nothing");
+        take_sidebar_pane_renders();
+        let mut rehit: Option<f32> = None;
+        for y in (100..780).step_by(10) {
+            vc.simulate_mouse_move(
+                point(px(100.), px(y as f32)),
+                None::<gpui::MouseButton>,
+                gpui::Modifiers::default(),
+            );
+            let hovered = vc.update(|_, cx| harness.read(cx).hovered_row.clone());
+            if hovered.as_deref() == Some("s-hover-1") {
+                rehit = Some(y as f32);
+                break;
+            }
+        }
+        let y = rehit.expect("the rebuilt rows must report hover again after pane renders");
+        let trigger = vc
+            .update(|_, cx| harness.read(cx).hover_trigger)
+            .expect("the hover report must seat the card's trigger again");
         assert!(
             (f32::from(trigger.origin.x) - 100.0).abs() < 2.0
                 && (f32::from(trigger.origin.y) - y).abs() < 2.0,
