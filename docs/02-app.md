@@ -340,11 +340,17 @@ it: the full title, ask and latest reply, the status with its detail (the
 pending question, the approval command, the terminal error), project,
 branch, turn count and last change — only what the app knows, the rest
 omitted. The rows report hover enter/leave themselves, so the delay arms
-even on a settled sidebar that re-renders nothing (the render-time poll
-only tracks the trigger point and heals a missed report). The card takes
+even on a settled sidebar that re-renders nothing — and the report seats
+the card's trigger at the reporting pointer, because the timer's notify
+reaches only the root, whose cached pane never re-renders to poll one
+(the render-time poll only refreshes the point while the pane renders,
+and heals a missed report). The card takes
 no focus and never covers its own row, so the
 row's click still lands; it closes on leave, scroll and click. Scripted,
-`row-detail:<session_id>` pins it open (pair with `click:` on the same id).
+`row-detail:<session_id>` pins it open (pair with `click:` on the same id),
+and `hover:<session_id>` delivers the row's own hover report, so the card
+opens past the delay exactly as for a real pointer (pair with `click:` on
+the same id and a `wait:` past the delay).
 The attention states ride the wire's `Session.attention` (muse 1.3.0:
 `approvalPending`, `inputPending`) carried through the sidebar join and
 kept fresh off the `session/statusChanged` broadcast; the open session's

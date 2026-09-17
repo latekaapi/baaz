@@ -118,4 +118,9 @@ docs and tests are built from. Two transcript verbs hold a highlight for a
 screenshot without touching the pointer: `select-text:<turn>:<from>-<to>`
 (the turn's first paragraph, byte offsets clamped to it) and
 `select-span:<turn>` (the whole turn as one cross-block span — paragraph,
-list and code block in one highlight).
+list and code block in one highlight). Two sidebar verbs capture the hover
+card: `row-detail:<session_id>` pins it open (pair with `click:` on the
+same id), and `hover:<session_id>` delivers the row's own hover report —
+what its hover event sends — so the card opens past the delay exactly as
+for a real pointer (pair with `click:` on the same id and a `wait:` past
+the delay; empty means the selected row).
