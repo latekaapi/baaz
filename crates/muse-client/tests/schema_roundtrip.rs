@@ -582,7 +582,7 @@ fn every_published_method_has_a_dispatch_arm() {
     }
 }
 
-/// **muse 1.2.1 / owner-round-2 S1.** The 1.2.1 binary serves the *full*
+/// **muse 1.2.1 full payloads.** The 1.2.1 binary serves the *full*
 /// server-initiated request payloads in the `pendingRequests` of
 /// `session/read` (and `resume`/`fork`) — no top-level `kind`, so the
 /// documented `PendingRequestPointer` fails with `missing field 'kind'`.
@@ -598,7 +598,7 @@ fn pending_requests_serve_full_payloads_without_a_kind() {
     let observed: Value = serde_json::from_str(r#"{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","availableChoices":[{"choiceId":"allow_once","decision":"approved","label":"Allow once","scope":"once"},{"choiceId":"allow_local_prefix","decision":"approvedPolicyAmendment","label":"Always allow in this workspace: echo ...","rulePreview":"Always allow in this workspace: echo ...","scope":"localPersistent"},{"acceptsFeedback":true,"choiceId":"abort","decision":"abort","label":"Reject","scope":"once"}],"currentRequirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"itemId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","judgeEscalated":false,"protectedWrite":false,"rawArgs":"{\"command\":\"echo hi && ls\"}","sessionId":"01a085ab-5461-7b10-a6ab-805e21f7a245","sourceRange":{"first":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"last":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"stream":{"id":"01a085ab-5461-7b10-a6ab-805e21f7a245","kind":"session"}},"subject":{"command":"echo hi && ls","kind":"shell","stages":[{"argv":["echo","hi"],"argvComplete":true,"position":1,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["echo"],"label":"Always allow in this workspace: echo ..."},"totalStages":2},{"argv":["ls"],"argvComplete":true,"position":2,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":1},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["ls"],"label":"Always allow in this workspace: ls ..."},"totalStages":2}],"workspaceRoot":"/private/tmp/harness-ws"},"taskId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","toolCallId":"user_shell_01a085ab-54a7-7411-80ca-08842679168d","toolName":"shell","turnId":"01a085ab-54a7-7411-80ca-08842679168d","viewCursor":"v:01a085ab-5461-7b10-a6ab-805e21f7a245:7"}"#)
         .expect("observed entry is JSON");
     // The old shape (`Vec<PendingRequestPointer>`) rejected this with
-    // `missing field 'kind'` — the exact failure the owner saw.
+    // `missing field 'kind'` — the exact failure seen against the live schema.
     assert!(serde_json::from_value::<PendingRequestPointer>(observed.clone()).is_err());
     let entry: PendingRequestEntry =
         serde_json::from_value(observed.clone()).expect("full approval payload decodes");
@@ -615,7 +615,7 @@ fn pending_requests_serve_full_payloads_without_a_kind() {
     assert!(matches!(pointer, PendingRequestEntry::Pointer(_)));
 }
 
-/// **muse 1.2.1 / owner-round-2 S1.** The additive-optional `Session` members,
+/// **muse 1.2.1 additive shapes.** The additive-optional `Session` members,
 /// the snapshot's new arms, the `RecoveryPending` rename result without a
 /// name, and the closed MCP union (which must reject an unknown transport).
 #[test]

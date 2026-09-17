@@ -379,8 +379,8 @@ pub struct Harness {
     /// names the active view — but the row highlights and the header label
     /// read it, never the view, so the click is acknowledged on its own frame.
     pub(crate) pending_id: Option<String>,
-    /// The pending "ensure visible" row id (owner round 4, O6; owner round
-    /// 6: `scrollIntoView({ block: "nearest" })`). Set only by
+    /// The pending "ensure visible" row id (`scrollIntoView({ block:
+    /// "nearest" })` semantics). Set only by
     /// outside-the-sidebar activations — the palette, New session / `+`,
     /// fork, boot `--session`, the `open:` step — and consumed once, on the
     /// first prepaint after activation, by the selected-row / current-group
@@ -400,7 +400,7 @@ pub struct Harness {
     /// local-row insert, a `load_sessions` reply) already notify and would
     /// otherwise race a reveal armed moments earlier every time.
     pub(crate) reveal_unknown: Option<(String, u32)>,
-    /// The sidebar column as its own view (owner round 4 §3): embedded with
+    /// The sidebar column as its own view: embedded with
     /// gpui's `.cached(size_full)`, a clean pane reuses its retained subtree
     /// instead of rebuilding the column on a transcript notify.
     /// [`Harness::sync_sidebar_pane`] re-arms it from `on_frame` whenever
@@ -431,16 +431,16 @@ pub struct Harness {
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
-    /// step, owner round 6 part C3): the in-process fallback for a real
+    /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
     /// it never persists.
     pub(crate) sidebar_scroll_sweep: Option<crate::resize::ScrollSweep>,
     /// A frame-paced transcript-wheel sweep in flight (`transcript-scroll-
-    /// sweep:` step, owner round 6 part C3): the transcript's twin of
+    /// sweep:` step): the transcript's twin of
     /// [`Self::sidebar_scroll_sweep`].
     pub(crate) transcript_scroll_sweep: Option<crate::resize::ScrollSweep>,
     /// The sessions list's scroll state: the caller-owned `ListState` the
-    /// virtualised sidebar lays out through (owner round 6). A cheap
+    /// virtualised sidebar lays out through. A cheap
     /// handle; the component itself stays stateless. Kept in sync with the
     /// flattened rows every frame by `sync_sidebar_list`: `reset` after a
     /// regroup or filter change, `splice` after a local insert or remove,
@@ -457,7 +457,7 @@ pub struct Harness {
     /// rows, which is what asks for `remeasure_items`.
     pub(crate) prev_sidebar_grouping: Option<Rc<Grouping>>,
     pub(crate) prev_sidebar_regroup: Option<SidebarRegroupKey>,
-    /// The sidebar wheel's input-side state (owner round 5 §A1): what the
+    /// The sidebar wheel's input-side state: what the
     /// capture handler writes, shared behind [`RefCell`] rather than kept
     /// on the entity. A wheel event can arrive inside a `Harness` update
     /// (a scripted `sidebar-wheel:` step dispatches from one), and updating
@@ -469,7 +469,7 @@ pub struct Harness {
     /// keyed travel would re-arm the pane per event through `on_frame`.
     pub(crate) sidebar_wheel: Rc<RefCell<SidebarWheelState>>,
     /// Whether the user has scrolled the sidebar since the reveal was last
-    /// armed (owner round 5 §A1). A reveal never moves a user-scrolled list:
+    /// armed. A reveal never moves a user-scrolled list:
     /// the capture handler records the scroll, `render_sidebar` sets this,
     /// arming clears it, and no reveal installs while it holds.
     pub(crate) sidebar_user_scrolled: bool,
@@ -580,15 +580,13 @@ pub struct Harness {
     /// Shell trigger bounds in window coordinates, recorded once per frame
     /// by `on_children_prepainted` wrappers on the triggers themselves — what
     /// every shell menu seats at through `aui::overlay::anchored_menu`
-    /// (owner round 4: menus anchored to their triggers, never constants).
+    /// (menus anchor to their triggers, never constants).
     /// Each wrapper notifies only on its first bounds (nothing → something),
     /// so a menu opened before the first prepaint appears on the next frame
     /// instead of flashing at a wrong seat, and nothing repaints afterwards.
     /// The sidebar footer row: the account menu's trigger.
     pub(crate) footer_bounds: Option<Bounds<Pixels>>,
-    /// The fixed Sessions caption row: the Sessions view menu's trigger
-    /// (owner round 4 fixup — the header sits above the scrolling list, so
-    /// its menu seats under the sliders icon at any scroll offset).
+    /// The fixed Sessions caption row: the Sessions view menu's trigger.
     pub(crate) sessions_caption: Option<Bounds<Pixels>>,
     /// The header project crumb: the header project menu's trigger.
     pub(crate) crumb_bounds: Option<Bounds<Pixels>>,
@@ -678,7 +676,7 @@ impl Harness {
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
-        // The sidebar column's own view (owner round 4 §3): the weak handle
+        // The sidebar column's own view: the weak handle
         // is this harness under construction, which `cx.entity()` already
         // names inside the builder.
         let harness_weak = cx.entity().downgrade();
@@ -780,7 +778,7 @@ impl Harness {
         };
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
-        // header title that shares the field (owner round 4 §3).
+        // header title that shares the field.
         this.subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
@@ -1245,7 +1243,7 @@ impl Harness {
     /// from the last observed cursor, which serves `history.mode: "none"` and
     /// streams only the suffix.
     ///
-    /// Two phases, split at the handshake (owner round 2 S3). A successful
+    /// Two phases, split at the handshake. A successful
     /// `initialize` is `Wire::Ready` no matter what the resume then says: a
     /// resume rejection about the session (another window holds the lease,
     /// the session is gone) is not a transport failure, so it becomes a
@@ -1455,7 +1453,7 @@ impl Harness {
                 .into_any_element()
         };
         // The session half is the label after the `·` separator, with no
-        // provider mark before it (owner round 4, O4). The title flexes
+        // provider mark before it. The title flexes
         // inside the header cell and clips to one line, so a whole first
         // prompt as the derived title can never push the overflow button
         // out. There is no width token in aui-tokens, so the flex leftover
@@ -1582,8 +1580,8 @@ impl Harness {
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
-        // window would shrink the list under the scroll (owner round 6: the
-        // click moved `-1262 → -1198` on the clamp, not on the reveal).
+        // window would shrink the list under the scroll (the click moved
+        // `-1262 → -1198` on the clamp, not on the reveal).
         let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects);
         replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
         // The replayed row stands for the folded capture, and no wire event
@@ -1619,7 +1617,7 @@ impl Harness {
         self.invalidate_list();
         // `--session <id>`: the live boot opens it once the list arrives
         // (`load_sessions`), and a replay window has no list reply — so the
-        // landed fixture is the arrival it waits for (owner round 6). A run
+        // landed fixture is the arrival it waits for. A run
         // with no session named keeps the replayed view.
         self.open_boot_session(window, cx);
         // A replayed window has no wire, but the search palette still needs
@@ -1972,7 +1970,7 @@ impl Harness {
             self.resize.persist();
         }
         // A frame-paced width sweep marches the divider one step per
-        // rendered frame (scripting only, owner round 6): each tick logs
+        // rendered frame (scripting only): each tick logs
         // its width plus the renders and re-hints it cost, so per-tick
         // resize cost is readable off a scripted run. Like a real drag it
         // owns the list (no reveal installs while active); unlike one it
@@ -2003,11 +2001,11 @@ impl Harness {
                 cx.notify();
             }
         }
-        // A frame-paced sidebar-wheel sweep (`sidebar-scroll-sweep:` step,
-        // owner round 6 part C3): the same push the real capture handler
+        // A frame-paced sidebar-wheel sweep (`sidebar-scroll-sweep:` step):
+        // the same push the real capture handler
         // makes (`sidebar_view::sidebar_wheel_capture`), once per rendered
         // frame instead of once per posted `CGEvent` — the in-process
-        // fallback this machine's screen session forced (see
+        // fallback where the environment delivers no real gesture (see
         // `docs/02-app.md`). Re-arms itself via `request_animation_frame`
         // through `push_sidebar_scroll_sweep`'s own notify; drops itself
         // when the sweep reports done.
@@ -2022,7 +2020,7 @@ impl Harness {
             }
         }
         // A frame-paced transcript-wheel sweep (`transcript-scroll-sweep:`
-        // step, owner round 6 part C3): the transcript's twin of the
+        // step): the transcript's twin of the
         // sidebar sweep above, pushing into the active session's own
         // accumulator (`SessionView::push_wheel`) instead of the sidebar's.
         if self.transcript_scroll_sweep.is_some() {
@@ -2043,9 +2041,9 @@ impl Harness {
         // The sidebar pane's inputs may have changed without a notify of its
         // own (a session event, a probe answer, the minute rollover): re-arm
         // it here, before anything draws, so a transcript notify alone never
-        // rebuilds the column (owner round 4 §3).
+        // rebuilds the column.
         self.sync_sidebar_pane(cx);
-        // The frame trace's per-tick row (owner round 6, part C3): written
+        // The frame trace's per-tick row: written
         // here, not from `render_transcript`, because this runs once per
         // `Harness::render` regardless of which subtree actually rebuilt —
         // the true per-display-tick hook, where the old centre-scoped trace
@@ -2112,7 +2110,7 @@ impl Render for Harness {
         // it, so nothing of the signed-in state can leak into a capture.
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
         let body: AnyElement = if signed_in {
-            // The column is its own cached view (owner round 4 §3): clean,
+            // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
             // `size_full` is what the column wears itself (`render_sidebar`
             // fills its cell), so the cached layout resolves to the same

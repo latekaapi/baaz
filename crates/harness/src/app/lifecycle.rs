@@ -167,7 +167,7 @@ struct FixtureSession {
     /// would carry.
     #[serde(default)]
     summary: Option<String>,
-    /// The row's ask line, standing in for the owner's last request: with
+    /// The row's ask line, standing in for the user's last request: with
     /// `summary` it draws the two-line byline.
     #[serde(default)]
     ask: Option<String>,
@@ -520,7 +520,7 @@ impl Harness {
 
     /// `wheel:<dy>`: dispatch one synthetic wheel event at the window centre
     /// and log the transcript's pixel offset before and after — the
-    /// palette-scroll instrument (owner round 4): over the open palette the
+    /// palette-scroll instrument: over the open palette the
     /// palette's list scrolls and the transcript never moves, while over the
     /// bare transcript the same wheels move it. Free: no turn, no wire.
     pub(crate) fn step_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,7 +535,7 @@ impl Harness {
             }),
             cx,
         );
-        // Owner round 4 §2: the handler only accumulates, so without this
+        // The handler only accumulates, so without this
         // the read below would always equal `before` and the log could no
         // longer tell a moved transcript from an occluded one. Apply the
         // frame's drain eagerly — with nothing pending it is gpui's own
@@ -547,7 +547,7 @@ impl Harness {
         crate::harness_log!("wheel dy={dy} list_px={before}->{after}");
     }
 
-    /// `centre`: the open-flicker instrument (owner round 6). Log
+    /// `centre`: the open-flicker instrument. Log
     /// `harness: centre hero=<hero> loading=<loading>`: the new-session
     /// hero vs loading-row paints since the last call. An existing session
     /// opened through `open:`/`click:` must read `hero=0`; a draft opened
@@ -557,8 +557,8 @@ impl Harness {
         crate::harness_log!("centre hero={hero} loading={loading}");
     }
 
-    /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument (owner round
-    /// 5 §A1.6). Dispatch n synthetic wheel events (default 1) at a sidebar
+    /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument. Dispatch
+    /// n synthetic wheel events (default 1) at a sidebar
     /// point — x = 100 sits in the sessions list at the default width, y =
     /// 40 % of the window height — synchronously, so one step lands between
     /// two frames: the burst shape a trackpad really delivers, which
@@ -594,7 +594,7 @@ impl Harness {
         let after = self.sidebar_list_top();
         // The flattened row count (heads + folds + sessions), not the
         // session count `visible_sessions(cx).len()` used to log here
-        // (owner round 6, part C4 review #5): `item_ix` walks the
+        //: `item_ix` walks the
         // flattened model, so a probe comparing it against `rows=` needs
         // the same count or its bound is off by the header/fold rows.
         let rows = self.prev_sidebar_rows.len();
@@ -612,7 +612,7 @@ impl Harness {
     }
 
     /// `resize-begin:<x>` / `resize-move:<x>` / `resize-end`: the scripted
-    /// resize drag (owner round 6). They drive the same [`Harness`] handlers
+    /// resize drag. They drive the same [`Harness`] handlers
     /// the divider strip calls — `begin_resize` / `drag_resize` /
     /// `end_resize` — so an overlap probe (a press with an outside open
     /// still armed, moves with frames interleaved) exercises the real press
@@ -621,7 +621,7 @@ impl Harness {
     /// flag and the drag: a probe the drag must not move keeps every
     /// line's `sidebar_ix` equal.
     /// `resize-sweep:<to_w,step_px>`: march the divider toward `to_w` one
-    /// `step_px` per rendered frame (scripting only, owner round 6) — the
+    /// `step_px` per rendered frame (scripting only) — the
     /// display link's pace on a real display — logging
     /// `harness: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per
     /// tick. Like a press it disarms the reveal and owns the list while it
@@ -640,14 +640,14 @@ impl Harness {
     }
 
     /// `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>`: a frame-paced
-    /// sidebar wheel gesture (owner round 6, part C3) — `dy` held for
+    /// sidebar wheel gesture — `dy` held for
     /// `finger_ticks` rendered frames, then decaying to 5% of `dy` over
     /// `tail_ticks` more, one push per tick via
     /// [`Self::push_sidebar_scroll_sweep`]. The
-    /// in-process fallback for a real `CGEvent` gesture: this machine's
-    /// screen session refused `NSRunningApplication.activate()` and
-    /// `screencapture` returned solid black, so a posted event's landing
-    /// window could not be confirmed (see `docs/02-app.md`). Pair with
+    /// in-process fallback for a real `CGEvent` gesture: where the session
+    /// cannot post or confirm a real event (no activatable app, no readable
+    /// screencapture), a posted event's landing window cannot be confirmed
+    /// (see `docs/02-app.md`). Pair with
     /// `HARNESS_FRAME_TRACE=1` and read `scripts/frame-trace.py --metric
     /// sidebar`; free, no turn, no wire.
     pub(crate) fn step_sidebar_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) {
@@ -1000,7 +1000,7 @@ impl Harness {
                     view.update(cx, |view, cx| {
                         view.set_project_name(name);
                         // The cached centre reuses a clean view: push the
-                        // repaint with the name (owner round 6, part 4).
+                        // repaint with the name.
                         cx.notify();
                     });
                 }
@@ -1157,7 +1157,7 @@ impl Harness {
             view.update(cx, |view, cx| {
                 view.set_project_name(name);
                 // The cached centre reuses a clean view: push the repaint
-                // with the name (owner round 6, part 4).
+                // with the name.
                 cx.notify();
             });
             if let Some(effort) = effort {
@@ -1194,7 +1194,7 @@ impl Harness {
     /// one-shot reveal. The clicked row is under the cursor, hence painted
     /// inside the viewport by definition, so there is nothing to ensure —
     /// and any stale arm from an earlier outside activation is dropped
-    /// rather than served (owner round 6).
+    /// rather than served.
     pub(crate) fn resume_quiet(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.resume_inner(session_id, true, window, cx);
     }
@@ -1215,7 +1215,7 @@ impl Harness {
         // capture, the `open:` step's screenshots). `activate` below sets
         // the highlight again on the paths that reach it. Only an outside
         // activation arms the reveal; a quiet click clears any stale arm
-        // instead (owner round 6).
+        // instead.
         self.pending_id = Some(session_id.clone());
         if quiet {
             self.reveal = None;
@@ -1224,7 +1224,7 @@ impl Harness {
             self.reveal = Some(session_id.clone());
             self.reveal_unknown = None;
             // A fresh arm owns the list again: the next user scroll disarms
-            // it (owner round 5 §A1).
+            // it.
             self.sidebar_user_scrolled = false;
         }
         let Some(client) = self.client.clone() else {
@@ -1246,7 +1246,7 @@ impl Harness {
                 } else {
                     self.open(session_id.clone(), false, quiet, window, cx);
                     // An existing session opens loading, never the hero —
-                    // even with no client behind it (owner round 6).
+                    // even with no client behind it.
                     if let Some(view) = self.active.clone() {
                         view.update(cx, |view, cx| view.mark_history_loading(cx));
                     }
@@ -1348,7 +1348,7 @@ impl Harness {
     /// A session view opened: the current project becomes that session's
     /// project when it has one. Made current and written, so the next boot
     /// and the next ⌘N start where this session is — but never touched:
-    /// opening a session must not reorder the groups (owner round 4, O1).
+    /// opening a session must not reorder the groups.
     /// The touch that remains is in [`Self::new_session_in`] (a new session
     /// is itself the freshest thing about its project) and in `adopt_root`,
     /// and both feed only the boot and removal fallbacks
@@ -1420,8 +1420,8 @@ impl Harness {
     /// `quiet == false`, so this is where the sidebar's one-shot reveal is
     /// armed: the next prepaint scrolls the least distance that brings the
     /// row (or, when its group is closed or folded past the cut, the group)
-    /// into view, then consumes the flag (owner round 4, O6; owner round 6:
-    /// `scrollIntoView({ block: "nearest" })`). A sidebar or rail click
+    /// into view, then consumes the flag (`scrollIntoView({ block:
+    /// "nearest" })` semantics). A sidebar or rail click
     /// comes through here with `quiet == true` and never arms: the clicked
     /// row is under the cursor, hence visible, and any stale arm is dropped.
     fn activate(&mut self, view: Entity<SessionView>, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1438,8 +1438,7 @@ impl Harness {
             self.reveal_unknown = None;
         } else {
             // The sidebar's one-shot reveal arms on the same swap — and a
-            // fresh arm owns the list again: the next user scroll disarms it
-            // (owner round 5 §A1).
+            // fresh arm owns the list again: the next user scroll disarms it.
             self.reveal = Some(session_id.clone());
             self.reveal_unknown = None;
             self.sidebar_user_scrolled = false;
@@ -1464,7 +1463,7 @@ impl Harness {
         });
         // The swap must repaint the centre even when every push above was
         // `set` without `notify`: a parked view reuses its retained subtree
-        // unless it is dirty (owner round 6, part 4).
+        // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
         self.active = Some(view);
         self.focus_composer = true;

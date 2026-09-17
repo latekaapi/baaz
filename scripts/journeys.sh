@@ -1,8 +1,6 @@
 #!/bin/sh
-# Owner round 3, J1: every user journey `--replay`, `--no-connect` and
-# `--steps` can drive, scripted so it reruns. Free — nothing here reaches
-# `turn/start`; see `docs/audit/journeys-2026-09-13.md` for the live half (J2)
-# and for the journeys a person still has to drive by hand.
+# Every user journey `--replay`, `--no-connect` and `--steps` can drive,
+# scripted so it reruns. Free — nothing here reaches `turn/start`.
 #
 #   scripts/journeys.sh <out-dir> [harness-binary]
 #

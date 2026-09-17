@@ -44,7 +44,7 @@ impl Harness {
         }
         self.tier_probing = true;
         // The banner answers at once: "Check again" reads "Checking…"
-        // while the probe runs (owner round 2, S4).
+        // while the probe runs.
         self.push_tier(cx);
         let program = self.args.program.clone();
         self.wire_call(cx, move || tier::probe(&program), move |this, result, cx| {
@@ -72,8 +72,7 @@ impl Harness {
 
     /// The banner the open session should be drawing, given the tier and
     /// whether "Send anyway" has been pressed. A known subscription draws
-    /// nothing — the banner leaves once the plan is known (owner round 2,
-    /// S4) — and while a probe runs the unknown-plan banner's button reads
+    /// nothing — the banner leaves once the plan is known — and while a probe runs the unknown-plan banner's button reads
     /// "Checking…".
     pub(crate) fn tier_banner(&self) -> Option<TierBanner> {
         match self.tier.as_ref()? {

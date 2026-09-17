@@ -88,7 +88,7 @@
 //! | `resize-move:<x>` | move a scripted resize drag through the real divider handler (same log) |
 //! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
 //! | `resize-sweep:<to_w,step_px>` | march the divider toward `to_w` one `step_px` per rendered frame, logging `harness: rssweep w=<width> pane=<pane> root=<root> rehint=<0/1>` per tick |
-//! | `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>` | a frame-paced sidebar wheel gesture: `dy` for `finger_ticks` rendered frames, then decaying to 5% of `dy` over `tail_ticks` more, one push per tick (owner round 6, part C3 — the in-process fallback for a real `CGEvent` gesture on a machine that cannot confirm one's landing window; pair with `HARNESS_FRAME_TRACE=1`) |
+//! | `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>` | a frame-paced sidebar wheel gesture: `dy` for `finger_ticks` rendered frames, then decaying to 5% of `dy` over `tail_ticks` more, one push per tick (the in-process fallback for a real `CGEvent` gesture where the environment cannot confirm a landing window; pair with `HARNESS_FRAME_TRACE=1`) |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
 //! | `overflow` | open the header's overflow menu |
 //! | `view-menu` | open the Sessions caption's view menu |
@@ -115,7 +115,7 @@
 //! | `new` | the same as ⌘N |
 //! | `new:<project>` | the group row's `+` for the project named; the session opens on the `session/start` round-trip, so following session verbs (`name:`, `draft:`, `send:`) wait for the switch (bounded, 10 s) instead of acting on the session that is still open |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `harness: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
-//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument, owner round 6: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
+//! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `harness: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `harness: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!

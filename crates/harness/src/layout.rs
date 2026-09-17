@@ -43,7 +43,7 @@ pub struct Layout {
     #[serde(rename = "closedGroups", default, skip_serializing_if = "Vec::is_empty")]
     pub closed_groups: Vec<String>,
     /// Project-group ids whose held-back rows stand shown: the "Show N more"
-    /// row's flip side (owner round 2, P3). Persisted exactly like
+    /// row's flip side. Persisted exactly like
     /// `closed_groups`, and empty by default so old files read unchanged.
     #[serde(rename = "expandedGroups", default, skip_serializing_if = "Vec::is_empty")]
     pub expanded_groups: Vec<String>,
@@ -53,7 +53,7 @@ pub struct Layout {
     #[serde(rename = "searchAllProjects", default = "default_search_all")]
     pub search_all_projects: bool,
     /// Whether project group rows draw the collapse chevron in the leading
-    /// box. Off by default: the row is a plain label (owner round 4, O4).
+    /// box. Off by default: the row is a plain label.
     /// The Settings dialog's Sidebar section (⌘,) owns the switch; `--steps
     /// group-chevron` flips it for captures meanwhile.
     #[serde(rename = "groupChevron", default)]

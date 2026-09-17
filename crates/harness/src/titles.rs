@@ -30,7 +30,7 @@
 //!
 //! Spend: one short turn per unnamed session, against the login's tier —
 //! never on resume, reconnect, replay, restart, or a second turn. The
-//! coordinator's billed proof is one fresh-session send plus this call.
+//! billed evidence for that claim is one fresh-session send plus this call.
 
 use crate::sessions::SessionMeta;
 

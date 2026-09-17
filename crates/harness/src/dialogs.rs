@@ -191,7 +191,7 @@ impl Harness {
     /// The native folder panel, directories only: a chosen folder is adopted
     /// exactly like a recent workspace. Cancel does nothing.
     ///
-    /// The three `harness:` lines are the owner-round-2 diagnosis for "Choose
+    /// The three `harness:` lines are the diagnosis trail for "Choose
     /// folder… does nothing": the select line says the row fired, the entry
     /// line says the panel was asked for, and the resolution line says what
     /// the panel answered. They stay because this will regress.
@@ -253,7 +253,7 @@ impl Harness {
                 continue;
             }
             let count = visible.iter().filter(|e| e.project.as_deref() == Some(project.id.as_str())).count();
-            // No coloured tiles anywhere (owner round 4, O4): adopted
+            // No coloured tiles anywhere: adopted
             // projects wear the folder glyph, like the recent workspaces
             // below.
             let item = emphasise(
@@ -481,7 +481,7 @@ impl Harness {
             return None;
         };
         // A click anywhere outside closes it: the catcher is a sibling of
-        // the menu inside the same draw (owner round 2, P4).
+        // the menu inside the same draw.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             cx.notify();
@@ -706,8 +706,8 @@ impl Harness {
                     // `on_click` on mouse-up against the frame the release
                     // sees, so dismissing on mouse-down closed the palette
                     // under the press and the release found no row — every
-                    // palette row's click silently did nothing but dismiss
-                    // (owner round 2, P1). The row's own click runs first on
+                    // palette row's click silently did nothing but dismiss.
+                    // The row's own click runs first on
                     // the way up and this runs after it, idempotently.
                     .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                         this.overlays.update(cx, |overlays, _| overlays.palette = None);
@@ -736,7 +736,7 @@ impl Harness {
         // The archive target stays on the dialog until its own button runs:
         // closing it any other way drops the target with it.
         // A dialog whose primary already dismisses it carries no second
-        // button: "Dismiss  Dismiss" was the owner's screenshot. The danger
+        // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
         // dialog keeps Cancel beside Archive; the others keep Dismiss beside
         // Reconnect / Sign in / Done.
         let secondary = match (danger, action) {

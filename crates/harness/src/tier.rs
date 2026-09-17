@@ -1,13 +1,12 @@
-//! Which credential tier this login is on, and the guard built on top of it
-//! (Phase 5 A1).
+//! Which credential tier this login is on, and the guard built on top of it.
 //!
 //! # The finding
 //!
 //! Muse has two credential tiers, **pay-as-you-go** and **subscription**, and
 //! the tier is decided by the login token rather than by anything the harness
-//! sends. The owner's token from 2026-09-08 was on pay-as-you-go, so Phases 1
-//! to 4 billed every turn as API usage even though `auth.json` said
-//! `mechanism: oauth`. Nothing on the wire says which tier a token is on:
+//! sends. A pay-as-you-go token bills every turn as API usage even though
+//! `auth.json` says `mechanism: oauth`. Nothing on the wire says which tier
+//! a token is on:
 //! `initialize` and `model/list` carry no account or plan field, `auth.json`
 //! carries only the mechanism, the storage, the API base and the person's name
 //! and email, and the session log records only a `credential_backend`.
@@ -139,7 +138,7 @@ impl Tier {
     ///
     /// A measured percentage reads as "N% used" and the still-drawing dash
     /// as "— used", but the card's own word `unavailable` stands alone —
-    /// "unavailable used" is the owner's screenshot, and the same rule
+    /// "unavailable used" is what a screenshot showed, and the same rule
     /// [`print_tier_field`] already applies to `--print-tier`.
     pub fn status_lines(&self) -> String {
         match self {
@@ -194,8 +193,8 @@ pub fn auth_mtime() -> Option<u64> {
     modified.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
-/// How long a cached answer is trusted before an ordinary boot probes again
-/// (owner round 2, S4). A forced probe — "Check again", `/usage`, `/status`
+/// How long a cached answer is trusted before an ordinary boot probes
+/// again. A forced probe — "Check again", `/usage`, `/status`
 /// — always re-probes; a second window booting inside the hour reuses the
 /// first's answer instead of driving a second TUI at the same workspace.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -402,7 +401,7 @@ fn probe_cmdline(pid: u32) -> Option<String> {
 }
 
 /// How long a probe waits for another harness's probe before going ahead
-/// alone (owner round 2, S4). Past one ceiling the holder is either done or
+/// alone. Past one ceiling the holder is either done or
 /// stuck; either way the waiter stops waiting.
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 
@@ -525,8 +524,8 @@ fn probe_blocking(muse: &str) -> Result<Tier, String> {
 /// subscription counts only once both usage windows arrived. muse 1.2.1
 /// draws the plan sentence first and the percentages land later, so a plan
 /// without them is "not yet", not "none" — accepting it is what printed
-/// `Current — / Weekly —` while the card still had ink to lay (owner round
-/// 2, S4). Anything else is complete as parsed.
+/// `Current — / Weekly —` while the card still had ink to lay. Anything
+/// else is complete as parsed.
 fn complete(tier: &Tier) -> bool {
     match tier {
         Tier::Subscription { current_pct, weekly_pct, usage_unavailable, .. } => {
@@ -650,10 +649,9 @@ pub const CARD_PAY_AS_YOU_GO: [&str; 4] = [
     "subscriptions are not currently available",
 ];
 /// The sentence muse 1.3.0 draws in place of both percentages while a known
-/// plan's usage windows are not being reported — observed while this login's
-/// quota sits fully spent (owner round: quota exhausted until 2026-09-21),
-/// but the card gives no reason, so this is read as "no numbers, ever, this
-/// probe" rather than assumed to mean any one cause.
+/// plan's usage windows are not being reported — observed while the login's
+/// quota sat fully spent, but the card gives no reason, so this is read as
+/// "no numbers, ever, this probe" rather than assumed to mean any one cause.
 pub const CARD_USAGE_UNAVAILABLE: &str = "usage currently unavailable";
 
 /// What the card said, or `None` while it has not said it yet.
@@ -1208,10 +1206,10 @@ mod tests {
         assert!(killed.borrow().is_empty());
     }
 
-    /// The verbatim 1.2.1 card (owner round 2, S4), captured 2026-09-13 and
+    /// The verbatim 1.2.1 card, captured and
     /// redacted: the plan name still arrives glued to the template's own
     /// "usage", and both windows carry percentages — `Current 13%`,
-    /// `Weekly 36%` on this login. The parser takes both, not the first
+    /// `Weekly 36%` in the fixture. The parser takes both, not the first
     /// partial draw.
     #[test]
     fn the_1_2_1_card_parses_with_its_percentages() {
@@ -1262,8 +1260,8 @@ mod tests {
         assert!(usage_unavailable, "the card's own words, not a still-drawing guess");
         // The missing numbers are the card's final word, not a partial
         // draw: the probe must not spend its whole deadline waiting for
-        // percentages that are never coming (owner round: quota exhausted
-        // until 2026-09-21 printed dashes forever under the old rule).
+        // percentages that are never coming (a fully-spent quota printed
+        // dashes forever under the old rule).
         assert!(complete(&Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }));
     }
 
