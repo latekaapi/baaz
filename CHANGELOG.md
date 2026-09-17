@@ -118,3 +118,6 @@ library.
   (new `on_row_hover` in the library), so the detail card's delay arms even
   on a settled sidebar that re-renders nothing; the render-time hover poll
   stays as the trigger tracker and fallback.
+- **Byline reads as one line.** The ask/result halves no longer split the
+  row 50/50: each hugs its content around a single `·` separator and both
+  truncate with an ellipsis when squeezed.
