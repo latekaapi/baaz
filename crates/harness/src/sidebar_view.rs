@@ -21,8 +21,9 @@ use std::rc::Rc;
 
 use aui::data::{icon_button, ButtonSize};
 use aui::nav::{
-    dense_field, ensure_row_visible, flatten_sidebar, group_row, nav_item, rail, row_index_for_session,
-    sidebar_footer, view_menu, virtual_sidebar_view, GroupAction, MenuRow, RailItem, RowAction, SidebarRow,
+    SESSION_DETAIL_GAP, anchored_session_detail_at_sidebar, dense_field, ensure_row_visible, flatten_sidebar,
+    group_row, nav_item, rail, row_index_for_session, sidebar_footer, view_menu, virtual_sidebar_view, GroupAction,
+    MenuRow, RailItem, RowAction, SidebarRow,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
 use aui_icons::{IconName, Provider};
@@ -257,11 +258,18 @@ pub(crate) struct SidebarRegroupKey {
     show_archived: bool,
 }
 
-/// The hover card's seat for a pointer hover: the cursor's point, so the
-/// card hangs below-start of where the person is pointing — the row's own
-/// click target stays uncovered, exactly as with a row-bounds trigger.
-fn point_trigger(at: gpui::Point<Pixels>) -> Bounds<Pixels> {
-    Bounds { origin: at, size: gpui::Size { width: px(1.0), height: px(1.0) } }
+/// The hover card's seated anchor for a row: the sidebar pane's right edge
+/// plus the card gap, top-aligned with the row — regardless of where in the
+/// row the pointer is, so the card never overlaps the sidebar. `None` before
+/// the pane's first prepaint lays its edge out. The vertical clamp (a bottom
+/// row's card shifting up to stay inside the window) rides in the seat
+/// element's own window fit.
+pub(crate) fn row_detail_seat(
+    sidebar: &Option<Bounds<Pixels>>,
+    row: &Bounds<Pixels>,
+) -> Option<gpui::Point<Pixels>> {
+    let edge = (*sidebar)?;
+    Some(gpui::point(edge.origin.x + edge.size.width + px(SESSION_DETAIL_GAP), row.origin.y))
 }
 
 impl Harness {
@@ -478,22 +486,21 @@ impl Harness {
         });
         // A session row's hover report: the hover card's arm and seat, and
         // the only thing that arms it. The rows fire this from their own
-        // hover events, so the delay arms — and the trigger point lands —
-        // even when the sidebar pane renders nothing (a settled sidebar
-        // re-renders on no pointer movement at all): the timer's notify
-        // reaches only the root, whose cached pane never re-renders. Pane
-        // renders never touch the hover state: only this report, a wheel or
-        // scroll, or a click may arm or close the card.
+        // hover events carrying the row's own bounds, so the delay arms —
+        // and the seat lands — even when the sidebar pane renders nothing (a
+        // settled sidebar re-renders on no pointer movement at all): the
+        // timer's notify reaches only the root, whose cached pane never
+        // re-renders. Pane renders never touch the hover state: only this
+        // report, a wheel or scroll, or a click may arm or close the card.
         let hover = cx.listener(
-            |this: &mut Self, (id, hovered): &(SharedString, bool), window, cx| {
-                let at = window.mouse_position();
+            |this: &mut Self, (id, hovered, row): &(SharedString, bool, Bounds<Pixels>), _, cx| {
                 crate::hover_trace!(
-                    "report id={id} {} at={:.0},{:.0}",
+                    "report id={id} {} row={:.0},{:.0}",
                     if *hovered { "entered" } else { "left" },
-                    f32::from(at.x),
-                    f32::from(at.y)
+                    f32::from(row.origin.x),
+                    f32::from(row.origin.y)
                 );
-                this.note_row_hover(id.to_string(), *hovered, at, cx);
+                this.note_row_hover(id.to_string(), *hovered, Some(*row), cx);
             },
         );
         // A group row's hover tray: `+` starts a session in that project
@@ -565,7 +572,7 @@ impl Harness {
                 });
             })
             .on_action(move |id, action, w, cx| act(&(id.clone(), action), w, cx))
-            .on_row_hover(move |id, hovered, w, cx| hover(&(id.clone(), hovered), w, cx));
+            .on_row_hover_bounds(move |id, hovered, row, w, cx| hover(&(id.clone(), hovered, row), w, cx));
         if let Some(renaming) = self.renaming.clone() {
             // The library builds the renaming row more than once per frame,
             // so the editor arrives as a builder it calls on every build —
@@ -606,7 +613,13 @@ impl Harness {
         // No quick-filter field: ⌘⇧F and the sidebar search icon open the
         // full-text search palette instead, so the two can never share the
         // sidebar.
-        v_flex()
+        // The pane's own rect, once per frame: the hover card's side seat
+        // hangs off its right edge. The wrapper is a plain full-size column
+        // around the column the pane already drew, so the geometry is
+        // unchanged; stored without notifying past the first prepaint (the
+        // overlay reads it on this same frame).
+        let pane_report = cx.entity().downgrade();
+        let column = v_flex()
             .size_full()
             .child(self.render_nav_block(cx))
             .child(self.render_sessions_caption(cx))
@@ -630,22 +643,34 @@ impl Harness {
                     .child(view)
                     .children(empty),
             )
-            .child(self.render_footer(cx))
+            .child(self.render_footer(cx));
+        div()
+            .size_full()
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(first) = bounds.first() {
+                    let bounds = *first;
+                    let _ = pane_report.update(cx, |this, cx| {
+                        Harness::note_trigger_bounds(&mut this.sidebar_bounds, bounds, cx);
+                    });
+                }
+            })
+            .child(column)
             .into_any_element()
     }
 
     /// Option B's hover detail, at the window root: the full picture for
     /// the hovered row (past its delay) or the scripted row
     /// (`row-detail:<id>`), through the library's
-    /// `anchored_session_detail` — below-start of the trigger, flipping
-    /// above near the window bottom and sliding inside, in `popover_layer`
-    /// so it escapes the sidebar's clipping and paints above everything.
+    /// `anchored_session_detail_at_sidebar` — the card's left edge at the
+    /// sidebar pane's right edge plus the card gap, top-aligned with the
+    /// row, sliding up near the window bottom, in `popover_layer` so it
+    /// escapes the sidebar's clipping and paints above everything.
     ///
     /// The card never takes focus (no focus handle, no key context — the
-    /// library builds none) and never covers its own row (below-start of
-    /// the trigger), so the row's click still lands; a click that does land
-    /// on the card only dismisses it. It closes on leave, scroll and click
-    /// through [`Self::close_row_detail`] and the listeners that call it.
+    /// library builds none) and never covers the sidebar (it hangs beside
+    /// it), so the row's click still lands; a click that does land on the
+    /// card only dismisses it. It closes on leave, scroll and click through
+    /// [`Self::close_row_detail`] and the listeners that call it.
     pub(crate) fn render_row_detail(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (element, reason) = self.build_row_detail(cx);
         let shown = element.is_some();
@@ -668,10 +693,10 @@ impl Harness {
 
     /// The card builder behind [`Self::render_row_detail`], with the reason
     /// a missing card is missing: `not-shown` (still inside the delay),
-    /// `no-hovered-row`, `no-trigger`, or the forced pin's own misses and
-    /// unknown rows under `unknown-row` / `forced-*`.
+    /// `no-hovered-row`, `no-trigger`, `no-sidebar-edge`, or the forced
+    /// pin's own misses and unknown rows under `unknown-row` / `forced-*`.
     fn build_row_detail(&mut self, cx: &mut Context<Self>) -> (Option<AnyElement>, &'static str) {
-        let (id, trigger) = match self.forced_detail.clone() {
+        let (id, row) = match self.forced_detail.clone() {
             Some(id) => {
                 let Some((known, bounds)) = self.selected_row_bounds.clone() else {
                     return (None, "forced-no-bounds");
@@ -688,12 +713,18 @@ impl Harness {
                 let Some(hovered) = self.hovered_row.clone() else {
                     return (None, "no-hovered-row");
                 };
-                let Some(trigger) = self.hover_trigger else {
+                let Some(row) = self.hover_trigger else {
                     return (None, "no-trigger");
                 };
-                (hovered, trigger)
+                (hovered, row)
             }
         };
+        // The seat's other half: the laid-out pane's right edge. Before the
+        // first prepaint there is no edge, so there is no card this frame.
+        let Some(edge) = self.sidebar_bounds else {
+            return (None, "no-sidebar-edge");
+        };
+        let sidebar_right = edge.origin.x + edge.size.width;
         let visible = self.visible_sessions(cx);
         // The visible rows first, then the whole list: a card pinned to a
         // filtered-out row still names it honestly.
@@ -732,15 +763,18 @@ impl Harness {
         if let Some(updated) = data.updated {
             card = card.updated(updated);
         }
-        // `anchored_session_detail` takes the card itself, so no wrapper
-        // rides along: the card carries no click handler of its own, and a
-        // click that lands on it is a no-op rather than a row action. That
-        // corner is nearly unreachable — reaching the card means leaving
+        // `anchored_session_detail_at_sidebar` takes the card itself, so no
+        // wrapper rides along: the card carries no click handler of its own,
+        // and a click that lands on it is a no-op rather than a row action.
+        // That corner is nearly unreachable — reaching the card means leaving
         // the row, and leaving closes it — while every row click still
-        // lands on its row (the card hangs below-start of the trigger,
-        // never over it) and dismisses through the select/action
-        // listeners; the row's own leave report and scroll close it.
-        (Some(aui::nav::anchored_session_detail(trigger, card).into_any_element()), "shown")
+        // lands on its row (the card hangs beside the sidebar, never over
+        // it) and dismisses through the select/action listeners; the row's
+        // own leave report and scroll close it.
+        (
+            Some(anchored_session_detail_at_sidebar(row, sidebar_right, card).into_any_element()),
+            "shown",
+        )
     }
 
     /// What a regroup or filter change looks like to the virtual list
@@ -817,21 +851,21 @@ impl Harness {
     pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
 
     /// Fold one row hover report into the hover state: entering a new row
-    /// arms the detail's delay and seats its trigger at the reporting
-    /// pointer, leaving the armed row closes it, and anything else changes
-    /// nothing. This is the only writer: pane renders never touch the hover
-    /// state, so a render can neither arm nor disarm a row. Fires from the
-    /// rows' own hover events, so this runs even when the sidebar pane
-    /// itself renders nothing — the timer's notify reaches only the root,
-    /// whose cached pane never re-renders, which is why the trigger lands
-    /// here. Entering never notifies (nothing shows until the delay
-    /// elapses); the timer notifies when the card opens, and leaving
+    /// arms the detail's delay and seats it from the row's own bounds —
+    /// never the pointer — leaving the armed row closes it, and anything
+    /// else changes nothing. This is the only writer: pane renders never
+    /// touch the hover state, so a render can neither arm nor disarm a row.
+    /// Fires from the rows' own hover events, so this runs even when the
+    /// sidebar pane itself renders nothing — the timer's notify reaches only
+    /// the root, whose cached pane never re-renders, which is why the row
+    /// bounds land here. Entering never notifies (nothing shows until the
+    /// delay elapses); the timer notifies when the card opens, and leaving
     /// notifies when an open card closes.
     pub(crate) fn note_row_hover(
         &mut self,
         id: String,
         hovered: bool,
-        at: gpui::Point<Pixels>,
+        row: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
         if hovered {
@@ -839,15 +873,28 @@ impl Harness {
                 crate::hover_trace!("note id={id} entered already-armed");
                 return;
             }
-            crate::hover_trace!(
-                "note id={id} entered arm trigger={:.0},{:.0}",
-                f32::from(at.x),
-                f32::from(at.y)
-            );
+            let Some(row) = row else {
+                crate::hover_trace!("note id={id} entered no-bounds");
+                return;
+            };
+            // The seated anchor the card opens at: the sidebar's right edge
+            // plus the card gap, top-aligned with the row.
+            match row_detail_seat(&self.sidebar_bounds, &row) {
+                Some(seat) => crate::hover_trace!(
+                    "note id={id} entered arm seat={:.0},{:.0}",
+                    f32::from(seat.x),
+                    f32::from(seat.y)
+                ),
+                None => crate::hover_trace!(
+                    "note id={id} entered arm no-sidebar-edge row={:.0},{:.0}",
+                    f32::from(row.origin.x),
+                    f32::from(row.origin.y)
+                ),
+            }
             self.hovered_row = Some(id.clone());
             self.hover_since = Some(std::time::Instant::now());
             self.hover_shown = false;
-            self.hover_trigger = Some(point_trigger(at));
+            self.hover_trigger = Some(row);
             let pending = cx.entity().downgrade();
             self.tasks.push(cx.spawn(async move |_, cx| {
                 cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
@@ -1658,14 +1705,35 @@ mod tests {
         Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
     }
 
-    /// The trigger the hover card seats at: the cursor's point, one pixel
-    /// square — below-start of it hangs the card under the pointer without
-    /// covering the row.
+    /// The hover card's seated anchor: the sidebar pane's right edge plus the
+    /// card gap, top-aligned with the hovered row — regardless of where in
+    /// the row the pointer is, so the card never overlaps the sidebar.
     #[test]
-    fn hover_trigger_is_the_cursor_point() {
-        let at = point_trigger(gpui::point(px(100.0), px(200.0)));
-        assert_eq!(at.origin, gpui::point(px(100.0), px(200.0)));
-        assert_eq!((at.size.width, at.size.height), (px(1.0), px(1.0)));
+    fn row_detail_seat_sits_at_the_sidebar_edge_aligned_to_its_row() {
+        let sidebar = caption(0.0, 0.0, 252.0, 800.0);
+        let row = caption(8.0, 140.0, 236.0, 62.0);
+        assert_eq!(row_detail_seat(&Some(sidebar), &row), Some(gpui::point(px(256.0), px(140.0))));
+    }
+
+    /// A narrow and a wide sidebar seat the card at their own right edge.
+    #[test]
+    fn row_detail_seat_follows_narrow_and_wide_sidebars() {
+        let row = caption(8.0, 140.0, 164.0, 62.0);
+        assert_eq!(
+            row_detail_seat(&Some(caption(0.0, 0.0, 180.0, 800.0)), &row),
+            Some(gpui::point(px(184.0), px(140.0)))
+        );
+        assert_eq!(
+            row_detail_seat(&Some(caption(0.0, 0.0, 400.0, 800.0)), &row),
+            Some(gpui::point(px(404.0), px(140.0)))
+        );
+    }
+
+    /// Before the pane's first prepaint there is no edge, so there is no
+    /// seat — and no card.
+    #[test]
+    fn row_detail_seat_needs_the_pane_edge() {
+        assert_eq!(row_detail_seat(&None, &caption(8.0, 140.0, 236.0, 62.0)), None);
     }
 
     /// Item 1: session rows report hover enter/leave to the caller. A
@@ -1882,16 +1950,36 @@ mod tests {
             gpui::Modifiers::default(),
         );
         // Arm through the real report path: what the row's own hover event
-        // hands the app.
+        // hands the app — the row's bounds, never the pointer.
+        let row_1 = caption(8.0, 140.0, 236.0, 62.0);
         vc.update(|_, cx| {
             harness.update(cx, |h, cx| {
-                h.note_row_hover("s-hover-1".into(), true, gpui::point(px(100.), px(200.)), cx);
+                h.note_row_hover("s-hover-1".into(), true, Some(row_1), cx);
             });
         });
         assert_eq!(
             vc.update(|_, cx| harness.read(cx).hovered_row.clone()).as_deref(),
             Some("s-hover-1"),
             "the report arms the row"
+        );
+        assert_eq!(
+            vc.update(|_, cx| harness.read(cx).hover_trigger),
+            Some(row_1),
+            "the report seats the row's own bounds, never the pointer"
+        );
+        // The seated anchor hangs off the laid-out pane's right edge,
+        // top-aligned with the row: the pane really painted above, so its
+        // edge is tracked.
+        let sidebar = vc
+            .update(|_, cx| harness.read(cx).sidebar_bounds)
+            .expect("the pane prepaint lays the sidebar edge out");
+        assert_eq!(
+            row_detail_seat(&Some(sidebar), &row_1),
+            Some(gpui::point(
+                sidebar.origin.x + sidebar.size.width + px(SESSION_DETAIL_GAP),
+                row_1.origin.y
+            )),
+            "the seat hangs off the sidebar edge at the row's top"
         );
         // Pane renders while GPUI reports no hover: the armed row survives.
         let renders = redraw_sidebar_pane(vc, &harness);
@@ -1914,7 +2002,7 @@ mod tests {
         // The row's own leave closes it.
         vc.update(|_, cx| {
             harness.update(cx, |h, cx| {
-                h.note_row_hover("s-hover-1".into(), false, gpui::point(px(1200.), px(780.)), cx);
+                h.note_row_hover("s-hover-1".into(), false, None, cx);
             });
         });
         let (armed, shown, card) = vc.update(|_, cx| {
@@ -1926,7 +2014,7 @@ mod tests {
         // A second row's enter moves the arm; its card opens past the delay.
         vc.update(|_, cx| {
             harness.update(cx, |h, cx| {
-                h.note_row_hover("s-hover-2".into(), true, gpui::point(px(100.), px(260.)), cx);
+                h.note_row_hover("s-hover-2".into(), true, Some(caption(8.0, 210.0, 236.0, 62.0)), cx);
             });
         });
         assert_eq!(
@@ -1952,13 +2040,14 @@ mod tests {
 
     /// The hover report itself seats the card, across pane renders. A
     /// settled sidebar re-renders nothing, so the delay timer's notify
-    /// reaches only the root (the pane stays cached): the trigger point
-    /// comes from the row's own hover report. The real root as the app
-    /// builds it (the cached pane, the app's own handlers): sweep the
-    /// pointer over a row with no redraw between moves, require the trigger
-    /// set at the pointer, force pane renders, re-sweep to restore the
-    /// resting hover, let `SESSION_DETAIL_DELAY` elapse, and require the
-    /// card builder to return its element (what the root mounts).
+    /// reaches only the root (the pane stays cached): the row's own bounds
+    /// come from the row's hover report. The real root as the app builds it
+    /// (the cached pane, the app's own handlers): sweep the pointer over a
+    /// row with no redraw between moves, require the trigger set to the
+    /// row's bounds and the seat hung off the sidebar edge, force pane
+    /// renders, re-sweep to restore the resting hover, let
+    /// `SESSION_DETAIL_DELAY` elapse, and require the card builder to return
+    /// its element (what the root mounts).
     #[gpui::test]
     fn hover_report_seats_the_card_across_pane_renders(cx: &mut TestAppContext) {
         use aui::nav::SESSION_DETAIL_DELAY;
@@ -2079,16 +2168,31 @@ mod tests {
             0,
             "a settled sidebar re-renders on no pointer movement"
         );
-        // The report itself seats the card: the trigger is set, at the
-        // pointer.
+        // The report itself seats the card: the trigger is the row's own
+        // bounds — never the reporting pointer — and the seat hangs off the
+        // laid-out pane's right edge at the row's top.
         let trigger = vc
             .update(|_, cx| harness.read(cx).hover_trigger)
             .expect("the hover report must seat the card's trigger");
+        let sidebar = vc
+            .update(|_, cx| harness.read(cx).sidebar_bounds)
+            .expect("the pane prepaint lays the sidebar edge out");
         assert!(
-            (f32::from(trigger.origin.x) - 100.0).abs() < 2.0
-                && (f32::from(trigger.origin.y) - y).abs() < 2.0,
-            "the trigger sits at the reporting pointer, got {:?} for a report at (100, {y})",
-            trigger.origin
+            f32::from(trigger.origin.x) < 100.0 && f32::from(trigger.size.height) > 1.0,
+            "the trigger is the row's rect, not the reporting pointer, got {trigger:?}"
+        );
+        assert!(
+            f32::from(trigger.origin.y) <= y
+                && y < f32::from(trigger.origin.y) + f32::from(trigger.size.height),
+            "the reporting pointer sits inside the trigger row, got {trigger:?} for a report at (100, {y})"
+        );
+        assert_eq!(
+            row_detail_seat(&Some(sidebar), &trigger),
+            Some(gpui::point(
+                sidebar.origin.x + sidebar.size.width + px(SESSION_DETAIL_GAP),
+                trigger.origin.y
+            )),
+            "the seat hangs off the sidebar edge at the row's top"
         );
         // Pane renders while a row is armed: the renders really happen, and
         // the report path re-arms afterwards. A test draw drops the retained
@@ -2117,10 +2221,13 @@ mod tests {
             .update(|_, cx| harness.read(cx).hover_trigger)
             .expect("the hover report must seat the card's trigger again");
         assert!(
-            (f32::from(trigger.origin.x) - 100.0).abs() < 2.0
-                && (f32::from(trigger.origin.y) - y).abs() < 2.0,
-            "the trigger sits at the reporting pointer, got {:?} for a report at (100, {y})",
-            trigger.origin
+            f32::from(trigger.origin.x) < 100.0 && f32::from(trigger.size.height) > 1.0,
+            "the trigger is the row's rect, not the reporting pointer, got {trigger:?}"
+        );
+        assert!(
+            f32::from(trigger.origin.y) <= y
+                && y < f32::from(trigger.origin.y) + f32::from(trigger.size.height),
+            "the reporting pointer sits inside the trigger row, got {trigger:?} for a report at (100, {y})"
         );
         // Past the delay with still no redraw: the timer opens the card
         // for the still-hovered row, and the builder returns its element.

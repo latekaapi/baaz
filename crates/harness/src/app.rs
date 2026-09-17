@@ -638,9 +638,14 @@ pub struct Harness {
     pub(crate) hover_since: Option<std::time::Instant>,
     /// The hover card is past its delay and showing.
     pub(crate) hover_shown: bool,
-    /// Where the showing card seats: the pointer's point when it opened,
-    /// frozen so the card never chases the mouse.
+    /// Where the showing card seats: the hovered row's own window bounds,
+    /// carried by the row's hover report and frozen so the card never chases
+    /// the mouse. The seat itself hangs off [`Harness::sidebar_bounds`].
     pub(crate) hover_trigger: Option<Bounds<Pixels>>,
+    /// The laid-out sidebar pane's window bounds, from the pane's own
+    /// prepaint in [`Harness::render_sidebar`]: what the hover card's side
+    /// seat hangs off (the pane's right edge plus the card gap).
+    pub(crate) sidebar_bounds: Option<Bounds<Pixels>>,
     /// Capture aid (`row-detail:<id>`): pins the hover card open for one
     /// row, seated at the selected row's bounds — free, no pointer.
     pub(crate) forced_detail: Option<String>,
@@ -766,6 +771,7 @@ impl Harness {
             hover_since: None,
             hover_shown: false,
             hover_trigger: None,
+            sidebar_bounds: None,
             forced_detail: None,
             selected_row_bounds: None,
             hover_trace_last_shown: None,

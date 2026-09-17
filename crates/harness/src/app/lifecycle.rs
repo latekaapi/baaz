@@ -722,11 +722,11 @@ impl Harness {
 
     /// `hover:<session_id>`: capture aid — deliver the selected row's own
     /// hover report, exactly what the row's hover event sends: arms the
-    /// card's delay and seats its trigger at the row's bounds centre (pair
-    /// with `click:` on the same id and a `wait:` past the delay; empty
-    /// means the selected row). A real mouse-move event cannot be
-    /// dispatched from a step — steps run inside a `Harness` update, and
-    /// the row's hover handler updates the entity, which panics
+    /// card's delay and seats it from the row's bounds, the same side seat
+    /// as a real pointer (pair with `click:` on the same id and a `wait:`
+    /// past the delay; empty means the selected row). A real mouse-move
+    /// event cannot be dispatched from a step — steps run inside a `Harness`
+    /// update, and the row's hover handler updates the entity, which panics
     /// re-entrantly (the wheel steps survive it only because their handlers
     /// never touch the entity) — so this makes the report's own call. The
     /// pointer-to-report half lives in the
@@ -746,9 +746,15 @@ impl Harness {
             );
             return;
         }
-        let at = bounds.center();
-        self.note_row_hover(known.clone(), true, at, cx);
-        crate::harness_log!("hover id={known} at={:.0},{:.0}", f32::from(at.x), f32::from(at.y));
+        self.note_row_hover(known.clone(), true, Some(bounds), cx);
+        match crate::sidebar_view::row_detail_seat(&self.sidebar_bounds, &bounds) {
+            Some(seat) => crate::harness_log!(
+                "hover id={known} seat={:.0},{:.0}",
+                f32::from(seat.x),
+                f32::from(seat.y)
+            ),
+            None => crate::harness_log!("hover id={known} no-sidebar-edge"),
+        }
     }
 
     /// `new`: the same as ⌘N, in the current project. `new:<project name>`:
