@@ -82,6 +82,7 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
+//! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `harness: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
 //! | `resize-move:<x>` | move a scripted resize drag through the real divider handler (same log) |
 //! | `resize-end` | end a scripted resize drag through the real divider handler (same log) |
@@ -189,6 +190,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "hidden", run: |this, _, _, cx| this.step_toggle_hidden(cx) },
     WindowVerb { verb: "empty", run: |this, _, _, cx| this.step_toggle_empty(cx) },
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
+    WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
     WindowVerb { verb: "resize-move", run: |this, rest, _, cx| this.step_resize_drag("move", rest, cx) },
     WindowVerb { verb: "resize-end", run: |this, rest, _, cx| this.step_resize_drag("end", rest, cx) },

@@ -357,7 +357,6 @@ impl Harness {
             let now = crate::clock::now_local();
             if !entry.running {
                 entry.running = true;
-                changed = true;
             }
             entry.turn_started = Some(now);
             entry.updated = now;

@@ -29,7 +29,7 @@ use aui_icons::{IconName, Provider};
 use aui_motion::pulse_phase;
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
-    div, prelude::*, px, AnyElement, Bounds, Context, Entity, Focusable, ListOffset, Pixels, Render,
+    div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset, Pixels, Render,
     SharedString, WeakEntity, Window,
 };
 use gpui_kit::base::input::TextareaState;
@@ -257,6 +257,13 @@ pub(crate) struct SidebarRegroupKey {
     show_archived: bool,
 }
 
+/// The hover card's seat for a pointer hover: the cursor's point, so the
+/// card hangs below-start of where the person is pointing — the row's own
+/// click target stays uncovered, exactly as with a row-bounds trigger.
+fn point_trigger(at: gpui::Point<Pixels>) -> Bounds<Pixels> {
+    Bounds { origin: at, size: gpui::Size { width: px(1.0), height: px(1.0) } }
+}
+
 impl Harness {
     /// Re-arm the sidebar pane when its inputs changed (owner round 4 §3).
     ///
@@ -403,6 +410,9 @@ impl Harness {
         // same frame.
         if user_scrolled {
             self.dismiss_group_menu(cx);
+            // A list that moved under an open hover card leaves it
+            // mis-seated: hover cards dismiss on scroll, like group menus.
+            self.close_row_detail();
         }
         // Keep presenting through the tail: a frame every tick while the
         // gesture is open, so the momentum tail is never cut — what the
@@ -426,6 +436,9 @@ impl Harness {
         // text-only height change.
         let rows = flatten_sidebar(&grouping, false);
         self.sync_sidebar_list(&rows, &grouping);
+        // The pointer's row, before anything builds on it: arming never
+        // notifies (this frame is already drawing); opening does.
+        self.poll_sidebar_hover(&grouping, window, cx);
         // The click's target first: the row highlights on the click's own
         // frame, before the new view (or any page) exists.
         let selected =
@@ -433,10 +446,15 @@ impl Harness {
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             // A sidebar click never arms the reveal: the clicked row is
             // under the cursor, hence painted inside the viewport (owner
-            // round 6).
+            // round 6). It always dismisses the hover card: the click is
+            // the row's, not the card's.
+            this.close_row_detail();
+            this.forced_detail = None;
             this.resume_quiet(id.to_string(), window, cx);
         });
         let act = cx.listener(|this: &mut Self, (id, action): &(SharedString, RowAction), window, cx| {
+            this.close_row_detail();
+            this.forced_detail = None;
             match action {
                 RowAction::Rename => this.start_rename(id.to_string(), window, cx),
                 RowAction::Pin => this.toggle_pin(id.to_string(), cx),
@@ -495,7 +513,12 @@ impl Harness {
         // the flattened rows start at the first group. Row bounds follow
         // scrolled rows through the per-frame menu intents below, which is
         // what seats a group menu at its own `…` at any offset.
-        let mut view = virtual_sidebar_view("sessions", Rc::clone(&grouping), self.sidebar_list.clone())
+        // The selected row's bounds, once per frame: what the scripted
+        // hover card seats at. Stored without notifying (the overlay reads
+        // it below on this same frame); only a newly selected id wakes the
+        // pane, for the capture step waiting on it.
+        let selected_report = cx.entity().downgrade();
+        let mut view = virtual_sidebar_view(Self::SIDEBAR_VIEW_ID, Rc::clone(&grouping), self.sidebar_list.clone())
             .row_actions(vec![RowAction::Pin, RowAction::Rename, RowAction::Archive])
             .on_select(move |id, w, cx| select(id, w, cx))
             .on_toggle(move |id, w, cx| toggle(id, w, cx))
@@ -505,6 +528,16 @@ impl Harness {
                 let _ = menu_report.update(cx, |this, cx| {
                     let fresh = !this.group_menu_bounds.contains_key(&id);
                     this.group_menu_bounds.insert(id, bounds);
+                    if fresh {
+                        cx.notify();
+                    }
+                });
+            })
+            .on_selected_prepainted(move |id, bounds, _, cx| {
+                let id = id.to_string();
+                let _ = selected_report.update(cx, |this, cx| {
+                    let fresh = this.selected_row_bounds.as_ref().is_none_or(|(known, _)| *known != id);
+                    this.selected_row_bounds = Some((id, bounds));
                     if fresh {
                         cx.notify();
                     }
@@ -579,6 +612,80 @@ impl Harness {
             .into_any_element()
     }
 
+    /// Option B's hover detail, at the window root: the full picture for
+    /// the hovered row (past its delay) or the scripted row
+    /// (`row-detail:<id>`), through the library's
+    /// `anchored_session_detail` — below-start of the trigger, flipping
+    /// above near the window bottom and sliding inside, in `popover_layer`
+    /// so it escapes the sidebar's clipping and paints above everything.
+    ///
+    /// The card never takes focus (no focus handle, no key context — the
+    /// library builds none) and never covers its own row (below-start of
+    /// the trigger), so the row's click still lands; a click that does land
+    /// on the card only dismisses it. It closes on leave, scroll and click
+    /// through [`Self::close_row_detail`] and the listeners that call it.
+    pub(crate) fn render_row_detail(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, trigger) = match self.forced_detail.clone() {
+            Some(id) => {
+                let (known, bounds) = self.selected_row_bounds.clone()?;
+                if known != id {
+                    return None;
+                }
+                (id, bounds)
+            }
+            None => {
+                if !self.hover_shown {
+                    return None;
+                }
+                (self.hovered_row.clone()?, self.hover_trigger?)
+            }
+        };
+        let visible = self.visible_sessions(cx);
+        // The visible rows first, then the whole list: a card pinned to a
+        // filtered-out row still names it honestly.
+        let entry = visible
+            .iter()
+            .find(|entry| entry.id == id)
+            .or_else(|| self.sessions.iter().find(|entry| entry.id == id))?;
+        let now = crate::sidebar::grouping_now(&visible);
+        let data = entry.detail_data(now);
+        let card_id: ElementId = (ElementId::from("row-detail"), SharedString::from(id.clone())).into();
+        let mut card = aui::nav::session_detail(card_id);
+        if let Some(title) = data.title {
+            card = card.title(title);
+        }
+        if let Some(ask) = data.ask {
+            card = card.ask(ask);
+        }
+        if let Some(reply) = data.reply {
+            card = card.reply(reply);
+        }
+        if let Some(status) = data.status {
+            card = card.status(status.kind, status.detail);
+        }
+        if let Some(project) = data.project {
+            card = card.project(project);
+        }
+        if let Some(branch) = data.branch {
+            card = card.branch(branch);
+        }
+        if let Some(turns) = data.turns {
+            card = card.turns(turns);
+        }
+        if let Some(updated) = data.updated {
+            card = card.updated(updated);
+        }
+        // `anchored_session_detail` takes the card itself, so no wrapper
+        // rides along: the card carries no click handler of its own, and a
+        // click that lands on it is a no-op rather than a row action. That
+        // corner is nearly unreachable — reaching the card means leaving
+        // the row, and leaving closes it — while every row click still
+        // lands on its row (the card hangs below-start of the trigger,
+        // never over it) and dismisses through the select/action
+        // listeners; leave and scroll close through the poll above.
+        Some(aui::nav::anchored_session_detail(trigger, card).into_any_element())
+    }
+
     /// What a regroup or filter change looks like to the virtual list
     /// (owner round 6): the mode and the three list-management toggles.
     /// Group open/close and fold expand are NOT in the key — they splice
@@ -647,6 +754,135 @@ impl Harness {
             self.sidebar_list.item_count(),
             rows.len()
         );
+    }
+
+    /// The id `render_sidebar` hands the virtual list: the hover poll below
+    /// re-derives row element ids under this same root, so the two must
+    /// never disagree.
+    pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
+
+    /// One rendered session row's element id, mirroring the library's own
+    /// key recipe (`render_flat_row` in `aui::nav::virtual_sidebar`): the
+    /// view id, the group key, the session id. Group keys: the group id for
+    /// status/project rows, `"pinned"` for the lifted pinned section, and
+    /// `"date-{n}"` counting only buckets that still have rows for date
+    /// rows — exactly as the flattener mints them, open groups only (a
+    /// closed group's rows are never built, so they can never be hovered).
+    ///
+    /// The app re-derives rather than the library reporting hovers because
+    /// the elements belong to the library while hover ownership belongs to
+    /// the app. The coupling is one-directional and fail-silent: if the
+    /// library ever reseats its keys, the poll reads `hovered: false`
+    /// everywhere and the card never opens.
+    pub(crate) fn sidebar_hover_rows(grouping: &Grouping) -> Vec<(String, ElementId)> {
+        let view: ElementId = Self::SIDEBAR_VIEW_ID.into();
+        let mut out = Vec::new();
+        let mut push = |key: ElementId, id: &SharedString| {
+            let row: ElementId = (key, id.clone()).into();
+            out.push((id.to_string(), row));
+        };
+        match grouping {
+            Grouping::Status(groups) => {
+                for group in groups.iter().filter(|g| g.open) {
+                    let key: ElementId = (view.clone(), group.id.clone()).into();
+                    for session in &group.sessions {
+                        push(key.clone(), &session.id);
+                    }
+                }
+            }
+            Grouping::Project(groups) => {
+                for group in groups.iter().filter(|g| g.open) {
+                    let key: ElementId = (view.clone(), group.id.clone()).into();
+                    for session in &group.sessions {
+                        push(key.clone(), &session.id);
+                    }
+                }
+            }
+            Grouping::Date(groups) => {
+                let pinned: ElementId = (view.clone(), "pinned").into();
+                for group in groups.iter() {
+                    for session in group.sessions.iter().filter(|s| s.pinned) {
+                        push(pinned.clone(), &session.id);
+                    }
+                }
+                let mut dated = 0usize;
+                for group in groups.iter() {
+                    if group.sessions.iter().any(|s| !s.pinned) {
+                        let key: ElementId =
+                            (view.clone(), SharedString::from(format!("date-{dated}"))).into();
+                        for session in group.sessions.iter().filter(|s| !s.pinned) {
+                            push(key.clone(), &session.id);
+                        }
+                        dated += 1;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Which session row the pointer is over, if any, read off the rows'
+    /// own interaction state. One frame behind the pointer (rows report
+    /// into window state when they build; the poll reads it here), which a
+    /// hover card never notices.
+    fn polled_hover_row(&self, grouping: &Grouping, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
+        for (id, row) in Self::sidebar_hover_rows(grouping) {
+            let (_, flags) = aui::util::interaction_flags(row, window, cx);
+            if flags.hovered {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Fold the poll above into the hover state: a new row arms the delay,
+    /// the same row past it opens the card, no row (or a wheel, which
+    /// clears through [`Self::close_row_detail`]) closes it. Runs inside
+    /// the pane's render, so arming never notifies — the pane is already
+    /// drawing — while opening does: the card itself renders at the root.
+    /// The spawned timer is the reliable opener for a still pointer (no
+    /// frames render while nothing moves); the in-render opening covers a
+    /// pointer that keeps travelling past the delay.
+    fn poll_sidebar_hover(&mut self, grouping: &Grouping, window: &mut Window, cx: &mut Context<Self>) {
+        let hovered = self.polled_hover_row(grouping, window, cx);
+        if hovered != self.hovered_row {
+            self.hovered_row = hovered.clone();
+            self.hover_since = hovered.as_ref().map(|_| std::time::Instant::now());
+            self.hover_shown = false;
+            self.hover_trigger = None;
+            if let Some(id) = hovered {
+                let pending = cx.entity().downgrade();
+                self.tasks.push(cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
+                    let _ = pending.update(cx, |this, cx| {
+                        if this.hovered_row.as_deref() == Some(&id) && !this.hover_shown {
+                            this.hover_shown = true;
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
+            return;
+        }
+        if hovered.is_some() {
+            self.hover_trigger = Some(point_trigger(window.mouse_position()));
+            if !self.hover_shown
+                && self.hover_since.is_some_and(|since| since.elapsed() >= aui::nav::SESSION_DETAIL_DELAY)
+            {
+                self.hover_shown = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Close the hover card: pointer left, wheel moved, row clicked, card
+    /// clicked. The scripted pin ([`Harness::forced_detail`]) is not hover
+    /// state and survives this; clicks clear it where they land.
+    pub(crate) fn close_row_detail(&mut self) {
+        self.hovered_row = None;
+        self.hover_since = None;
+        self.hover_shown = false;
+        self.hover_trigger = None;
     }
 
     /// Steer the virtual list to the outside-activated session, moving the
@@ -1421,6 +1657,50 @@ mod tests {
 
     fn caption(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
+    }
+
+    /// The hover poll's row ids mirror the library's key recipe: the view
+    /// id, the group key, the session id — `date-{n}` counting only buckets
+    /// that still have rows, closed groups contributing nothing.
+    #[test]
+    fn hover_row_ids_mirror_the_library_key_recipe() {
+        use aui::nav::{DateGroup, ProjectGroup, SessionSummary, StatusGroup};
+        use aui_tokens::AgentState;
+        let row = |id: &str| SessionSummary::new(id, id, AgentState::Idle, "now");
+        // Date: the pinned session lifts under `pinned`, and the bucket
+        // index skips the bucket left with only pinned rows.
+        let grouping = Grouping::Date(vec![
+            DateGroup::new("Today", vec![row("a").pinned(), row("b")]),
+            DateGroup::new("Yesterday", vec![row("c").pinned()]),
+            DateGroup::new("Earlier", vec![row("d")]),
+        ]);
+        let ids: Vec<(String, ElementId)> = Harness::sidebar_hover_rows(&grouping);
+        let view: ElementId = Harness::SIDEBAR_VIEW_ID.into();
+        let key = |group: &str| -> ElementId { (view.clone(), SharedString::from(group)).into() };
+        let at = |group: &str, id: &str| -> (String, ElementId) {
+            (id.to_owned(), (key(group), SharedString::from(id)).into())
+        };
+        assert_eq!(ids, vec![at("pinned", "a"), at("pinned", "c"), at("date-0", "b"), at("date-1", "d")]);
+        // Project: closed groups contribute no rows; the key is the group id.
+        let mut shut = ProjectGroup::new("p-shut", "Shut", "1");
+        shut.sessions = vec![row("f")];
+        let grouping = Grouping::Project(vec![ProjectGroup::new("p-open", "Open", "1").open(vec![row("e")]), shut]);
+        let ids = Harness::sidebar_hover_rows(&grouping);
+        assert_eq!(ids, vec![at("p-open", "e")]);
+        // Status: same group-id keys, open groups only.
+        let grouping = Grouping::Status(vec![StatusGroup::new("s-done", "Done", "1", vec![row("g")])]);
+        let ids = Harness::sidebar_hover_rows(&grouping);
+        assert_eq!(ids, vec![at("s-done", "g")]);
+    }
+
+    /// The trigger the hover card seats at: the cursor's point, one pixel
+    /// square — below-start of it hangs the card under the pointer without
+    /// covering the row.
+    #[test]
+    fn hover_trigger_is_the_cursor_point() {
+        let at = point_trigger(gpui::point(px(100.0), px(200.0)));
+        assert_eq!(at.origin, gpui::point(px(100.0), px(200.0)));
+        assert_eq!((at.size.width, at.size.height), (px(1.0), px(1.0)));
     }
 
     #[test]
