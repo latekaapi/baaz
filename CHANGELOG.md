@@ -11,6 +11,24 @@ the `aui` component library.
 - **Chat over Muse Code.** Drives `muse serve` as a child process and speaks
   MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does
   (device code or an API key).
+- **The app is called Baaz.** The crate, the binary, the bundle
+  (`sh.baaz.app`) and the `BAAZ_*` environment variables all carry the name.
+  A state directory written under the old name is carried onto
+  `~/Library/Application Support/baaz` at startup: the whole tree moves when
+  nothing is there yet, and when something already is — an early write such
+  as the tier probe can create it before the migration runs — only the
+  entries it is missing are filled in, nothing is overwritten, and the old
+  directory is left in place.
+- **A mascot on three surfaces.** The boot hero, the new-session composer
+  and critical error dialogs. The composer mascot is one of five variants,
+  picked by a seed that is stable per session so it never changes on a
+  repaint, and cycles on click; it appears with a short fade and settle,
+  breathes while idle, and lifts on hover. Every one of those rests at zero
+  and asks for no frames while the window is inactive or the system asks for
+  reduced motion, so an idle window costs nothing. It stands down whenever a
+  banner or the queue needs the same strip. Error dialogs pick their sprite
+  by what failed — disconnected for connectivity, blocked for limit and
+  permission refusals — and toasts stay text-only.
 
 ### Sessions & sidebar
 
@@ -66,7 +84,11 @@ the `aui` component library.
 
 - **Streaming transcript.** Markdown, reasoning, tool calls grouped and
   folded into readable cards, per-turn token counts, a context meter with
-  compaction, and a queue strip for steering a running turn.
+  compaction, and a queue strip for steering a running turn. A queued
+  message can be edited back into the composer, dropped, or sent straight
+  into the running turn; a send that cannot be delivered — the turn ended,
+  the server refused it, another window reclaimed the row — puts the words
+  back in the composer rather than losing them.
 - **Approvals, questions and errors.** Multi-stage approval cards with the
   server's own choices and policy/judge resolutions, question cards with
   previews and a timeout, error banners with retry, plans and todos.
