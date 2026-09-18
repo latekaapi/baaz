@@ -207,6 +207,11 @@ impl Harness {
             .filter(|entry| {
                 !entry.hidden
                     && !entry.archived
+                    // Never sweep a provisional row: its turn count is
+                    // unknown, and hiding it would hide it permanently past
+                    // the wire answering — the same reason the open session
+                    // is excluded below.
+                    && !entry.provisional
                     && entry.is_empty()
                     && !active.as_deref().is_some_and(|id| id == entry.id)
             })
@@ -553,8 +558,16 @@ impl Harness {
             .filter(|entry| self.show_archived || !entry.archived)
             .filter(|entry| {
                 // An archived row shown on request is explicitly asked for;
-                // the empty filter must not swallow it back.
-                (self.show_archived && entry.archived) || self.show_empty || !entry.is_empty()
+                // the empty filter must not swallow it back. A provisional
+                // row's emptiness is unknown (the index knows no turn count),
+                // so the empty filter leaves it alone — hidden and archived
+                // still apply above, from the same overrides the real rows
+                // get. Only labelled index entries ever become provisional,
+                // which is what keeps the index's own zero-turn rows out.
+                (self.show_archived && entry.archived)
+                    || self.show_empty
+                    || entry.provisional
+                    || !entry.is_empty()
             })
             .cloned()
             .collect();
@@ -589,7 +602,7 @@ impl Harness {
         let was_boot = !self.sessions_loaded || !self.index_loaded;
         let grouping = Rc::new(match self.effective_group_by() {
             crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
-            crate::layout::GroupBy::Project if self.sessions_loaded && self.index_loaded => {
+            crate::layout::GroupBy::Project if self.index_loaded => {
                 let closed: std::collections::HashSet<String> =
                     self.layout.closed_groups.iter().cloned().collect();
                 let expanded: std::collections::HashSet<String> =
@@ -603,12 +616,13 @@ impl Harness {
                 };
                 sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, &self.layout, now)
             }
-            // The list or the index hasn't landed yet: a flat date view,
-            // exactly what the window showed while loading before projects
-            // existed. Row visibility comes from the index, so project
-            // groups debut only with their rows — the collapse measures
+            // The index hasn't landed yet: a flat date view, exactly what
+            // the window showed while loading before projects existed.
+            // Once the index lands the rows are provisional but real, so
+            // project groups debut with them — the collapse measures
             // content on its first frame instead of opening from an empty
-            // box it never re-measures.
+            // box it never re-measures, and the grouping already has its
+            // final shape when the wire rows replace them.
             crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
         });
         crate::log::boot_mark(&format!(

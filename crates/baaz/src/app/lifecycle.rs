@@ -285,11 +285,23 @@ impl Harness {
                 this.index_loaded = true;
                 this.index = index;
                 let at = std::time::Instant::now();
-                this.rejoin();
+                if this.sessions_loaded {
+                    this.rejoin();
+                } else {
+                    // The wire has not answered yet: paint the sidebar from
+                    // the index now (provisional rows, no meta line) instead
+                    // of holding an empty column until `session/list` lands.
+                    // The list reply replaces them wholesale.
+                    this.install_provisional_rows();
+                }
                 crate::log::boot_mark(&format!(
                     "rejoin-done rows={} in={}ms",
                     this.sessions.len(),
                     at.elapsed().as_millis()
+                ));
+                crate::log::boot_mark(&format!(
+                    "provisional-rows rows={}",
+                    this.sessions.iter().filter(|e| e.provisional).count()
                 ));
                 this.rebuild_search_index(cx);
                 crate::log::boot_mark("index-loaded");
@@ -308,6 +320,18 @@ impl Harness {
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
+        if self.sessions_list_in_flight {
+            // A fetch is already running — at boot the probe answer's fetch
+            // is still out when the boot session's `session/start` lands and
+            // refreshes the list behind it. Note the refresh and let the
+            // landing reply issue the one follow-up, instead of fetching
+            // twice and applying the same reply twice (rejoining every row
+            // and rebuilding the grouping and the search index for nothing).
+            crate::log::boot_mark("session/list-coalesced");
+            self.sessions_list_stale = true;
+            return;
+        }
+        self.sessions_list_in_flight = true;
         crate::log::boot_mark("session/list-sent");
         let projects = self.projects.clone();
         let work = move || {
@@ -363,11 +387,16 @@ impl Harness {
                 Err(_) => 0,
             };
             crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
+            this.sessions_list_in_flight = false;
+            // The first reply replaces the provisional rows wholesale (see
+            // `install_provisional_rows`); a later reply whose rows match
+            // what is already shown changes nothing and must cost nothing —
+            // no rejoin, no regroup, no title reads, no search rebuild.
+            let already = this.sessions_loaded;
             this.sessions_loaded = true;
             crate::log::boot_mark("sessions-loaded");
             if let Ok((sessions, branches, availability)) = result {
                 this.projects.refresh_availability(&availability);
-                this.invalidate_list();
                 let projects = this.projects.clone();
                 let join_at = std::time::Instant::now();
                 // One cache over the whole loop: each distinct workspace
@@ -396,16 +425,35 @@ impl Harness {
                     join_at.elapsed().as_millis(),
                     wire.len()
                 ));
-                // Local rows whose id the reply does not contain survive;
-                // a local whose id is listed is replaced by its wire row.
-                this.sessions = sidebar::merge_session_list(wire, &this.sessions);
-                this.branches = branches;
-                this.derive_titles(cx);
-                crate::log::boot_mark(&format!(
-                    "list-applied rows={} in={}ms",
-                    this.sessions.len(),
-                    reply_at.elapsed().as_millis()
-                ));
+                // Provisional rows are never local, so they never survive
+                // this comparison: the first reply always applies wholesale.
+                // (`SessionEntry` equality includes the provisional flag.)
+                let unchanged = already && sidebar::list_apply_unchanged(&this.sessions, &wire);
+                if unchanged {
+                    // The rows match, but the branch answers are still fresh
+                    // data: keep them (assigning invalidates nothing, so the
+                    // grouping and the search index stay untouched).
+                    this.branches = branches;
+                    crate::log::boot_mark(&format!(
+                        "list-applied rows={} unchanged in={}ms",
+                        this.sessions.len(),
+                        reply_at.elapsed().as_millis()
+                    ));
+                } else {
+                    this.invalidate_list();
+                    // Local rows whose id the reply does not contain survive;
+                    // a local whose id is listed is replaced by its wire row.
+                    // Provisional rows are never local: the first reply drops
+                    // every one of them here.
+                    this.sessions = sidebar::merge_session_list(wire, &this.sessions);
+                    this.branches = branches;
+                    this.derive_titles(cx);
+                    crate::log::boot_mark(&format!(
+                        "list-applied rows={} in={}ms",
+                        this.sessions.len(),
+                        reply_at.elapsed().as_millis()
+                    ));
+                }
             }
             this.open_boot_session(window, cx);
             // Re-arm the pane in the same update as the data: the column is
@@ -414,6 +462,12 @@ impl Harness {
             // window may not take for a long while — before the first rows paint.
             this.sync_sidebar_pane(cx);
             cx.notify();
+            if this.sessions_list_stale {
+                // A refresh asked while this fetch was running: one
+                // follow-up, not a dropped update.
+                this.sessions_list_stale = false;
+                this.load_sessions(cx);
+            }
         });
     }
 
@@ -861,6 +915,48 @@ impl Harness {
         if let Some(session_id) = self.active_id(cx) {
             self.open_archive_dialog(session_id, cx);
         }
+    }
+
+    /// Paint the sidebar from the local index while `session/list` is still
+    /// in flight: one provisional row per labelled index entry, through
+    /// [`SessionEntry::provisional`]. Only when the wire has not answered
+    /// yet — the list reply replaces these wholesale
+    /// ([`sidebar::merge_session_list`] keeps local rows only, and
+    /// provisional rows are never local), so the end state is exactly what
+    /// the wire joined. Rows already present (a local row placed at
+    /// `session/start` before anything landed) keep their seat: an index
+    /// entry for an id already in the list builds nothing.
+    pub(crate) fn install_provisional_rows(&mut self) {
+        self.invalidate_list();
+        let mut canon = crate::projects::CanonicalCache::default();
+        let projects = self.projects.clone();
+        let pending = self.titles_pending.clone();
+        let sides = self.side_sessions.clone();
+        let mut rows = Vec::new();
+        for (session_id, index) in &self.index {
+            if self.sessions.iter().any(|e| e.id == *session_id) {
+                continue;
+            }
+            let Some(mut entry) = sidebar::SessionEntry::provisional(
+                session_id,
+                index,
+                self.overrides.get(session_id),
+                &projects,
+                &mut canon,
+            ) else {
+                continue;
+            };
+            // Pending rows read pending; side sessions read hidden — the
+            // same flags the joined wire rows get, before their overrides
+            // land.
+            Self::apply_title_flags(&pending, &sides, &mut entry);
+            rows.push(entry);
+        }
+        // Newest first, like [`Self::visible_sessions`]: the grouping reads
+        // this order, and the palette takes its head from it.
+        rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
+        self.sessions.retain(|entry| entry.local);
+        self.sessions.extend(rows);
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,

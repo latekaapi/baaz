@@ -504,13 +504,24 @@ pub struct Harness {
     /// each `session/list` off the UI thread.
     pub(crate) branches: HashMap<String, String>,
     /// Whether the session list has landed at least once. The sidebar draws
-    /// project groups only after it and the index both have: groups debut
-    /// with their rows, so the collapse measures content on its first frame
-    /// instead of opening from an empty box it never re-measures.
+    /// project groups once the index has: provisional rows debut with their
+    /// groups, so the collapse measures content on its first frame instead
+    /// of opening from an empty box it never re-measures.
     pub(crate) sessions_loaded: bool,
     /// Whether the session index has landed at least once: row descriptions
     /// (and with them, row visibility) come from it.
     pub(crate) index_loaded: bool,
+    /// A `session/list` fetch is in flight: a second [`Self::load_sessions`]
+    /// meanwhile (at boot the boot session's `session/start` lands while
+    /// the probe answer's fetch is still out) sets
+    /// [`Self::sessions_list_stale`] instead of fetching — the reply below
+    /// issues the one follow-up. Two overlapping fetches used to apply the
+    /// same reply twice, rejoining 337 rows and rebuilding the grouping and
+    /// the search index for nothing.
+    sessions_list_in_flight: bool,
+    /// A refresh was asked for while [`Self::sessions_list_in_flight`]: the
+    /// landing reply reloads once rather than dropping it.
+    sessions_list_stale: bool,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
@@ -731,6 +742,8 @@ impl Harness {
             branches: HashMap::new(),
             sessions_loaded: false,
             index_loaded: false,
+            sessions_list_in_flight: false,
+            sessions_list_stale: false,
             layout: layout::read(),
             show_hidden: false,
             show_empty: false,
