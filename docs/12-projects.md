@@ -37,11 +37,11 @@ a folder.
 - `session/list` without `workspaceRoot` returns every session, paged (`limit` max 200,
   `nextCursor`), each row carrying its own `workspace_root`. Free.
 - `session/start { workspaceRoot }` opens a session anywhere; one child multiplexes.
-- Worktrees are CLI-only (`muse -w`); `session/start` has no worktree parameter. A harness
-  worktree means `git worktree add` by the harness and the worktree path as `workspaceRoot`.
+- Worktrees are CLI-only (`muse -w`); `session/start` has no worktree parameter. A Baaz
+  worktree means `git worktree add` by Baaz and the worktree path as `workspaceRoot`.
 - Muse's index (`session-index.db`, read-only) has `workspace_root` and `git_branch` per
-  session; the harness's reader selects neither yet.
-- The harness's `SessionEntry::join` drops `Session.workspace_root`; the library's
+  session; Baaz's reader selects neither yet.
+- Baaz's `SessionEntry::join` drops `Session.workspace_root`; the library's
   `sidebar_view` already renders `Grouping::Project`; `prompt_for_paths` is in gpui-pre and
   unit-testable; ⌘O and ⌘⇧O are unbound; `history.json` is already keyed by workspace;
   `search.db` has no workspace column; the library has no label-colour ramp.
@@ -54,7 +54,7 @@ Taken 2026-09-13.
   inside each group, a Date/Project toggle in the Sessions view menu. "Current project" is
   the open session's project, else the last used.
 - **D31 Worktrees.** A follow-on slice. This slice stores an explicit project id on every
-  session the harness starts, so a worktree session (whose folder differs from its
+  session Baaz starts, so a worktree session (whose folder differs from its
   project's root) slots in later without regrouping.
 - **D32 Unadopted workspaces.** Sessions whose workspace is not an added project show under
   one muted, collapsed group "Other workspaces", each row tagged with its folder name. The
@@ -94,7 +94,7 @@ Taken 2026-09-13.
 
 ## 4. Data model
 
-`~/Library/Application Support/harness/projects.json` (atomic write, `HARNESS_STATE_DIR`
+`~/Library/Application Support/baaz/projects.json` (atomic write, `BAAZ_STATE_DIR`
 honoured), camelCase:
 
 ```json
@@ -104,8 +104,8 @@ honoured), camelCase:
   "projects": [
     {
       "id": "6d0e…",
-      "root": "/Users/alex/Projects/harness",
-      "name": "harness",
+      "root": "/Users/alex/Projects/baaz",
+      "name": "baaz",
       "colour": 3,
       "pinned": false,
       "addedAt": "2026-09-13T10:00:00Z",
@@ -150,10 +150,10 @@ workspaces". Never by prefix, never by the current project.
 ## 6. Build order
 
 Built in three steps: first the library component (the label ramp, project mark, group-row
-additions, swatch menu rows, rail tint, palette mark, gallery entries), then the harness data
+additions, swatch menu rows, rail tint, palette mark, gallery entries), then Baaz data
 layer (store, index column, unfiltered paged list, project resolution, grouping, current
 project and the `workspace()` audit, per-project defaults, per-root `@` index, search column
-— data only, the window still drawing the old way), then the harness UI (the sidebar groups,
+— data only, the window still drawing the old way), then Baaz UI (the sidebar groups,
 header crumb and menu, Projects palette and folder panel, removal, rail tint, search badges
 and scope, steps verbs, a sidebar fixture for reproducible captures, docs).
 
@@ -173,7 +173,7 @@ codebase and bent.
 
 - **Group-row menu anchor.** The design called for the menu measured under the
   row's `…` button. The library reports no per-row geometry for a group row,
-  and the harness does not fork the library for it — so the row menu anchors
+  and Baaz does not fork the library for it — so the row menu anchors
   right-aligned to the sidebar's content edge under the header, by the same
   scroll-bounds math as the view menu, clamped into the window. Deterministic
   in captures; one step removed from the row in life.
@@ -215,7 +215,7 @@ codebase and bent.
 - **The panel needed two fixes, found by log.** Clicks never reached any
   palette row — the scrim dismissed on mouse-down, so the release found no
   row — and the panel could open behind an inactive app (`cx.activate(true)`
-  first). The scrim now dismisses on click. The three `harness:` lines
+  first). The scrim now dismisses on click. The three `baaz:` lines
   (select, entry, resolution) stay.
 - **Folding holds back past five, not past the open session.** Pinned rows
   never count toward the five; the open session appends past the cut rather

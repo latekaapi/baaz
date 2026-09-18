@@ -39,7 +39,7 @@ decides what that costs. Free: `--replay <capture>`, `--no-connect`,
 session:
 
 ```sh
-cargo run -p harness -- --print-tier
+cargo run -p baaz -- --print-tier
 ```
 
 See `docs/06-billing.md` for the full picture.
@@ -48,13 +48,13 @@ See `docs/06-billing.md` for the full picture.
 
 | var | effect |
 |---|---|
-| `HARNESS_STATE_DIR` | Overrides where the harness's own state lives (sessions metadata, search index, settings, tier cache — everything under `~/Library/Application Support/harness` normally). **Always set this to a fresh `$(mktemp -d)` for any scripted or automated run** — otherwise it reads and writes your real local state. |
-| `HARNESS_MUSE` | The `muse` binary to spawn (defaults to `muse` on `PATH`). |
-| `HARNESS_TRACE=1` | Verbose switch/state tracing to stderr. |
-| `HARNESS_HOVER_TRACE=1` | Hover-card diagnosis tracing to stderr (`harness-hover:` lines for the row report, `note_row_hover`, the delay timer, card-builder result changes, and the rows' GPUI hover state at most once per second). Off by default and cheap when off. |
-| `HARNESS_FRAME_STATS=1` | Records per-frame render timing (see `--bench` and `docs/02-app.md`). |
-| `HARNESS_FRAME_TRACE=1` | Traces the normal window's paint cadence to `$HARNESS_STATE_DIR/frame-trace.log`, so a scripted gesture on `--replay` becomes a measurement (`scripts/frame-trace.py`). |
-| `HARNESS_DETERMINISTIC=1` | Freezes anything that would otherwise vary run to run (relative timestamps, etc.), so a `--screenshot` capture is byte-identical across runs. Used throughout `scripts/captures.sh`. |
+| `BAAZ_STATE_DIR` | Overrides where Baaz's own state lives (sessions metadata, search index, settings, tier cache — everything under `~/Library/Application Support/baaz` normally). **Always set this to a fresh `$(mktemp -d)` for any scripted or automated run** — otherwise it reads and writes your real local state. |
+| `BAAZ_MUSE` | The `muse` binary to spawn (defaults to `muse` on `PATH`). |
+| `BAAZ_TRACE=1` | Verbose switch/state tracing to stderr. |
+| `BAAZ_HOVER_TRACE=1` | Hover-card diagnosis tracing to stderr (`baaz-hover:` lines for the row report, `note_row_hover`, the delay timer, card-builder result changes, and the rows' GPUI hover state at most once per second). Off by default and cheap when off. |
+| `BAAZ_FRAME_STATS=1` | Records per-frame render timing (see `--bench` and `docs/02-app.md`). |
+| `BAAZ_FRAME_TRACE=1` | Traces the normal window's paint cadence to `$BAAZ_STATE_DIR/frame-trace.log`, so a scripted gesture on `--replay` becomes a measurement (`scripts/frame-trace.py`). |
+| `BAAZ_DETERMINISTIC=1` | Freezes anything that would otherwise vary run to run (relative timestamps, etc.), so a `--screenshot` capture is byte-identical across runs. Used throughout `scripts/captures.sh`. |
 
 ## The scripting surface: `--replay`, `--steps`, `--screenshot`
 
@@ -62,7 +62,7 @@ The same flags back the checked-in fixtures, the docs' screenshots, and any
 new capture you add.
 
 ```sh
-HARNESS_STATE_DIR="$(mktemp -d)" cargo run -p harness -- \
+BAAZ_STATE_DIR="$(mktemp -d)" cargo run -p baaz -- \
   --replay fixtures/msp/transcript-approve.jsonl \
   --theme dark \
   --steps 'choose:1' \
@@ -100,7 +100,7 @@ HARNESS_STATE_DIR="$(mktemp -d)" cargo run -p harness -- \
   any of that, a scripted capture waits up to 30 s for the app to become
   able to run the list at all, then up to 5 s for the run to start; a
   script that never becomes runnable, or never starts, is a stderr line
-  (`harness: steps never became ready …`, `harness: steps never started
+  (`baaz: steps never became ready …`, `baaz: steps never started
   …`), never a quiet screenshot of an empty shell passed off as success.
 - On a live connection, a `--screenshot` run also waits, bounded (up to two
   minutes, logged to stderr while it waits), for no turn to still be
@@ -127,5 +127,5 @@ for a real pointer (pair with `click:` on the same id and a `wait:` past
 the delay; empty means the selected row). A scripted resize drag runs
 through the real divider handler as `resize-begin:<x>` / `resize-move:<x>` /
 `resize-end`, or frame-paced as `resize-sweep:<to_w,step_px>`; the full verb
-tables live in `crates/harness/src/steps.rs` with the composer verbs in
+tables live in `crates/baaz/src/steps.rs` with the composer verbs in
 `docs/03-composer.md` and the approval verbs in `docs/04-approvals.md`.

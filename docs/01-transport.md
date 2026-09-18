@@ -205,7 +205,7 @@ the schema and a capture disagree, the capture wins and it is written down.
    So **anything that needs a transcript runs durable**: the probe and
    `live_echo` both do, and both leave a real (tiny, echo-provider) session in
    `~/.local/share/muse/sessions`. `MuseConfig::no_session_log` still exists,
-   with the finding written on it; `HARNESS_PROBE_EPHEMERAL=1` makes the probe
+   with the finding written on it; `BAAZ_PROBE_EPHEMERAL=1` makes the probe
    reproduce the silence.
 
 9. **Five fields the schema calls optional are always on the wire, sometimes as
@@ -256,7 +256,7 @@ the schema and a capture disagree, the capture wins and it is written down.
     `failed` outcome instead.
 
 15. **A loaded session refuses its second host, and only its second host.**
-    Under muse 1.2.1 two harness processes can list the same session, but the
+    Under muse 1.2.1 two Baaz processes can list the same session, but the
     second one's `session/resume` for it is rejected with `-32021` (`session
     … is already in use`, `data.kind: sessionInUse`) while the first keeps
     its lease — verified live with `--session <id>` on both and the second's
@@ -275,12 +275,12 @@ the schema and a capture disagree, the capture wins and it is written down.
     `SessionViewHealth(ChangedParams)`, the `skill/*` catalog family, the
     `usage/read` + `usage/changed` subscription-usage family, the `task/*`
     background-task family, and `workflow/cancel` + `workflow/childControl`.
-    None of them are wired into the harness's own request/notification
+    None of them are wired into Baaz's own request/notification
     dispatch yet — they round-trip in `crates/muse-client/tests/
     schema_roundtrip.rs` (`every_published_method_has_a_dispatch_arm`) and fold
     through `muse-adapter`'s existing "unhandled method" arm
-    (`crates/muse-adapter/src/fold.rs`), same as any other notification the
-    harness does not yet act on. Verified live: connecting to the 1.3.0
+    (`crates/muse-adapter/src/fold.rs`), same as any other notification Baaz
+    does not yet act on. Verified live: connecting to the 1.3.0
     binary no longer logs `FingerprintMismatch`, and `--session <id>` opens a
     session's full transcript unchanged.
 
@@ -366,7 +366,7 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 ### The probe
 
-`harness-probe` (spawned `muse serve --trust-workspace`, started an **echo**
+`baaz-probe` (spawned `muse serve --trust-workspace`, started an **echo**
 session, listed models, sent one turn, and printed every folded `Delta` as
 JSON) was removed 2026-09-12; git history has it. Its docstring's "the echo
 provider is free" claim was wrong (D19: `--provider echo` picks a route, not

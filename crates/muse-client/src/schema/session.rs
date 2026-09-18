@@ -78,7 +78,7 @@ pub struct Session {
     pub model_id: Option<String>,
     /// The durable allocated session name (tdd SS2.4/SS2.14.1, ADR 27598 D2/D4). **Additive-optional**:
     /// present when the serving path holds an allocated name, omitted otherwise — absent is never
-    /// fabricated. Authoritative and renameable via `session/rename` (not yet wired: the harness
+    /// fabricated. Authoritative and renameable via `session/rename` (not yet wired: Baaz
     /// reads it, it never sends the rename).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -590,7 +590,7 @@ pub struct SessionReasoningEffortChangedParams {
 /// `session/rename` params (tdd SS2.14.2): set or change the durable allocated session name
 /// through the runtime `session_name` command. One writer; withheld under the ephemeral profile.
 ///
-/// Typed but not wired: the harness reads [`Session::name`], it never sends the rename.
+/// Typed but not wired: Baaz reads [`Session::name`], it never sends the rename.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRenameParams {

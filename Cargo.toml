@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter", "crates/harness"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +10,7 @@ license = "MIT"
 authors = ["latekaapi"]
 description = "A native macOS chat client for Meta's Muse Code agent, built with gpui and the aui component library."
 readme = "README.md"
-repository = "https://github.com/latekaapi/harness"
+repository = "https://github.com/latekaapi/baaz"
 keywords = ["muse", "agent", "chat", "gpui", "macos"]
 categories = ["gui", "command-line-utilities"]
 

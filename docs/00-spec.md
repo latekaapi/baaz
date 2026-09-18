@@ -1,4 +1,4 @@
-# Harness — Muse Code chat slice: specification
+# Baaz — Muse Code chat slice: specification
 
 Status: frozen 2026-09-08. Change only by agreement; record changes in
 `docs/CHANGELOG.md`.
@@ -54,7 +54,7 @@ Cargo workspace, three crates, plus path dependencies on `aui`, `aui-protocol`, 
 ```
 crates/muse-client    transport only, no gpui, no aui.      MuseClient, MuseEvent, typed params/results
 crates/muse-adapter   fold MSP events into aui_protocol.     MuseFold::apply(MuseEvent) -> Vec<Delta> + SideState
-crates/harness        the gpui app.                          Entities, views, intents -> MuseClient calls
+crates/baaz        the gpui app.                          Entities, views, intents -> MuseClient calls
 ```
 
 ### 2.1 muse-client
@@ -73,7 +73,7 @@ crates/harness        the gpui app.                          Entities, views, in
   text` so `turn/unqueued` and `turn/retracted` can restore the prompt.
 - Typed structs for every method/notification in `msp.d.ts`, `#[serde(rename_all =
   "camelCase")]`, all string enums `#[serde(other)]`-tolerant (the schema calls most of them
-  open). `initialize` with `clientInfo {name:"harness", version}`; compare
+  open). `initialize` with `clientInfo {name:"baaz", version}`; compare
   `schema.fingerprint` with `fixtures/msp/msp/manifest.json` and **warn, never fail**.
 - Ordering rule: view events may arrive before the command's ack. Never gate folding on acks.
 - `view/gap`: buffer live events with cursor ≥ `next`, `view/page` the missing range
@@ -111,7 +111,7 @@ Pure and testable: `cargo test -p muse-adapter` replays every `fixtures/msp/*.js
 `MuseFold` and asserts on the resulting `Session` (snapshot tests with `insta` or plain
 `assert_eq` on serialized JSON; pick one and stay with it).
 
-### 2.3 harness (gpui)
+### 2.3 Baaz (gpui)
 
 Boot as `aui/examples/minimal.rs` does: `gpui_kit::application().with_assets(AuiAssets)`,
 `aui::init`, text scale from `aui_tokens::scale`. Entities:
@@ -129,12 +129,12 @@ sizes and durations through tokens. Both themes correct.
 
 ### 3.1 Plan mode is client-side, and flagged as such
 
-MSP has no plan mode; the TUI's `/plan` is a skill. Plan mode in the harness:
+MSP has no plan mode; the TUI's `/plan` is a skill. Plan mode in Baaz:
 
 - Toggle with **Shift+Tab** or `/plan`; a "Plan" pill in the composer footer, click to exit.
 - While on, a send does two things: `session/setApprovalMode { denyUnmatched }` (remember the
   previous mode) and prefixes the text part with the plan preamble in
-  `crates/harness/src/plan.rs` ("Create a grounded, decision-complete plan for the request
+  `crates/baaz/src/plan.rs` ("Create a grounded, decision-complete plan for the request
   below, then stop and wait for approval. Do not edit files or run commands that change
   state."). `displayText` carries the user's text only, so the transcript shows what they typed.
 - The reply renders as a normal assistant turn; when it completes, a `Block::Plan` is
@@ -198,8 +198,8 @@ values plus `Plan` as a client-side overlay flag on the session, not a wire mode
 
 `session/list` gives identity and timestamps; `~/.local/share/muse/session-index.db` gives
 `session_name`, `title`, `first_user_prompt`, `search_text` (read-only, `rusqlite`, opened
-read-only, tolerate absence). Rename writes a harness-side override in
-`~/Library/Application Support/harness/sessions.json` (never the muse index). Delete hides
+read-only, tolerate absence). Rename writes a Baaz-side override in
+`~/Library/Application Support/baaz/sessions.json` (never the muse index). Delete hides
 the session in the same file ("Hide" in the menu, undo toast). Search filters the sidebar
 over title + first prompt + search text.
 
@@ -271,7 +271,7 @@ Committed per phase in both repositories.
 
 1. **Transport and fold.** `muse-client`, `muse-adapter`, the `aui-protocol` extensions, replay
    tests over every fixture, a live echo-provider integration test (`cargo test -p muse-client
-   -- --ignored live_echo`), a `harness-probe` binary that starts a session, sends a turn and
+   -- --ignored live_echo`), a `baaz-probe` binary that starts a session, sends a turn and
    prints folded deltas. Gate: all fixtures fold without `Generic` fallbacks except
    `reminderChild`/`workflow`; the live echo test passes.
 2. **Shell, sessions, streaming.** The app boots, auth probe and login screen, sidebar lists

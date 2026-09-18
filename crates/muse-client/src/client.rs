@@ -85,7 +85,7 @@ pub const GAP_ABORTED: &str = "client/gapAborted";
 ///
 /// ```text
 /// MUSE_CAPTURE=fixtures/msp/transcript-userinput-answer.jsonl \
-///   cargo run -p harness -- --provider meta --workspace /tmp/ws
+///   cargo run -p baaz -- --provider meta --workspace /tmp/ws
 /// ```
 ///
 /// Nothing is redacted. A capture holds the prompts, the replies and the
@@ -659,7 +659,7 @@ impl MuseClient {
 
     /// `turn/cancel` — the non-urgent cancel, on the normal command lane.
     ///
-    /// No caller in `crates/harness` yet (the shell uses `turn_interrupt`
+    /// No caller in `crates/baaz` yet (the shell uses `turn_interrupt`
     /// instead); kept as wire surface covered by `schema_roundtrip.rs`, not
     /// dead code.
     pub fn turn_cancel(&self, params: &TurnCancelParams) -> Result<TurnCancelResult> {
@@ -741,7 +741,7 @@ impl MuseClient {
     /// `view/subscribe` — attach this connection's live view subscription at an
     /// explicit cursor. The re-attach path after `view/unsubscribe`.
     ///
-    /// No caller in `crates/harness` yet (the app never detaches its
+    /// No caller in `crates/baaz` yet (the app never detaches its
     /// subscription); kept as wire surface covered by `schema_roundtrip.rs`,
     /// not dead code.
     pub fn view_subscribe(&self, params: &ViewSubscribeParams) -> Result<ViewSubscribeResult> {
@@ -751,7 +751,7 @@ impl MuseClient {
     /// `view/unsubscribe` — stop following a session. Idempotent; does not
     /// unload the session.
     ///
-    /// No caller in `crates/harness` yet (nothing detaches); kept as wire
+    /// No caller in `crates/baaz` yet (nothing detaches); kept as wire
     /// surface covered by `schema_roundtrip.rs`, not dead code.
     pub fn view_unsubscribe(
         &self,

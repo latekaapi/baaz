@@ -43,7 +43,7 @@ step is enough to start a session, so `--send` is no longer the only way in.
 ```sh
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
-HARNESS_PROVIDER=echo cargo run -p harness -- --workspace /tmp/ws --theme dark \
+BAAZ_PROVIDER=echo cargo run -p baaz -- --workspace /tmp/ws --theme dark \
   --screenshot /tmp/model.png --screenshot-delay 6000 --steps 'model'
 ```
 
@@ -208,8 +208,8 @@ item/completed  agentMessage  "**Plan:** Print `hello` to stdout … Reply
 
 So plan mode sends `/plan <text>` as the model-visible input with `displayText`
 set to what the person typed, and asks for `denyUnmatched` for the duration.
-`crates/harness/src/plan.rs` still carries the spec's preamble as the fallback
-for the day a Muse build stops shipping the skill; `HARNESS_PLAN_PREAMBLE=1`
+`crates/baaz/src/plan.rs` still carries the spec's preamble as the fallback
+for the day a Muse build stops shipping the skill; `BAAZ_PLAN_PREAMBLE=1`
 reaches it without a rebuild, because a fallback nobody can reach is not one.
 
 The rest is as §3.1 says. Shift+Tab or `/plan` toggles; a **Plan** pill sits in
@@ -224,7 +224,7 @@ Reject restores the mode and stops there.
 ## 7. Prompt history
 
 Every sent prompt is appended to
-`~/Library/Application Support/harness/history.json`, keyed by the canonical
+`~/Library/Application Support/baaz/history.json`, keyed by the canonical
 workspace path — the same canonicalization `session/list` needs, so `/tmp/x` and
 `/private/tmp/x` are one history. The newest 200 are kept and a prompt identical
 to the one before it is not stored twice.
@@ -272,9 +272,9 @@ the prompt text. All three crates are pure Rust, so `cargo tree -d` still shows
 one `gpui-pre` and one `gpui-kit`.
 
 Enter sends because the composer's editor runs with `submit_on_enter`: plain
-Enter emits the submit without a newline and the harness binding sends the
+Enter emits the submit without a newline and Baaz binding sends the
 turn, while Shift+Enter still inserts a newline. The flag lives in the library
-(`composer_state_rows`), so the harness binds nothing of its own for it.
+(`composer_state_rows`), so Baaz binds nothing of its own for it.
 
 ⌘V is bound in the composer's context and re-dispatches gpui-kit's own `Paste`
 when the clipboard holds no image, so an ordinary text paste is the editor's,
@@ -283,7 +283,7 @@ untouched.
 ## 9. New-session drafts
 
 An unsent session has **no sidebar row** and costs at most one server session
-per project. `Harness.drafts` names one draft session per project id; ⌘N
+per project. `Baaz.drafts` names one draft session per project id; ⌘N
 (`new_session_in`) reopens that view while it is still unsent (zero turns,
 no name) instead of calling `session/start`, so repeated ⌘N never accumulates
 "New session" rows. Views named in `drafts` are never evicted from the
@@ -305,7 +305,7 @@ holds something keeps it — moved content never clobbers. Drafts live in
 memory for the app's lifetime; nothing is persisted to disk.
 
 Scripting: `--steps new` is ⌘N, `new:<project name>` the group row's `+`.
-Every `session/start` the app sends logs one `harness: session/start
+Every `session/start` the app sends logs one `baaz: session/start
 project=<id> reason=<no-draft|retarget>` line, so a scripted run can count
 them. Under `--no-connect` / `--replay` there is no child to start on, so
 `new` opens the draft as a local view (`local-draft-<project>`) and `open:`

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise a `frame-trace.log` from a `HARNESS_FRAME_TRACE=1` run.
+"""Summarise a `frame-trace.log` from a `BAAZ_FRAME_TRACE=1` run.
 
 v3 format, one row per `Harness::render` — i.e.
 once per display tick that renders anything at all, not only the ticks
@@ -51,7 +51,7 @@ For each of the three interactions this instrument exists to measure
 
 Free: reads a file.
 
-    python3 scripts/frame-trace.py "$HARNESS_STATE_DIR"/frame-trace.log [--metric sidebar|transcript|resize]
+    python3 scripts/frame-trace.py "$BAAZ_STATE_DIR"/frame-trace.log [--metric sidebar|transcript|resize]
 """
 
 import argparse

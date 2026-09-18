@@ -1,15 +1,15 @@
 #!/bin/sh
-# Bundle the release harness binary as a macOS app.
+# Bundle the release baaz binary as a macOS app.
 #
 # Usage:
 #   scripts/bundle.sh
 #
 # Reads `assets/icon-1024.png` (a flat H tile, 1024x1024), builds
-# `cargo build --release -p harness`, converts the icon to
-# `Harness.icns` with `sips`/`iconutil`, writes `Info.plist`
-# (`dev.harness.app`) and assembles `target/bundle/Harness.app`:
+# `cargo build --release -p baaz`, converts the icon to
+# `Baaz.icns` with `sips`/`iconutil`, writes `Info.plist`
+# (`sh.baaz.app`) and assembles `target/bundle/Baaz.app`:
 #
-#   Harness.app/Contents/{Info.plist,MacOS/Harness,Resources/Harness.icns}
+#   Baaz.app/Contents/{Info.plist,MacOS/Baaz,Resources/Baaz.icns}
 #
 # The bundle is ad-hoc signed so it launches on this machine with `open`.
 # Re-running the script rebuilds in place; it never touches the repo's
@@ -20,7 +20,7 @@ export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/assets/icon-1024.png"
-OUT="$ROOT/target/bundle/Harness.app"
+OUT="$ROOT/target/bundle/Baaz.app"
 CONTENTS="$OUT/Contents"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 
@@ -29,11 +29,11 @@ if [ ! -f "$SRC" ]; then
     exit 1
 fi
 
-cargo build --release -p harness
+cargo build --release -p baaz
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
-SET="$WORK/Harness.iconset"
+SET="$WORK/Baaz.iconset"
 mkdir -p "$SET"
 # Every slot iconutil wants, downsampled from the 1024 source.
 for size in 16 32 64 128 256 512; do
@@ -41,26 +41,26 @@ for size in 16 32 64 128 256 512; do
     double=$((size * 2))
     sips -z "$double" "$double" "$SRC" --out "$SET/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$SET" -o "$WORK/Harness.icns"
+iconutil -c icns "$SET" -o "$WORK/Baaz.icns"
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
-cp "$ROOT/target/release/harness" "$CONTENTS/MacOS/Harness"
-cp "$WORK/Harness.icns" "$CONTENTS/Resources/Harness.icns"
+cp "$ROOT/target/release/baaz" "$CONTENTS/MacOS/Baaz"
+cp "$WORK/Baaz.icns" "$CONTENTS/Resources/Baaz.icns"
 cat >"$CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>Harness</string>
+    <string>Baaz</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.harness.app</string>
+    <string>sh.baaz.app</string>
     <key>CFBundleName</key>
-    <string>Harness</string>
+    <string>Baaz</string>
     <key>CFBundleDisplayName</key>
-    <string>Harness</string>
+    <string>Baaz</string>
     <key>CFBundleIconFile</key>
-    <string>Harness</string>
+    <string>Baaz</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

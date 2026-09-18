@@ -47,7 +47,7 @@ fn live_echo() {
 
     let (init, warning) = client
         .initialize(
-            "harness",
+            "baaz",
             env!("CARGO_PKG_VERSION"),
             ClientCapabilities {
                 requested_capabilities: Some(vec!["userShell".into()]),
@@ -187,7 +187,7 @@ fn live_backfill_parity() {
     let client = MuseClient::spawn(&MuseConfig::default()).expect("muse serve starts");
     let events = client.events();
     client
-        .initialize("harness", env!("CARGO_PKG_VERSION"), ClientCapabilities::default())
+        .initialize("baaz", env!("CARGO_PKG_VERSION"), ClientCapabilities::default())
         .expect("initialize");
 
     let started = client

@@ -39,7 +39,7 @@ const UNTYPED_METHODS: &[&str] = &[
 ///
 /// The subagent calls (SS3.16) have typed params — [`SubagentInputParams`] and
 /// friends — but the published declarations give their results no interface,
-/// and the harness issues none of these calls, so there is nothing to model
+/// and Baaz issues none of these calls, so there is nothing to model
 /// and nothing to verify against. Typing them from guesswork would be worse
 /// than saying so here.
 const RESULTS_NOT_MODELLED: &[&str] = &[
@@ -435,10 +435,10 @@ fn optional_and_nullable_error_data_keeps_the_distinction() {
 
 #[test]
 fn constructors_produce_the_documented_shapes() {
-    let init = InitializeParams::new("harness", "0.1.0");
+    let init = InitializeParams::new("baaz", "0.1.0");
     assert_eq!(
         serde_json::to_value(&init).unwrap(),
-        serde_json::json!({"clientInfo": {"name": "harness", "version": "0.1.0"}})
+        serde_json::json!({"clientInfo": {"name": "baaz", "version": "0.1.0"}})
     );
 
     assert_eq!(
@@ -595,7 +595,7 @@ fn every_published_method_has_a_dispatch_arm() {
 /// [`PendingRequestEntry::Pointer`].
 #[test]
 fn pending_requests_serve_full_payloads_without_a_kind() {
-    let observed: Value = serde_json::from_str(r#"{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","availableChoices":[{"choiceId":"allow_once","decision":"approved","label":"Allow once","scope":"once"},{"choiceId":"allow_local_prefix","decision":"approvedPolicyAmendment","label":"Always allow in this workspace: echo ...","rulePreview":"Always allow in this workspace: echo ...","scope":"localPersistent"},{"acceptsFeedback":true,"choiceId":"abort","decision":"abort","label":"Reject","scope":"once"}],"currentRequirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"itemId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","judgeEscalated":false,"protectedWrite":false,"rawArgs":"{\"command\":\"echo hi && ls\"}","sessionId":"01a085ab-5461-7b10-a6ab-805e21f7a245","sourceRange":{"first":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"last":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"stream":{"id":"01a085ab-5461-7b10-a6ab-805e21f7a245","kind":"session"}},"subject":{"command":"echo hi && ls","kind":"shell","stages":[{"argv":["echo","hi"],"argvComplete":true,"position":1,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["echo"],"label":"Always allow in this workspace: echo ..."},"totalStages":2},{"argv":["ls"],"argvComplete":true,"position":2,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":1},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["ls"],"label":"Always allow in this workspace: ls ..."},"totalStages":2}],"workspaceRoot":"/private/tmp/harness-ws"},"taskId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","toolCallId":"user_shell_01a085ab-54a7-7411-80ca-08842679168d","toolName":"shell","turnId":"01a085ab-54a7-7411-80ca-08842679168d","viewCursor":"v:01a085ab-5461-7b10-a6ab-805e21f7a245:7"}"#)
+    let observed: Value = serde_json::from_str(r#"{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","availableChoices":[{"choiceId":"allow_once","decision":"approved","label":"Allow once","scope":"once"},{"choiceId":"allow_local_prefix","decision":"approvedPolicyAmendment","label":"Always allow in this workspace: echo ...","rulePreview":"Always allow in this workspace: echo ...","scope":"localPersistent"},{"acceptsFeedback":true,"choiceId":"abort","decision":"abort","label":"Reject","scope":"once"}],"currentRequirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"itemId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","judgeEscalated":false,"protectedWrite":false,"rawArgs":"{\"command\":\"echo hi && ls\"}","sessionId":"01a085ab-5461-7b10-a6ab-805e21f7a245","sourceRange":{"first":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"last":{"id":"7d16cd47-d4ba-4bc8-a4e9-1356aa45c641","sequence":17},"stream":{"id":"01a085ab-5461-7b10-a6ab-805e21f7a245","kind":"session"}},"subject":{"command":"echo hi && ls","kind":"shell","stages":[{"argv":["echo","hi"],"argvComplete":true,"position":1,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":0},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["echo"],"label":"Always allow in this workspace: echo ..."},"totalStages":2},{"argv":["ls"],"argvComplete":true,"position":2,"requirementId":{"approvalId":"88c9949e-d154-5a28-87e6-7e9bdcf1186b","sourceIndex":1},"resolution":{"kind":"unresolved"},"suggestedPrefix":{"argvPrefix":["ls"],"label":"Always allow in this workspace: ls ..."},"totalStages":2}],"workspaceRoot":"/private/tmp/baaz-ws"},"taskId":"57c88dbf-7fc7-4140-85bc-2b3529488d78","toolCallId":"user_shell_01a085ab-54a7-7411-80ca-08842679168d","toolName":"shell","turnId":"01a085ab-54a7-7411-80ca-08842679168d","viewCursor":"v:01a085ab-5461-7b10-a6ab-805e21f7a245:7"}"#)
         .expect("observed entry is JSON");
     // The old shape (`Vec<PendingRequestPointer>`) rejected this with
     // `missing field 'kind'` — the exact failure seen against the live schema.

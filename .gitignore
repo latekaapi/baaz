@@ -4,7 +4,7 @@ target/
 # which turned out to carry the real developer's signed-in name and email
 # (found during v0.1 prep); untracked wholesale rather than hand-checking
 # all of them. Only the README's own screenshots, captured fresh from an
-# isolated HARNESS_STATE_DIR with --replay, are tracked.
+# isolated BAAZ_STATE_DIR with --replay, are tracked.
 !docs/images/readme-*.png
 !assets/icon-*.png
 .DS_Store

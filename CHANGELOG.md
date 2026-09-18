@@ -129,7 +129,7 @@ the `aui` component library.
 
 ### Accounts & billing
 
-- **Account awareness.** The harness probes which billing tier a login is
+- **Account awareness.** Baaz probes which billing tier a login is
   on and warns before a turn would bill pay-as-you-go (`docs/06-billing.md`).
 - **Status card wording.** An unavailable usage reading renders as
   `Current usage: unavailable`, not `unavailable used`.

@@ -2,7 +2,7 @@
 
 Phase 5 decision A1. What a turn costs is not decided by the provider you pick,
 by the model, or by anything on the wire. It is decided by the **login token**,
-and until this phase the harness had no way to tell you which kind you were
+and until this phase Baaz had no way to tell you which kind you were
 holding.
 
 Read `docs/04-approvals.md` §0 first: it is the other half of this, and it says
@@ -19,7 +19,7 @@ Muse issues credentials on one of two tiers.
 | **Subscription** | drawn from the plan's current and weekly windows |
 | **Pay-as-you-go** | billed as API usage, per turn, per token |
 
-Both look identical from inside the harness. `auth.json` carries the mechanism
+Both look identical from inside Baaz. `auth.json` carries the mechanism
 (`oauth`), the storage, the API base and the person's name and email, and says
 nothing about entitlement. `initialize` carries no account object. `model/list`
 carries no plan field. The session log records a `credential_backend` and not a
@@ -32,7 +32,7 @@ else.
 An early login token was on pay-as-you-go, so roughly 110 sessions and 40 turns
 across early development were billed as API usage while the project's own docs
 described them as subscription turns. A logout and a fresh login put the token
-on a subscription plan; nothing else changed, and nothing in the harness could
+on a subscription plan; nothing else changed, and nothing in Baaz could
 have told the difference before or after.
 
 ---
@@ -47,7 +47,7 @@ The `muse` TUI knows. `/upgrade` draws a card that reads either
 or "you're on pay-as-you-go" / "Subscriptions aren't currently available for
 your account".
 
-So `crates/harness/src/tier.rs` drives that card:
+So `crates/baaz/src/tier.rs` drives that card:
 
 1. `openpty`, then `muse --workspace <probe dir> --trust-workspace` on the
    slave side with its own session and the slave as its controlling terminal
@@ -58,7 +58,7 @@ So `crates/harness/src/tier.rs` drives that card:
    keystrokes land on that gate instead — Enter accepts its default ("Trust
    and continue"), eating both the command text and the card, so the probe
    read a bare idle composer and reported "not recognised" on every run
-   against a fresh `HARNESS_STATE_DIR`.
+   against a fresh `BAAZ_STATE_DIR`.
 2. **Answer the cursor-position query.** The TUI opens with `ESC [ 6 n` and
    paints nothing until something replies; the driver answers `ESC [ 1;1 R`
    every time it sees one.
@@ -76,7 +76,7 @@ So `crates/harness/src/tier.rs` drives that card:
 
 Opening the TUI **writes a session record and makes no model call**, so the
 probe costs nothing. It runs in a throwaway workspace under
-`~/Library/Application Support/harness/tier-probe`, deliberately not the
+`~/Library/Application Support/baaz/tier-probe`, deliberately not the
 window's own, so probe sessions never appear in the sidebar of a real project.
 The probe's child is SIGKILLed on every exit — the TUI ignores SIGTERM, which
 once left two orphans alive for six hours. Its pid is written to
@@ -119,14 +119,14 @@ The first two are pinned by `tier::tests::the_card_this_muse_really_draws_parses
 **The raw terminal output is never logged.** The card's footer carries a URL,
 and a TUI that decided to show a login flow would carry a code. Only the parsed
 plan name, the two percentages and the reset clauses ever leave the module.
-`HARNESS_TIER_DEBUG=1` prints how many bytes were read and which of a fixed list
+`BAAZ_TIER_DEBUG=1` prints how many bytes were read and which of a fixed list
 of harmless words appeared, and never the bytes.
 
 ---
 
 ## 3. The cache
 
-`~/Library/Application Support/harness/tier.json`, keyed by the modification
+`~/Library/Application Support/baaz/tier.json`, keyed by the modification
 time of `auth.json` in whole seconds:
 
 ```json
@@ -142,7 +142,7 @@ an ordinary boot inside the hour reuses the cache instead of re-driving the
 TUI. Beyond that the probe re-runs when the person asks: `/usage`, `/status`,
 and the unknown-plan banner's "Check again" always re-probe.
 
-One probe runs at a time across harnesses. The probe takes
+One probe runs at a time across Baaz processes. The probe takes
 `tier-probe/probe.lock` (its pid inside) before opening the TUI; a second
 window waits up to 30 s, then reuses the winner's fresh cache when it landed
 instead of driving a second TUI at the same workspace, and proceeds without
@@ -188,7 +188,7 @@ path, no pseudo-terminal, a card that never arrived — becomes
 
 A stored API key or `META_API_KEY` is pay-as-you-go by construction: there is
 no subscription it could draw on, so there is nothing to probe. When
-`account/read` reports the `apiKey` or `envKey` lane the harness sets the tier
+`account/read` reports the `apiKey` or `envKey` lane Baaz sets the tier
 to pay-as-you-go directly — the TUI probe is about subscriptions and never
 runs — and the footer reads "Pay-as-you-go · API key" without one. The
 `/status` lines, the banner and the "Send anyway" guard are the same objects
@@ -197,7 +197,7 @@ as on any other pay-as-you-go login.
 ## 6. Checking it yourself
 
 ```bash
-cargo run -p harness -- --print-tier      # probe, print, exit; costs nothing
+cargo run -p baaz -- --print-tier      # probe, print, exit; costs nothing
 ```
 
 ```
@@ -213,7 +213,7 @@ could not be determined.
 
 **In Account Center**, check that the subscription is the one you expect and
 that no API-usage line is still accruing from a pay-as-you-go period. The
-harness cannot see either.
+Baaz cannot see either.
 
 ### Scripting the states
 
@@ -223,7 +223,7 @@ same `Tier` the real probe returns, so a screenshot of the guard is a screenshot
 of the guard.
 
 ```bash
-cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl \
+cargo run -p baaz -- --replay fixtures/msp/transcript-approve.jsonl \
   --tier payg --theme dark --screenshot docs/images/phase5-tier-payg-dark.png
 ```
 

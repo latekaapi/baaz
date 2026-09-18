@@ -1,4 +1,4 @@
-# Harness
+# Baaz
 
 A native macOS chat client for Muse Code —
 built with [gpui](https://www.gpui.rs) (the UI framework behind
@@ -10,9 +10,6 @@ transcript and a docked composer in the centre, and every card the agent can
 raise — approvals with the server's own choices, questions with previews and
 a timeout, plans, todos, tool output, errors with retry — drawn rather than
 printed.
-
-> **Harness is a working name.** The project will be renamed before it
-> settles; expect the repository and binary name to change.
 
 <p>
   <img src="docs/images/readme-approval-dark.png" width="49%" alt="A multi-stage shell approval card, dark theme">
@@ -43,7 +40,7 @@ printed.
 - **A composer** with model, effort and mode menus, `@`-mentions, a
   `/`-command menu (including skills from `muse skills list`), prompt
   history, and image attachments.
-- **Billing-tier awareness.** The harness probes which plan a login is on and
+- **Billing-tier awareness.** Baaz probes which plan a login is on and
   warns before a turn would bill pay-as-you-go, rather than finding out
   after the fact (see **Cost**, below).
 - **Session rows that explain themselves.** Every row is title, status verb,
@@ -61,7 +58,7 @@ printed.
 - **macOS 14 (Sonoma) or later.**
 - **Rust 1.85+** and the Xcode command line tools (`xcode-select --install`).
 - The **`muse` CLI** on your `PATH`, signed in to a Muse Code account.
-  Harness currently targets muse's 1.3.x wire schema (MSP).
+  Baaz currently targets muse's 1.3.x wire schema (MSP).
 - The [`aui`](https://github.com/latekaapi/agentic-ui) component library,
   checked out **beside** this repository — it's a path dependency for now
   (see `Cargo.toml`).
@@ -69,19 +66,19 @@ printed.
 ## Building and running
 
 ```sh
-git clone https://github.com/latekaapi/harness
+git clone https://github.com/latekaapi/baaz
 git clone https://github.com/latekaapi/agentic-ui   # beside it, not inside it
 
-cd harness
-cargo run -p harness                               # workspace = $PWD
-cargo run -p harness -- --workspace ~/code/thing    # somewhere else
+cd baaz
+cargo run -p baaz                               # workspace = $PWD
+cargo run -p baaz -- --workspace ~/code/thing    # somewhere else
 ```
 
 A distributable `.app` bundle:
 
 ```sh
-scripts/bundle.sh                    # builds target/bundle/Harness.app
-open target/bundle/Harness.app
+scripts/bundle.sh                    # builds target/bundle/Baaz.app
+open target/bundle/Baaz.app
 ```
 
 ## Cost — read this before running anything scripted
@@ -90,15 +87,15 @@ open target/bundle/Harness.app
 bill: on a signed-in machine, anything that reaches `turn/start` spends a
 turn, and what that turn costs depends on which plan the login is on —
 Muse issues credentials on two tiers, and a pay-as-you-go token bills every
-turn as API usage. The harness probes the tier and warns before sending on
+turn as API usage. Baaz probes the tier and warns before sending on
 pay-as-you-go.
 
 What costs nothing:
 
 ```sh
-cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # a checked-in capture, no server at all
-cargo run -p harness -- --no-connect                                     # draws the chrome, no server
-cargo run -p harness -- --print-tier                                     # which plan is this login on?
+cargo run -p baaz -- --replay fixtures/msp/transcript-approve.jsonl   # a checked-in capture, no server at all
+cargo run -p baaz -- --no-connect                                     # draws the chrome, no server
+cargo run -p baaz -- --print-tier                                     # which plan is this login on?
 ```
 
 See `docs/06-billing.md` for the full picture, and `CONTRIBUTING.md` for the
@@ -128,7 +125,7 @@ verbs spend a turn).
 ```
 crates/muse-client    the transport and the typed MSP schema
 crates/muse-adapter   MuseFold: MSP events → aui_protocol deltas
-crates/harness        the gpui application
+crates/baaz        the gpui application
 fixtures/msp          checked-in wire captures; every one of them replays
 ```
 
@@ -136,8 +133,7 @@ fixtures/msp          checked-in wire captures; every one of them replays
 
 Pre-1.0, macOS only. The wire protocol (MSP) is versioned by the `muse` CLI
 itself; this client tracks its 1.3.x schema and may need updating against a
-newer or older `muse`. Expect rough edges and a rename before the project
-settles.
+newer or older `muse`. Expect rough edges.
 
 ## License
 

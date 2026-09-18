@@ -6,9 +6,9 @@ plus the files this workspace's turns actually created.
 
 ## Storage
 
-`~/Library/Application Support/harness/search.db` (sqlite via the existing
+`~/Library/Application Support/baaz/search.db` (sqlite via the existing
 `rusqlite` bundled build, which ships FTS5 — no new dependency), owned by
-`crates/harness/src/search.rs`:
+`crates/baaz/src/search.rs`:
 
 | table | contents | fed by |
 |---|---|---|
