@@ -667,6 +667,7 @@ impl WireCall for Harness {
 impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, capture: CaptureToken, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::log::boot_mark("harness-new-start");
         // The rename field is one visual line: soft wrap off, so a long name
         // scrolls under the caret instead of spilling a second line.
         let rename = cx.new(|cx| {
@@ -855,6 +856,7 @@ impl Harness {
         this.connect(cx);
         this.load_index(cx);
         this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
+        crate::log::boot_mark("harness-new-done");
         this
     }
 
@@ -980,9 +982,19 @@ impl Harness {
 
     /// Spawn `muse serve`, initialize, and start draining its events.
     fn connect(&mut self, cx: &mut Context<Self>) {
+        crate::log::boot_mark("connect-sent");
         let program = self.args.program.clone();
-        self.wire_call(cx, move || conn::connect(&program), |this, result, cx| match result {
+        self.wire_call(
+            cx,
+            move || {
+                let at = std::time::Instant::now();
+                let out = conn::connect(&program);
+                crate::log::boot_mark(&format!("connect-work-done ok={} in={}ms", out.is_ok(), at.elapsed().as_millis()));
+                out
+            },
+            |this, result, cx| match result {
             Ok((connection, events)) => {
+                crate::log::boot_mark("connect-reply");
                 let server = &connection.server.server_info;
                     crate::baaz_log!("connected to {} {}", server.name, server.version);
                 if let Some(warning) = &connection.warning {

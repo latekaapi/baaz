@@ -14,9 +14,32 @@ macro_rules! baaz_log {
 }
 
 /// Whether `BAAZ_TRACE=1` switch tracing is on, read once.
-fn trace_enabled() -> bool {
+pub(crate) fn trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("BAAZ_TRACE").is_ok_and(|v| v == "1"))
+}
+
+/// Process start for the cold-boot sidebar trace. Set once from `main`.
+static BOOT_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Record process start. Idempotent; the first call wins.
+pub fn boot_init() {
+    let _ = BOOT_ORIGIN.get_or_init(std::time::Instant::now);
+}
+
+/// Milliseconds since [`boot_init`]. `None` before init.
+pub fn boot_ms() -> Option<u128> {
+    BOOT_ORIGIN.get().map(|at| at.elapsed().as_millis())
+}
+
+/// One cold-boot timing line on stderr, behind `BAAZ_TRACE=1`.
+pub fn boot_mark(label: &str) {
+    if !trace_enabled() {
+        return;
+    }
+    if let Some(ms) = boot_ms() {
+        eprintln!("baaz-boot +{ms}ms {label}");
+    }
 }
 
 /// Whether `BAAZ_HOVER_TRACE=1` hover-card tracing is on, read once.

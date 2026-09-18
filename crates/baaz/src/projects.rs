@@ -171,6 +171,38 @@ pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
 }
 
+/// One batch's canonicalization answers: each distinct root is read from
+/// the disk once, no matter how many rows name it.
+///
+/// [`SessionEntry::join`] canonicalizes its row's root and compares it
+/// against every adopted root, so a cold list of N rows in P projects pays
+/// N×(1+P) `canonicalize` syscalls on the UI thread. The rows of one
+/// refresh share a handful of distinct roots, so the refresh hoists one of
+/// these over its whole row loop instead: same answers (the function is
+/// pure per input string within the pass), one read per distinct root.
+#[derive(Default)]
+pub struct CanonicalCache {
+    /// Raw root → its canonical spelling, in insertion order.
+    map: std::collections::HashMap<String, String>,
+}
+
+impl CanonicalCache {
+    /// The canonical spelling of `root`, reading the disk on first sight.
+    pub fn get(&mut self, root: &str) -> String {
+        if let Some(hit) = self.map.get(root) {
+            return hit.clone();
+        }
+        let canon = canonical_str(root);
+        self.map.insert(root.to_owned(), canon.clone());
+        canon
+    }
+
+    /// How many distinct roots have been read so far.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 impl Projects {
     /// Adopt `root`, or hand back the project that already holds it.
     ///
@@ -365,6 +397,32 @@ impl Projects {
             .iter()
             .filter(|project| self.is_available(&project.id))
             .find(|project| canonical_path(&project.root) == canonical)
+    }
+
+    /// [`Self::resolve_available`], reading every root through `cache` so a
+    /// batch of rows pays one `canonicalize` per distinct root instead of
+    /// one per row per project. Answers are identical: the cache is a pure
+    /// memo of [`canonical_str`] within the pass.
+    pub fn resolve_available_cached(
+        &self,
+        workspace_root: Option<&str>,
+        meta_project: Option<&str>,
+        cache: &mut CanonicalCache,
+    ) -> Option<&Project> {
+        if let Some(id) = meta_project {
+            if let Some(project) = self.find_available(id) {
+                return Some(project);
+            }
+        }
+        let root = workspace_root.filter(|s| !s.is_empty())?;
+        let canonical = cache.get(root);
+        self.projects
+            .iter()
+            .filter(|project| self.is_available(&project.id))
+            .find(|project| {
+                let stored = project.root.to_string_lossy();
+                cache.get(stored.as_ref()) == canonical
+            })
     }
 }
 

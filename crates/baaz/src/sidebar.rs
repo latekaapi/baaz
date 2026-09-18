@@ -170,6 +170,20 @@ impl SessionEntry {
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
     ) -> Self {
+        Self::join_cached(session, index, meta, projects, &mut crate::projects::CanonicalCache::default())
+    }
+
+    /// [`Self::join`], reading every workspace root through `cache` so a
+    /// refresh of many rows sharing few roots pays one `canonicalize` per
+    /// distinct root. Row-for-row identical to [`Self::join`]: the cache is
+    /// a pure memo within the pass.
+    pub fn join_cached(
+        session: &muse_client::schema::Session,
+        index: Option<&IndexEntry>,
+        meta: Option<&SessionMeta>,
+        projects: &crate::projects::Projects,
+        cache: &mut crate::projects::CanonicalCache,
+    ) -> Self {
         fn pick(value: Option<&str>) -> Option<&str> {
             value.map(str::trim).filter(|s| !s.is_empty())
         }
@@ -192,11 +206,14 @@ impl SessionEntry {
                 .map(str::trim)
                 .is_some_and(|s| !s.is_empty());
         let text = label.unwrap_or(UNNAMED);
-        let workspace = session.workspace_root.as_deref().map(crate::projects::canonical_str);
+        let workspace = session.workspace_root.as_deref().map(|root| cache.get(root));
         // A missing root resolves nowhere: the row falls back to "Other
         // workspaces" while the adoption stays in the store.
-        let resolved = projects
-            .resolve_available(session.workspace_root.as_deref(), meta.and_then(|m| m.project.as_deref()));
+        let resolved = projects.resolve_available_cached(
+            session.workspace_root.as_deref(),
+            meta.and_then(|m| m.project.as_deref()),
+            cache,
+        );
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
         Self {
@@ -1389,6 +1406,66 @@ mod tests {
         assert_eq!(entry.branch.as_deref(), Some("feature-x"));
         assert_eq!(entry.label, UNNAMED);
         assert!(entry.needs_title);
+    }
+
+    /// The cached join is the plain join, row for row, while reading each
+    /// distinct root once: repeats hit the cache, a missing root falls back
+    /// to its verbatim spelling exactly as the uncached path does, and a
+    /// row with no root reads nothing at all.
+    #[test]
+    fn join_cached_matches_join_and_reads_each_root_once() {
+        let base = roots_base();
+        let root_a = base.join("cache-a");
+        let root_b = base.join("cache-b");
+        std::fs::create_dir_all(&root_a).expect("temp root");
+        std::fs::create_dir_all(&root_b).expect("temp root");
+        // Never created: canonicalization fails and the verbatim spelling
+        // is what both paths must keep.
+        let gone = base.join("cache-gone");
+        let adopted = |id: &str, root: std::path::PathBuf| crate::projects::Project {
+            id: id.to_owned(),
+            root,
+            name: id.to_owned(),
+            colour: 1,
+            pinned: false,
+            added_at: "2026-09-13T10:00:00Z".into(),
+            last_opened_at: "2026-09-13T10:00:00Z".into(),
+            defaults: crate::projects::ProjectDefaults::default(),
+        };
+        let mut store = crate::projects::Projects::default();
+        store.projects = vec![adopted("p-a", root_a.clone()), adopted("p-b", root_b.clone())];
+        let roots: Vec<Option<String>> = vec![
+            Some(root_a.to_string_lossy().into_owned()),
+            Some(root_a.to_string_lossy().into_owned()),
+            Some(root_b.to_string_lossy().into_owned()),
+            Some(gone.to_string_lossy().into_owned()),
+            None,
+        ];
+        let mut cache = crate::projects::CanonicalCache::default();
+        for (i, root) in roots.iter().enumerate() {
+            let mut session = wire_session();
+            session.session_id = format!("c{i}");
+            session.workspace_root = root.clone();
+            let plain = SessionEntry::join(&session, None, None, &store);
+            let cached = SessionEntry::join_cached(&session, None, None, &store, &mut cache);
+            assert_eq!(plain, cached, "row {i} differs");
+        }
+        // The two adopted roots plus the missing one. The repeat and the
+        // rootless row read nothing new.
+        assert_eq!(cache.len(), 3);
+        // The adopted rows resolved; the missing one fell back to Other.
+        let resolved: Vec<Option<String>> = roots
+            .iter()
+            .map(|root| {
+                let mut session = wire_session();
+                session.workspace_root = root.clone();
+                SessionEntry::join(&session, None, None, &store).project
+            })
+            .collect();
+        assert_eq!(resolved[0].as_deref(), Some("p-a"));
+        assert_eq!(resolved[2].as_deref(), Some("p-b"));
+        assert_eq!(resolved[3], None);
+        assert_eq!(resolved[4], None);
     }
 
     /// A generated title ranks directly under a user-given name: above the

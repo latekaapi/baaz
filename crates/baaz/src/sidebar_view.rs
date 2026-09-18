@@ -244,6 +244,32 @@ impl SidebarKey {
     }
 }
 
+/// The sidebar's empty-state copy, in pure form so it stays honest about
+/// loading: while the session list or the index has not landed yet, an
+/// empty column means "not here yet", never "nothing exists" — the rows
+/// paint the moment either lands.
+pub(crate) fn empty_state_text(
+    sessions_loaded: bool,
+    index_loaded: bool,
+    hidden_only: bool,
+    empty_only: bool,
+) -> (&'static str, &'static str) {
+    if !sessions_loaded || !index_loaded {
+        return ("Loading sessions…", "Your sessions appear as soon as they arrive.");
+    }
+    match (hidden_only, empty_only) {
+        (true, _) => (
+            "Every session here is hidden",
+            "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.",
+        ),
+        (false, true) => (
+            "Only empty sessions here",
+            "Turn on \u{201c}Show empty\u{201d} in the Sessions menu above.",
+        ),
+        (false, false) => ("No sessions yet", "\u{2318}N starts one."),
+    }
+}
+
 /// What a regroup or filter change looks like to the virtual list (owner
 /// round 6): the grouping mode and the three list-management toggles.
 /// [`Harness::sync_sidebar_list`] resets the list state when this changes
@@ -282,6 +308,7 @@ impl Harness {
         let key = SidebarKey::current(self, cx);
         if self.sidebar_key.as_ref() != Some(&key) {
             self.sidebar_key = Some(key);
+            crate::log::boot_mark("pane-notify");
             self.sidebar_pane.update(cx, |_, cx| cx.notify());
         }
     }
@@ -425,7 +452,16 @@ impl Harness {
         if self.sidebar_gesture_active() {
             window.request_animation_frame();
         }
+        static FIRST_ROWS_DONE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         let visible = self.visible_sessions(cx);
+        if self.sessions_loaded
+            && self.index_loaded
+            && !visible.is_empty()
+            && !FIRST_ROWS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::log::boot_mark(&format!("first-rows-painted rows={}", visible.len()));
+        }
         let empty = self.render_sidebar_empty(&visible, cx);
         // Both come from the window's cache: built once per change and once
         // per minute, not once per frame (findings `performance-5`,
@@ -1275,15 +1311,7 @@ impl Harness {
         let hidden_only = !self.show_hidden && self.sessions.iter().any(|e| e.hidden);
         let empty_only = !self.show_empty
             && self.sessions.iter().any(|e| (self.show_hidden || !e.hidden) && e.is_empty());
-        let (title, detail) = match (hidden_only, empty_only) {
-            (true, _) => {
-                ("Every session here is hidden", "Turn on \u{201c}Show hidden\u{201d} in the Sessions menu above.")
-            }
-            (false, true) => {
-                ("Only empty sessions here", "Turn on \u{201c}Show empty\u{201d} in the Sessions menu above.")
-            }
-            (false, false) => ("No sessions yet", "\u{2318}N starts one."),
-        };
+        let (title, detail) = empty_state_text(self.sessions_loaded, self.index_loaded, hidden_only, empty_only);
         Some(
             v_flex()
                 .w_full()
@@ -1761,6 +1789,30 @@ mod tests {
     #[test]
     fn row_detail_seat_needs_the_pane_edge() {
         assert_eq!(row_detail_seat(&None, &caption(8.0, 140.0, 236.0, 62.0)), None);
+    }
+
+    /// An empty column while the list or the index is still landing is
+    /// "not here yet", never "nothing exists": the loading copy wins over
+    /// every filter state, and the settled copy is unchanged once both
+    /// have landed.
+    #[test]
+    fn empty_state_names_loading_until_both_landed() {
+        let (title, _) = empty_state_text(false, false, false, false);
+        assert_eq!(title, "Loading sessions…");
+        let (title, _) = empty_state_text(false, true, false, false);
+        assert_eq!(title, "Loading sessions…");
+        let (title, _) = empty_state_text(true, false, false, false);
+        assert_eq!(title, "Loading sessions…");
+        // Loading wins over the filter states too.
+        let (title, _) = empty_state_text(false, false, true, true);
+        assert_eq!(title, "Loading sessions…");
+        // Settled: the existing copy, untouched.
+        let (title, detail) = empty_state_text(true, true, false, false);
+        assert_eq!((title, detail), ("No sessions yet", "\u{2318}N starts one."));
+        let (title, _) = empty_state_text(true, true, true, false);
+        assert_eq!(title, "Every session here is hidden");
+        let (title, _) = empty_state_text(true, true, false, true);
+        assert_eq!(title, "Only empty sessions here");
     }
 
     /// Item 1: session rows report hover enter/leave to the caller. A

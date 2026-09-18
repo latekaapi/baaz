@@ -585,6 +585,8 @@ impl Harness {
                 return Rc::clone(grouping);
             }
         }
+        let at = std::time::Instant::now();
+        let was_boot = !self.sessions_loaded || !self.index_loaded;
         let grouping = Rc::new(match self.effective_group_by() {
             crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
             crate::layout::GroupBy::Project if self.sessions_loaded && self.index_loaded => {
@@ -609,6 +611,12 @@ impl Harness {
             // box it never re-measures.
             crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
         });
+        crate::log::boot_mark(&format!(
+            "grouping-built rows={} boot={} in={}ms",
+            visible.len(),
+            was_boot as u8,
+            at.elapsed().as_millis()
+        ));
         cache.grouping = Some((minute, Rc::clone(&grouping)));
         grouping
     }
