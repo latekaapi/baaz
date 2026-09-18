@@ -95,17 +95,29 @@ impl SessionView {
         if completed_ours {
             self.record_created_files(cx);
         }
-        // Restore a retracted prompt the moment the fold hands it back — unless
-        // the unqueue was a Remove (the text is meant to be gone) or a Steer
-        // (the text is going straight back out on the wire).
+        // Route a reclaimed prompt by the intent captured when its row's
+        // button was clicked — never by the fold's `commandId` echo, which
+        // may be missing or arrive on another tick. The echo, when present,
+        // is the same text and is drained so it cannot land twice.
         let restored = self.fold.take_restored_prompt(&self.session_id);
-        let unqueued_kind = unqueued.as_deref().and_then(|id| self.unqueueing.remove(id));
-        if let Some(text) = restored {
-            match unqueued_kind {
-                Some(Unqueue::Remove) => {}
-                Some(Unqueue::Steer) => self.steer_text(text, cx),
-                _ => self.restore_prompt(text, cx),
+        if let Some(turn_id) = unqueued.as_deref() {
+            if let Some(pending) = self.unqueueing.remove(turn_id) {
+                let _ = restored;
+                match pending.kind {
+                    Unqueue::Remove => {}
+                    Unqueue::Edit => self.restore_prompt(pending.text, cx),
+                    Unqueue::Steer => self.steer_text(pending.text, cx),
+                }
+            } else if let Some(text) = restored {
+                // Reclaimed by someone else (another window won the same
+                // row): there is no intent to route by, so the words go back
+                // in the composer rather than evaporating.
+                self.restore_prompt(text, cx);
             }
+        } else if let Some(text) = restored {
+            // A retraction handed the prompt back; put it in the composer,
+            // where it came from.
+            self.restore_prompt(text, cx);
         }
         // Notify less (P1): a streaming delta that changed nothing visible
         // must not rebuild the whole transcript. Unchanged deltas arrive
@@ -414,5 +426,381 @@ mod tests {
         assert!(!should_retry_stale_page(&stale, true));
         assert!(!should_retry_stale_page(&other_internal(), false));
         assert!(!should_retry_stale_page(&MuseError::Closed, false));
+    }
+
+    // ------------------------------------------------- queued-row unqueues
+    //
+    // A stub `muse serve` that answers `turn/unqueue` and `turn/steer` (or
+    // fails the steer on demand) and logs every request line, so the tests
+    // below drive the real view — `unqueue()`, `apply()`, `steer_text()` —
+    // against the real client with no network and no sign-in.
+    use gpui::Entity;
+    use std::sync::Arc as StdArc;
+    use std::time::{Duration, Instant};
+
+    const STUB_SERVE: &str = r#"#!/usr/bin/env python3
+import sys, json
+log = open(sys.argv[-1], "a", buffering=1)
+fail_steer = "fail-steer" in sys.argv
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+    except Exception:
+        continue
+    log.write(line + "\n")
+    rid = req.get("id")
+    if rid is None:
+        continue
+    method = req.get("method")
+    params = req.get("params") or {}
+    if method == "turn/steer" and fail_steer:
+        resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "commandRejected: missing_run", "data": {"kind": "commandRejected", "reason": "missing_run"}}}
+    elif method in ("turn/unqueue", "turn/steer"):
+        tid = params.get("turnId", params.get("expectedTurnId"))
+        resp = {"jsonrpc": "2.0", "id": rid, "result": {"commandId": params.get("commandId"), "status": "accepted", "turnId": tid}}
+    else:
+        resp = {"jsonrpc": "2.0", "id": rid, "result": {}}
+    sys.stdout.write(json.dumps(resp) + "\n")
+    sys.stdout.flush()
+"#;
+
+    struct StubServe {
+        dir: std::path::PathBuf,
+        log: std::path::PathBuf,
+    }
+
+    impl Drop for StubServe {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl StubServe {
+        fn start(name: &str, extra: &[&str]) -> (muse_client::MuseClient, StubServe) {
+            let dir = std::env::temp_dir().join(format!(
+                "baaz-unqueue-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("stub dir");
+            let prog = dir.join("stub-serve");
+            std::fs::write(&prog, STUB_SERVE).expect("stub script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).expect("stub chmod");
+            }
+            let log = dir.join("wire.log");
+            let mut args: Vec<String> = extra.iter().map(|s| (*s).to_owned()).collect();
+            args.push(log.to_string_lossy().into_owned());
+            let config = muse_client::MuseConfig {
+                program: prog,
+                trust_workspace: false,
+                no_session_log: true,
+                extra_args: args,
+            };
+            let client = muse_client::MuseClient::spawn(&config).expect("stub spawn");
+            (client, StubServe { dir, log })
+        }
+
+        fn requests(&self) -> Vec<serde_json::Value> {
+            let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+            text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+        }
+
+        fn saw(&self, method: &str) -> Option<serde_json::Value> {
+            self.requests().into_iter().find(|v| v.get("method").and_then(|m| m.as_str()) == Some(method))
+        }
+
+        /// The text parts a `turn/steer` request carried, in order.
+        fn steer_texts(&self) -> Vec<String> {
+            self.requests()
+                .into_iter()
+                .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("turn/steer"))
+                .flat_map(|v| {
+                    v.pointer("/params/input")
+                        .and_then(|i| i.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_owned))
+                .collect()
+        }
+    }
+
+    fn unqueue_event(method: &str, params: serde_json::Value) -> muse_client::MuseEvent {
+        muse_client::MuseEvent::Notification {
+            method: method.to_owned(),
+            params,
+            cursor: None,
+            session_id: Some("s-1".to_owned()),
+        }
+    }
+
+    fn open_live_view(
+        vc: &mut gpui::VisualTestContext,
+        client: Option<muse_client::MuseClient>,
+        workspace: &str,
+    ) -> Entity<SessionView> {
+        vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: workspace.to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+            };
+            let client = client.map(StdArc::new);
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), client, host, window, cx))
+        })
+    }
+
+    /// A turn running, one message queued behind it, its row's button clicked.
+    fn queue_and_click(
+        view: &Entity<SessionView>,
+        vc: &mut gpui::VisualTestContext,
+        why: Unqueue,
+        queued_text: &str,
+    ) {
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.record_command("s-1", "c-q", queued_text);
+                view.fold.record_queued("s-1", "t-q", "c-q", queued_text);
+            });
+            view.update(cx, |view, cx| {
+                view.apply(unqueue_event("turn/started", serde_json::json!({"turnId": "t-run"})), cx)
+            });
+            assert!(view.read(cx).busy(), "the fixture turn is running");
+            view.update(cx, |view, cx| view.unqueue("t-q", why, queued_text.to_owned(), cx));
+        });
+    }
+
+    fn wait_for_wire(stub: &StubServe, vc: &mut gpui::VisualTestContext, method: &str) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            vc.run_until_parked();
+            if stub.saw(method).is_some() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {method}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn pending_prompt_of(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Option<String> {
+        vc.run_until_parked();
+        vc.update(|_, cx| view.read(cx).pending_prompt.clone())
+    }
+
+    /// The reported turn: queue a message, Steer it, `turn/unqueued` lands —
+    /// `turn/steer` goes out with the exact text, and nothing lands back in
+    /// the composer.
+    #[gpui::test]
+    fn steer_sends_the_reclaimed_text(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("steer", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-steer");
+        queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q", "commandId": "c-q"})),
+                    cx,
+                )
+            })
+        });
+        wait_for_wire(&stub, vc, "turn/steer");
+        assert_eq!(stub.steer_texts(), vec!["the queued words".to_owned()]);
+        assert_eq!(pending_prompt_of(&view, vc), None, "no duplicate in the composer");
+        vc.update(|_, cx| assert_eq!(view.read(cx).banner, None));
+    }
+
+    /// The prime-suspect tick hazard: `turn/unqueued` without the `commandId`
+    /// echo still steers, from the text captured at click time.
+    #[gpui::test]
+    fn steer_without_command_echo_still_sends(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("steer-noecho", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-steer-noecho");
+        queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q"})), cx)
+            })
+        });
+        wait_for_wire(&stub, vc, "turn/steer");
+        assert_eq!(stub.steer_texts(), vec!["the queued words".to_owned()]);
+        assert_eq!(pending_prompt_of(&view, vc), None, "no duplicate in the composer");
+    }
+
+    /// The failure path: the server rejects the steer — the words land back
+    /// in the composer and the banner says why, instead of evaporating.
+    #[gpui::test]
+    fn rejected_steer_falls_back_to_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("steer-rejected", &["fail-steer"]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-steer-rejected");
+        queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q", "commandId": "c-q"})),
+                    cx,
+                )
+            })
+        });
+        wait_for_wire(&stub, vc, "turn/steer");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let restored = loop {
+            let found = pending_prompt_of(&view, vc);
+            if found.is_some() || Instant::now() > deadline {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(restored.as_deref(), Some("the queued words"));
+        vc.update(|_, cx| assert!(view.read(cx).banner.is_some(), "the user sees why"));
+    }
+
+    /// The turn ended mid-reclaim: the steer has nowhere to go, so the words
+    /// go back in the composer with the reason — synchronously, no wire.
+    #[gpui::test]
+    fn ended_turn_steer_falls_back_to_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, None, "/tmp/unqueue-steer-ended");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.steer_text("the queued words".to_owned(), cx))
+        });
+        assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("the queued words"));
+        vc.update(|_, cx| {
+            let banner = view.read(cx).banner.clone().unwrap_or_default();
+            assert!(banner.contains("ended"), "the banner says why, got: {banner}");
+        });
+    }
+
+    /// Ordering hazard, both orders: the unqueue (without echo) and an
+    /// unrelated retraction on different ticks never cross-contaminate — the
+    /// queued text is steered and the retracted text is composed.
+    #[gpui::test]
+    fn unqueued_then_retraction_keeps_both(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("order-a", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-order-a");
+        queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| view.fold.record_command("s-1", "c-r", "the retracted words"));
+            view.update(cx, |view, cx| {
+                view.apply(unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q"})), cx)
+            })
+        });
+        wait_for_wire(&stub, vc, "turn/steer");
+        assert_eq!(stub.steer_texts(), vec!["the queued words".to_owned()]);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event("turn/retracted", serde_json::json!({"turnId": "t-r", "commandId": "c-r"})),
+                    cx,
+                )
+            })
+        });
+        assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("the retracted words"));
+    }
+
+    #[gpui::test]
+    fn retraction_then_unqueued_keeps_both(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("order-b", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-order-b");
+        queue_and_click(&view, vc, Unqueue::Steer, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| view.fold.record_command("s-1", "c-r", "the retracted words"));
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event("turn/retracted", serde_json::json!({"turnId": "t-r", "commandId": "c-r"})),
+                    cx,
+                )
+            })
+        });
+        assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("the retracted words"));
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q"})), cx)
+            })
+        });
+        wait_for_wire(&stub, vc, "turn/steer");
+        assert_eq!(stub.steer_texts(), vec!["the queued words".to_owned()]);
+        assert_eq!(
+            pending_prompt_of(&view, vc).as_deref(),
+            Some("the retracted words"),
+            "the steer leaves the composer's text alone"
+        );
+    }
+
+    /// Edit still restores to the composer — via the captured text, so a
+    /// missing echo cannot lose it either — and never steers.
+    #[gpui::test]
+    fn edit_restores_to_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("edit", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-edit");
+        queue_and_click(&view, vc, Unqueue::Edit, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q"})), cx)
+            })
+        });
+        assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("the queued words"));
+        vc.run_until_parked();
+        std::thread::sleep(Duration::from_millis(300));
+        vc.run_until_parked();
+        assert!(stub.saw("turn/steer").is_none(), "edit never steers");
+    }
+
+    /// Remove still drops silently: nothing in the composer, no banner, the
+    /// row gone, nothing on the wire.
+    #[gpui::test]
+    fn remove_drops_silently(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (client, stub) = StubServe::start("remove", &[]);
+        let vc = cx.add_empty_window();
+        let view = open_live_view(vc, Some(client), "/tmp/unqueue-remove");
+        queue_and_click(&view, vc, Unqueue::Remove, "the queued words");
+        wait_for_wire(&stub, vc, "turn/unqueue");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply(
+                    unqueue_event("turn/unqueued", serde_json::json!({"turnId": "t-q", "commandId": "c-q"})),
+                    cx,
+                )
+            })
+        });
+        assert_eq!(pending_prompt_of(&view, vc), None);
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).banner, None);
+            let queued = view.read(cx).fold.side("s-1").map(|s| s.queued.len()).unwrap_or(999);
+            assert_eq!(queued, 0, "the row leaves the strip");
+        });
+        vc.run_until_parked();
+        std::thread::sleep(Duration::from_millis(300));
+        vc.run_until_parked();
+        assert!(stub.saw("turn/steer").is_none(), "remove never steers");
     }
 }

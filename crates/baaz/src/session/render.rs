@@ -1309,7 +1309,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .iter()
             .map(|q| {
                 let row = QueueStripRow::new(q.turn_id.clone(), side.queued_text(q).to_owned());
-                if editing.get(&q.turn_id) == Some(&Unqueue::Edit) {
+                if editing.get(&q.turn_id).is_some_and(|pending| pending.kind == Unqueue::Edit) {
                     row.editing()
                 } else {
                     row
@@ -1322,7 +1322,17 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 QueueIntent::Remove => Unqueue::Remove,
                 QueueIntent::Steer => Unqueue::Steer,
             };
-            this.unqueue(id.as_ref(), why, cx);
+            // The row's text, captured now: by the time `turn/unqueued`
+            // lands the fold may no longer be able to echo it back.
+            let text = this
+                .fold
+                .side(&this.session_id)
+                .and_then(|live| {
+                    let row = live.queued_turn(id.as_ref())?;
+                    Some(live.queued_text(row).to_owned())
+                })
+                .unwrap_or_default();
+            this.unqueue(id.as_ref(), why, text, cx);
         });
         Some(
             div()
