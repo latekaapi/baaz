@@ -140,8 +140,24 @@ impl Harness {
     /// the provider catalog while logged out, so it never was one).
     pub(crate) fn probe_account(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        self.wire_call(cx, move || client.account_read(), |this, result, cx| match result {
-            Ok(state) => this.apply_account(state, cx),
+        crate::log::boot_mark("account/read-sent");
+        self.wire_call(
+            cx,
+            move || {
+                let at = std::time::Instant::now();
+                let out = client.account_read();
+                crate::log::boot_mark(&format!(
+                    "account/read-work-done ok={} in={}ms",
+                    out.is_ok(),
+                    at.elapsed().as_millis()
+                ));
+                out
+            },
+            |this, result, cx| match result {
+            Ok(state) => {
+                crate::log::boot_mark("account/read-reply");
+                this.apply_account(state, cx)
+            }
             Err(error) => {
                 // The wire is up but the probe failed: say so and show
                 // the login screen, like the old probe did. Never logs

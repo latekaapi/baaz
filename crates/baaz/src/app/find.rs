@@ -90,6 +90,10 @@ impl Harness {
     /// lands while the palette is open, the open query runs again against
     /// the fresh index.
     pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        // One cache over the whole build: each distinct index root is
+        // canonicalized once, not once per row.
+        let mut canon = crate::projects::CanonicalCache::default();
         let rows: Vec<crate::search::SessionRow> = self
             .index
             .iter()
@@ -112,16 +116,28 @@ impl Harness {
                     title: entry.title.clone(),
                     first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
                     body: entry.search_text.clone(),
-                    workspace: entry.workspace_root.as_deref().map(crate::projects::canonical_str),
+                    workspace: entry.workspace_root.as_deref().map(|root| canon.get(root)),
                 }
             })
             .collect();
+        crate::log::boot_mark(&format!(
+            "search-rows-built rows={} in={}ms (per-row canonical_str N={})",
+            rows.len(),
+            at.elapsed().as_millis(),
+            rows.len()
+        ));
         let work = move || {
+            let at = std::time::Instant::now();
             let mut connection = match crate::search::open() {
                 Ok(connection) => connection,
                 Err(_) => return,
             };
             let _ = crate::search::rebuild_sessions(&mut connection, &rows);
+            crate::log::boot_mark(&format!(
+                "search-rebuild-done rows={} in={}ms",
+                rows.len(),
+                at.elapsed().as_millis()
+            ));
         };
         self.wire_call(cx, work, |this: &mut Self, (), cx| {
             this.refresh_search(cx);

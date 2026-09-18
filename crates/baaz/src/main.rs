@@ -657,6 +657,8 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
 }
 
 fn main() {
+    crate::log::boot_init();
+    crate::log::boot_mark("process-start");
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();
@@ -709,7 +711,9 @@ fn main() {
         app::bind_keys(cx);
         app::set_menus(cx);
 
+        crate::log::boot_mark("window-open-requested");
         let (handle, capture) = open_shell_window(&args, cx);
+        crate::log::boot_mark("window-shown");
         cx.on_app_quit(|_| async {
             crate::tier::cleanup_probes();
         })

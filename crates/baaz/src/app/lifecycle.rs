@@ -264,15 +264,41 @@ impl Harness {
 
     /// Read the local index once at boot; it is a cache, not a source of truth.
     pub(super) fn load_index(&mut self, cx: &mut Context<Self>) {
-        self.wire_call(cx, index::read, |this, index, cx| {
-            // Settled, even on an empty read: row visibility comes from the
-            // index, and the sidebar waits for it before debuting groups.
-            this.index_loaded = true;
-            this.index = index;
-            this.rejoin();
-            this.rebuild_search_index(cx);
-            cx.notify();
-        });
+        crate::log::boot_mark("index-read-sent");
+        self.wire_call(
+            cx,
+            move || {
+                let at = std::time::Instant::now();
+                crate::log::boot_mark("index-read-start");
+                let map = index::read();
+                crate::log::boot_mark(&format!(
+                    "index-read-done rows={} in={}ms",
+                    map.len(),
+                    at.elapsed().as_millis()
+                ));
+                map
+            },
+            |this, index, cx| {
+                crate::log::boot_mark(&format!("index-reply rows={}", index.len()));
+                // Settled, even on an empty read: row visibility comes from the
+                // index, and the sidebar waits for it before debuting groups.
+                this.index_loaded = true;
+                this.index = index;
+                let at = std::time::Instant::now();
+                this.rejoin();
+                crate::log::boot_mark(&format!(
+                    "rejoin-done rows={} in={}ms",
+                    this.sessions.len(),
+                    at.elapsed().as_millis()
+                ));
+                this.rebuild_search_index(cx);
+                crate::log::boot_mark("index-loaded");
+                // Same reason as the list reply below: re-arm the cached
+                // pane in this update, not on some later frame's `on_frame`.
+                this.sync_sidebar_pane(cx);
+                cx.notify();
+            },
+        );
     }
 
     /// `session/list`, unfiltered and paged: one window over every
@@ -282,22 +308,40 @@ impl Harness {
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
+        crate::log::boot_mark("session/list-sent");
         let projects = self.projects.clone();
         let work = move || {
+            let at = std::time::Instant::now();
+            crate::log::boot_mark("session/list-work-start");
             let mut sessions = Vec::new();
             let mut cursor: Option<String> = None;
+            let mut pages = 0usize;
             loop {
+                let page_at = std::time::Instant::now();
                 let page = client.session_list(&SessionListParams {
                     cursor,
                     limit: Some(200),
                     ..Default::default()
                 })?;
+                pages += 1;
+                crate::log::boot_mark(&format!(
+                    "session/list-page pages={} rows={} in={}ms",
+                    pages,
+                    page.sessions.len(),
+                    page_at.elapsed().as_millis()
+                ));
                 sessions.extend(page.sessions);
                 cursor = page.next_cursor;
                 if cursor.is_none() {
                     break;
                 }
             }
+            crate::log::boot_mark(&format!(
+                "session/list-work-done rows={} pages={} in={}ms",
+                sessions.len(),
+                pages,
+                at.elapsed().as_millis()
+            ));
             // The branch behind every project group row, read while already
             // off the UI thread — and the root-exists answers beside them,
             // so the refresh rechecks every adoption without touching the
@@ -313,19 +357,31 @@ impl Harness {
             Ok::<_, MuseError>((sessions, branches, availability))
         };
         self.wire_call_in(cx, work, |this, result, window, cx| {
+            let reply_at = std::time::Instant::now();
+            let row_count = match &result {
+                Ok((sessions, _, _)) => sessions.len(),
+                Err(_) => 0,
+            };
+            crate::log::boot_mark(&format!("session/list-reply rows={row_count}"));
             this.sessions_loaded = true;
+            crate::log::boot_mark("sessions-loaded");
             if let Ok((sessions, branches, availability)) = result {
                 this.projects.refresh_availability(&availability);
                 this.invalidate_list();
                 let projects = this.projects.clone();
+                let join_at = std::time::Instant::now();
+                // One cache over the whole loop: each distinct workspace
+                // root is canonicalized once, not once per row per project.
+                let mut canon = crate::projects::CanonicalCache::default();
                 let wire: Vec<SessionEntry> = sessions
                     .iter()
                     .map(|s| {
-                        let mut entry = SessionEntry::join(
+                        let mut entry = SessionEntry::join_cached(
                             s,
                             this.index.get(&s.session_id),
                             this.overrides.get(&s.session_id),
                             &projects,
+                            &mut canon,
                         );
                         // Pending rows read pending; side sessions read
                         // hidden — even before their override writes land.
@@ -333,13 +389,30 @@ impl Harness {
                         entry
                     })
                     .collect();
+                crate::log::boot_mark(&format!(
+                    "join-done rows={} distinct_roots={} in={}ms (per-row SessionEntry::join N={})",
+                    wire.len(),
+                    canon.len(),
+                    join_at.elapsed().as_millis(),
+                    wire.len()
+                ));
                 // Local rows whose id the reply does not contain survive;
                 // a local whose id is listed is replaced by its wire row.
                 this.sessions = sidebar::merge_session_list(wire, &this.sessions);
                 this.branches = branches;
                 this.derive_titles(cx);
+                crate::log::boot_mark(&format!(
+                    "list-applied rows={} in={}ms",
+                    this.sessions.len(),
+                    reply_at.elapsed().as_millis()
+                ));
             }
             this.open_boot_session(window, cx);
+            // Re-arm the pane in the same update as the data: the column is
+            // a cached view, and waiting for the next root render's `on_frame`
+            // to notice the new key adds a whole frame hop — one a quiescent
+            // window may not take for a long while — before the first rows paint.
+            this.sync_sidebar_pane(cx);
             cx.notify();
         });
     }
