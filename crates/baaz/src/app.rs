@@ -1786,7 +1786,7 @@ impl Harness {
     /// Projects palette. Otherwise the one thing to do is start one.
     /// The hero column also takes a drop: every dropped directory is
     /// adopted, the first becoming current.
-    fn render_no_session(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         if self.current_project().is_none() {
             let choose = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.choose_project_folder(cx));
@@ -1802,6 +1802,7 @@ impl Harness {
                 .justify_center()
                 .gap(px(scale::SP_3))
                 .on_drop(drop)
+                .child(crate::mascot::boot_mascot(window, cx))
                 .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Add a project"))
                 .child(
                     div()
@@ -1824,6 +1825,7 @@ impl Harness {
             .items_center()
             .justify_center()
             .gap(px(scale::SP_4))
+            .child(crate::mascot::boot_mascot(window, cx))
             .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child(self.workspace_name()))
             .child(
                 div()
@@ -2178,7 +2180,7 @@ impl Render for Harness {
         } else {
             self.render_login(cx).into_any_element()
         };
-        let dialog = self.render_dialog(cx);
+        let dialog = self.render_dialog(window, cx);
         let settings = self.render_settings(cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);

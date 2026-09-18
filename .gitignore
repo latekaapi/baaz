@@ -7,6 +7,10 @@ target/
 # isolated BAAZ_STATE_DIR with --replay, are tracked.
 !docs/images/readme-*.png
 !assets/icon-*.png
+# The Baaz mascot art: bundled PNGs served by `crate::mascot` (else `*.png`
+# above would leave the copies untracked; the directory alone is not enough,
+# the files themselves must be re-included).
+!/crates/baaz/assets/mascot/**/*.png
 .DS_Store
 __pycache__/
 # Local secrets for testing (owner-provided API key); never committed.

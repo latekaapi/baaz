@@ -52,6 +52,7 @@ mod index;
 mod layout;
 mod log;
 mod login;
+mod mascot;
 mod overlays;
 mod plan;
 mod project_menu;
@@ -502,7 +503,7 @@ fn run_bench(args: Args) {
     );
     // The shell branch rebuilds these into the `Harness` boot below.
     let (bench_bare, shell_args) = (args.bench_bare, args.clone());
-    gpui_kit::application().with_assets(aui::assets::AuiAssets).run(move |cx| {
+    gpui_kit::application().with_assets(crate::mascot::BaazAssets).run(move |cx| {
         aui::init(theme, cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
         // measures stable numbers.
@@ -676,8 +677,9 @@ fn main() {
     // land inside a fixed delay (finding F9).
     let await_approval = args.steps.iter().any(|step| step.starts_with("shell:"));
     let await_steps = !args.steps.is_empty() || !args.login_steps.is_empty();
-    // 1. The asset source first: it serves `aui-icons` over gpui-kit's set.
-    let app = gpui_kit::application().with_assets(aui::assets::AuiAssets);
+    // 1. The asset source first: the harness's mascot PNGs, then `aui-icons`
+    // over gpui-kit's set (see `crate::mascot`).
+    let app = gpui_kit::application().with_assets(crate::mascot::BaazAssets);
     // The Dock icon and Cmd-Tab after every window is gone: re-activate
     // the surviving window, or rebuild it through the same function if it
     // was removed some other way. `--screenshot` runs and `--bench` quit
