@@ -99,6 +99,16 @@ pub struct SessionEntry {
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
     /// its id, then the joined wire row replaces it.
     pub local: bool,
+    /// Provisional: built from the local index before `session/list` lands,
+    /// carrying only what the index knows (a label and a time) — never turn
+    /// counts, running state or the status verb. [`Self::summary`] leaves the
+    /// status line unset for these rows (the library renders that as empty
+    /// space at the same height), and the first `session/list` reply replaces
+    /// them wholesale. Exempt from the empty filter: their emptiness is
+    /// unknown, and filtering on it would keep the sidebar empty until the
+    /// wire answers — but only labelled index entries ever become provisional,
+    /// which is what keeps the index's own zero-turn rows out.
+    pub provisional: bool,
     /// The row's `workspace_root`: canonicalized when the path exists,
     /// verbatim otherwise. What project resolution reads — never the current
     /// project, so a worktree session keeps its own folder.
@@ -236,6 +246,7 @@ impl SessionEntry {
             needs_title: label.is_none(),
             title_pending: false,
             local: false,
+            provisional: false,
             workspace,
             project,
             project_name,
@@ -253,6 +264,99 @@ impl SessionEntry {
                 .map(str::to_owned),
             branch: session.branch.clone(),
         }
+    }
+
+    /// One provisional row from the local index, before `session/list` lands.
+    ///
+    /// Only what the index knows: the label through [`IndexEntry::label`]'s
+    /// own ladder (no second ladder invented here), the time from
+    /// `updated_at_us`, and the workspace for project resolution. The store
+    /// overrides that the real rows get (hidden / pinned / archived, the
+    /// name, the byline halves) apply here too, so a hidden session never
+    /// flashes into view. Everything the wire owns stays at its zero value —
+    /// `turns: 0`, idle, no attention, no branch, no error — and
+    /// [`Self::summary`] leaves the status line unset for these rows, so
+    /// none of those zeroes ever renders.
+    ///
+    /// `None` (no row) when the index entry carries no label: with no name,
+    /// no title and no first prompt the row would read [`UNNAMED`] with an
+    /// unknown turn count, and the empty filter would hide it the moment the
+    /// wire answered — the index's own zero-turn rows are exactly these, so
+    /// leaving them out keeps the provisional list close to the real one.
+    ///
+    /// `needs_title` stays false on purpose: nothing may spend a
+    /// `session/read` on a row the wire has not listed yet, and a read now
+    /// would mark the id titled so the real row never earned one either.
+    pub fn provisional(
+        session_id: &str,
+        index: &IndexEntry,
+        meta: Option<&SessionMeta>,
+        projects: &crate::projects::Projects,
+        cache: &mut crate::projects::CanonicalCache,
+    ) -> Option<Self> {
+        fn pick(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|s| !s.is_empty())
+        }
+        let name = pick(meta.and_then(|m| m.name.as_deref()));
+        let label = name
+            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
+            .or_else(|| index.label())
+            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
+        let text = label?;
+        let user_named = name.is_some()
+            || index
+                .session_name
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+        let updated = index
+            .updated_at_us
+            .and_then(DateTime::from_timestamp_micros)
+            .map(|t| t.with_timezone(&Local))
+            .unwrap_or_else(|| Local.from_utc_datetime(&DateTime::<Utc>::UNIX_EPOCH.naive_utc()));
+        let workspace = index.workspace_root.as_deref().map(|root| cache.get(root));
+        let resolved = projects.resolve_available_cached(
+            index.workspace_root.as_deref(),
+            meta.and_then(|m| m.project.as_deref()),
+            cache,
+        );
+        let project = resolved.as_ref().map(|p| p.id.clone());
+        let project_name = resolved.as_ref().map(|p| p.name.clone());
+        Some(Self {
+            id: session_id.to_owned(),
+            label: one_line(text),
+            updated,
+            running: false,
+            turns: 0,
+            hidden: meta.is_some_and(|m| m.hidden),
+            pinned: meta.is_some_and(|m| m.pinned),
+            archived: meta.is_some_and(|m| m.archived),
+            description: describe(meta, Some(index), text, user_named),
+            last_ask: meta
+                .and_then(|m| m.last_ask.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            replayed: false,
+            named: name.is_some(),
+            needs_title: false,
+            title_pending: false,
+            local: false,
+            provisional: true,
+            workspace,
+            project,
+            project_name,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: meta
+                .and_then(|m| m.last_error.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            branch: None,
+        })
     }
 
     /// The one row a `--replay` window shows: the capture it is reading.
@@ -287,6 +391,7 @@ impl SessionEntry {
             title_pending: false,
             last_ask: None,
             local: false,
+            provisional: false,
             workspace,
             project,
             project_name,
@@ -519,8 +624,16 @@ impl SessionEntry {
                 }
             }
         }
-        let status = self.row_status(now);
-        row = row.status(status.kind, status.detail);
+        // A provisional row carries no turn count, no running bit and no
+        // status verb — the index knows none of them — so the status line
+        // stays unset: the row renders its third line as empty space at
+        // exactly the same height (`status_line` in the library), and the
+        // real row fills that same line in when it lands. No false
+        // `Settled · 0 turns`, no layout jump.
+        if !self.provisional {
+            let status = self.row_status(now);
+            row = row.status(status.kind, status.detail);
+        }
         if self.pinned {
             row = row.pinned();
         }
@@ -599,6 +712,7 @@ pub fn local_started_row(
         title_pending: false,
         last_ask: None,
         local: true,
+        provisional: false,
         workspace,
         project,
         project_name: None,
@@ -648,6 +762,17 @@ pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) ->
     let listed: std::collections::HashSet<String> = merged.iter().map(|entry| entry.id.clone()).collect();
     merged.extend(existing.iter().filter(|entry| entry.local && !listed.contains(&entry.id)).cloned());
     merged
+}
+
+/// Whether a `session/list` reply changes nothing on screen: every listed
+/// row (locals aside — they are the window's own and survive any merge)
+/// already matches, in order. Provisional rows never match: they carry the
+/// provisional flag and no wire facts, so the first reply after the index
+/// always applies wholesale. The caller ANDs the list-having-landed bit —
+/// the first reply applies even against an empty list.
+pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) -> bool {
+    let listed: Vec<&SessionEntry> = existing.iter().filter(|entry| !entry.local).collect();
+    listed.len() == wire.len() && listed.iter().zip(wire.iter()).all(|(a, b)| a == &b)
 }
 
 /// The single "now" a grouping is built against.
@@ -1257,7 +1382,10 @@ mod tests {
 
     /// Every state through the real `summary()`: the context line keeps one
     /// line and the status line is always set, so every row is three lines
-    /// tall whatever the session is in.
+    /// tall whatever the session is in. (Provisional rows are the one
+    /// exception: their status line stays unset, which the library draws as
+    /// the same-height empty space — covered beside the provisional
+    /// constructor, not here.)
     #[test]
     fn every_state_keeps_the_three_line_height() {
         use aui::nav::context_line_kind;
@@ -1531,6 +1659,7 @@ mod tests {
             title_pending: false,
             last_ask: None,
             local: false,
+            provisional: false,
             workspace: None,
             project: None,
             project_name: None,
@@ -2101,6 +2230,117 @@ mod tests {
         let gone = entry("old");
         let merged = merge_session_list(Vec::new(), std::slice::from_ref(&gone));
         assert!(merged.is_empty());
+    }
+
+    fn index_entry(title: &str, prompt: Option<&str>) -> IndexEntry {
+        IndexEntry {
+            title: title.to_owned(),
+            first_user_prompt: prompt.map(str::to_owned),
+            updated_at_us: Some(1_700_000_000_000_000),
+            ..IndexEntry::default()
+        }
+    }
+
+    #[test]
+    fn provisional_rows_carry_only_what_the_index_knows() {
+        let projects = Projects::default();
+        let mut cache = crate::projects::CanonicalCache::default();
+        // The label ladder is the index's own: session name, then title,
+        // then first prompt — and Muse's placeholder title counts as none.
+        let mut named = index_entry("Generated title", Some("why panic"));
+        named.session_name = Some("parser".into());
+        let row = SessionEntry::provisional("s", &named, None, &projects, &mut cache).expect("labelled");
+        assert_eq!(row.label, "parser");
+        let row = SessionEntry::provisional("s", &index_entry("Fix the parser", Some("why panic")), None, &projects, &mut cache).expect("labelled");
+        assert_eq!(row.label, "Fix the parser");
+        let row = SessionEntry::provisional("s", &index_entry("", Some("why panic")), None, &projects, &mut cache).expect("labelled");
+        assert_eq!(row.label, "why panic");
+        assert!(SessionEntry::provisional("s", &index_entry("New session", None), None, &projects, &mut cache).is_none());
+        assert!(SessionEntry::provisional("s", &IndexEntry::default(), None, &projects, &mut cache).is_none());
+        // A store name outranks the index, and the store's flags ride along
+        // so a hidden session never flashes into view.
+        let meta = SessionMeta { name: Some("mine".into()), hidden: true, pinned: true, ..SessionMeta::default() };
+        let row = SessionEntry::provisional("s", &named, Some(&meta), &projects, &mut cache).expect("labelled");
+        assert_eq!(row.label, "mine");
+        assert!(row.hidden && row.pinned);
+        assert!(row.provisional);
+        // Nothing the wire owns: no turns, idle, no branch, no error — and
+        // no title read may ever spend itself on a row the wire has not
+        // listed yet.
+        assert_eq!((row.turns, row.running, row.branch.clone(), row.last_error.clone()), (0, false, None, None));
+        assert!(!row.needs_title);
+        assert!(!row.local && !row.replayed);
+        // The time is the index's, in epoch microseconds.
+        assert_eq!(row.updated.timestamp_micros(), 1_700_000_000_000_000);
+    }
+
+    #[test]
+    fn provisional_rows_leave_the_status_line_unset() {
+        let projects = Projects::default();
+        let mut cache = crate::projects::CanonicalCache::default();
+        let now = Local::now();
+        let provisional =
+            SessionEntry::provisional("s", &index_entry("Fix the parser", Some("why panic")), None, &projects, &mut cache)
+                .expect("labelled");
+        let summary = provisional.summary(now);
+        // No turn count, no status verb, no invented idleness: the meta line
+        // is absent — which the library draws as empty space at the same
+        // row height, so the real row fills it in without a layout jump.
+        assert!(summary.status.is_none());
+        // ... while the label and the elapsed tag already read.
+        assert_eq!(summary.name.as_ref(), "Fix the parser");
+        assert!(!summary.elapsed.is_empty());
+        // A joined row always carries its status line, provisional or not.
+        let mut wire = entry("s");
+        wire.turns = 12;
+        assert!(wire.summary(now).status.is_some());
+    }
+
+    #[test]
+    fn the_first_list_reply_replaces_provisional_rows_wholesale() {
+        let projects = Projects::default();
+        let mut cache = crate::projects::CanonicalCache::default();
+        let provisional =
+            SessionEntry::provisional("s", &index_entry("Fix the parser", Some("why panic")), None, &projects, &mut cache)
+                .expect("labelled");
+        // Provisional rows are never local, so the merge drops every one of
+        // them the moment the wire answers — locals alone survive.
+        let merged = merge_session_list(Vec::new(), std::slice::from_ref(&provisional));
+        assert!(merged.is_empty());
+        let wire = entry("s");
+        let merged = merge_session_list(vec![wire.clone()], std::slice::from_ref(&provisional));
+        assert_eq!(merged, vec![wire]);
+        assert!(!merged.iter().any(|e| e.provisional));
+    }
+
+    #[test]
+    fn a_repeat_list_reply_applies_nothing() {
+        let wire = vec![entry("a"), entry("b")];
+        // The same rows in the same order: a second apply must cost nothing.
+        assert!(list_apply_unchanged(&wire, &wire));
+        // A local row is the window's own and survives any merge, so it
+        // never counts as a change either.
+        let mut local = entry("new");
+        local.local = true;
+        let existing = vec![wire[0].clone(), wire[1].clone(), local];
+        assert!(list_apply_unchanged(&existing, &wire));
+        // Anything else — a reorder, a new row, a dropped row, a relabel —
+        // is a real change. (Reordered from clones, so only the order
+        // differs — fresh `entry` values would differ in their timestamps
+        // too and prove nothing.)
+        assert!(!list_apply_unchanged(&wire, &[wire[1].clone(), wire[0].clone()]));
+        assert!(!list_apply_unchanged(&wire, &[entry("a")]));
+        let mut relabelled = entry("a");
+        relabelled.label = "changed".into();
+        assert!(!list_apply_unchanged(&[relabelled, entry("b")], &wire));
+        // And a provisional row never matches its wire successor: the first
+        // reply always applies wholesale.
+        let projects = Projects::default();
+        let mut cache = crate::projects::CanonicalCache::default();
+        let provisional =
+            SessionEntry::provisional("a", &index_entry("Fix the parser", Some("why panic")), None, &projects, &mut cache)
+                .expect("labelled");
+        assert!(!list_apply_unchanged(&[provisional, entry("b")], &wire));
     }
 
     #[test]
