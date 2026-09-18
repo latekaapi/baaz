@@ -93,20 +93,6 @@ impl SessionView {
         }
         let composer = self.render_composer(cx);
         let p = cx.aui().colors;
-        // The perch rides above the composer on the new-session screen only:
-        // an empty render cache means no turns yet, and the first turn's
-        // arrival fills the cache and unmounts the perch with it. Absolute,
-        // so it reserves nothing and shifts nothing.
-        //
-        // It shares that strip with the banners and the queue, which are laid
-        // out in flow and reach the pane's right edge — the pay-as-you-go
-        // guard did exactly that and the mascot sat tangled in its buttons.
-        // Anything else in the strip wins: it is carrying something the user
-        // has to read or act on, and the mascot is decoration.
-        let strip_busy =
-            self.banner.is_some() || self.tier_banner.is_some() || self.queued_rows_present();
-        let perch =
-            (self.cached_turns.is_empty() && !strip_busy).then(|| self.render_perch(window, cx));
         // The docked band spans the pane, hairline included; only the
         // composer's content is bound to the measure, as in the design.
         // The library's docked composer draws its own top hairline, which
@@ -119,89 +105,10 @@ impl SessionView {
                 .mx_auto()
                 .mt(px(-1.0))
                 .relative()
-                .children(perch)
                 .child(composer),
         ).into_any_element()
     }
 
-    /// The mascot perched on the composer's top edge, right-aligned with a
-    /// small inset — feet on the edge, overlapping the top border slightly,
-    /// clear of the composer's text and controls.
-    ///
-    /// The variant is seeded per session id (stable while the screen is
-    /// open, never reshuffled per frame); a click cycles it with a quick
-    /// fade. All motion goes through gpui's animation facilities: the appear
-    /// presence and the hover tween only ask for frames while they are
-    /// moving, and the idle bob rests at 0 — asking for nothing — whenever
-    /// the window is not focused or motion is reduced.
-    fn render_perch(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let paths = crate::mascot::PERCH_PATHS;
-        let seed = crate::mascot::perch_index_for_session(&self.session_id);
-        let index = (seed + self.mascot_bump as usize) % paths.len();
-        let path = paths[index];
-        // Pinned when the person asked the OS for reduced motion, and in a
-        // deterministic run: a capture has to be byte-identical, which a
-        // looping animation cannot promise.
-        let still = cx.reduce_motion() || crate::clock::deterministic();
-        // Appear: fade + a 2.5 px settle down, 260 ms ease-out. Keyed per
-        // (session, variant): once when the screen opens, and again as the
-        // new variant's fade when a click cycles it.
-        let (opacity, appear_dy) = if still {
-            (1.0, 0.0)
-        } else {
-            let timing = EnterExit {
-                enter: std::time::Duration::from_millis(260),
-                exit: std::time::Duration::from_millis(160),
-                delay: std::time::Duration::ZERO,
-            };
-            let sample =
-                presence(format!("baaz-perch-{}-{index}", self.session_id), true, timing, window, cx);
-            let progress = sample.progress.clamp(0.0, 1.0);
-            (progress, -2.5 * (1.0 - progress))
-        };
-        // No idle loop. A breathing bob read well, but it asks for a frame
-        // for as long as the new-session screen is open, and this app's
-        // contract is that an idle window schedules none — the mascot is
-        // decoration and does not get to spend the frame budget, or to make
-        // a capture depend on when it was taken. Motion here is finite and
-        // event-driven: the appear plays once, the hover tween runs only
-        // while the pointer is over it.
-        // Hover: a 2.5 px lift and a 1.025 scale over 160 ms, reversing on
-        // exit. The pointer writes one bool; the tween owns the motion.
-        let hovered = if still {
-            if self.mascot_hovered { 1.0 } else { 0.0 }
-        } else {
-            tween(
-                format!("baaz-perch-hover-{}", self.session_id),
-                if self.mascot_hovered { 1.0f32 } else { 0.0f32 },
-                Tween::new(std::time::Duration::from_millis(160), Easing::OUT),
-                window,
-                cx,
-            )
-        };
-        let size = crate::mascot::PERCH_PT * (1.0 + 0.025 * hovered);
-        // Feet on the edge: the inner band starts 1 px above the pane
-        // hairline, so -39 px puts the 44 pt mascot's bottom ~4 px below the
-        // hairline — on the edge, never over the composer's text.
-        let top = -39.0 + appear_dy - 2.5 * hovered;
-        let hover = cx.listener(|this: &mut Self, hovered: &bool, _, cx| {
-            this.mascot_hovered = *hovered;
-            cx.notify();
-        });
-        let cycle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.mascot_bump = this.mascot_bump.wrapping_add(1);
-            cx.notify();
-        });
-        div().absolute().top(px(top)).right(px(12.0)).child(
-            div()
-                .id("baaz-perch")
-                .cursor(CursorStyle::PointingHand)
-                .opacity(opacity)
-                .on_hover(move |hovered, window, cx| hover(hovered, window, cx))
-                .on_click(move |event, window, cx| cycle(event, window, cx))
-                .child(gpui::img(path).w(px(size)).h(px(size))),
-        ).into_any_element()
-    }
 
     /// The file-drop overlay, mounted only while a drag is over the pane:
     /// hidden it still samples its exit presence every render, and a running
@@ -267,7 +174,7 @@ impl SessionView {
         let folds = self.fold_intents(window, cx);
         let element = self.transcript_list(folds, cx);
         record_frame_stats(frame_start.elapsed());
-        let _ = window;
+
         element
     }
 
@@ -316,7 +223,11 @@ impl SessionView {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.workspace.clone())
         });
-        transcript::empty_state(&display, pick, cx)
+        // The hero sits above the title, the way the boot screen does. It
+        // replaced a small mascot perched on the composer: at 44 pt that read
+        // as an ornament stuck to the chrome rather than part of the screen.
+        let hero = Some(crate::mascot::hero_mascot(&self.session_id, window, cx));
+        transcript::empty_state(&display, hero, pick, cx)
     }
 
     /// Every intent a card can raise, bound once per frame.
@@ -1398,12 +1309,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 
     /// The queued strip: exactly what `SideState::queued` holds, in server
     /// order.
-    /// Whether the queue strip will draw: the perch shares its strip and
-    /// stands down for it.
-    pub(super) fn queued_rows_present(&self) -> bool {
-        self.fold.side(&self.session_id).is_some_and(|side| !side.queued.is_empty())
-    }
-
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let side = self.fold.side(&self.session_id)?;
         if side.queued.is_empty() {

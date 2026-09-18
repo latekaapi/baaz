@@ -1041,6 +1041,7 @@ pub(crate) const EMPTY_STATE_MEASURE: f32 = 880.0;
 /// deriving a folder name.
 pub fn empty_state(
     display: &str,
+    hero: Option<AnyElement>,
     on_pick: Option<PickSuggestion>,
     cx: &mut App,
 ) -> AnyElement {
@@ -1051,6 +1052,7 @@ pub fn empty_state(
         .items_center()
         .justify_center()
         .gap(px(scale::SP_3))
+        .children(hero)
         .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("New session"))
         .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("Muse runs in {display}.")));
     // Three ways in, for a person looking at a blank page. They are prompts

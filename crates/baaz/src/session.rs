@@ -52,11 +52,10 @@ use aui::transcript::{
     StatusLead,
 };
 use aui_icons::IconName;
-use aui_motion::{Easing, EnterExit, Tween, presence, tween};
 use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
 use aui_tokens::scale;
 use gpui::{
-    div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, CursorStyle, Entity,
+    div, list, prelude::*, px, AnyElement, ClipboardEntry, ClipboardItem, Context, Entity,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, ListAlignment, ListState, Pixels, SharedString,
     Task, Window,
 };
@@ -627,12 +626,6 @@ pub struct SessionView {
     unqueueing: HashMap<String, PendingUnqueue>,
     /// Pins the context meter's breakdown open, for a scripted capture.
     meter_open: bool,
-    /// The perch mascot's hover state, on the new-session screen: the
-    /// pointer writes it, the hover tween animates from it.
-    mascot_hovered: bool,
-    /// Clicks on the perch mascot cycle its variant: added to the
-    /// per-session seed, so the variant stays stable until clicked.
-    mascot_bump: u32,
     /// "Show full output" fetches by tool block id: what the server's stored
     /// bytes came back as. The fold keeps the fetch handle (`outputRef`); this
     /// keeps the result, so the card renders fetched lines without the fold
@@ -772,8 +765,6 @@ impl SessionView {
             mention_epoch: 0,
             unqueueing: HashMap::new(),
             meter_open: false,
-            mascot_hovered: false,
-            mascot_bump: 0,
             full_outputs: HashMap::new(),
             fake_context: None,
             focus: cx.focus_handle(),
