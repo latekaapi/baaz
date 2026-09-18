@@ -97,7 +97,16 @@ impl SessionView {
         // an empty render cache means no turns yet, and the first turn's
         // arrival fills the cache and unmounts the perch with it. Absolute,
         // so it reserves nothing and shifts nothing.
-        let perch = self.cached_turns.is_empty().then(|| self.render_perch(window, cx));
+        //
+        // It shares that strip with the banners and the queue, which are laid
+        // out in flow and reach the pane's right edge — the pay-as-you-go
+        // guard did exactly that and the mascot sat tangled in its buttons.
+        // Anything else in the strip wins: it is carrying something the user
+        // has to read or act on, and the mascot is decoration.
+        let strip_busy =
+            self.banner.is_some() || self.tier_banner.is_some() || self.queued_rows_present();
+        let perch =
+            (self.cached_turns.is_empty() && !strip_busy).then(|| self.render_perch(window, cx));
         // The docked band spans the pane, hairline included; only the
         // composer's content is bound to the measure, as in the design.
         // The library's docked composer draws its own top hairline, which
@@ -1393,6 +1402,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 
     /// The queued strip: exactly what `SideState::queued` holds, in server
     /// order.
+    /// Whether the queue strip will draw: the perch shares its strip and
+    /// stands down for it.
+    pub(super) fn queued_rows_present(&self) -> bool {
+        self.fold.side(&self.session_id).is_some_and(|side| !side.queued.is_empty())
+    }
+
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let side = self.fold.side(&self.session_id)?;
         if side.queued.is_empty() {
