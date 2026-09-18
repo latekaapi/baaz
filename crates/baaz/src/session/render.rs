@@ -139,7 +139,10 @@ impl SessionView {
         let seed = crate::mascot::perch_index_for_session(&self.session_id);
         let index = (seed + self.mascot_bump as usize) % paths.len();
         let path = paths[index];
-        let still = cx.reduce_motion();
+        // Pinned when the person asked the OS for reduced motion, and in a
+        // deterministic run: a capture has to be byte-identical, which a
+        // looping animation cannot promise.
+        let still = cx.reduce_motion() || crate::clock::deterministic();
         // Appear: fade + a 2.5 px settle down, 260 ms ease-out. Keyed per
         // (session, variant): once when the screen opens, and again as the
         // new variant's fade when a click cycles it.
@@ -156,20 +159,13 @@ impl SessionView {
             let progress = sample.progress.clamp(0.0, 1.0);
             (progress, -2.5 * (1.0 - progress))
         };
-        // Idle: a slow breathing bob, 2 px over a 3.5 s eased ping-pong.
-        let bob = if !still && window.is_window_active() {
-            let phase = looping(
-                format!("baaz-perch-bob-{}", self.session_id),
-                Loop::eased(std::time::Duration::from_millis(3500), Easing::INOUT)
-                    .alternate()
-                    .resting(0.0),
-                window,
-                cx,
-            );
-            2.0 * phase.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        // No idle loop. A breathing bob read well, but it asks for a frame
+        // for as long as the new-session screen is open, and this app's
+        // contract is that an idle window schedules none — the mascot is
+        // decoration and does not get to spend the frame budget, or to make
+        // a capture depend on when it was taken. Motion here is finite and
+        // event-driven: the appear plays once, the hover tween runs only
+        // while the pointer is over it.
         // Hover: a 2.5 px lift and a 1.025 scale over 160 ms, reversing on
         // exit. The pointer writes one bool; the tween owns the motion.
         let hovered = if still {
@@ -187,7 +183,7 @@ impl SessionView {
         // Feet on the edge: the inner band starts 1 px above the pane
         // hairline, so -39 px puts the 44 pt mascot's bottom ~4 px below the
         // hairline — on the edge, never over the composer's text.
-        let top = -39.0 + appear_dy + bob - 2.5 * hovered;
+        let top = -39.0 + appear_dy - 2.5 * hovered;
         let hover = cx.listener(|this: &mut Self, hovered: &bool, _, cx| {
             this.mascot_hovered = *hovered;
             cx.notify();
