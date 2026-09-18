@@ -49,23 +49,29 @@ pub fn legacy_default_support_dir() -> PathBuf {
 /// unit test asserts on it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StateMigration {
-    /// Nothing to do: the new directory already exists, or there is no old
-    /// one to move.
+    /// Nothing to do: there is no old directory, or the new one already has
+    /// everything the old one holds.
     NotNeeded,
     /// The old directory was renamed onto the new path.
     Moved,
     /// A rename was impossible (cross-device, permissions), so the tree was
     /// copied and the old directory removed afterwards.
     Copied,
+    /// A new directory already existed - an early write beat the migration -
+    /// so entries missing from it were filled in from the old one. Nothing in
+    /// the new tree was overwritten, and the old directory is left in place.
+    Merged,
 }
 
 /// One-time move of the pre-rename state directory onto the new path.
 ///
 /// On startup, when `BAAZ_STATE_DIR` is unset (an explicit state dir means
-/// the default paths are untouched), the default is `baaz`, and no `baaz`
-/// directory exists yet while a `harness` one does, the old directory is
-/// moved — sessions, projects, the search index, everything — so existing
-/// state survives the rename. Never fails startup: every outcome is logged
+/// the default paths are untouched), a `harness` directory is carried onto
+/// the `baaz` path — sessions, projects, the search index, everything — so
+/// existing state survives the rename. With no `baaz` directory the whole
+/// tree moves; when one already exists, because an early write such as the
+/// tier probe beat this call, only the entries it is missing are filled in
+/// and nothing is overwritten. Never fails startup: every outcome is logged
 /// and returned, and the app continues against whatever is on disk.
 pub fn migrate_legacy_support_dir() -> StateMigration {
     if std::env::var_os("BAAZ_STATE_DIR").is_some() {
@@ -88,6 +94,13 @@ pub fn migrate_legacy_support_dir() -> StateMigration {
                 default_support_dir().display()
             );
         }
+        StateMigration::Merged => {
+            eprintln!(
+                "baaz: filled missing state from {} into {} (the new directory already existed; nothing was overwritten, the old directory was kept)",
+                legacy_default_support_dir().display(),
+                default_support_dir().display()
+            );
+        }
     }
     outcome
 }
@@ -95,7 +108,7 @@ pub fn migrate_legacy_support_dir() -> StateMigration {
 /// The move itself, against explicit paths so the unit test never touches
 /// `HOME` or the real `Application Support`.
 fn migrate_support_dir_at(new: &std::path::Path, old: &std::path::Path) -> StateMigration {
-    if new.exists() || !old.exists() {
+    if !old.exists() {
         return StateMigration::NotNeeded;
     }
     if let Some(parent) = new.parent() {
@@ -103,13 +116,50 @@ fn migrate_support_dir_at(new: &std::path::Path, old: &std::path::Path) -> State
             return StateMigration::NotNeeded;
         }
     }
-    if std::fs::rename(old, new).is_ok() {
-        return StateMigration::Moved;
+    // The clean case: nothing at the new path, so the whole tree moves.
+    if !new.exists() {
+        if std::fs::rename(old, new).is_ok() {
+            return StateMigration::Moved;
+        }
+        if copy_dir_all(old, new).is_ok() && std::fs::remove_dir_all(old).is_ok() {
+            return StateMigration::Copied;
+        }
+        return StateMigration::NotNeeded;
     }
-    if copy_dir_all(old, new).is_ok() && std::fs::remove_dir_all(old).is_ok() {
-        return StateMigration::Copied;
+    // The new directory already exists. It only takes one early write — a
+    // tier probe, a crashed first launch — to create it before this runs,
+    // and an all-or-nothing guard here would strand the old sessions
+    // forever with no warning. Fill in whatever the new tree is missing and
+    // leave everything it already has alone: the new copy is authoritative,
+    // because the user has been running against it.
+    if !copy_missing(old, new) {
+        return StateMigration::NotNeeded;
     }
-    StateMigration::NotNeeded
+    StateMigration::Merged
+}
+
+/// Copy entries of `old` that have no counterpart in `new`, recursing into
+/// directories that exist on both sides. Never overwrites. Returns whether
+/// anything was copied.
+fn copy_missing(old: &std::path::Path, new: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(old) else {
+        return false;
+    };
+    let mut filled = false;
+    for entry in entries.flatten() {
+        let target = new.join(entry.file_name());
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            if target.exists() {
+                filled |= copy_missing(&entry.path(), &target);
+            } else if copy_dir_all(&entry.path(), &target).is_ok() {
+                filled = true;
+            }
+        } else if !target.exists() && std::fs::copy(entry.path(), &target).is_ok() {
+            filled = true;
+        }
+    }
+    filled
 }
 
 /// Recursively copy a directory tree: `rename` cannot cross devices, and the
@@ -207,6 +257,42 @@ mod tests {
         assert_eq!(std::fs::read_to_string(new.join("sessions.json")).unwrap(), "{}");
         assert_eq!(std::fs::read(new.join("nested").join("search.db")).unwrap(), b"db");
         // A second run is a no-op: the new dir already exists.
+        assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::NotNeeded);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The regression this guards: on the owner's machine a tier probe wrote
+    /// `baaz/tier-probe` before any launch could migrate, and the old
+    /// `new.exists()` guard then refused forever — 73 sessions stranded in
+    /// `harness/sessions.json` with no warning. A partial new directory must
+    /// be filled in, not treated as done.
+    #[test]
+    fn an_early_write_to_the_new_dir_does_not_strand_the_old_state() {
+        let base = std::env::temp_dir().join(format!("baaz-merge-{}", std::process::id()));
+        let old = base.join("harness");
+        let new = base.join("baaz");
+        let _ = std::fs::remove_dir_all(&base);
+        // The old tree: the user's real state.
+        std::fs::create_dir_all(old.join("nested")).expect("seed old");
+        std::fs::write(old.join("sessions.json"), b"OLD-SESSIONS").expect("seed sessions");
+        std::fs::write(old.join("layout.json"), b"OLD-LAYOUT").expect("seed layout");
+        std::fs::write(old.join("nested").join("search.db"), b"OLD-DB").expect("seed db");
+        // An early write beat the migration: the new dir exists with one file,
+        // and one file that also exists on the old side with newer content.
+        std::fs::create_dir_all(&new).expect("seed new");
+        std::fs::write(new.join("tier-probe"), b"PROBE").expect("seed probe");
+        std::fs::write(new.join("layout.json"), b"NEW-LAYOUT").expect("seed new layout");
+
+        assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::Merged);
+        // What the new tree lacked is filled in, including nested trees.
+        assert_eq!(std::fs::read(new.join("sessions.json")).unwrap(), b"OLD-SESSIONS");
+        assert_eq!(std::fs::read(new.join("nested").join("search.db")).unwrap(), b"OLD-DB");
+        // What it already had is untouched: the user has been running against it.
+        assert_eq!(std::fs::read(new.join("layout.json")).unwrap(), b"NEW-LAYOUT");
+        assert_eq!(std::fs::read(new.join("tier-probe")).unwrap(), b"PROBE");
+        // The old directory is kept, so a merge is never a destructive step.
+        assert!(old.exists(), "a merge leaves the old directory in place");
+        // Running again finds nothing missing and reports so.
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::NotNeeded);
         let _ = std::fs::remove_dir_all(&base);
     }
