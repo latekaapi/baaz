@@ -52,7 +52,7 @@ use aui::transcript::{
     StatusLead,
 };
 use aui_icons::IconName;
-use aui_motion::{Easing, EnterExit, Loop, Tween, looping, presence, tween};
+use aui_motion::{Easing, EnterExit, Tween, presence, tween};
 use aui_protocol::{ActivityState, Block, PermissionMode, PlanState, ReasoningEffort, Session, ThinkingState, ToolStatus, Turn};
 use aui_tokens::scale;
 use gpui::{

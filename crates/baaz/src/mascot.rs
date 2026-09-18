@@ -226,7 +226,8 @@ impl AssetSource for BaazAssets {
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
 /// it appears. Under reduced motion it draws settled.
 pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
-    let style = if cx.reduce_motion() {
+    // Pinned for reduced motion and for deterministic captures alike.
+    let style = if cx.reduce_motion() || crate::clock::deterministic() {
         PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
     } else {
         let timing = EnterExit {
