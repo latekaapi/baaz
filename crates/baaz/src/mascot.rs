@@ -6,7 +6,7 @@
 //! `crates/baaz/assets/mascot/` and are embedded here with `include_bytes!`.
 //! [`BaazAssets`] serves the `mascot/…` paths and chains to [`AuiAssets`]
 //! for everything else; the app installs it in `main.rs` (both the shell
-//! boot and the bench boot), so `gpui::img("mascot/perch/…")` resolves
+//! boot and the bench boot), so `gpui::img("mascot/hero/…")` resolves
 //! through the normal embedded-asset pipeline.
 //!
 //! Retina note: gpui's image loader fetches exactly the embedded path it is
@@ -22,21 +22,11 @@ use std::time::Duration;
 use aui_motion::{EnterExit, PresenceStyle, presence};
 use gpui::{AssetSource, SharedString, div, img, prelude::*, px, AnyElement, App, Window};
 
-/// The five `perch/` variants (44 pt), in asset order.
-pub const PERCH_PATHS: [&str; 5] = [
-    "mascot/perch/welcome-idle.png",
-    "mascot/perch/greeting-wave.png",
-    "mascot/perch/chill-ambient.png",
-    "mascot/perch/thinking-planning.png",
-    "mascot/perch/searching-reading.png",
-];
-
 /// The boot-screen mascot (180 pt).
 pub const BOOT_GREETING: &str = "mascot/boot/greeting-wave.png";
 
-/// Layout size of the perch mascot, in points.
-pub const PERCH_PT: f32 = 44.0;
-/// Layout size of the boot mascot, in points.
+/// Layout size of the hero mascots — the boot screen and the new session
+/// screen use the same size.
 pub const BOOT_PT: f32 = 180.0;
 /// Layout size of the error mascot, in points.
 pub const ERROR_PT: f32 = 56.0;
@@ -66,11 +56,11 @@ macro_rules! mascot {
 /// Every bundled mascot file. The loader normalises any `@2x`/`@3x` request
 /// to the base path, so all three suffixes serve these bytes.
 static MASCOTS: &[MascotFile] = &[
-    mascot!("perch", "welcome-idle"),
-    mascot!("perch", "greeting-wave"),
-    mascot!("perch", "chill-ambient"),
-    mascot!("perch", "thinking-planning"),
-    mascot!("perch", "searching-reading"),
+    mascot!("hero", "welcome-idle"),
+    mascot!("hero", "greeting-wave"),
+    mascot!("hero", "chill-ambient"),
+    mascot!("hero", "thinking-planning"),
+    mascot!("hero", "searching-reading"),
     mascot!("boot", "greeting-wave"),
     mascot!("boot", "welcome-idle"),
     mascot!("error", "error-sorry"),
@@ -78,16 +68,26 @@ static MASCOTS: &[MascotFile] = &[
     mascot!("error", "blocked-permission"),
 ];
 
+/// The new-session hero variants, in the order [`perch_index_for_session`]
+/// indexes them.
+pub const HERO_PATHS: [&str; 5] = [
+    "mascot/hero/welcome-idle.png",
+    "mascot/hero/greeting-wave.png",
+    "mascot/hero/chill-ambient.png",
+    "mascot/hero/thinking-planning.png",
+    "mascot/hero/searching-reading.png",
+];
+
 /// The `@3x` bytes for a mascot path, whatever its suffix.
 fn mascot_bytes(path: &str) -> Option<&'static [u8]> {
-    // Compare against the stem: `mascot/perch/foo[@2x|@3x].png` all match
-    // `mascot/perch/foo.png`. Anything outside `mascot/` is not ours.
+    // Compare against the stem: `mascot/hero/foo[@2x|@3x].png` all match
+    // `mascot/hero/foo.png`. Anything outside `mascot/` is not ours.
     let (stem, _) = path.rsplit_once('.')?;
     let stem = stem.strip_suffix("@3x").or_else(|| stem.strip_suffix("@2x")).unwrap_or(stem);
     MASCOTS.iter().find(|m| m.base.strip_suffix(".png") == Some(stem)).map(|m| m.bytes_3x as &'static [u8])
 }
 
-/// Which perch variant a session gets: FNV-1a over the session id, mod five.
+/// Which hero variant a session gets: FNV-1a over the session id, mod five.
 ///
 /// Deterministic per session id, so the variant stays stable while the
 /// new-session screen is open and never reshuffles frame to frame; different
@@ -98,7 +98,7 @@ pub fn perch_index_for_session(session_id: &str) -> usize {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    (hash % PERCH_PATHS.len() as u64) as usize
+    (hash % HERO_PATHS.len() as u64) as usize
 }
 
 /// Which error family a critical dialog is in. Picked by error kind — the
@@ -204,8 +204,8 @@ impl AssetSource for BaazAssets {
         let mut out = aui::assets::AuiAssets.list(path)?;
         match path {
             "" => out.push("mascot".into()),
-            "mascot" => out.extend(["mascot/perch".into(), "mascot/boot".into(), "mascot/error".into()]),
-            "mascot/perch" | "mascot/boot" | "mascot/error" => {
+            "mascot" => out.extend(["mascot/hero".into(), "mascot/boot".into(), "mascot/error".into()]),
+            "mascot/hero" | "mascot/boot" | "mascot/error" => {
                 let dir = path;
                 out.extend(
                     MASCOTS
@@ -225,7 +225,22 @@ impl AssetSource for BaazAssets {
 ///
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
 /// it appears. Under reduced motion it draws settled.
+/// The new-session hero: the same character and size as the boot hero, above
+/// the "New session" title, with the variant seeded by the session id so a
+/// person sees a different one from session to session but never a different
+/// one frame to frame.
+pub fn hero_mascot(session_id: &str, window: &mut Window, cx: &mut App) -> AnyElement {
+    let path = HERO_PATHS[perch_index_for_session(session_id)];
+    mascot_hero_element(path, "baaz-session-hero", window, cx)
+}
+
 pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
+    mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", window, cx)
+}
+
+/// One hero-sized mascot, faded and risen in once on appear. `id` keys the
+/// presence, so two heroes on different surfaces do not share a state.
+fn mascot_hero_element(path: &'static str, id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
     // Pinned for reduced motion and for deterministic captures alike.
     let style = if cx.reduce_motion() || crate::clock::deterministic() {
         PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
@@ -237,7 +252,7 @@ pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
         };
         // One stable id: the enter plays once, on appear — never again on
         // re-render, because the presence is already `Present`.
-        PresenceStyle::fade_rise(presence("baaz-boot-mascot", true, timing, window, cx), 8.0)
+        PresenceStyle::fade_rise(presence(id, true, timing, window, cx), 8.0)
     };
     div()
         .flex()
@@ -246,9 +261,10 @@ pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
         .opacity(style.opacity)
         .relative()
         .top(style.offset_y)
-        .child(img(BOOT_GREETING).w(px(BOOT_PT)).h(px(BOOT_PT)))
+        .child(img(path).w(px(BOOT_PT)).h(px(BOOT_PT)))
         .into_any_element()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -271,7 +287,7 @@ mod tests {
     fn the_seed_is_stable_per_session_and_varies_across_sessions() {
         assert_eq!(perch_index_for_session("s-1"), perch_index_for_session("s-1"));
         for id in ["s-1", "s-2", "new-session", "01234567-89ab-cdef-0123-456789abcdef"] {
-            assert!(perch_index_for_session(id) < PERCH_PATHS.len(), "{id} is in range");
+            assert!(perch_index_for_session(id) < HERO_PATHS.len(), "{id} is in range");
         }
         let distinct: std::collections::HashSet<usize> =
             ["s-1", "s-2", "s-3", "s-4", "s-5", "s-6", "s-7", "s-8"]
@@ -331,10 +347,10 @@ mod tests {
     fn the_source_lists_the_mascot_tree_beside_the_library() {
         let root = BaazAssets.list("").expect("root lists");
         assert!(root.iter().any(|e| e.as_ref() == "mascot"), "mascot is listed: {root:?}");
-        let perch = BaazAssets.list("mascot/perch").expect("perch lists");
-        assert_eq!(perch.len(), PERCH_PATHS.len());
-        for path in PERCH_PATHS {
-            assert!(perch.iter().any(|e| e.as_ref() == path), "{path} is listed");
+        let hero = BaazAssets.list("mascot/hero").expect("hero lists");
+        assert_eq!(hero.len(), HERO_PATHS.len());
+        for path in HERO_PATHS {
+            assert!(hero.iter().any(|e| e.as_ref() == path), "{path} is listed");
         }
     }
 }
