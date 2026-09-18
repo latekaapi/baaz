@@ -168,6 +168,14 @@ impl SessionView {
 
     pub(crate) fn steer_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(turn_id) = self.running.as_ref().map(|r| r.turn_id.clone()) else {
+            // The turn ended while the reclaim was in flight: the steer has
+            // nowhere to go, so the words go back where they came from — with
+            // the reason, so a message that reappears does not read as sent.
+            self.banner = Some(
+                "The turn ended before the message could be steered — kept it in the composer."
+                    .to_owned(),
+            );
+            self.banner_action = None;
             self.restore_prompt(text, cx);
             return;
         };
@@ -178,15 +186,25 @@ impl SessionView {
             command_id,
             session_id: self.session_id.clone(),
             expected_turn_id: turn_id,
-            input: self.parts(text),
+            input: self.parts(text.clone()),
             reasoning_effort: self.effort.map(effort_wire),
         };
         self.images.clear();
         self.files.clear();
-        let Some(client) = self.wire_client(cx) else { return };
-        self.wire_call(cx, move || client.turn_steer(&params), |this, result, cx| {
+        let Some(client) = self.wire_client(cx) else {
+            // No wire to steer on (a replayed capture — and `wire_client`
+            // already said so above the composer): keep the words, not just
+            // the notice.
+            self.restore_prompt(text, cx);
+            return;
+        };
+        self.wire_call(cx, move || client.turn_steer(&params), move |this, result, cx| {
             if let Err(error) = result {
+                // The steer never landed (the turn ended mid-flight, or the
+                // server refused it): the banner says why, and the words go
+                // back in the composer instead of evaporating.
                 this.report(&error, cx);
+                this.restore_prompt(text, cx);
             }
         });
         cx.notify();
@@ -212,13 +230,13 @@ impl SessionView {
         });
     }
 
-    /// `turn/unqueue`, remembering why so `turn/unqueued` knows what to do with
-    /// the text it hands back.
-    pub(super) fn unqueue(&mut self, turn_id: &str, why: Unqueue, cx: &mut Context<Self>) {
+    /// `turn/unqueue`, remembering why — and the row's text, captured now —
+    /// so `turn/unqueued` needs no fold echo to know what was reclaimed.
+    pub(super) fn unqueue(&mut self, turn_id: &str, why: Unqueue, text: String, cx: &mut Context<Self>) {
         if self.wire_client(cx).is_none() {
             return;
         }
-        self.unqueueing.insert(turn_id.to_owned(), why);
+        self.unqueueing.insert(turn_id.to_owned(), PendingUnqueue { kind: why, text });
         let params = TurnUnqueueParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),

@@ -363,6 +363,18 @@ enum Unqueue {
     Steer,
 }
 
+/// A queued row whose reclaim (`turn/unqueue`) is in flight.
+///
+/// The text is captured when the row's button is clicked, from the same
+/// `command_text` the fold would echo back — so handling `turn/unqueued`
+/// never depends on that echo arriving on the same event tick, or at all.
+/// A missing or late echo used to drop the reclaimed text silently.
+#[derive(Clone, PartialEq, Eq)]
+struct PendingUnqueue {
+    kind: Unqueue,
+    text: String,
+}
+
 /// One open Muse session.
 pub struct SessionView {
     /// The Muse session id this view follows.
@@ -609,8 +621,9 @@ pub struct SessionView {
     mention_epoch: u64,
     /// The canonical workspace key the history file is written under.
     workspace_key: String,
-    /// Queued turns whose unqueue is in flight, and why.
-    unqueueing: HashMap<String, Unqueue>,
+    /// Queued turns whose unqueue is in flight, with the intent and the text
+    /// captured when the row's button was clicked.
+    unqueueing: HashMap<String, PendingUnqueue>,
     /// Pins the context meter's breakdown open, for a scripted capture.
     meter_open: bool,
     /// "Show full output" fetches by tool block id: what the server's stored
