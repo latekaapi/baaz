@@ -93,13 +93,108 @@ impl SessionView {
         }
         let composer = self.render_composer(cx);
         let p = cx.aui().colors;
+        // The perch rides above the composer on the new-session screen only:
+        // an empty render cache means no turns yet, and the first turn's
+        // arrival fills the cache and unmounts the perch with it. Absolute,
+        // so it reserves nothing and shifts nothing.
+        let perch = self.cached_turns.is_empty().then(|| self.render_perch(window, cx));
         // The docked band spans the pane, hairline included; only the
         // composer's content is bound to the measure, as in the design.
         // The library's docked composer draws its own top hairline, which
         // would stop at the measure's edges: the band draws the pane-wide
         // one and the composer is pulled up a pixel so its own lies on it.
         div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
-            div().w_full().max_w(px(TRANSCRIPT_MEASURE)).mx_auto().mt(px(-1.0)).child(composer),
+            div()
+                .w_full()
+                .max_w(px(TRANSCRIPT_MEASURE))
+                .mx_auto()
+                .mt(px(-1.0))
+                .relative()
+                .children(perch)
+                .child(composer),
+        ).into_any_element()
+    }
+
+    /// The mascot perched on the composer's top edge, right-aligned with a
+    /// small inset — feet on the edge, overlapping the top border slightly,
+    /// clear of the composer's text and controls.
+    ///
+    /// The variant is seeded per session id (stable while the screen is
+    /// open, never reshuffled per frame); a click cycles it with a quick
+    /// fade. All motion goes through gpui's animation facilities: the appear
+    /// presence and the hover tween only ask for frames while they are
+    /// moving, and the idle bob rests at 0 — asking for nothing — whenever
+    /// the window is not focused or motion is reduced.
+    fn render_perch(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let paths = crate::mascot::PERCH_PATHS;
+        let seed = crate::mascot::perch_index_for_session(&self.session_id);
+        let index = (seed + self.mascot_bump as usize) % paths.len();
+        let path = paths[index];
+        let still = cx.reduce_motion();
+        // Appear: fade + a 2.5 px settle down, 260 ms ease-out. Keyed per
+        // (session, variant): once when the screen opens, and again as the
+        // new variant's fade when a click cycles it.
+        let (opacity, appear_dy) = if still {
+            (1.0, 0.0)
+        } else {
+            let timing = EnterExit {
+                enter: std::time::Duration::from_millis(260),
+                exit: std::time::Duration::from_millis(160),
+                delay: std::time::Duration::ZERO,
+            };
+            let sample =
+                presence(format!("baaz-perch-{}-{index}", self.session_id), true, timing, window, cx);
+            let progress = sample.progress.clamp(0.0, 1.0);
+            (progress, -2.5 * (1.0 - progress))
+        };
+        // Idle: a slow breathing bob, 2 px over a 3.5 s eased ping-pong.
+        let bob = if !still && window.is_window_active() {
+            let phase = looping(
+                format!("baaz-perch-bob-{}", self.session_id),
+                Loop::eased(std::time::Duration::from_millis(3500), Easing::INOUT)
+                    .alternate()
+                    .resting(0.0),
+                window,
+                cx,
+            );
+            2.0 * phase.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // Hover: a 2.5 px lift and a 1.025 scale over 160 ms, reversing on
+        // exit. The pointer writes one bool; the tween owns the motion.
+        let hovered = if still {
+            if self.mascot_hovered { 1.0 } else { 0.0 }
+        } else {
+            tween(
+                format!("baaz-perch-hover-{}", self.session_id),
+                if self.mascot_hovered { 1.0f32 } else { 0.0f32 },
+                Tween::new(std::time::Duration::from_millis(160), Easing::OUT),
+                window,
+                cx,
+            )
+        };
+        let size = crate::mascot::PERCH_PT * (1.0 + 0.025 * hovered);
+        // Feet on the edge: the inner band starts 1 px above the pane
+        // hairline, so -39 px puts the 44 pt mascot's bottom ~4 px below the
+        // hairline — on the edge, never over the composer's text.
+        let top = -39.0 + appear_dy + bob - 2.5 * hovered;
+        let hover = cx.listener(|this: &mut Self, hovered: &bool, _, cx| {
+            this.mascot_hovered = *hovered;
+            cx.notify();
+        });
+        let cycle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.mascot_bump = this.mascot_bump.wrapping_add(1);
+            cx.notify();
+        });
+        div().absolute().top(px(top)).right(px(12.0)).child(
+            div()
+                .id("baaz-perch")
+                .cursor(CursorStyle::PointingHand)
+                .opacity(opacity)
+                .on_hover(move |hovered, window, cx| hover(hovered, window, cx))
+                .on_click(move |event, window, cx| cycle(event, window, cx))
+                .child(gpui::img(path).w(px(size)).h(px(size))),
         ).into_any_element()
     }
 

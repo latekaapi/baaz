@@ -97,6 +97,7 @@
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
+//! | `error-dialog:<offline\|blocked\|sorry>` | capture aid: raise a critical error dialog of that family through the real dialog path (default `sorry`), free |
 //! | `projects` | open the Projects palette |
 //! | `project:<path>` | adopt `path` as a project and make it current (no panel, no session) |
 //! | `project-menu` | open the header's project menu (`project-menu:<name>` opens the group row menu for the project named) |
@@ -209,6 +210,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
+    WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| this.confirm_archive_dialog(window, cx) },
     WindowVerb { verb: "show-archived", run: |this, _, _, cx| this.step_toggle_archived(cx) },
     WindowVerb { verb: "projects", run: |this, _, window, cx| this.step_projects(window, cx) },

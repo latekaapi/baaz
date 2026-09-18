@@ -14,6 +14,7 @@
 //! draws the dialog and the toast stack settled rather than rising in: an
 //! enter presence never lands on the same frame twice.
 
+use aui::data::{button, ButtonSize};
 use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
 use aui::nav::{folder_drop_card, view_menu, MenuRow};
 use aui::overlay::{
@@ -21,10 +22,12 @@ use aui::overlay::{
     PaletteItem, PaletteSection,
 };
 use aui_icons::IconName;
-use aui_tokens::scale;
+use aui_motion::{presence, EnterExit, PresenceStyle};
+use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
+    black, div, prelude::*, px, relative, AnyElement, App, Context, Focusable, SharedString, Window,
 };
+use gpui_kit::base::h_flex;
 use gpui_kit::component::input::Textarea;
 
 use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP, TOAST_STACK_H, TOAST_TOP, TOAST_W};
@@ -725,7 +728,7 @@ impl Harness {
         )
     }
 
-    pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Read the modal out whole before anything asks `cx` for a listener:
         // the entity's borrow and `cx.listener` cannot be alive at once.
         let (title, detail, kind, primary_label, action, danger) = {
@@ -775,21 +778,106 @@ impl Harness {
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        // A deterministic capture draws the dialog settled rather than rising
-        // in: the enter presence never lands on the same frame twice.
-        let mut card = dialog("dialog", title)
-            .kind(kind)
-            .body(detail)
-            .danger(danger)
-            .primary(primary_label);
-        if let Some(secondary) = secondary {
-            card = card.secondary(secondary);
-        }
-        let card = card
-            .on_primary(move |w, cx| primary(&(), w, cx))
-            .on_secondary(move |w, cx| close(&(), w, cx))
-            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        // Critical errors (`DialogKind::Error`) draw a Baaz-owned card that
+        // mirrors the library dialog's shell — same 420 pt width, 16 pt
+        // padding, 12 pt gap, scrim, motion and action row — with the error
+        // mascot leading the header in place of the 26 px kind tile: 56 pt,
+        // centred on the title row, the title to its right. Only critical
+        // dialogs take this path; confirmations keep the library card below
+        // untouched, and the toast stack stays text-only.
+        let card: AnyElement = if kind == DialogKind::Error {
+            let sprite = crate::mascot::ErrorMascot::classify(&title, &detail);
+            let p = cx.aui().colors;
+            // The shared modal motion (6 px drop at 98.5 % scale), settled
+            // for a scripted capture — the same stillness the palette uses.
+            let style = if self.still() {
+                PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
+            } else {
+                PresenceStyle::fade_rise_scale(
+                    presence("baaz-error-dialog", true, EnterExit::DEFAULT, window, cx),
+                    6.0,
+                    0.985,
+                )
+            };
+            let head = h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(scale::SP_3))
+                .child(crate::mascot::error_mascot(sprite))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_role(TextRole::Title)
+                        .text_color(p.ink)
+                        .child(SharedString::from(title)),
+                );
+            let mut shell = div()
+                .relative()
+                .top(-style.offset_y)
+                .flex_none()
+                .w(px(420.0 * style.scale))
+                .rounded(px(scale::R_LG))
+                .border_1()
+                .border_color(p.line_strong)
+                .bg(p.overlay)
+                .shadow(p.shadow(3))
+                .text_color(p.ink)
+                .gap(px(scale::SP_4))
+                .p(px(scale::SP_5))
+                .child(head)
+                .child(
+                    div()
+                        .w_full()
+                        .ui(scale::FS_12)
+                        .line_height(relative(scale::LH_UI))
+                        .text_color(p.ink_2)
+                        .child(SharedString::from(detail)),
+                );
+            // The one action row, as the library draws it: spacer, secondary,
+            // primary at the far right.
+            let mut actions =
+                h_flex().w_full().items_center().gap(px(scale::SP_3)).child(div().flex_1().min_w(px(0.0)));
+            if let Some(label) = secondary {
+                actions = actions.child(
+                    button("dialog-secondary", label)
+                        .size(ButtonSize::Md)
+                        .on_click(move |_, w, cx| close(&(), w, cx)),
+                );
+            }
+            let mut prime = button("dialog-primary", primary_label).size(ButtonSize::Md);
+            prime = if danger { prime.danger() } else { prime.primary() };
+            shell = shell.child(actions.child(prime.on_click(move |_, w, cx| primary(&(), w, cx))));
+            let mut scrim = div()
+                .id("dialog")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(black().opacity(0.25 * style.opacity));
+            scrim = scrim.on_click(move |_, w, cx| dismiss(&(), w, cx));
+            scrim
+                .child(div().id("dialog-card").flex_none().opacity(style.opacity).occlude().child(shell))
+                .into_any_element()
+        } else {
+            // A deterministic capture draws the dialog settled rather than rising
+            // in: the enter presence never lands on the same frame twice.
+            let mut card = dialog("dialog", title)
+                .kind(kind)
+                .body(detail)
+                .danger(danger)
+                .primary(primary_label);
+            if let Some(secondary) = secondary {
+                card = card.secondary(secondary);
+            }
+            let card = card
+                .on_primary(move |w, cx| primary(&(), w, cx))
+                .on_secondary(move |w, cx| close(&(), w, cx))
+                .on_dismiss(move |w, cx| dismiss(&(), w, cx));
+            let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+            card.into_any_element()
+        };
         Some(
             popover_layer(
                 div()
@@ -802,6 +890,49 @@ impl Harness {
             )
             .into_any_element(),
         )
+    }
+
+    /// `error-dialog:<offline|blocked|sorry>`: capture aid that raises a
+    /// critical error dialog through the same [`Self::set_dialog`] path a
+    /// real failure takes, so the screenshot shows the production render —
+    /// never a hardcoded render branch. Scripting only, like the other
+    /// capture aids (`title-land:`, `row-detail:`); free, it reaches the
+    /// wire nowhere. The payload picks the sprite family (default `sorry`).
+    pub(crate) fn step_error_dialog(&mut self, rest: &str, cx: &mut Context<Self>) {
+        use crate::overlays::{Dialog, DialogAction};
+        let dialog = match rest.trim().to_lowercase().as_str() {
+            "offline" => Dialog {
+                title: "Muse disconnected".into(),
+                detail: "The connection to `muse serve` dropped before the turn finished. \
+                    Reconnect and the open session resumes where it stopped."
+                    .into(),
+                kind: DialogKind::Error,
+                primary: "Reconnect",
+                action: DialogAction::Reconnect,
+                archive_target: None,
+            },
+            "blocked" => Dialog {
+                title: "Usage limit exceeded".into(),
+                detail: "This login's plan allows no more turns until the quota resets. \
+                    Sign in with a login that still has room, or wait for the reset."
+                    .into(),
+                kind: DialogKind::Error,
+                primary: "Dismiss",
+                action: DialogAction::Dismiss,
+                archive_target: None,
+            },
+            _ => Dialog {
+                title: "Muse hit an internal error".into(),
+                detail: "The turn failed inside `muse serve` before producing anything. \
+                    Nothing was billed for the attempt; retry the turn or start a new session."
+                    .into(),
+                kind: DialogKind::Error,
+                primary: "Dismiss",
+                action: DialogAction::Dismiss,
+                archive_target: None,
+            },
+        };
+        self.set_dialog(cx, dialog);
     }
 
     /// Baaz → About Baaz.
