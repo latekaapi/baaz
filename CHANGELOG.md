@@ -158,6 +158,15 @@ the `aui` component library.
 
 ### Performance
 
+- **The sidebar paints from the local index.** On a machine with 337
+  sessions the list used to appear about 1.06 s after the window did: the
+  index was read and joined within 130 ms, but nothing was drawn until
+  `session/list` returned, behind the ~870 ms the `muse serve` child takes to
+  start. Provisional rows now come from the index at ~160 ms and are replaced
+  wholesale when the real list lands. They show only what the index knows — a
+  label, a description, an elapsed tag — and reserve the meta line's height
+  without drawing it, so no turn count is invented and no row moves when the
+  real one arrives.
 - **Calm rendering.** The sidebar and transcript paint through cached panes
   that rebuild only when their inputs change; an idle window schedules no
   frames. Scrolling, resize drags and the one-shot reveal steer the lists
