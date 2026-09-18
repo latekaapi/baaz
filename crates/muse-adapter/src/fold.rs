@@ -177,7 +177,7 @@ pub struct MuseFold {
 ///
 /// A fold serves a whole `muse serve` connection and used to keep every
 /// session it had ever seen, so the process grew with each session opened
-/// (finding `performance-16`). In the harness a session view owns its fold
+/// (finding `performance-16`). In Baaz a session view owns its fold
 /// and closing the view drops it, so this bound only ever binds a fold that
 /// really is multiplexing — a `session/fork`, or a capture that carries more
 /// than one session. The active session is always among those kept, because
@@ -289,7 +289,7 @@ impl MuseFold {
 
     /// Append a block the **client** authored, in a turn of its own.
     ///
-    /// The one block the harness writes itself is the plan card: MSP has no plan
+    /// The one block Baaz writes itself is the plan card: MSP has no plan
     /// mode, so the proposal is derived from the reply's text (spec §3.1) and
     /// has to enter the transcript from this side. `id` is the turn's id, so a
     /// later [`MuseFold::replace_client_block`] can find it again.

@@ -1,11 +1,11 @@
 # Keymap, as built
 
 Spec §3.9, plus everything the cards added. Nothing here is configurable yet;
-`aui::init` installs the library's half and `crate::app::bind_keys` installs the
-harness's, so a fork can rebind either by calling `cx.bind_keys` afterwards.
+`aui::init` installs the library's half and `crate::app::bind_keys` installs Baaz's,
+so a fork can rebind either by calling `cx.bind_keys` afterwards.
 
 A key means one thing at a time because the **context** it is bound in is a
-fact about the frame, not a guess. `HarnessComposer` is on the composer's
+fact about the frame, not a guess. `BaazComposer` is on the composer's
 holder; `menu`, `field`, `histup` and `histdown` join it as the frame changes;
 `AuiMenu` belongs to whatever overlay has the keyboard; `AuiApproval` is added
 only while a pending card is focused and the draft is empty.
@@ -16,17 +16,17 @@ only while a pending card is focused and the draft is empty.
 
 | Key | What it does | Context |
 |---|---|---|
-| Enter | Send, or queue when a turn is running | `HarnessComposer`, no menu, no field |
-| Enter | Run the highlighted `/` or `@` row | `HarnessComposer && menu` |
-| Enter | Send an open approval-feedback or question-clarify field | `HarnessComposer && field` |
-| Enter | Commit the sidebar row's inline rename | `HarnessRename` |
+| Enter | Send, or queue when a turn is running | `BaazComposer`, no menu, no field |
+| Enter | Run the highlighted `/` or `@` row | `BaazComposer && menu` |
+| Enter | Send an open approval-feedback or question-clarify field | `BaazComposer && field` |
+| Enter | Commit the sidebar row's inline rename | `BaazRename` |
 | ⇧Enter | New line | matches nothing, so the editor gets it |
-| ⌘Enter | Steer the running turn | `HarnessComposer` |
-| ⇧Tab | Plan mode on / off | `HarnessComposer` |
-| ⌘V | Paste; an image on the clipboard becomes an attachment | `HarnessComposer` |
-| ⌘U | Attach a file or photo (the `+` menu's first row) | `HarnessComposer` |
+| ⌘Enter | Steer the running turn | `BaazComposer` |
+| ⇧Tab | Plan mode on / off | `BaazComposer` |
+| ⌘V | Paste; an image on the clipboard becomes an attachment | `BaazComposer` |
+| ⌘U | Attach a file or photo (the `+` menu's first row) | `BaazComposer` |
 | ↑ / ↓ | Prompt history, only on the draft's first / last line | `histup` / `histdown` |
-| ↑ / ↓ | Move the open menu's highlight | `HarnessComposer && menu` |
+| ↑ / ↓ | Move the open menu's highlight | `BaazComposer && menu` |
 | `/` | The command menu, at a line start only | — |
 | `@` | The mention picker, wherever a word starts | — |
 | `!` | The shell escape: a command, not a turn | — |
@@ -69,7 +69,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘⇧O | The Projects palette: adopted projects to switch to, recent Muse workspaces to adopt |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
 | ⌘W | Close the window (File → Close Window): probe cleanup, then the app hides; the Dock icon or ⌘-Tab brings the same window and session back |
-| ⌘Q | Quit (Harness → Quit Harness; probe cleanup first) |
+| ⌘Q | Quit (Baaz → Quit Baaz; probe cleanup first) |
 | ⌘M | Minimize the window |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
 
@@ -77,18 +77,18 @@ stays where the person was typing and the needs-you banner is the way over.
 
 gpui has no `:focus-visible`, so the library keeps one window-wide flag: a key
 arms it, a mouse press disarms it, and every focusable control draws its accent
-ring only while it is armed. The harness has its own root element, so it calls
+ring only while it is armed. Baaz has its own root element, so it calls
 `aui::keys::track_pointer` on it — without that call the flag would never be
 disarmed and every control would wear a ring after the first key press.
 
 ## Native menus
 
 The menu bar is real (`crate::app::set_menus`, called after `bind_keys` in
-`main.rs`): Harness (About, Services, Quit ⌘Q), File (Add Project ⌘⇧O, New
+`main.rs`): Baaz (About, Services, Quit ⌘Q), File (Add Project ⌘⇧O, New
 ⌘N, Settings ⌘,, Close ⌘W),
 Edit (the standard six, each carrying its `OsAction` for OS recognition),
 View (sidebar, palette ⌘K, search ⌘⇧F, theme), Window (Minimize ⌘M, Zoom),
-Help (Harness Documentation reveals `docs/` in Finder). A menu item's shortcut displays
+Help (Baaz Documentation reveals `docs/` in Finder). A menu item's shortcut displays
 from the keymap, so an item without a binding shows none — which is why the
 Edit items show none: ⌘X/⌘C/⌘V/⌘A/⌘Z belong to the focused field and are not
 rebound globally. ⌘W and the red dot both hide the app (`cx.hide()`) after the
@@ -108,5 +108,5 @@ child survive and the Dock icon and ⌘-Tab bring the same session back;
   keys stay with the focused field; binding them globally would steal them
   from the composer.
 - **⌘W / ⌘Q are bound, once.** They used to be left to the platform; now
-  File → Close Window and Harness → Quit Harness own them, because closing or
+  File → Close Window and Baaz → Quit Baaz own them, because closing or
   quitting mid-probe must run the probe cleanup.

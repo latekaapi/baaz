@@ -1,6 +1,6 @@
 # The app — shell, sessions, streaming
 
-Phase 2 of the spec (`docs/00-spec.md` §5). `crates/harness` is the gpui
+Phase 2 of the spec (`docs/00-spec.md` §5). `crates/baaz` is the gpui
 application: the window, the auth screen, the sessions sidebar, the transcript
 and the composer. It sits on `muse-client` for the wire, `muse-adapter` for the
 fold, and the `aui` component library for everything visible.
@@ -8,7 +8,7 @@ fold, and the `aui` component library for everything visible.
 ```
 crates/muse-client    the `muse serve` child, NDJSON JSON-RPC        (phase 1)
 crates/muse-adapter   MuseFold: MSP view events -> aui_protocol      (phase 1)
-crates/harness        the gpui app                                   (this doc)
+crates/baaz        the gpui app                                   (this doc)
 ```
 
 ---
@@ -18,10 +18,10 @@ crates/harness        the gpui app                                   (this doc)
 ```sh
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
-cargo run -p harness                                  # workspace = $PWD, provider = meta
-cargo run -p harness -- --workspace ~/code/thing      # a different workspace
-HARNESS_PROVIDER=echo cargo run -p harness            # routed through echo — still a real turn
-cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
+cargo run -p baaz                                  # workspace = $PWD, provider = meta
+cargo run -p baaz -- --workspace ~/code/thing      # a different workspace
+BAAZ_PROVIDER=echo cargo run -p baaz            # routed through echo — still a real turn
+cargo run -p baaz -- --replay fixtures/msp/transcript-approve.jsonl   # free
 ```
 
 > **`echo` is not a free provider.** On a signed-in machine the session log
@@ -41,7 +41,7 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 | `--screenshot-delay <ms>` | how long to wait first (default 600). |
 | `--no-connect` | render the chrome without spawning `muse serve` — what a login-screen capture wants. |
 | `--replay <capture.jsonl>` | fold a checked-in wire capture and render it, with no child process at all (implies `--no-connect`). Commands against a replayed session are refused with a banner. Free. |
-| `--bench <capture.jsonl> [--bench-cadence-ms <ms>] [--bench-scroll top\|mid\|tail\|sweep\|wheel] [--bench-frames <n>] [--bench-open-turn] [--bench-bare] [--bench-out <file.json>]` | stream the capture through the fold on a timer while driving the transcript list, and print element / draw / frame / fold-apply timing plus peak RSS (§6). Free: no child, no server. Cadence defaults to 4 ms, scroll to `sweep`, frames to 600. Drives the normal shell; `--bench-bare` drives the transcript alone. Implies `HARNESS_FRAME_STATS`. |
+| `--bench <capture.jsonl> [--bench-cadence-ms <ms>] [--bench-scroll top\|mid\|tail\|sweep\|wheel] [--bench-frames <n>] [--bench-open-turn] [--bench-bare] [--bench-out <file.json>]` | stream the capture through the fold on a timer while driving the transcript list, and print element / draw / frame / fold-apply timing plus peak RSS (§6). Free: no child, no server. Cadence defaults to 4 ms, scroll to `sweep`, frames to 600. Drives the normal shell; `--bench-bare` drives the transcript alone. Implies `BAAZ_FRAME_STATS`. |
 | `--steps <a;b;c>` | drive the open session from the command line, so a screenshot is reproducible (`docs/03-composer.md` §1, `docs/04-approvals.md` §7). Scripting only — its full verb table, with which steps cost a turn, lives in `main.rs`'s `Args::steps` doc comment; only `send:` and `steer:` bill. Runs exactly once, as soon as the wire is connected and a session is open; the boot session opens without waiting for `session/list`, and a step that cannot run logs instead of vanishing. |
 | `--login <state>` | which login-screen state `--no-connect` boots into for a capture: `choose` (the default), `device`, `apikey`, `apikey-error`, `validating` or `error`. Sample data only. |
 | `--login-steps <a;b;c>` | drive the login screen from the command line, once the login screen is up on a live connection (never with `--no-connect` / `--replay`). After sign-in the ordinary `--steps` run as today. |
@@ -60,8 +60,8 @@ cargo run -p harness -- --replay fixtures/msp/transcript-approve.jsonl   # free
 The key travels from the environment into the field and then into the wire
 call: it never appears in argv, a log or a screenshot argument. If `VAR` is
 unset the step fails with a stderr line naming the variable, not its value.
-Every login-state transition prints one stderr line (`harness: login →
-<state>`, `harness: account → <lane>`, no secrets), so a headless run can be
+Every login-state transition prints one stderr line (`baaz: login →
+<state>`, `baaz: account → <lane>`, no secrets), so a headless run can be
 followed from a log: `--login-steps
 'apikey;key-from-env:MUSE_TEST_KEY;submit;wait:8000' --screenshot …` captures
 the signed-in shell on the API-key lane.
@@ -71,11 +71,11 @@ the signed-in shell on the API-key lane.
 
 | environment | meaning |
 |---|---|
-| `HARNESS_PROVIDER=echo` | route turns through `echo`. **Not free** — see the note above; it is simply the cheapest route and the one scripted runs default to. The spec caps real turns at five per phase and every provider's turns count. |
-| `HARNESS_MUSE=<path>` | the `muse` binary to drive; `muse` on `PATH` otherwise. |
-| `HARNESS_DETERMINISTIC=1` | freeze the clocks and draw every card settled, so a `--replay … --screenshot` capture is byte-identical run to run. One clock (`src/clock.rs`): sidebar grouping/elapsed and turn ages read "now" once per frame — under the flag "now" is the newest stamp in the data (the sidebar's `updated`, the transcript's reported `recorded_at`), so the newest row reads `now` however old the fixture is — and every `Instant` behind a label or countdown is frozen, so elapsed cells vanish and countdowns show their full duration. The boot holds the platform's reduced-motion switch, so every motion primitive (spinner and shimmer loops, tweens, enter presence, springs, the streaming caret) resolves to its resting state — including components with no `at_rest` of their own, like the library's `StatusRow` or a pending approval's header spinner. On top of that the harness passes `at_rest` everywhere it constructs an animated component (turn reveals, the login card, dialogs, toasts, palettes, all composer menus, approval cards, suggestion chips); a capture never takes keyboard focus, so the composer's blinking caret (which honors no motion switch) never paints. |
+| `BAAZ_PROVIDER=echo` | route turns through `echo`. **Not free** — see the note above; it is simply the cheapest route and the one scripted runs default to. The spec caps real turns at five per phase and every provider's turns count. |
+| `BAAZ_MUSE=<path>` | the `muse` binary to drive; `muse` on `PATH` otherwise. |
+| `BAAZ_DETERMINISTIC=1` | freeze the clocks and draw every card settled, so a `--replay … --screenshot` capture is byte-identical run to run. One clock (`src/clock.rs`): sidebar grouping/elapsed and turn ages read "now" once per frame — under the flag "now" is the newest stamp in the data (the sidebar's `updated`, the transcript's reported `recorded_at`), so the newest row reads `now` however old the fixture is — and every `Instant` behind a label or countdown is frozen, so elapsed cells vanish and countdowns show their full duration. The boot holds the platform's reduced-motion switch, so every motion primitive (spinner and shimmer loops, tweens, enter presence, springs, the streaming caret) resolves to its resting state — including components with no `at_rest` of their own, like the library's `StatusRow` or a pending approval's header spinner. On top of that Baaz passes `at_rest` everywhere it constructs an animated component (turn reveals, the login card, dialogs, toasts, palettes, all composer menus, approval cards, suggestion chips); a capture never takes keyboard focus, so the composer's blinking caret (which honors no motion switch) never paints. |
 
-The window is 1440×900 and titled **Harness**. It boots exactly as
+The window is 1440×900 and titled **Baaz**. It boots exactly as
 `aui/examples/minimal.rs` does — `gpui_kit::application().with_assets(AuiAssets)`,
 then `aui::init(theme, cx)`, then `AuiTheme::set_text_scale(scale::TEXT_SCALE)`,
 then the window — because that order is the library's contract.
@@ -213,7 +213,7 @@ is **Sign out** (`account/logout`, back to the login screen) — or **Sign out
 the footer any more; they moved to the Sessions caption's view menu (see §5).
 
 The on-state screenshots live in a scratch workspace
-(`/private/tmp/harness-ws`): freshly started turn-less sessions are pruned
+(`/private/tmp/baaz-ws`): freshly started turn-less sessions are pruned
 by `muse serve` 1.1.1 before any later run can list them, so only a
 workspace with older stable empties can show the toggle on.
 
@@ -232,7 +232,7 @@ One window over several workspaces (design `docs/12-projects.md`). A
 **project** is an adopted root with an identity of its own — a UUID, a stable
 colour (slot 1–8 on the library's label ramp), a name that renames without
 touching the folder, and the last-used model, effort and approval mode new
-sessions start with. The store is `projects.json` under the harness support
+sessions start with. The store is `projects.json` under Baaz support
 dir (version 1, camelCase, atomic write, best-effort read); `sessions.json`
 `SessionMeta` carries `project: Option<String>`, written at `session/start`.
 
@@ -437,7 +437,7 @@ list's own top edge, so the header and its spacing stay put at any scroll
 offset — including after a reveal-on-activation scrolls the list — and no row
 ever reaches the nav rows. The sessions area is the
 library's virtualised list (`aui::nav::virtual_sidebar_view`): `render_sidebar` re-flattens the grouping into `SidebarRow`s every
-frame (an index walk, no summaries cloned) and keeps a harness-owned
+frame (an index walk, no summaries cloned) and keeps a Baaz-owned
 `ListState` in sync — `reset` after a regroup or filter change (the only sync
 that drops the offset), `splice` after a local insert or remove (open/close,
 fold expand, sessions arriving or leaving), `remeasure_items` after a
@@ -544,7 +544,7 @@ status row sits under the transcript while that runs. Resume attaches;
 replays `item/delta`, so a backfilled message arrives whole and the fold takes
 it that way.
 
-Reopening keeps what was opened: the harness holds an MRU of the last eight
+Reopening keeps what was opened: Baaz holds an MRU of the last eight
 session views (fold, scroll position and draft riding along in the parked
 entity; its event subscription dropped). The reopened view shows at once and
 tops up with `session/resume { cursor: <last observed viewCursor> }` — the
@@ -570,7 +570,7 @@ full-window capture overlay owns every move and the release, and the shell
 skips its layout spring so the divider tracks the pointer; the spring
 re-arms on release. The drag clears on mouse-up anywhere and on window
 blur. The settled width persists globally in `layout.json` under the
-harness support dir (restored at boot, clamped on load); double-clicking
+Baaz support dir (restored at boot, clamped on load); double-clicking
 the handle resets to the 252 px default. `--steps sidebar-width:<px>`
 scripts a settled width for screenshots.
 
@@ -622,7 +622,7 @@ happened off-screen; the decision is the pure
 `Block::Thinking`), and `fixtures/msp/transcript-real.jsonl` is the real
 capture that exercises it (419 billed reasoning tokens, no `reasoning`
 item). The library draws the footer from `TurnMeta` with no per-cell hook,
-so a silent turn carries no library footer and the harness draws the row
+so a silent turn carries no library footer and Baaz draws the row
 itself, mirroring the library's cells. A turn with a visible thinking card
 keeps the library's plain `419 reasoning` cell.
 
@@ -645,10 +645,10 @@ scrolls sideways. Measured before and after in
 
 The scripted counterpart is the `--steps wheel:<dy>` verb: one synthetic
 `ScrollWheelEvent` at the window centre, logging
-`harness: wheel dy=<dy> list_px=<before>-><after>` (the transcript's pixel
+`baaz: wheel dy=<dy> list_px=<before>-><after>` (the transcript's pixel
 offset on either side). Over the open palette the palette's list scrolls and
 the transcript never moves — the library card occludes its own rect and stops
-the wheel after its list scrolls, and the harness palette scrim occludes the
+the wheel after its list scrolls, and Baaz palette scrim occludes the
 dimmed ground around it — while over the bare transcript the same wheels move
 it. A wheel dispatched before the first frame lands on no listener, so the
 proof runs put a `wait:` ahead of the wheels.
@@ -689,7 +689,7 @@ stays bounded as the transcript grows. `apply` notifies only when the fold
 changed or view state changed (unchanged streaming deltas earn no frame), the
 turn ticker runs at 1 Hz and notifies only when the displayed second changes,
 and unchanged turns are never re-parsed (the library memoises markdown).
-`HARNESS_FRAME_STATS=1` prints render-time percentiles to stderr; the
+`BAAZ_FRAME_STATS=1` prints render-time percentiles to stderr; the
 `synthetic-stress-300.jsonl` capture (~300 turns, generated by
 `fixtures/msp/make-stress-300.py`) is the benchmark.
 
@@ -731,7 +731,7 @@ and it moves it only on the server's own terminal.
 
 ### Measuring
 
-`harness --bench <capture.jsonl>` streams the capture's `<--` lines — a
+`baaz --bench <capture.jsonl>` streams the capture's `<--` lines — a
 `view/page` result's `events` unpacked into the notifications they stand
 for, so a `MUSE_CAPTURE` of a real open path benches as the live stream
 would — through the fold on a timer at `--bench-cadence-ms` (default 4, so streaming cost is
@@ -816,13 +816,13 @@ elapsed row, so `bench-idle frames_2s` must be 2 and never more
 (finding `performance-13`). `--bench-out
 <file.json>` writes the same numbers plus the command, the capture, the
 build profile and the git short hash, for tracking across runs. `--bench`
-implies `HARNESS_FRAME_STATS` (read once, so disabled builds pay one relaxed
+implies `BAAZ_FRAME_STATS` (read once, so disabled builds pay one relaxed
 load per frame) and replaces the old `bench:<n>` step's role — the step still
 works, driving N frames on a static replay for the stderr percentiles.
 
-`HARNESS_FRAME_TRACE=1` traces the normal window instead of the bench, to
-`$HARNESS_STATE_DIR/frame-trace.log` (the harness's own
-`~/Library/Application Support/harness/` when the state dir is unset), so a
+`BAAZ_FRAME_TRACE=1` traces the normal window instead of the bench, to
+`$BAAZ_STATE_DIR/frame-trace.log` (Baaz's own
+`~/Library/Application Support/baaz/` when the state dir is unset), so a
 hand gesture on `--replay` becomes a measurement. An earlier version of the trace was v2, one row per *centre* paint
 (`t_us,list_px,events_since_last_paint,gesture_active,centre_w,rehint,draw_us`)
 — it went silent through a sidebar-only or resize-only gesture once parts
@@ -885,7 +885,7 @@ before, so the gallery and the transcript are untouched.
 
 Measured free, idle replay plus the running stress row
 (`--replay fixtures/msp/synthetic-stress-hetero.jsonl --sidebar-fixture
-fixtures/sidebar/stress.json`, `HARNESS_FRAME_TRACE=1`, 10 s): 184 root
+fixtures/sidebar/stress.json`, `BAAZ_FRAME_TRACE=1`, 10 s): 184 root
 ticks (17.8/s, the 20 Hz design rate minus scheduling slack), pane rebuilt
 on 181, the cached transcript column on 4 boot rows only. The same run
 with an all-idle fixture reads 5 boot rows and then silence — the timer
@@ -906,7 +906,7 @@ unreliable for confirming which window an event lands on**:
 `true` (event-posting permission is granted), but
 `NSRunningApplication.activate()` for the target process intermittently
 returns `false`, `screencapture` returns a solid black image (no attached
-compositor to capture), and two `harness` windows (a fresh `--replay`
+compositor to capture), and two `baaz` windows (a fresh `--replay`
 window and another long-running one) were found reporting
 **identical, exactly overlapping** `CGWindowListCopyWindowInfo` bounds with
 no on-screen way to confirm which one a posted event actually reached.
@@ -917,7 +917,7 @@ the rest and are what a script can rely on.
 
 Numbers (debug build, branch head, `--replay
 fixtures/msp/synthetic-stress-hetero.jsonl --sidebar-fixture
-fixtures/sidebar/stress.json`, `HARNESS_FRAME_TRACE=1`; the tick-based
+fixtures/sidebar/stress.json`, `BAAZ_FRAME_TRACE=1`; the tick-based
 percentage can under-count on this machine — with no real display link,
 `request_animation_frame` can fire faster than any genuine 60/120 Hz
 compositor would present, so two consecutive rows carrying the same value
@@ -935,7 +935,7 @@ below):
 
 **Not done**: this table across three builds
 (`c14819d`, `b2d82e2`, branch head) with matching library worktrees.
-`c14819d` carries no `HARNESS_FRAME_TRACE`/sweep instrumentation at all
+`c14819d` carries no `BAAZ_FRAME_TRACE`/sweep instrumentation at all
 (an earlier commit) and `b2d82e2` carries only the v2, centre-scoped trace
 (a later one) — neither can produce a comparable v3 row for a sidebar-only or
 resize-only tick without a same-shape scratch patch in a matching
@@ -991,7 +991,7 @@ repaint stops at itself). Filed for a follow-up rather than chased further
 at the time.
 
 Baselines (before any fix, on an instrumented branch; each run
-with its own throwaway `HARNESS_STATE_DIR`). `bench-draw` is whole-frame
+with its own throwaway `BAAZ_STATE_DIR`). `bench-draw` is whole-frame
 render-to-paint in µs; `bench-element` beside it is 3–12 µs p50 everywhere,
 so the two orders of magnitude between them are row building, layout and
 paint — the blind spot the instrument closes:
@@ -1027,7 +1027,7 @@ each repeat's gap spans the timeout; the old 2 s timeout masked it.
 Mechanism unresolved; p50/p90 are unaffected.
 
 After the fixes (same-day same-machine before/after, each run with its
-own throwaway `HARNESS_STATE_DIR`;
+own throwaway `BAAZ_STATE_DIR`;
 `bench-draw` and `bench-frame` are p50/p90/max, draw in µs, frame in ms):
 
 | fixture | scroll | debug shell | debug bare | release shell | release bare |
@@ -1059,8 +1059,8 @@ stalls/clamps across all phases).
 What the bench cannot show is the cadence itself — one synthetic event per
 frame earns one drain by construction, so the 6.5× application saving only
 materialises where events share a frame (bursts, and any real gesture). The
-hand gesture is the verdict: `HARNESS_FRAME_TRACE=1 cargo run -p
-harness -- --replay fixtures/msp/synthetic-stress-hetero.jsonl`, scroll up
+hand gesture is the verdict: `BAAZ_FRAME_TRACE=1 cargo run -p
+baaz -- --replay fixtures/msp/synthetic-stress-hetero.jsonl`, scroll up
 for 2 s, lift, wait for the tail; then `python3 scripts/frame-trace.py`.
 This passes at paints/s ≥ 55 during the tail and ≥ 110 during the
 finger phase on the 120 Hz panel, no gap > 2 ticks, last applied event =
@@ -1094,10 +1094,10 @@ Every turn the wire timed carries its age beside that row: the user bubble's
 caption under it, the assistant's last cell in the footer. The fold keeps the
 item's `recorded_at` (RFC3339) on the turn — the latest revision of each item
 wins, so live and backfilled transcripts agree, and the turn keeps the
-earliest across its items — and the harness formats it in words (`just now`,
+earliest across its items — and Baaz formats it in words (`just now`,
 minutes, hours, `yesterday`, else the date) against one clock read once per
 frame (`transcript_now_ms`: wall time, or the newest reported stamp under
-`HARNESS_DETERMINISTIC=1`, the sibling of the sidebar's `grouping_now`). A
+`BAAZ_DETERMINISTIC=1`, the sibling of the sidebar's `grouping_now`). A
 turn the wire never timed draws no caption and no extra cell, keeping its old
 height.
 Markdown links click through: URLs open in the browser, file paths open in
@@ -1129,7 +1129,7 @@ as one cross-block span) drive screenshots.
 
 `aui::composer::composer(...).docked(true)` is the composer. **Enter** sends,
 **Shift+Enter** makes a newline, **Escape on an empty composer** and **⌃C**
-interrupt. Enter is an action bound in the `HarnessComposer` key context, so it
+interrupt. Enter is an action bound in the `BaazComposer` key context, so it
 wins over the textarea; Shift+Enter matches no binding and falls through to the
 editor, which is exactly the split §3.9 asks for.
 
@@ -1200,11 +1200,11 @@ The banner stays up until the new child answers.
 
 The menu bar is built in `crate::app::set_menus`, called from `main.rs`
 after `bind_keys` — after, because macOS reads each item's shortcut from the
-keymap. Harness (About, Services, Quit), File (Add Project…, New, Settings…
+keymap. Baaz (About, Services, Quit), File (Add Project…, New, Settings…
 ⌘,, Close),
 Edit (the standard six with `OsAction`), View (sidebar, palette, search,
 theme),
-Window (Minimize, Zoom), Help (Harness Documentation, which reveals the
+Window (Minimize, Zoom), Help (Baaz Documentation, which reveals the
 `docs/` folder in Finder). The red dot and ⌘W both hide the app (`cx.hide()`
 after the tier-probe cleanup): the window and the `muse serve` child survive,
 so the Dock icon and ⌘-Tab bring the same session back, and `on_reopen`
@@ -1216,9 +1216,9 @@ directory's `docs/` first, then three ancestors above the executable, so it
 works from `cargo run` and from a debug target; a bundle moved away from
 the repo logs instead of pretending.
 
-`scripts/bundle.sh` assembles `target/bundle/Harness.app` from the release
+`scripts/bundle.sh` assembles `target/bundle/Baaz.app` from the release
 binary, `assets/icon-1024.png` (a flat H tile drawn by the checked-in
-`assets/make-icon.py`, converted to `Harness.icns` with `sips`/`iconutil`)
-and a generated `Info.plist` (`CFBundleIdentifier dev.harness.app`),
-ad-hoc signed so `open target/bundle/Harness.app` launches it on this
+`assets/make-icon.py`, converted to `Baaz.icns` with `sips`/`iconutil`)
+and a generated `Info.plist` (`CFBundleIdentifier sh.baaz.app`),
+ad-hoc signed so `open target/bundle/Baaz.app` launches it on this
 machine. Signing/notarisation are out of scope.

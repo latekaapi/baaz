@@ -365,7 +365,7 @@ hand-written.
 ## 8. Keyboard (spec §3.9)
 
 When a pending approval or question arrives and the composer draft is **empty**,
-focus moves to the card — it has its own focus handle in a `HarnessCard` key
+focus moves to the card — it has its own focus handle in a `BaazCard` key
 context. `1`–`9` choose, Enter confirms an open feedback or clarify field, Esc
 collapses the card and returns focus to the composer, Tab moves between the card
 and the composer.

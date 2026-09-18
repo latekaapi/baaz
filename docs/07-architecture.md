@@ -26,7 +26,7 @@ here is already described somewhere else in more detail; this is the map.
                     └───────────────┬──────────────────────────┘
                                     │ aui_protocol::{Session, Delta}
                     ┌───────────────▼──────────────────────────┐
-                    │ harness (gpui)                           │
+                    │ baaz (gpui)                              │
                     │   app.rs + app/  the window and the shell│
                     │   session.rs + session/  one session     │
                     │   login.rs    the login screen, account/*│
@@ -45,7 +45,7 @@ here is already described somewhere else in more detail; this is the map.
 `muse-client` knows the wire and nothing about the UI. `muse-adapter` knows
 both protocols and nothing about gpui — it has no gpui dependency at all, which
 is what lets `crates/muse-adapter/tests/fixtures.rs` replay every checked-in
-capture with no window. `harness` knows gpui and the library.
+capture with no window. `baaz` knows gpui and the library.
 
 ## 2. The entities
 
@@ -167,12 +167,12 @@ queued turns, the effective approval mode, and the prompt text of a command in
 flight (the wire never gives a prompt back, so a retraction has to be able to
 hand it over).
 
-## 5. The harness's own storage
+## 5. Baaz's own storage
 
-Muse owns `~/.config/muse` and `~/.local/share/muse`, and the harness never
+Muse owns `~/.config/muse` and `~/.local/share/muse`, and Baaz never
 writes to either. It reads the session index (`index.rs`, read-only, and every
 failure mode is an empty map). Its own state lives under
-`~/Library/Application Support/harness`, written atomically by `store.rs`:
+`~/Library/Application Support/baaz`, written atomically by `store.rs`:
 
 | file | what |
 |---|---|

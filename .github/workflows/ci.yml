@@ -8,7 +8,7 @@ jobs:
   build-test-lint:
     runs-on: macos-latest
     steps:
-      # The harness depends on the `aui` library by **path**, as
+      # Baaz depends on the `aui` library by **path**, as
       # `../agentic-ui/crates/*`, so the library has to be checked out beside
       # it.
       # TODO(release): switch Cargo.toml's aui/aui-* entries to a git
@@ -17,7 +17,7 @@ jobs:
       # the exact change).
       - uses: actions/checkout@v4
         with:
-          path: harness
+          path: baaz
 
       - uses: actions/checkout@v4
         with:
@@ -32,14 +32,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: harness
+          workspaces: baaz
 
       - name: Build workspace
-        working-directory: harness
+        working-directory: baaz
         run: cargo build --workspace
 
       - name: Test workspace
-        working-directory: harness
+        working-directory: baaz
         # The two tests that spawn a real `muse serve` are `#[ignore]`d and
         # stay that way: each one spends a real, billed turn (docs/06-billing.md
         # and docs/04-approvals.md §0). The offline gates replace them —
@@ -48,20 +48,20 @@ jobs:
         run: cargo test --workspace
 
       - name: Clippy
-        working-directory: harness
+        working-directory: baaz
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Doc
-        working-directory: harness
+        working-directory: baaz
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # One `gpui-pre` and one `gpui-kit`: the harness pins the exact versions
+      # One `gpui-pre` and one `gpui-kit`: Baaz pins the exact versions
       # agentic-ui resolves, and two copies of gpui in one binary is a class of
       # bug that shows up as a blank window rather than as an error.
       - name: One gpui
-        working-directory: harness
+        working-directory: baaz
         run: |
           duplicates="$(cargo tree -d | grep -E '^(gpui-pre|gpui-kit) v' || true)"
           if [ -n "$duplicates" ]; then

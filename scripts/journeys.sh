@@ -2,7 +2,7 @@
 # Every user journey `--replay`, `--no-connect` and `--steps` can drive,
 # scripted so it reruns. Free — nothing here reaches `turn/start`.
 #
-#   scripts/journeys.sh <out-dir> [harness-binary]
+#   scripts/journeys.sh <out-dir> [baaz-binary]
 #
 # Each journey runs twice from a fresh state dir and the pair is compared:
 # a journey passes when both runs produce a capture and the two are
@@ -10,9 +10,9 @@
 # own. Park the pointer outside the top-left 1440x900 first — a capture
 # renders there, and a hovered row leaks into it.
 set -e
-out="${1:?out dir}"; bin="${2:-./target/debug/harness}"
+out="${1:?out dir}"; bin="${2:-./target/debug/baaz}"
 mkdir -p "$out"
-export HARNESS_DETERMINISTIC=1
+export BAAZ_DETERMINISTIC=1
 
 pass=0; fail=0
 report="$out/journeys.txt"; : > "$report"
@@ -28,7 +28,7 @@ REPLAY=fixtures/msp/transcript-real.jsonl
 journey() {
   name="$1"; steps="$2"; shift 2
   for run in 1 2; do
-    HARNESS_STATE_DIR="$(mktemp -d)" "$bin" \
+    BAAZ_STATE_DIR="$(mktemp -d)" "$bin" \
       --workspace "$WS_A" --replay "$REPLAY" --sidebar-fixture "$FIX" \
       --screenshot-delay 12000 --theme dark --steps "$steps" "$@" \
       --screenshot "$out/$name.run$run.png" >/dev/null 2>&1 || true
@@ -109,7 +109,7 @@ journey composer-draft "$PROJ;draft:a drafted prompt"
 capture_replay() { # <name> <capture> <steps>
   name="$1"; capture="$2"; steps="$3"
   for run in 1 2; do
-    HARNESS_STATE_DIR="$(mktemp -d)" "$bin" --replay "$capture" --theme dark \
+    BAAZ_STATE_DIR="$(mktemp -d)" "$bin" --replay "$capture" --theme dark \
       --screenshot-delay 12000 --steps "$steps" \
       --screenshot "$out/$name.run$run.png" >/dev/null 2>&1 || true
   done
@@ -140,7 +140,7 @@ capture_replay finishing        fixtures/msp/synthetic-finishing.jsonl "wait:300
 login_shot() { # <name> <login-state>
   name="$1"; state="$2"
   for run in 1 2; do
-    HARNESS_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login "$state" --theme dark \
+    BAAZ_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login "$state" --theme dark \
       --screenshot-delay 6000 --screenshot "$out/$name.run$run.png" >/dev/null 2>&1 || true
   done
   if [ -f "$out/$name.run1.png" ] && cmp -s "$out/$name.run1.png" "$out/$name.run2.png"; then
