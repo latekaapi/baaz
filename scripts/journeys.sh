@@ -41,8 +41,11 @@ journey() {
     mv "$out/$name.run1.png" "$out/$name.png"; rm -f "$out/$name.run2.png"
     echo "PASS  $name  $out/$name.png" >> "$report"; pass=$((pass+1))
   else
-    mv "$out/$name.run1.png" "$out/$name.png"; rm -f "$out/$name.run2.png"
-    echo "FAIL  $name  (not byte-identical run to run)  $out/$name.png" >> "$report"
+    # Keep BOTH captures on a mismatch. A journey that fails here is usually
+    # unreproducible on its own, so the pair is the only evidence of what
+    # differed — deleting it costs a whole suite run to get back.
+    mv "$out/$name.run1.png" "$out/$name.png"
+    echo "FAIL  $name  (not byte-identical run to run)  $out/$name.png vs $out/$name.run2.png" >> "$report"
     fail=$((fail+1))
   fi
 }
