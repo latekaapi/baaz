@@ -171,6 +171,24 @@ pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
 }
 
+/// Whether a directory is a plausible workspace to work in, as opposed to
+/// somewhere a launch merely happened to start (decision D39).
+///
+/// `/` and `$HOME` are the two that matter. Neither is a project: both hold
+/// the whole machine rather than one piece of work, and a launch that lands
+/// on either learned nothing about what the person wants open. A bundled
+/// `.app` opened from Finder always starts at `/`, so this is the common
+/// case and not an edge one.
+pub fn is_workspace_root(root: &Path) -> bool {
+    if root == Path::new("/") {
+        return false;
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => root != Path::new(&home),
+        None => true,
+    }
+}
+
 /// One batch's canonicalization answers: each distinct root is read from
 /// the disk once, no matter how many rows name it.
 ///
@@ -928,5 +946,19 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("remove root");
         assert!(!projects.is_available("ws"), "no stale positive survives forgetting");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// D39's rule, which decides both what boot adopts and whether the `@`
+    /// and `/` menus are primed at all. A bundle opened from Finder starts at
+    /// `/`, so getting this wrong walks the whole disk on first launch.
+    #[test]
+    fn neither_the_filesystem_root_nor_home_is_a_workspace() {
+        assert!(!is_workspace_root(Path::new("/")), "/ holds the machine, not one piece of work");
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(!is_workspace_root(Path::new(&home)), "$HOME is where a launch lands, not a project");
+            // A directory inside $HOME is ordinary: only $HOME itself is out.
+            assert!(is_workspace_root(&Path::new(&home).join("Projects").join("thing")));
+        }
+        assert!(is_workspace_root(Path::new("/tmp/some-checkout")));
     }
 }
