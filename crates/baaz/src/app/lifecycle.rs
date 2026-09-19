@@ -1123,11 +1123,24 @@ impl Harness {
         let Some(params) =
             projects::start_params(&self.projects, current.as_deref(), &self.args.provider, self.args.approval_mode.clone())
         else {
-            // Nowhere to start: no current project, or its adoption is gone.
             // Logged, because a scripted `new` that lands here used to read
             // as a script that ran — exit 0, screenshot written — while
             // having started nothing.
             crate::baaz_log!("new: no current project; starting nothing");
+            if current.is_none() {
+                // No adoption anywhere to start in: offer the folder panel
+                // instead of the dead click the owner reported. The chosen
+                // folder starts a session (still needs a `workspaceRoot`)
+                // without being adopted, so it resolves to "Other
+                // workspaces" like any unadopted root.
+                self.choose_session_folder(window, cx);
+            }
+            // `current.is_some()` here would mean the id `current_project()`
+            // just resolved through `find_available` no longer names a
+            // project at all — a race this single-threaded flow does not
+            // have today. Left as a silent no-op rather than a folder panel
+            // that would silently orphan a still-current (if unavailable)
+            // adoption.
             return;
         };
         let effort = current
@@ -1215,6 +1228,84 @@ impl Harness {
                 this.report(&error, cx);
             }
         });
+    }
+
+    /// `session/start` in `root`, which is never adopted: no project
+    /// defaults, no `projects.current` pointer, no `drafts` entry. The
+    /// session groups nowhere (`Projects::resolve` finds no adoption for
+    /// this root) and shows under "Other workspaces", exactly like any
+    /// session whose folder was never adopted.
+    ///
+    /// This is [`Self::new_session_in`]'s sibling for a folder that is not,
+    /// and is not becoming, a project — the folder panel's target when
+    /// "New session" has nowhere current to start (see
+    /// [`Self::new_session_in`]'s `None` arm) and [`Self::step_new_in`]'s
+    /// headless twin. There is no live-draft reuse here: an unadopted root
+    /// has no project id to key a draft on, so every call starts a fresh
+    /// session.
+    pub(crate) fn new_session_in_root(&mut self, root: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let root = root.to_path_buf();
+        let Some(client) = self.client.clone() else {
+            // Scripted chrome (`--no-connect` / `--replay`): no child to
+            // start a session on, so the draft opens as a local view.
+            self.open_local_draft(window, cx);
+            return;
+        };
+        let params = projects::start_params_for_root(&root, &self.args.provider, self.args.approval_mode.clone());
+        // Walked eagerly, like `new_session_in` does for a project's root:
+        // the `@` picker for the session about to open should not wait on
+        // the sessions list to learn where it lives.
+        self.load_menu_sources(root.clone(), cx);
+        self.session_switch_pending = true;
+        let work = move || client.session_start(&params);
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(started) => {
+                let session_id = started.session.session_id.clone();
+                // Before `open`, which asks `session_workspace` where this
+                // session lives and has nothing else to go on.
+                this.starting_root =
+                    Some((session_id.clone(), projects::canonical_str(&root.to_string_lossy())));
+                this.open(session_id.clone(), false, false, window, cx);
+                if let Some(view) = this.active.clone() {
+                    if let Ok(envelope) = serde_json::to_value(&started.session) {
+                        view.update(cx, |view, cx| view.seed_session(envelope, cx));
+                    }
+                }
+                // No project override: a `meta.project` of `None` is exactly
+                // what files this session under "Other workspaces".
+                let moving = this.pending_draft.take();
+                if let Some(view) =
+                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
+                {
+                    Self::land_moving_draft(&view, moving, window, cx);
+                } else if moving.is_some() {
+                    this.pending_draft = moving;
+                }
+                crate::baaz_log!("session/start root (no project)");
+                this.load_sessions(cx);
+            }
+            Err(error) => {
+                crate::baaz_log!("new-in: session/start failed: {error}");
+                this.session_switch_pending = false;
+                this.report(&error, cx);
+            }
+        });
+    }
+
+    /// `new-in:<path>`: [`Self::new_session_in_root`] without the folder
+    /// panel, since a native panel cannot be driven from a script — the
+    /// headless twin of what [`Self::choose_session_folder`] does with a
+    /// chosen path. Relative paths resolve against the process's own
+    /// directory, like `project:<path>` already does for adoption.
+    pub(crate) fn step_new_in(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return;
+        }
+        let path = std::path::PathBuf::from(rest);
+        let path =
+            if path.is_absolute() { path } else { std::env::current_dir().unwrap_or_default().join(path) };
+        self.new_session_in_root(&path, window, cx);
     }
 
     /// Whether `session_id` still names an unsent draft: a row with zero
@@ -1517,6 +1608,15 @@ impl Harness {
             .iter()
             .find(|e| e.id == session_id)
             .and_then(|e| e.workspace.clone())
+            // A session started outside a project is not in the list yet and
+            // has no project to speak for it; its root came back with
+            // `session/start` and is held until the list catches up.
+            .or_else(|| {
+                self.starting_root
+                    .as_ref()
+                    .filter(|(id, _)| id == session_id)
+                    .map(|(_, root)| root.clone())
+            })
             .unwrap_or_else(|| self.workspace())
     }
 

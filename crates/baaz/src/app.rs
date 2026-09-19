@@ -422,6 +422,16 @@ pub struct Harness {
     /// project's draft session to exist so it can be moved in. Set by the
     /// project menu's retarget, consumed by `new_session_in`.
     pub(crate) pending_draft: Option<Draft>,
+    /// `(session id, root)` for a session started outside any project, held
+    /// from `session/start` until the sessions list carries its row.
+    ///
+    /// A session with no project is the one case where nothing else knows
+    /// where it lives: `current_project` is deliberately not set, so
+    /// `session_workspace` would fall back to the launch directory for a row
+    /// it cannot find yet — which on a bundle opened from Finder is `/`.
+    /// The header would name the wrong place and the `@` picker would walk
+    /// the whole disk to fill itself.
+    pub(crate) starting_root: Option<(String, String)>,
     /// Everything that floats: the modal, the open menu and the toasts. One
     /// entity, shared with the session view, which renders the halves that hang
     /// off the composer's own chips (spec §2.3).
@@ -717,6 +727,7 @@ impl Harness {
             session_cache: Vec::new(),
             drafts: HashMap::new(),
             pending_draft: None,
+            starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
@@ -870,9 +881,9 @@ impl Harness {
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
         // bundle opened from Finder, where `boot_projects` declined to adopt
-        // `/` — `workspace()` falls back to the launch directory, and priming
-        // the menus from it would walk the whole filesystem to fill a picker
-        // no session can open yet. Adopting a project loads them then.
+        // `/` — `workspace()` falls back to the launch directory, which is not
+        // a workspace and holds nothing worth priming a picker with. Adopting
+        // a project, or starting a session in a folder, loads them then.
         if this.current_project.is_some() {
             this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
         }
@@ -2209,7 +2220,7 @@ impl Render for Harness {
             }
             stack.into_any_element()
         } else {
-            self.render_login(cx).into_any_element()
+            self.render_login(window, cx).into_any_element()
         };
         let dialog = self.render_dialog(window, cx);
         let settings = self.render_settings(cx);
