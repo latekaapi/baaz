@@ -57,7 +57,7 @@ Taken 2026-09-13.
   session Baaz starts, so a worktree session (whose folder differs from its
   project's root) slots in later without regrouping.
 - **D32 Unadopted workspaces.** Sessions whose workspace is not an added project show under
-  one muted, collapsed group "Other workspaces", each row tagged with its folder name. The
+  one muted, collapsed group Unfiled, each row tagged with its folder name. The
   Projects palette offers those workspaces for adoption in one click.
 - **D33 Identity.** An initial mark plus a per-project colour from a new eight-colour label
   ramp in the library tokens (both themes), assigned round-robin at add time, changeable
@@ -81,7 +81,7 @@ Taken 2026-09-13.
 - **D37 Ordering (rewritten 2026-09-13).** Project groups sort
   pinned first, then by name case-insensitively (ties by `addedAt`, then id) —
   never by recency; no drag reorder. A project never moves because a session in
-  it was created, opened, or got a turn. "Other workspaces" is always last.
+  it was created, opened, or got a turn. Unfiled is always last.
 - **D38 Removal.** Remove from sidebar keeps every session; they move to Unfiled.
   Nothing on Muse's side changes.
 - **D39 Boot.** `--workspace` wins and is adopted if new; else the stored current project;
@@ -92,13 +92,13 @@ Taken 2026-09-13.
 - **D40 One window, one process.** No split, no pop-out; the parked-view MRU stays keyed
   by session id and is valid across projects.
 - **D42 The default workspace.** Muse needs a workspace root for every session, so "no
-  project" still has to mean somewhere real. `~/Baaz` is made at boot and is where
+  project" still has to mean somewhere real. `~/baaz-sessions` is made at boot and is where
   "New session" starts when nothing is adopted — no folder picker between a first
   launch and a first question. It is deliberately **not** a project: its sessions
   resolve to no project and so appear under Unfiled, and adopting a project is the
   other thing a first launch can do rather than the only one. A run with its own
   `BAAZ_STATE_DIR` keeps its default workspace inside it, so tests, captures and
-  journeys never create or write the real `~/Baaz`.
+  journeys never create or write the real one.
 - **D43 Unfiled.** The group of sessions no adoption holds — the default workspace's
   own and any root Muse ran in elsewhere. Its id stays `"other"` so stored fold state
   keeps working, and it reads `closedGroups` exactly as a project group does: open
@@ -145,7 +145,7 @@ workspaces". Never by prefix, never by the current project.
 - **Sidebar.** Nav block: New session, Add project, Automations (Soon). Then the list:
   project groups (mark, name, state dot when a session runs, branch in mono at the right,
   count; hover `+` and `…`), sessions inside newest-first with pinned first, then the muted
-  "Other workspaces" group. With one project and nothing in Other the list stays the date
+  Unfiled group. With one project and nothing in Other the list stays the date
   view. The view menu: Group by project (toggle), the existing empty/hidden/archived rows,
   Search all projects (toggle).
 - **Header crumb.** `mark project ▾ · session label`. The project part opens the project
@@ -194,7 +194,7 @@ codebase and bent.
   in captures; one step removed from the row in life.
 - **`MenuKind::Project` carries neither id nor anchor.** The kind stays
   `Copy` (every menu match relies on it): the target id lives on
-  `Menu::project` (`None` is "Other workspaces") and the header-vs-row anchor
+  `Menu::project` (`None` is Unfiled) and the header-vs-row anchor
   on `Menu::project_header`.
 - **Colour is click-toggled, not hover-opened.** The submenu hangs off the
   menu's right edge while `project_colour_open` is set; picking a swatch
@@ -234,7 +234,7 @@ codebase and bent.
   (select, entry, resolution) stay.
 - **Folding holds back past five, not past the open session.** Pinned rows
   never count toward the five; the open session appends past the cut rather
-  than displacing a newer row; "Other workspaces" never folds.
+  than displacing a newer row; Unfiled never folds.
 - **No menu had click-outside handling.** The expected `.on_dismiss` does not
   exist on `popover_layer` — the view, account, project (+ colour) and
   overflow menus all gained catcher siblings in the same deferred draw, the

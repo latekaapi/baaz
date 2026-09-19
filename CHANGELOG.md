@@ -12,7 +12,7 @@ the `aui` component library.
   MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does
   (device code or an API key).
 - **Sessions do not need a project.** Muse needs a folder for every session,
-  so Baaz makes one — `~/Baaz` — at first boot and starts there when nothing
+  so Baaz makes one — `~/baaz-sessions` — at first boot and starts there when nothing
   has been adopted. A first launch can ask a question straight away; adding a
   project folder is the other thing it can do rather than the only one.
   Sessions with no project are grouped under **Unfiled**, which is open
@@ -138,7 +138,7 @@ the `aui` component library.
   per-project model/effort/approval defaults.
 - **Deleted folders leave the sidebar.** A project whose root is gone is
   shown nowhere — sidebar, Projects palette, project menu, rail, current —
-  while its sessions fall back to "Other workspaces" and the adoption stays
+  while its sessions fall back to Unfiled and the adoption stays
   in `projects.json`, so an unmounted volume or a re-attached worktree comes
   back by itself.
 - **Project running state is a left-edge bar.** A group with a running

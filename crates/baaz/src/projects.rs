@@ -171,7 +171,8 @@ pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
 }
 
-/// The folder a session runs in when it belongs to no project: `~/Baaz`.
+/// The folder a session runs in when it belongs to no project:
+/// `~/baaz-sessions`.
 ///
 /// Muse needs a workspace root for every session, so "no project" still has
 /// to mean somewhere real. One folder, made once at boot, is what lets a
@@ -179,15 +180,20 @@ pub fn canonical_str(root: &str) -> String {
 /// keeps that promise without a folder picker standing between the person
 /// and their first question.
 ///
+/// Lowercase and hyphenated, with no space: Muse runs shell commands in it,
+/// and a space in a workspace root is a quoting papercut in every one of
+/// them. It does not share the application's own name, so "Muse runs in
+/// baaz-sessions" names a folder rather than reading like the app.
+///
 /// A run with its own `BAAZ_STATE_DIR` — a test, a capture, a journey —
 /// keeps its default workspace inside that directory instead, so a
-/// disposable run never creates or writes in the real `~/Baaz`.
+/// disposable run never creates or writes in the real one.
 pub fn default_workspace() -> PathBuf {
     if std::env::var_os("BAAZ_STATE_DIR").is_some() {
         return crate::store::support_dir().join("workspace");
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Baaz")
+    home.join("baaz-sessions")
 }
 
 /// Make [`default_workspace`] exist, and answer where it is.
@@ -304,7 +310,7 @@ impl Projects {
     }
 
     /// Forget the adoption. Sessions keep their rows — they resolve to
-    /// "Other workspaces" now — and a `current` pointing at it is cleared.
+    /// Unfiled now — and a `current` pointing at it is cleared.
     /// Returns whether anything was forgotten.
     pub fn remove(&mut self, id: &str) -> bool {
         let before = self.projects.len();
@@ -403,7 +409,7 @@ impl Projects {
     /// [`Projects::sorted`], minus the adoptions whose root is gone: what
     /// the sidebar, the Projects palette, the project menu and the rail
     /// list. Sessions of a skipped project resolve nowhere (see
-    /// [`Projects::resolve_available`]) and fall back to "Other workspaces"
+    /// [`Projects::resolve_available`]) and fall back to Unfiled
     /// like any unadopted workspace.
     pub fn sorted_available(&self) -> Vec<&Project> {
         self.sorted().into_iter().filter(|project| self.is_available(&project.id)).collect()
@@ -427,7 +433,7 @@ impl Projects {
     }
 
     /// [`Projects::resolve`], but a missing root resolves nowhere: the row
-    /// falls back to "Other workspaces" while the adoption — and the
+    /// falls back to Unfiled while the adoption — and the
     /// session's stored project id — stay put, so the session regroups
     /// under its project when the path comes back.
     pub fn resolve_available(
@@ -955,7 +961,7 @@ mod tests {
         assert_eq!(listed, vec!["present"]);
         // The pure order is untouched: `sorted` still names both.
         assert_eq!(projects.sorted().len(), 2);
-        // Sessions of the missing root resolve nowhere — "Other workspaces".
+        // Sessions of the missing root resolve nowhere — Unfiled.
         assert!(projects.resolve_available(Some("gone-root"), Some("gone")).is_none());
         assert!(projects.resolve_available(Some(projects.projects[1].root.to_str().expect("utf8")), None).is_none());
         // A present root resolves exactly as before.

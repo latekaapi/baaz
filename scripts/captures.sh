@@ -18,7 +18,7 @@ done
 for l in choose device apikey error apikey-error; do
   BAAZ_STATE_DIR="$(mktemp -d)" "$bin" --no-connect --login "$l" --theme dark --screenshot "$out/login-$l-dark.png" >/dev/null 2>&1 || echo "FAILED login $l"
 done
-# --- Projects, package 2 (docs/12-projects.md) ---
+# --- Projects (docs/12-projects.md) ---
 # One window over three adopted roots plus two strays, then each surface in
 # turn. Every capture runs twice from a fresh state dir and `cmp`s the pair:
 # byte-identical run to run is the gate. `set -e` is on, so the comparison
