@@ -610,6 +610,12 @@ impl Harness {
         self.open_search(window, cx);
         if !rest.is_empty() {
             self.search_query.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
+            // `set_value` does not raise `InputEvent::Change`, which is what
+            // typing goes through, so the query has to be run by hand here.
+            // Without this the step opened the palette, filled the field and
+            // left the empty-query result on screen — a capture of a search
+            // that never ran, which is worse than no capture at all.
+            self.refresh_search(cx);
         }
     }
 
