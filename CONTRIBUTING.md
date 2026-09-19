@@ -6,9 +6,37 @@
 export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 ```
 
-You'll need `agentic-ui` checked out **beside** this repository (the `aui`
-crates are path dependencies — see `Cargo.toml`), the `muse` CLI on your
-`PATH`, and Rust 1.85+.
+You'll need the `muse` CLI on your `PATH` and Rust 1.85+. The `aui` crates
+are a git dependency pinned to a tag, so `cargo` fetches them — there is
+nothing to check out beside this repository.
+
+### Working on `aui` at the same time
+
+To build against a local [`agentic-ui`](https://github.com/latekaapi/agentic-ui)
+checkout instead — changing a component and seeing it here without tagging a
+release — patch the source rather than editing `Cargo.toml`, so the change
+never lands in a commit by accident:
+
+```toml
+# .cargo/config.toml, which is git-ignored
+[patch."https://github.com/latekaapi/agentic-ui"]
+aui          = { path = "../agentic-ui/crates/aui" }
+aui-protocol = { path = "../agentic-ui/crates/aui-protocol" }
+aui-motion   = { path = "../agentic-ui/crates/aui-motion" }
+aui-tokens   = { path = "../agentic-ui/crates/aui-tokens" }
+aui-icons    = { path = "../agentic-ui/crates/aui-icons" }
+```
+
+While that patch is active `cargo` rewrites `Cargo.lock` to point at the
+path instead of the tag, so the lock will show as modified. Don't commit it
+in that state — the committed lock has to name the tag, or CI builds
+something other than what a release does.
+
+A library change ships in two steps: tag and release `agentic-ui`, then bump
+the tag in this repository's `Cargo.toml`. Both repositories pin the exact
+same `gpui-pre` and `gpui-kit` versions, and `cargo tree -d` is the gate that
+says so — two copies of gpui in one binary shows up as a blank window rather
+than as an error.
 
 ## Building and testing
 

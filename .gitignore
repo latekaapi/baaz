@@ -16,6 +16,9 @@ __pycache__/
 # Local secrets for testing (owner-provided API key); never committed.
 .dev.env
 .env
+# A local `[patch]` pointing the aui crates at a checkout beside this one
+# (CONTRIBUTING.md). Personal to a working copy; never committed.
+/.cargo/config.toml
 
 # Internal AI-process material: not part of the public v0.1 release. Kept on
 # disk for whoever maintains this checkout, just not tracked.

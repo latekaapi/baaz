@@ -8,22 +8,7 @@ jobs:
   build-test-lint:
     runs-on: macos-latest
     steps:
-      # Baaz depends on the `aui` library by **path**, as
-      # `../agentic-ui/crates/*`, so the library has to be checked out beside
-      # it.
-      # TODO(release): switch Cargo.toml's aui/aui-* entries to a git
-      # dependency pinned to a tagged agentic-ui release, and drop this
-      # second checkout (see Cargo.toml's own path-dependency comment for
-      # the exact change).
       - uses: actions/checkout@v4
-        with:
-          path: baaz
-
-      - uses: actions/checkout@v4
-        with:
-          repository: latekaapi/agentic-ui
-          ref: main
-          path: agentic-ui
 
       - name: Install Rust stable
         run: |
@@ -31,15 +16,11 @@ jobs:
           rustup default stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: baaz
 
       - name: Build workspace
-        working-directory: baaz
         run: cargo build --workspace
 
       - name: Test workspace
-        working-directory: baaz
         # The two tests that spawn a real `muse serve` are `#[ignore]`d and
         # stay that way: each one spends a real, billed turn (docs/06-billing.md
         # and docs/04-approvals.md §0). The offline gates replace them —
@@ -48,11 +29,9 @@ jobs:
         run: cargo test --workspace
 
       - name: Clippy
-        working-directory: baaz
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Doc
-        working-directory: baaz
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -61,7 +40,6 @@ jobs:
       # agentic-ui resolves, and two copies of gpui in one binary is a class of
       # bug that shows up as a blank window rather than as an error.
       - name: One gpui
-        working-directory: baaz
         run: |
           duplicates="$(cargo tree -d | grep -E '^(gpui-pre|gpui-kit) v' || true)"
           if [ -n "$duplicates" ]; then

@@ -38,17 +38,19 @@ gpui = { package = "gpui-pre", version = "=0.3.3" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.3" }
 gpui-kit = "0.6.0"
 
-# Path dependencies on the aui library, checked out beside this repository.
-# TODO(release): once agentic-ui's public names are final, pin these to a git
-# dependency instead, e.g.:
-#   aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
-# (one entry per aui-* crate below, same git + tag), and drop the second
-# checkout step in .github/workflows/ci.yml.
-aui = { path = "../agentic-ui/crates/aui" }
-aui-protocol = { path = "../agentic-ui/crates/aui-protocol" }
-aui-motion = { path = "../agentic-ui/crates/aui-motion" }
-aui-tokens = { path = "../agentic-ui/crates/aui-tokens" }
-aui-icons = { path = "../agentic-ui/crates/aui-icons" }
+# The aui component library, pinned to a tag rather than tracked on a branch:
+# `aui` is pre-1.0 and breaks between minor versions, so a moving `main`
+# would break this build at a time of its choosing. All five entries share
+# one tag — they are one workspace and are only ever released together.
+#
+# To build against a local checkout instead (developing both at once), add a
+# patch to `.cargo/config.toml` or the workspace root rather than editing
+# these lines; `CONTRIBUTING.md` has the snippet.
+aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
+aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
+aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
+aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
+aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.1.0" }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }
