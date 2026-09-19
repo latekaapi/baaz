@@ -47,13 +47,13 @@ enum ProjectMenuAction {
     Reveal,
     /// Ask before removing the menu's project from the sidebar.
     Remove,
-    /// The "Other workspaces" row: adopt through the Projects palette.
+    /// The unfiled row: adopt through the Projects palette.
     AddAsProject,
 }
 
 impl Harness {
     /// Open a project menu: the header crumb's (`from_header`), or a group
-    /// row's `…` tray (`project` is `None` for "Other workspaces").
+    /// row's `…` tray (`project` is `None` when the session is unfiled).
     /// Clicking the same affordance again closes it, like every other menu.
     pub(crate) fn open_project_menu(&mut self, project: Option<String>, from_header: bool, cx: &mut Context<Self>) {
         let already = self
@@ -180,9 +180,9 @@ impl Harness {
         let Some(project) = self.projects.find(&id).cloned() else { return };
         let n = self.sessions.iter().filter(|e| e.project.as_deref() == Some(id.as_str())).count();
         let detail = if n == 1 {
-            "Its 1 session stays on disk and moves to Other workspaces. Nothing in the folder changes.".to_owned()
+            "Its 1 session stays on disk and moves to Unfiled. Nothing in the folder changes.".to_owned()
         } else {
-            format!("Its {n} sessions stay on disk and move to Other workspaces. Nothing in the folder changes.")
+            format!("Its {n} sessions stay on disk and move to Unfiled. Nothing in the folder changes.")
         };
         self.set_dialog(
             cx,
@@ -397,7 +397,7 @@ impl Harness {
         let listed = self.ordered_projects();
         let listed_len = listed.len();
         match target.clone() {
-            // "Other workspaces" carries one row: adopting starts in the
+            // The unfiled group carries one row: adopting starts in the
             // Projects palette.
             None => push(
                 MenuRow::Toggle { label: "Add as project…".into(), checked: false },
@@ -494,7 +494,7 @@ impl Harness {
         });
         // The seat: below-start of whatever opened the menu — the header
         // crumb's rect, or the group row's tray `…` bounds (`None` is the
-        // "Other workspaces" row, keyed under its group id). `anchored_menu`
+        // unfiled row, keyed under its group id). `anchored_menu`
         // flips the side and slides inside the window on overflow. No bounds
         // yet: no menu this frame, never the old `top(52)` seat; the rail
         // guard keeps a scripted group menu there from repainting forever

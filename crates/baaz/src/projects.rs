@@ -171,6 +171,41 @@ pub fn canonical_str(root: &str) -> String {
     canonical_path(Path::new(root)).to_string_lossy().into_owned()
 }
 
+/// The folder a session runs in when it belongs to no project: `~/Baaz`.
+///
+/// Muse needs a workspace root for every session, so "no project" still has
+/// to mean somewhere real. One folder, made once at boot, is what lets a
+/// first launch start a session before anything has been adopted — and what
+/// keeps that promise without a folder picker standing between the person
+/// and their first question.
+///
+/// A run with its own `BAAZ_STATE_DIR` — a test, a capture, a journey —
+/// keeps its default workspace inside that directory instead, so a
+/// disposable run never creates or writes in the real `~/Baaz`.
+pub fn default_workspace() -> PathBuf {
+    if std::env::var_os("BAAZ_STATE_DIR").is_some() {
+        return crate::store::support_dir().join("workspace");
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    home.join("Baaz")
+}
+
+/// Make [`default_workspace`] exist, and answer where it is.
+///
+/// Best-effort, like every other boot-time write: a folder that cannot be
+/// created costs the unfiled lane, not the launch, so the caller gets `None`
+/// and the rest of the window comes up as usual.
+pub fn ensure_default_workspace() -> Option<PathBuf> {
+    let root = default_workspace();
+    match std::fs::create_dir_all(&root) {
+        Ok(()) => Some(canonical_path(&root)),
+        Err(error) => {
+            crate::baaz_log!("default workspace: cannot create {}: {error}", root.display());
+            None
+        }
+    }
+}
+
 /// Whether a directory is a plausible workspace to work in, as opposed to
 /// somewhere a launch merely happened to start (decision D39).
 ///
@@ -993,6 +1028,26 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("remove root");
         assert!(!projects.is_available("ws"), "no stale positive survives forgetting");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The unfiled lane's folder. A disposable run must never create or
+    /// write the real `~/Baaz`, so a state dir of its own redirects it.
+    #[test]
+    fn the_default_workspace_follows_a_disposable_state_dir() {
+        let dir = state_dir("default-workspace");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (guard, old) = with_state_dir(&dir);
+        let root = default_workspace();
+        assert_eq!(root, dir.join("workspace"), "a run with its own state dir keeps its workspace there");
+        assert!(!root.exists(), "nothing exists before it is asked for");
+        let made = ensure_default_workspace().expect("the folder is creatable");
+        assert!(made.is_dir(), "asking for it makes it");
+        // Idempotent: a second boot finds it rather than failing on it.
+        assert!(ensure_default_workspace().is_some());
+        // And it is a workspace, so the `@` picker will actually walk it.
+        assert!(is_workspace_root(&made));
+        restore_state_dir(guard, old);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// D39's rule, which decides both what boot adopts and whether the `@`

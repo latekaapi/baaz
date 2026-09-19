@@ -82,13 +82,28 @@ Taken 2026-09-13.
   pinned first, then by name case-insensitively (ties by `addedAt`, then id) —
   never by recency; no drag reorder. A project never moves because a session in
   it was created, opened, or got a turn. "Other workspaces" is always last.
-- **D38 Removal.** Remove from sidebar keeps every session; they move to "Other
-  workspaces". Nothing on Muse's side changes.
+- **D38 Removal.** Remove from sidebar keeps every session; they move to Unfiled.
+  Nothing on Muse's side changes.
 - **D39 Boot.** `--workspace` wins and is adopted if new; else the stored current project;
   else the most recently opened; on a first run the launch directory unless it is `/` or
-  `$HOME`, in which case the window opens with no project and an "Add a project" hero.
+  `$HOME` (`projects::is_workspace_root`), in which case the window opens with no project.
+  A scripted run adopts its launch directory by the same rule, not around it: a bundle
+  opened from Finder starts at `/`, and adopting that would write a junk project.
 - **D40 One window, one process.** No split, no pop-out; the parked-view MRU stays keyed
   by session id and is valid across projects.
+- **D42 The default workspace.** Muse needs a workspace root for every session, so "no
+  project" still has to mean somewhere real. `~/Baaz` is made at boot and is where
+  "New session" starts when nothing is adopted — no folder picker between a first
+  launch and a first question. It is deliberately **not** a project: its sessions
+  resolve to no project and so appear under Unfiled, and adopting a project is the
+  other thing a first launch can do rather than the only one. A run with its own
+  `BAAZ_STATE_DIR` keeps its default workspace inside it, so tests, captures and
+  journeys never create or write the real `~/Baaz`.
+- **D43 Unfiled.** The group of sessions no adoption holds — the default workspace's
+  own and any root Muse ran in elsewhere. Its id stays `"other"` so stored fold state
+  keeps working, and it reads `closedGroups` exactly as a project group does: open
+  unless closed. It used to be the one row that read that set inverted and started
+  shut, which would now hide the first session a person ever started.
 - **D41 Identity of a project.** A UUID; the canonical root is unique among projects. The
   name defaults to the folder name and is renameable; a rename never touches the folder.
 

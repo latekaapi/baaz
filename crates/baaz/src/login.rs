@@ -739,6 +739,7 @@ impl Harness {
                     .w_full()
                     .items_center()
                     .justify_center()
+                    .pb(px(crate::app::HERO_LIFT))
                     .gap(px(scale::SP_6))
                     .child(crate::mascot::welcome_mascot(window, cx))
                     .child(

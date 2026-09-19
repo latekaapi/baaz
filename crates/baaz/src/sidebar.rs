@@ -115,7 +115,7 @@ pub struct SessionEntry {
     pub workspace: Option<String>,
     /// The resolved project id: the stored one when it still names a
     /// project, else the adoption whose root equals [`Self::workspace`].
-    /// `None` is "Other workspaces".
+    /// `None` is unfiled.
     pub project: Option<String>,
     /// The resolved project's display name, for the context line's
     /// `project · branch` fallback. Resolved beside [`Self::project`];
@@ -809,9 +809,16 @@ pub fn grouping_at(entries: &[SessionEntry], now: DateTime<Local>) -> Grouping {
     Grouping::Date(groups)
 }
 
-/// The "Other workspaces" group id: sessions whose workspace no adoption
-/// holds. Always last, muted, and closed until the person opens it.
+/// The unfiled group id: sessions whose workspace no adoption holds —
+/// the default workspace's own, and any root Muse ran in elsewhere.
+/// Always last and muted; open unless the person closed it.
+///
+/// The id stays `"other"` so a stored fold state keeps working.
 pub const OTHER_GROUP: &str = "other";
+
+/// What that group is called. Everything not filed under a project is in it,
+/// which is what the word has to carry.
+pub const UNFILED_LABEL: &str = "Unfiled";
 
 /// How many of a project's newest unpinned sessions a folded group shows.
 ///
@@ -978,8 +985,13 @@ pub fn grouping_by_project(
             })
             .collect();
         let count = sessions.len().to_string();
-        let mut group = ProjectGroup::new(OTHER_GROUP, "Other workspaces", count).muted();
-        if view.closed.contains(OTHER_GROUP) {
+        let mut group = ProjectGroup::new(OTHER_GROUP, UNFILED_LABEL, count).muted();
+        // Open unless the person closed it, exactly like a project group.
+        // It used to be the one row that read the set inverted, because it
+        // held other people's workspaces and started shut; it now holds the
+        // default workspace too, so a session started before any project was
+        // adopted would otherwise land out of sight.
+        if !view.closed.contains(OTHER_GROUP) {
             group = group.open(sessions);
         }
         groups.push(group);
@@ -987,7 +999,7 @@ pub fn grouping_by_project(
     Grouping::Project(groups)
 }
 
-/// The last path component of a workspace root, for the "Other workspaces"
+/// The last path component of a workspace root, for the unfiled
 /// rows' repo tag — and the search palette's badge for sessions no project
 /// holds. A root with no final component names itself whole rather than
 /// tagging nothing.
@@ -1906,8 +1918,8 @@ mod tests {
             panic!("project grouping must yield project groups");
         };
         // Name order, never recency: agentic-ui, baaz,
-        // empty — even though baaz rows are the newest — then Other
-        // workspaces last.
+        // empty — even though baaz rows are the newest — then the unfiled
+        // group last.
         assert_eq!(groups.len(), 4);
         assert_eq!(groups[0].id.as_ref(), "p-agentic");
         assert_eq!(groups[1].id.as_ref(), "p-baaz");
@@ -1919,11 +1931,14 @@ mod tests {
         assert!(groups[2].open, "an empty project still gets an open group row");
         let other = &groups[3];
         assert_eq!(other.id.as_ref(), OTHER_GROUP);
-        assert_eq!(other.name.as_ref(), "Other workspaces");
+        assert_eq!(other.name.as_ref(), UNFILED_LABEL);
         assert!(other.muted);
-        assert!(!other.open, "Other workspaces starts closed");
+        // Open unless the person closed it, like every other group: a
+        // session started before any project was adopted lands here, and a
+        // group that started shut would hide it.
+        assert!(other.open, "the unfiled group starts open");
         assert_eq!(other.count.as_ref(), "2");
-        assert!(other.sessions.is_empty(), "a closed group counts its rows without carrying them");
+        assert_eq!(other.sessions.len(), 2, "an open group carries its rows");
         // No coloured marks anywhere: every group row is the plain default.
         assert!(groups.iter().all(|g| g.mark.is_none()), "no group row carries a mark");
         // Newest first inside the group.
@@ -2017,7 +2032,8 @@ mod tests {
         assert!(!group.open);
         assert_eq!(group.count.as_ref(), "1");
         assert!(group.sessions.is_empty());
-        // …while opening Other workspaces is the same set read inverted.
+        // …and the unfiled group reads that set exactly the same way,
+        // rather than inverted as it once did.
         let mut closed = HashSet::new();
         closed.insert(OTHER_GROUP.to_owned());
         let entries = vec![
@@ -2028,9 +2044,20 @@ mod tests {
         else {
             panic!("project grouping must yield project groups");
         };
-        let other = groups.last().expect("other group");
+        let other = groups.last().expect("unfiled group");
+        assert!(!other.open, "closing the unfiled group closes it");
+        assert_eq!(other.count.as_ref(), "2", "a closed group still counts what is inside");
+        assert!(other.sessions.is_empty());
+
+        // Open, it carries its rows: each one named by its workspace's
+        // folder, newest first.
+        let Grouping::Project(groups) =
+            by_project_view(&entries, &projects, &HashSet::new(), &HashSet::new(), None)
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        let other = groups.last().expect("unfiled group");
         assert!(other.open);
-        // Stray rows carry their workspace's folder name, newest first.
         assert_eq!(other.sessions.len(), 2);
         assert_eq!(other.sessions[0].id.as_ref(), "s4");
         assert_eq!(other.sessions[0].repo.as_deref(), Some("stray"));

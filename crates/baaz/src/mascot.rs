@@ -13,7 +13,7 @@
 //! Retina note: gpui's image loader fetches exactly the embedded path it is
 //! given — it never auto-requests `@2x`/`@3x` siblings — so every mascot
 //! path (base, `@2x`, `@3x`) serves the `@3x` bytes. The element lays out at
-//! the design size (44/56/180 pt) and the GPU downscales, which stays crisp
+//! the design size ([`ERROR_PT`], [`BOOT_PT`]) and the GPU downscales, which stays crisp
 //! on retina. The 1x/2x files are still copied into the repo as the
 //! resolution ladder's record.
 
@@ -23,12 +23,12 @@ use std::time::Duration;
 use aui_motion::{EnterExit, PresenceStyle, presence};
 use gpui::{AssetSource, SharedString, div, img, prelude::*, px, AnyElement, App, Window};
 
-/// The boot-screen mascot (180 pt).
+/// The boot-screen mascot.
 pub const BOOT_GREETING: &str = "mascot/boot/greeting-wave.png";
 
 /// Layout size of the hero mascots — the boot screen and the new session
 /// screen use the same size.
-pub const BOOT_PT: f32 = 180.0;
+pub const BOOT_PT: f32 = 132.0;
 /// Layout size of the error mascot, in points.
 pub const ERROR_PT: f32 = 56.0;
 
@@ -221,7 +221,7 @@ impl AssetSource for BaazAssets {
     }
 }
 
-/// The boot-screen mascot: 180 pt, centred by its caller, fading in with a
+/// The boot-screen mascot: [`BOOT_PT`], centred by its caller, fading in with a
 /// slight upward drift (8 px, ~320 ms, ease-out), once on appear.
 ///
 /// In-flow and fixed-size, so its space is reserved and nothing shifts when
@@ -353,6 +353,7 @@ mod tests {
         assert_eq!(ErrorMascot::Offline.path(), ERROR_OFFLINE);
         assert_eq!(ErrorMascot::Blocked.path(), ERROR_BLOCKED);
         assert_eq!(ERROR_PT, 56.0);
+        assert_eq!(BOOT_PT, 132.0);
     }
 
     #[test]

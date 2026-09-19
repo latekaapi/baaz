@@ -11,6 +11,12 @@ the `aui` component library.
 - **Chat over Muse Code.** Drives `muse serve` as a child process and speaks
   MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does
   (device code or an API key).
+- **Sessions do not need a project.** Muse needs a folder for every session,
+  so Baaz makes one — `~/Baaz` — at first boot and starts there when nothing
+  has been adopted. A first launch can ask a question straight away; adding a
+  project folder is the other thing it can do rather than the only one.
+  Sessions with no project are grouped under **Unfiled**, which is open
+  unless you close it.
 - **The app is called Baaz.** The crate, the binary, the bundle
   (`sh.baaz.app`) and the `BAAZ_*` environment variables all carry the name.
   A state directory written under the old name is carried onto
