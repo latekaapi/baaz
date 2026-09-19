@@ -1123,24 +1123,24 @@ impl Harness {
         let Some(params) =
             projects::start_params(&self.projects, current.as_deref(), &self.args.provider, self.args.approval_mode.clone())
         else {
-            // Logged, because a scripted `new` that lands here used to read
-            // as a script that ran — exit 0, screenshot written — while
-            // having started nothing.
-            crate::baaz_log!("new: no current project; starting nothing");
             if current.is_none() {
-                // No adoption anywhere to start in: offer the folder panel
-                // instead of the dead click the owner reported. The chosen
-                // folder starts a session (still needs a `workspaceRoot`)
-                // without being adopted, so it resolves to "Other
-                // workspaces" like any unadopted root.
-                self.choose_session_folder(window, cx);
+                // No project to start in, which is an ordinary state and not
+                // a failure: the session goes to the default workspace, so a
+                // first launch can ask something before adopting anything.
+                // That folder is not a project, so the session files itself
+                // as unfiled.
+                let root = projects::default_workspace();
+                crate::baaz_log!("new: no project; starting in the default workspace");
+                self.new_session_in_root(&root, window, cx);
+                return;
             }
             // `current.is_some()` here would mean the id `current_project()`
             // just resolved through `find_available` no longer names a
             // project at all — a race this single-threaded flow does not
-            // have today. Left as a silent no-op rather than a folder panel
-            // that would silently orphan a still-current (if unavailable)
-            // adoption.
+            // have today. Logged, because a scripted `new` that lands here
+            // used to read as a script that ran — exit 0, screenshot
+            // written — while having started nothing.
+            crate::baaz_log!("new: current project is unavailable; starting nothing");
             return;
         };
         let effort = current
@@ -1292,11 +1292,10 @@ impl Harness {
         });
     }
 
-    /// `new-in:<path>`: [`Self::new_session_in_root`] without the folder
-    /// panel, since a native panel cannot be driven from a script — the
-    /// headless twin of what [`Self::choose_session_folder`] does with a
-    /// chosen path. Relative paths resolve against the process's own
-    /// directory, like `project:<path>` already does for adoption.
+    /// `new-in:<path>`: [`Self::new_session_in_root`] against a named root,
+    /// so a capture can put a session in a folder of its own rather than in
+    /// the default workspace. Relative paths resolve against the process's
+    /// own directory, like `project:<path>` already does for adoption.
     pub(crate) fn step_new_in(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let rest = rest.trim();
         if rest.is_empty() {

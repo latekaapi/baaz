@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 pub enum GroupBy {
     /// Flat rows under calendar-day headers, as the window always did.
     Date,
-    /// One collapsible group per project, then "Other workspaces".
+    /// One collapsible group per project, then the unfiled group.
     Project,
 }
 
@@ -39,7 +39,8 @@ pub struct Layout {
     #[serde(rename = "groupBy", default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<GroupBy>,
     /// Group ids standing closed: project ids, and `"other"` for the
-    /// "Other workspaces" group, which starts closed.
+    /// unfiled group. Every group reads it the same way, and every group
+    /// starts open.
     #[serde(rename = "closedGroups", default, skip_serializing_if = "Vec::is_empty")]
     pub closed_groups: Vec<String>,
     /// Project-group ids whose held-back rows stand shown: the "Show N more"

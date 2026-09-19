@@ -501,10 +501,9 @@ impl Harness {
         cx.notify();
     }
 
-    /// Flip a project group's disclosure: its id moves in or out of
-    /// `closed_groups` and the layout is written. "Other workspaces" reads
-    /// the same set inverted (closed until opened), so the one flip rule
-    /// serves both rows.
+    /// Flip a group's disclosure: its id moves in or out of
+    /// `closed_groups` and the layout is written. Every group, the unfiled
+    /// one included, reads that set the same way.
     pub(crate) fn toggle_group(&mut self, id: String, cx: &mut Context<Self>) {
         if self.layout.closed_groups.iter().any(|g| g == &id) {
             self.layout.closed_groups.retain(|g| g != &id);

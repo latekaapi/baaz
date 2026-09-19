@@ -240,47 +240,6 @@ impl Harness {
         }));
     }
 
-    /// The native folder panel for "New session" with no current project:
-    /// the chosen folder starts a session there and is never adopted — the
-    /// Claude Code / Codex model of working somewhere without remembering it
-    /// as a project. Compare [`Self::choose_project_folder`], which adopts
-    /// and starts nothing; this starts and never adopts. Cancel does
-    /// nothing.
-    ///
-    /// Same four-line diagnosis trail as `choose_project_folder`, for the
-    /// same reason: "New session does nothing" is exactly the regression
-    /// this replaces, so its own dead end needs the same trail.
-    pub(crate) fn choose_session_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::baaz_log!("choose_session_folder: opening the folder panel");
-        // The panel is app-modal but opens behind everything when this app is
-        // not active: brought forward first so "nothing happens" is never a
-        // hidden panel.
-        cx.activate(true);
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open".into()),
-        });
-        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
-            match paths.await {
-                Ok(Ok(Some(paths))) => {
-                    crate::baaz_log!(
-                        "choose_session_folder: panel chose {}",
-                        paths.first().map(|p| p.display().to_string()).unwrap_or_default()
-                    );
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        if let Some(root) = paths.first() {
-                            this.new_session_in_root(root, window, cx);
-                        }
-                    });
-                }
-                Ok(Ok(None)) => crate::baaz_log!("choose_session_folder: panel cancelled"),
-                Ok(Err(error)) => crate::baaz_log!("choose_session_folder: panel errored: {error:#}"),
-                Err(_) => crate::baaz_log!("choose_session_folder: panel future dropped"),
-            }
-        }));
-    }
 
     /// One ordered vec feeds the Projects palette's keyboard, click and
     /// drawn sections, so the three agree about what row 3 is. Section

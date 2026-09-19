@@ -197,6 +197,14 @@ const UNDO_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
 /// ground behind it goes. The library's `palette_scrim` is a design-card block
 /// of a fixed height; a window overlay places itself.
 pub(crate) const PALETTE_TOP: f32 = 96.0;
+
+/// How far above dead centre a hero column sits, in points.
+///
+/// A column centred exactly in the pane reads low: the eye puts the optical
+/// centre above the geometric one, and the sidebar and composer give the
+/// window weight at the bottom already. Applied as bottom padding, so the
+/// column still centres — just in a slightly shorter box.
+pub(crate) const HERO_LIFT: f32 = 48.0;
 pub(crate) const PALETTE_SCRIM: f32 = 0.4;
 /// How many rows the palette lists. The sidebar's search is the way through a
 /// longer list; this is the way back to something recent.
@@ -844,6 +852,10 @@ impl Harness {
             .filter(|(_, meta)| meta.side_session)
             .map(|(id, _)| id.clone())
             .collect();
+        // Before anything reads it: "New session" with no project starts
+        // here, and on a first launch that click comes before the person has
+        // adopted anything at all.
+        projects::ensure_default_workspace();
         this.boot_projects();
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the
@@ -975,7 +987,13 @@ impl Harness {
             || !self.args.steps.is_empty()
             || self.args.screenshot.is_some();
         let mut dirty = false;
-        if self.args.workspace_explicit || scripted {
+        // A scripted run adopts where it was launched, so a capture works in
+        // the checkout it was started from. It is still subject to D39: a
+        // bundle opened from Finder starts at `/`, and adopting that would
+        // both contradict the rule below and write a junk project. An
+        // explicit `--workspace` is explicit intent and wins either way.
+        let launch_adoptable = projects::is_workspace_root(&self.args.workspace);
+        if self.args.workspace_explicit || (scripted && launch_adoptable) {
             let workspace = self.args.workspace.clone();
             let id = self.projects.add(&workspace).id.clone();
             self.projects.touch(&id);
@@ -1437,8 +1455,9 @@ impl Harness {
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         // The project crumb: name and chevron as one click target that opens
         // the project menu under it — `project › session`, no marks (owner
-        // round 4, O4). With no current project it reads "Add a project…"
-        // and opens the Projects palette instead.
+        // round 4, O4). With no current project it names the unfiled lane —
+        // where a session started right now would go — and opens the
+        // Projects palette, which is how one gets filed.
         let renaming_project_here =
             self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
         let crumb: AnyElement = if renaming_project_here {
@@ -1491,7 +1510,7 @@ impl Harness {
                 .items_center()
                 .track_interaction(&state)
                 .on_click(open)
-                .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child("Add a project…"))
+                .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child(crate::sidebar::UNFILED_LABEL))
                 .into_any_element()
         };
         // The session half is the label after the `·` separator, with no
@@ -1831,33 +1850,38 @@ impl Harness {
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         if self.current_project().is_none() {
-            let choose = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.choose_project_folder(cx));
-            let recents = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.open_projects(true, window, cx);
+            let start = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.new_session(window, cx)
             });
+            let choose = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.choose_project_folder(cx));
             let drop = cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
                 this.adopt_dropped(paths.paths().to_vec(), cx);
             });
+            // Nothing adopted is not a dead end any more: the default
+            // workspace means a first launch can ask something straight
+            // away, and adopting a folder is the other thing it can do
+            // rather than the only one.
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .gap(px(scale::SP_3))
+                .pb(px(HERO_LIFT))
                 .on_drop(drop)
                 .child(crate::mascot::boot_mascot(window, cx))
-                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Add a project"))
+                .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("Ready when you are"))
                 .child(
                     div()
                         .ui(scale::FS_12)
                         .text_color(p.ink_3)
-                        .child("Muse works inside a folder. Add one to start."),
+                        .child("Start a session now, or add a project folder to work in."),
                 )
                 .child(
                     h_flex()
                         .gap(px(scale::SP_2))
                         .mt(px(scale::SP_2))
-                        .child(button("hero-choose", "Choose folder…").primary().icon(IconName::Folder).on_click(choose))
-                        .child(button("hero-recents", "Recent workspaces").icon(IconName::Clock).on_click(recents)),
+                        .child(button("hero-new", "New session").primary().icon(IconName::Plus).on_click(start))
+                        .child(button("hero-choose", "Add project").icon(IconName::Folder).on_click(choose)),
                 )
                 .into_any_element();
         }
@@ -1867,6 +1891,7 @@ impl Harness {
             .items_center()
             .justify_center()
             .gap(px(scale::SP_4))
+            .pb(px(HERO_LIFT))
             .child(crate::mascot::boot_mascot(window, cx))
             .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child(self.workspace_name()))
             .child(
