@@ -138,6 +138,17 @@ async fn settle(cx: &gpui::AsyncApp, delay: Duration) {
     }
 }
 
+/// Whether a capture keeps the display's own pixels instead of being
+/// downsampled to logical ones: `BAAZ_SHOT_NATIVE=1`.
+///
+/// The regression suite compares captures byte for byte, and logical pixels
+/// are what make two machines agree, so that stays the default. Artwork for
+/// the README wants every pixel the retina panel drew, which is what this
+/// is for.
+pub fn native_pixels() -> bool {
+    std::env::var("BAAZ_SHOT_NATIVE").is_ok_and(|v| v == "1")
+}
+
 /// Downsample to logical pixels, encode and write, off the UI thread.
 ///
 /// Split out of [`capture_and_quit`] because all three used to run inside the
@@ -149,6 +160,7 @@ fn write_capture(
     path: &std::path::Path,
 ) -> anyhow::Result<(u32, u32)> {
     let (w, h) = (image.width(), image.height());
+    let scale = if native_pixels() { 1.0 } else { scale };
     let target_w = (w as f32 / scale).round() as u32;
     let target_h = (h as f32 / scale).round() as u32;
     let image = if (target_w, target_h) != (w, h) {

@@ -238,11 +238,11 @@ dir (version 1, camelCase, atomic write, best-effort read); `sessions.json`
 
 A session resolves to a project in one order only: its stored project id when
 that adoption still exists, else the adoption whose canonical root equals the
-row's `workspace_root`, else "Other workspaces". Never by prefix, never by
+row's `workspace_root`, else Unfiled. Never by prefix, never by
 the current project — a worktree session's folder differs from its project's
 root, and a prefix would file it under the wrong project. An adoption whose
 root is gone (a deleted worktree, an unmounted volume) resolves nowhere at
-any step: its sessions read as "Other workspaces" until the path comes back.
+any step: its sessions read as Unfiled until the path comes back.
 The adoption itself stays in `projects.json` — hiding is a listing rule, and
 nothing in the listing path writes the store back. Existence is cached per
 project with a 30 s TTL and rechecked for every adoption off the UI thread on
@@ -278,7 +278,7 @@ case-insensitively, never recency, no drag reorder), each
 a plain muted label with the count, a left-edge accent bar in the state
 colour when any of its sessions runs (breathing with the shared pulse while
 running, solid otherwise), and hover `+` and `…`; sessions inside run newest-first with pinned
-first; then the muted "Other workspaces" group, always last and closed until
+first; then the muted Unfiled group, always last and closed until
 opened. The plain label's first glyph starts at the leading centre (x = 18,
 the line the nav icons and the session dots sit on); with the chevron flag
 the chevron takes that box and the label follows at `NAV_LABEL_X` like every
@@ -482,7 +482,7 @@ project, a Colour submenu of eight swatches, Pin/Unpin project, Reveal in
 Finder, and Remove from sidebar. Renaming swaps the crumb's name for the
 dense field (Enter writes, Escape cancels, empty reverts to the folder name).
 **Remove from sidebar** asks first ("Its n sessions stay on disk and move to
-Other workspaces. Nothing in the folder changes."); on confirm the adoption
+Unfiled. Nothing in the folder changes."); on confirm the adoption
 is forgotten, its sessions' stored project is cleared (a later re-add
 resolves them by root), current passes to the most recently opened remaining
 adoption, and there is no Undo — re-adding is one click in the palette.

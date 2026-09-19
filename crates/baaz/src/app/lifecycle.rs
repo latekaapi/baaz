@@ -1233,7 +1233,7 @@ impl Harness {
     /// `session/start` in `root`, which is never adopted: no project
     /// defaults, no `projects.current` pointer, no `drafts` entry. The
     /// session groups nowhere (`Projects::resolve` finds no adoption for
-    /// this root) and shows under "Other workspaces", exactly like any
+    /// this root) and shows under Unfiled, exactly like any
     /// session whose folder was never adopted.
     ///
     /// This is [`Self::new_session_in`]'s sibling for a folder that is not,
@@ -1272,7 +1272,7 @@ impl Harness {
                     }
                 }
                 // No project override: a `meta.project` of `None` is exactly
-                // what files this session under "Other workspaces".
+                // what files this session under Unfiled.
                 let moving = this.pending_draft.take();
                 if let Some(view) =
                     this.active.clone().filter(|view| view.read(cx).session_id == session_id)

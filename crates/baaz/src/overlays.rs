@@ -50,7 +50,7 @@ pub enum DialogAction {
     /// Archive the dialog's `archive_target` out of the sidebar.
     Archive,
     /// Remove the dialog's `archive_target` project from the sidebar (its
-    /// sessions stay on disk and move to "Other workspaces").
+    /// sessions stay on disk and move to Unfiled).
     RemoveProject,
 }
 
@@ -92,7 +92,7 @@ pub struct Menu {
     /// know exactly what to replace when a row is picked.
     pub at: usize,
     /// For [`MenuKind::Project`]: the menu's project id, or `None` for the
-    /// "Other workspaces" group. Meaningless for every other kind.
+    /// Unfiled group. Meaningless for every other kind.
     pub project: Option<String>,
     /// For [`MenuKind::Project`]: opened from the header crumb rather than a
     /// group row, so the menu anchors under the crumb instead of the
@@ -111,7 +111,7 @@ impl Menu {
         Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false }
     }
 
-    /// A project menu for `project` (`None` is "Other workspaces").
+    /// A project menu for `project` (`None` is Unfiled).
     pub fn project(project: Option<String>, from_header: bool) -> Self {
         Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header }
     }

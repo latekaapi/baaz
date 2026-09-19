@@ -865,7 +865,7 @@ pub struct GroupView<'a> {
 /// [folded](aui::nav::ProjectGroup::folded) until its id lands in `expanded`.
 /// The open session (`active`) — and the click's target (`pending`) — are
 /// always among the visible ones even when older than the fifth: they append
-/// past the five rather than displacing a newer row. "Other workspaces"
+/// past the five rather than displacing a newer row. Unfiled
 /// never folds: it is closed until opened and usually short.
 pub fn grouping_by_project(
     entries: &[SessionEntry],
@@ -878,7 +878,7 @@ pub fn grouping_by_project(
     let mut by_project: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
     let mut other: Vec<&SessionEntry> = Vec::new();
     for entry in entries {
-        // A missing root is no project: the row lands in "Other workspaces"
+        // A missing root is no project: the row lands in Unfiled
         // even when its stored id still names the adoption.
         match entry.project.as_deref().and_then(|id| projects.find_available(id)) {
             Some(project) => {
@@ -1787,7 +1787,7 @@ mod tests {
     }
 
     /// The grouping tests' roots on disk: availability hides a missing root,
-    /// so fake `/work` paths would group everything into "Other workspaces".
+    /// so fake `/work` paths would group everything into Unfiled.
     /// One shared base per test-binary run; `create_dir_all` is idempotent
     /// across the parallel tests that share it.
     fn roots_base() -> std::path::PathBuf {
@@ -1895,7 +1895,7 @@ mod tests {
         // No group for the missing root — but it stays adopted.
         assert!(groups.iter().all(|g| g.id.as_ref() != "p-gone"));
         assert!(projects.find("p-gone").is_some());
-        // Its session is not lost: it falls back to "Other workspaces" with
+        // Its session is not lost: it falls back to Unfiled with
         // Baaz session.
         let group = folded_group(&groups, "p-baaz");
         assert_eq!(group.sessions.len(), 1);
