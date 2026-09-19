@@ -1,7 +1,7 @@
 //! Plan mode: client-side, and flagged as such (spec §3.1).
 //!
-//! MSP has no plan mode. What Muse has is a **skill** called `plan`, and the
-//! Phase 3 probe settled how it is reached: sending the literal text
+//! MSP has no plan mode. What Muse has is a **skill** called `plan`, and a
+//! probe settled how it is reached: sending the literal text
 //! `/plan <prompt>` as an ordinary `turn/start` text part makes the server read
 //! the skill and answer in its shape. The evidence, from one real `meta` turn
 //! (`fixtures/msp/transcript-plan-probe.jsonl`):

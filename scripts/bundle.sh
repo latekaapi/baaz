@@ -4,7 +4,8 @@
 # Usage:
 #   scripts/bundle.sh
 #
-# Reads `assets/icon-1024.png` (a flat H tile, 1024x1024), builds
+# Reads `assets/icon-1024.png` (the Baaz app icon: the mascot on a
+# baked squircle, 1024x1024), builds
 # `cargo build --release -p baaz`, converts the icon to
 # `Baaz.icns` with `sips`/`iconutil`, writes `Info.plist`
 # (`sh.baaz.app`) and assembles `target/bundle/Baaz.app`:

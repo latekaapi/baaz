@@ -17,8 +17,8 @@
 //!
 //! # Screens
 //!
-//! Two, and the auth probe decides which: the login screen (spec §3.2,
-//! superseded by `docs/diagnosis/login.md`) or the shell. The shell's right
+//! Two, and the auth probe decides which: the login screen (spec §3.2) or
+//! the shell. The shell's right
 //! pane is not used; the column is always closed.
 //!
 //! # What lives elsewhere
@@ -488,7 +488,7 @@ pub struct Harness {
     /// Set when the next frame should move the keyboard to the composer.
     pub(crate) focus_composer: bool,
     /// What the billing probe said, or `None` while it has not said it yet
-    /// (spec §3.2, Phase 5 A1). A probe that failed is
+    /// (spec §3.2). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
     pub(crate) tier: Option<Tier>,
     /// A probe is in flight; a second one is not started on top of it.

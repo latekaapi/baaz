@@ -29,7 +29,7 @@ pub struct IndexEntry {
     pub title: String,
     /// The first thing the person typed, which is the best fallback label.
     pub first_user_prompt: Option<String>,
-    /// Everything the index made searchable, for the Phase 5 search field.
+    /// Everything the index made searchable, for the search field.
     pub search_text: String,
     /// Last activity, in epoch microseconds.
     pub updated_at_us: Option<i64>,
@@ -42,9 +42,9 @@ impl IndexEntry {
     ///
     /// Muse writes the literal string `"New session"` into `title` for a
     /// session it could not name — which is a placeholder wearing a title's
-    /// clothes, and the reason fourteen rows read the same thing in Phase 4's
-    /// screenshots (finding F10). It is treated as no title at all, so the
-    /// caller goes on to the next fact it has.
+    /// clothes, and the reason fourteen rows can read the same thing at
+    /// once. It is treated as no title at all, so the caller goes on to the
+    /// next fact it has.
     pub fn label(&self) -> Option<&str> {
         fn pick(value: &Option<String>) -> Option<&str> {
             value.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -159,9 +159,6 @@ pub fn read_at(path: &std::path::Path) -> HashMap<String, IndexEntry> {
 /// What the Projects palette adopts from: recent Muse workspaces, not yet
 /// adopted, that still exist on disk (the existence check is the caller's —
 /// this only reports what the index says).
-///
-/// Package 2's palette calls this; package 1 only reads the column.
-#[allow(dead_code)]
 pub fn workspaces(index: &HashMap<String, IndexEntry>) -> Vec<(String, usize, Option<i64>)> {
     let mut by_root: HashMap<&str, (usize, Option<i64>)> = HashMap::new();
     for entry in index.values() {

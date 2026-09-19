@@ -74,7 +74,7 @@ fields, construction, and the top of the frame.
 | `dialogs.rs` | what floats over the window: the modal, the palette, the toast stack, the header's overflow menu |
 | `billing.rs` | the tier probe's lifecycle and the banner it hands to the open session |
 | `resize.rs` | `ResizeDrag`: the sidebar divider's width and whatever drag is in flight over it |
-| `login.rs` | the login screen's state, the `account/*` notifications, the device-code and API-key flows, sign-out, and `render_login` (`docs/diagnosis/login.md` §4, D22–D28) |
+| `login.rs` | the login screen's state, the `account/*` notifications, the device-code and API-key flows, sign-out, and `render_login` |
 | `steps.rs` | the whole scripting surface: one parser, one verb table per scope (window, session, login), the two runners, and the cost notes |
 | `wire.rs` | `WireCall`: run a blocking request on the background executor, then return through `update` / `update_in` — the shape every wire call in the app has |
 

@@ -32,7 +32,7 @@ pub struct Connection {
 
 /// Spawn `muse serve`, `initialize`, and start the event bridge.
 ///
-/// **Durable, always.** Phase 1 established that `--no-session-log` accepts a
+/// **Durable, always.** `--no-session-log` accepts a
 /// turn and then emits no view events at all (`docs/01-transport.md` §4), so an
 /// app that wants a transcript may never set it.
 ///

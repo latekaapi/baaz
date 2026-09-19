@@ -1236,7 +1236,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         )
     }
 
-    /// The billing guard's banner (Phase 5 A1), directly over the composer
+    /// The billing guard's banner, directly over the composer
     /// because it is about the thing the composer is for.
     ///
     /// Pay-as-you-go is `Waiting`-tinted and carries both the way out and the

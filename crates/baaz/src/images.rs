@@ -2,7 +2,7 @@
 //!
 //! MSP's `TurnInputPart` for an image is `{type:"image", base64Data, mediaType,
 //! width?, height?}`, with width and height **together or not at all**
-//! (`msp.d.ts:1443–1456`). The Phase 3 probe confirmed the echo provider accepts
+//! (`msp.d.ts:1443–1456`). A probe confirmed the echo provider accepts
 //! such a part (`status: accepted`), so nothing here needed a real turn to
 //! prove — and it accepted bytes that are not a decodable PNG, which says the
 //! wire checks the base64 and the media type and never looks at the image.

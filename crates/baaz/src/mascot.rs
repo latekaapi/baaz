@@ -1,10 +1,11 @@
-//! The Baaz mascot: bundled PNGs served through a harness asset source.
+//! The Baaz mascot: bundled PNGs served through the app's asset source.
 //!
 //! `aui::assets::AuiAssets` serves the library's own compiled-in art
 //! (`aui-icons` layered over gpui-kit's set). It cannot see files that live
 //! in this crate, so the mascot PNGs live under
 //! `crates/baaz/assets/mascot/` and are embedded here with `include_bytes!`.
-//! [`BaazAssets`] serves the `mascot/…` paths and chains to [`AuiAssets`]
+//! [`BaazAssets`] serves the `mascot/…` paths and chains to
+//! [`aui::assets::AuiAssets`]
 //! for everything else; the app installs it in `main.rs` (both the shell
 //! boot and the bench boot), so `gpui::img("mascot/hero/…")` resolves
 //! through the normal embedded-asset pipeline.
@@ -187,8 +188,8 @@ pub fn error_mascot(kind: ErrorMascot) -> AnyElement {
     div().flex_none().child(img(kind.path()).w(px(ERROR_PT)).h(px(ERROR_PT))).into_any_element()
 }
 
-/// The harness asset source: mascot paths from [`MASCOTS`], everything else
-/// from [`AuiAssets`].
+/// The app's asset source: mascot paths from [`MASCOTS`], everything else
+/// from [`aui::assets::AuiAssets`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BaazAssets;
 

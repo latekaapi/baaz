@@ -214,7 +214,7 @@ impl BurstStats {
 /// zero sample arriving mid-burst throws away everything accumulated so far
 /// when the travel is negative — and nothing when it is positive. Hence the
 /// two directions, run with the same shape: an asymmetry here is the bug, not
-/// noise (D7, `docs/diagnosis/scroll-research-2026-09-13.md`).
+/// noise.
 const BURSTS: [(&str, f32, bool); 4] = [
     ("up-clean", -12.0, false),
     ("up-zeroed", -12.0, true),

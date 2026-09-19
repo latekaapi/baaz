@@ -1,5 +1,4 @@
-//! What Baaz knows about a session that MSP has no room for (spec §3.7,
-//! Phase 5 A2).
+//! What Baaz knows about a session that MSP has no room for (spec §3.7).
 //!
 //! Three facts, and none of them are on the wire:
 //!
@@ -9,8 +8,8 @@
 //!   a decision about *this* window's list, so it lives in *this* window's
 //!   store and never touches Muse's.
 //! * **A derived title.** A session with nothing to be called by reads the
-//!   same as every other one: fourteen rows reading "New session" is what
-//!   Phase 4's screenshots show (finding F10). The transcript's first user
+//!   same as every other one: fourteen rows can read "New session" at once.
+//!   The transcript's first user
 //!   prompt is the honest label — the first `userShell` command only when
 //!   the session has no user text at all — and reading the shell form costs
 //!   a `session/read`, so the answer is cached here.

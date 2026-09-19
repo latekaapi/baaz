@@ -1,6 +1,6 @@
 //! Who is signed in, from the wire's account state plus two display strings.
 //!
-//! Sign-in itself is on the wire now (`docs/diagnosis/login.md`, D22): the
+//! Sign-in itself is on the wire now: the
 //! app drives `account/read` / `account/loginStart` / `account/loginCancel` /
 //! `account/logout` on its `muse serve` connection, and the screens in
 //! `aui::screens::login` show what those report. This module owns none of

@@ -159,7 +159,7 @@ pub struct Args {
     /// `--steps <a;b;c>`: what to do to the open session before the capture.
     ///
     /// One step per item, `;`-separated because a step's payload may contain a
-    /// comma. Every Phase 3 screenshot is one of these, so every screenshot is
+    /// comma. Every screenshot is driven by these, so every screenshot is
     /// reproducible from a command line rather than from a pointer. **The
     /// whole surface is scripting only**, and the `steps` module is the one
     /// place that documents it: the verb table, which verbs the window owns
@@ -437,10 +437,9 @@ fn parse_args() -> Args {
         usage("--sidebar-fixture needs --replay or --no-connect");
     }
 
-    // Scripted runs — screenshots, `--steps`, `--send` — are how a phase burns
-    // real turns by accident: Phase 3 spent 25 against a cap of five because the
-    // screenshot commands omitted `BAAZ_PROVIDER=echo`. A scripted run is
-    // therefore `echo` unless the provider was named explicitly.
+    // Scripted runs — screenshots, `--steps`, `--send` — can burn real turns
+    // by accident when the screenshot commands omit `BAAZ_PROVIDER=echo`. A
+    // scripted run is therefore `echo` unless the provider was named explicitly.
     let scripted = out.screenshot.is_some()
         || !out.steps.is_empty()
         || !out.login_steps.is_empty()

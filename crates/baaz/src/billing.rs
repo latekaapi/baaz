@@ -18,8 +18,7 @@ use crate::tier::{self, Tier};
 use crate::wire::WireCall;
 
 impl Harness {
-    /// Find out what this login is entitled to (Phase 5 A1,
-    /// `docs/06-billing.md`).
+    /// Find out what this login is entitled to (see `docs/06-billing.md`).
     ///
     /// The cache answers the ordinary boot; a probe only runs when `auth.json`
     /// has changed since the cached answer was taken, or when `force` says the

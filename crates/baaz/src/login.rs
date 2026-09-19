@@ -1,6 +1,6 @@
 //! The login screen and the `account/*` lane behind it.
 //!
-//! Sign-in is on the wire (**D22**, `docs/diagnosis/login.md` §4): Baaz
+//! Sign-in is on the wire: Baaz
 //! sets `experimentalApi: true` at `initialize` and drives `account/*`
 //! itself, so there is no stderr parser, no `muse login` child and no
 //! `MUSE_LOGIN` any more. `auth.json` is still read, but only to supplement
@@ -55,8 +55,8 @@ use crate::tier::Tier;
 use crate::wire::WireCall;
 use crate::LoginSample;
 
-/// Where the boot probe got to: sign-in is on the wire now
-/// (`docs/diagnosis/login.md`, D22), so this is the `account/read` answer.
+/// Where the boot probe got to: sign-in is on the wire now,
+/// so this is the `account/read` answer.
 pub(crate) enum Auth {
     /// Waiting for `account/read`.
     Probing,

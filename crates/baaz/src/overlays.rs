@@ -326,7 +326,7 @@ pub enum Command {
     Plan,
     /// `session/compact`.
     Compact,
-    /// Fork the session — Phase 4.
+    /// Fork the session.
     Fork,
     /// Rename the session (`sessions.json`, not the wire).
     Name,

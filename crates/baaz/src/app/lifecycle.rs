@@ -1059,7 +1059,7 @@ impl Harness {
     /// A new session is also the moment to re-walk the workspace: files come
     /// and go while the window is open, and the `@` picker should not offer a
     /// path that was deleted an hour ago. With no adoption there is nowhere
-    /// to start, so nothing starts — package 2's hero owns that state.
+    /// to start, so nothing starts.
     pub(crate) fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_project_id();
         self.new_session_in(current, window, cx);

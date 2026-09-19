@@ -572,7 +572,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The regression the owner reported: the palette listed sessions on an
+    /// The regression: the palette listed sessions on an
     /// empty query and found nothing the moment anything was typed, because
     /// every token was a whole-token phrase. `gol` has to reach
     /// `gold-annular` the way a palette you type into is expected to.

@@ -7,7 +7,7 @@ crates/muse-client    the `muse serve` child, NDJSON JSON-RPC, typed MSP schema
 crates/muse-adapter   MuseFold: MSP view events -> aui_protocol::Delta + SideState
 ```
 
-The research doc (`../agentic-ui/docs/10-muse-research.md`) is the reference for
+The research doc kept in the `agentic-ui` checkout is the reference for
 *what* MSP is. This document records what building against it taught us: the
 framing rules, the ordering rule, the reconnect procedure, the places where the
 captures contradict the schema, and how to run the probe and the live test.
@@ -186,8 +186,8 @@ the schema and a capture disagree, the capture wins and it is written down.
    a real `turnId` — and then `session/started` is the **only** notification
    that ever arrives. No `turn/started`, no items, no `session/tokenUsage`, no
    `turn/completed`, ever. Verified twice, once through `muse-client` and once
-   through a reference Python probe (`fixtures/msp/probe.py`, removed
-   2026-09-12; git history has it), so it is the server's behaviour and not
+   through a reference Python probe (removed from the tree 2026-09-12; git
+   history has it), so it is the server's behaviour and not
    this client's:
 
    ```
@@ -237,7 +237,7 @@ the schema and a capture disagree, the capture wins and it is written down.
     answers `-32601` with `data: {"kind": "experimentalRequired",
     "descriptor": "<method>"}` (`fixtures/msp/transcript-account.jsonl`
     records the `account/read` case on a second connection). With the opt-in
-    the four methods and two notifications of `docs/diagnosis/login.md` §3
+    the four methods and two notifications of the auth flow (spec §3.2)
     are served.
 
 12. **The device-code artifacts travel in the result only.**
