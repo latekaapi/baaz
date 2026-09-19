@@ -281,19 +281,31 @@ pub fn query_files(connection: &Connection, query: &str, limit: usize) -> Vec<Fi
 /// Turn a raw query into an FTS5 `MATCH` string, or `None` when it has no
 /// searchable token.
 ///
-/// Tokens are alphanumeric runs joined with `OR` (recall over precision;
-/// bm25 orders). Anything else — quotes, colons, parens — is dropped rather
-/// than interpreted, so typing `foo(` never errors the query.
+/// Tokens are alphanumeric runs, each a **prefix** term, joined with `AND`.
+/// Anything else — quotes, colons, parens — is dropped rather than
+/// interpreted, so typing `foo(` never errors the query.
+///
+/// Both of those are load-bearing for a palette you type into:
+///
+/// * The trailing `*` is what makes a half-typed word match. Without it each
+///   token is a phrase that only matches a whole indexed token, so `gol`
+///   never reached `gold-annular` and `har` never reached `harness` — the
+///   palette looked broken for every query short of a complete word.
+/// * `AND` is what makes a second word narrow the result. Under `OR` each
+///   word you added widened it, so typing more made the answer worse:
+///   `gold ann` returned 12 rows where `gold-annular` was the only one meant.
 fn fts_query(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{token}\""))
+        // The token cannot contain a quote — it is an alphanumeric run — so
+        // quoting it is enough to keep FTS5 from reading it as syntax.
+        .map(|token| format!("\"{token}\"*"))
         .collect();
     if tokens.is_empty() {
         return None;
     }
-    Some(tokens.join(" OR "))
+    Some(tokens.join(" AND "))
 }
 
 /// Largest char boundary in `text` at or below `bound`.
@@ -558,6 +570,93 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].workspace.as_deref(), Some("/work/a"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regression the owner reported: the palette listed sessions on an
+    /// empty query and found nothing the moment anything was typed, because
+    /// every token was a whole-token phrase. `gol` has to reach
+    /// `gold-annular` the way a palette you type into is expected to.
+    #[test]
+    fn a_half_typed_word_matches_by_prefix() {
+        let mut connection = memory();
+        rebuild_sessions(
+            &mut connection,
+            &[
+                SessionRow {
+                    session_id: "s1".into(),
+                    label: "gold-annular".into(),
+                    title: "gold-annular".into(),
+                    first_prompt: String::new(),
+                    body: "rename the app".into(),
+                    workspace: Some("/work/harness".into()),
+                },
+                SessionRow {
+                    session_id: "s2".into(),
+                    label: "teal-meridian".into(),
+                    title: "teal-meridian".into(),
+                    first_prompt: String::new(),
+                    body: "queued message".into(),
+                    workspace: Some("/work/harness".into()),
+                },
+            ],
+        )
+        .expect("rebuild");
+        let labels = |q: &str| {
+            let mut found: Vec<String> =
+                query_sessions(&connection, q, LIMIT).into_iter().map(|hit| hit.label).collect();
+            found.sort();
+            found
+        };
+        // Every prefix of a label finds it, one character at a time.
+        for prefix in ["g", "go", "gol", "gold", "annu"] {
+            assert_eq!(labels(prefix), vec!["gold-annular"], "prefix {prefix:?}");
+        }
+        // The whole token still works, as it always did.
+        assert_eq!(labels("gold"), vec!["gold-annular"]);
+        // A word from the body, half typed.
+        assert_eq!(labels("queu"), vec!["teal-meridian"]);
+    }
+
+    /// A second word must narrow the answer. Joined with `OR` it widened it,
+    /// so typing more of what you wanted returned more of what you did not.
+    #[test]
+    fn a_second_word_narrows_rather_than_widens() {
+        let mut connection = memory();
+        rebuild_sessions(
+            &mut connection,
+            &[
+                SessionRow {
+                    session_id: "s1".into(),
+                    label: "gold-annular".into(),
+                    title: "gold-annular".into(),
+                    first_prompt: String::new(),
+                    body: String::new(),
+                    workspace: None,
+                },
+                SessionRow {
+                    session_id: "s2".into(),
+                    label: "gold-perigee".into(),
+                    title: "gold-perigee".into(),
+                    first_prompt: String::new(),
+                    body: String::new(),
+                    workspace: None,
+                },
+                SessionRow {
+                    session_id: "s3".into(),
+                    label: "silver-annulus".into(),
+                    title: "silver-annulus".into(),
+                    first_prompt: String::new(),
+                    body: String::new(),
+                    workspace: None,
+                },
+            ],
+        )
+        .expect("rebuild");
+        let count = |q: &str| query_sessions(&connection, q, LIMIT).len();
+        assert_eq!(count("gold"), 2, "one word matches both golds");
+        assert_eq!(count("gold ann"), 1, "the second word narrows to one");
+        let hit = query_sessions(&connection, "gold ann", LIMIT);
+        assert_eq!(hit.first().map(|h| h.label.as_str()), Some("gold-annular"));
     }
 
     #[test]

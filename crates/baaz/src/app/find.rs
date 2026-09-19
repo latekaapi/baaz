@@ -63,9 +63,17 @@ impl Harness {
                         .into_iter()
                         .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
                         .collect();
+                crate::log::boot_mark(&format!(
+                    "search q={query:?} scope={scope:?} sessions={} files={}",
+                    sessions.len(),
+                    files.len()
+                ));
                 (sessions, files)
             }
-            Err(_) => (Vec::new(), Vec::new()),
+            Err(error) => {
+                crate::log::boot_mark(&format!("search db open failed: {error}"));
+                (Vec::new(), Vec::new())
+            }
         };
         self.wire_call(cx, work, move |this: &mut Self, (sessions, files), cx| {
             if this.search_epoch != epoch {
