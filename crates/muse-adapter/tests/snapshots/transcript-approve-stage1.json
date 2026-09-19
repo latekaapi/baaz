@@ -7,7 +7,7 @@
       "model": "",
       "mode": "promptUnmatched",
       "plan": false,
-      "cwd": "/private/tmp/claude-501/-Users-alex-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+      "cwd": "/Users/alex/Projects/acme-web",
       "branch": null,
       "environment": {
         "kind": "local"
@@ -40,7 +40,7 @@
               "tool": "shell",
               "command": "echo hi && ls",
               "reason": "",
-              "cwd": "/private/tmp/claude-501/-Users-alex-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws",
+              "cwd": "/Users/alex/Projects/acme-web",
               "capabilities": [],
               "scope": "this_worktree",
               "state": {
@@ -219,7 +219,7 @@
                 "totalStages": 2
               }
             ],
-            "workspaceRoot": "/private/tmp/claude-501/-Users-alex-Projects-agentic-ui/8ab48253-6396-4330-a618-480ba4f4c514/scratchpad/ws"
+            "workspaceRoot": "/Users/alex/Projects/acme-web"
           },
           "taskId": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
           "toolCallId": "user_shell_01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
