@@ -868,7 +868,14 @@ impl Harness {
         }
         this.connect(cx);
         this.load_index(cx);
-        this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
+        // Only when a project is current. With none — a first launch, or a
+        // bundle opened from Finder, where `boot_projects` declined to adopt
+        // `/` — `workspace()` falls back to the launch directory, and priming
+        // the menus from it would walk the whole filesystem to fill a picker
+        // no session can open yet. Adopting a project loads them then.
+        if this.current_project.is_some() {
+            this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
+        }
         crate::log::boot_mark("harness-new-done");
         this
     }
@@ -974,8 +981,7 @@ impl Harness {
             dirty = true;
         } else {
             let launch = self.args.workspace.clone();
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            if launch.as_path() != std::path::Path::new("/") && home.as_deref() != Some(launch.as_path()) {
+            if projects::is_workspace_root(&launch) {
                 let id = self.projects.add(&launch).id.clone();
                 self.projects.touch(&id);
                 self.projects.current = Some(id);
