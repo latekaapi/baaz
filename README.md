@@ -98,16 +98,14 @@ another project is never silently waiting.
 - **Rust 1.85+** and the Xcode command line tools (`xcode-select --install`)
 - The **`muse` CLI** on your `PATH`, signed in to a Muse Code account.
   Baaz targets muse's 1.3.x wire schema (MSP).
-- The [`aui`](https://github.com/latekaapi/agentic-ui) component library,
-  checked out **beside** this repository — it is a path dependency for now
-  (see `Cargo.toml`).
+- Nothing else. The [`aui`](https://github.com/latekaapi/agentic-ui)
+  component library is a git dependency pinned to a tag, so `cargo` fetches
+  it for you.
 
 ## Building and running
 
 ```sh
 git clone https://github.com/latekaapi/baaz
-git clone https://github.com/latekaapi/agentic-ui   # beside it, not inside it
-
 cd baaz
 cargo run -p baaz                                # workspace = $PWD
 cargo run -p baaz -- --workspace ~/code/thing    # somewhere else
