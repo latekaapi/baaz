@@ -1525,8 +1525,7 @@ impl Harness {
         actions.push(Some(ViewAction::ToggleArchived));
         rows.push(MenuRow::Separator);
         actions.push(None);
-        // Stored here, read by package 2's palette: the toggle lands now so
-        // the menu already says what search will do.
+        // Stored here so the menu already says what search will do.
         rows.push(MenuRow::Toggle {
             label: "Search all projects".into(),
             checked: self.layout.search_all_projects,

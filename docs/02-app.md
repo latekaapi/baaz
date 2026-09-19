@@ -160,7 +160,7 @@ event.
 
 ---
 
-## 4. Auth (superseded: `docs/diagnosis/login.md`, D22–D29)
+## 4. Auth (superseded by a later login rework)
 
 Sign-in is on the wire. `conn.rs` sets `experimentalApi: true` at
 `initialize` (without it every `account/*` method answers `-32601` /
@@ -640,8 +640,8 @@ children, and bubble runs in reverse registration order, so the list always
 beats anything wrapping it there. The hitbox is gpui's own, so an `occlude()`
 overlay above the transcript takes the wheel instead; a gesture more
 horizontal than vertical is left alone, so a wide markdown table still
-scrolls sideways. Measured before and after in
-`docs/diagnosis/scroll-research-2026-09-13.md`.
+scrolls sideways. Measured before and after with the scroll-cadence
+research that drove this change.
 
 The scripted counterpart is the `--steps wheel:<dy>` verb: one synthetic
 `ScrollWheelEvent` at the window centre, logging
@@ -1217,8 +1217,8 @@ works from `cargo run` and from a debug target; a bundle moved away from
 the repo logs instead of pretending.
 
 `scripts/bundle.sh` assembles `target/bundle/Baaz.app` from the release
-binary, `assets/icon-1024.png` (a flat H tile drawn by the checked-in
-`assets/make-icon.py`, converted to `Baaz.icns` with `sips`/`iconutil`)
+binary, `assets/icon-1024.png` (the checked-in Baaz mascot app icon,
+converted to `Baaz.icns` with `sips`/`iconutil`)
 and a generated `Info.plist` (`CFBundleIdentifier sh.baaz.app`),
 ad-hoc signed so `open target/bundle/Baaz.app` launches it on this
 machine. Signing/notarisation are out of scope.

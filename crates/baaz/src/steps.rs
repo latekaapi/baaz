@@ -243,7 +243,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "effort", run: |v, _, _, cx| v.toggle_picker(MenuKind::Effort, cx) },
     SessionVerb { verb: "mode", run: |v, _, _, cx| v.toggle_picker(MenuKind::Mode, cx) },
     SessionVerb { verb: "confirm", run: |v, _, window, cx| v.confirm_menu(window, cx) },
-    // The Phase 5 session operations, so their screenshots come from a command
+    // The session operations, so their screenshots come from a command
     // line rather than from a pointer.
     SessionVerb {
         verb: "name",

@@ -322,7 +322,7 @@ pub enum SessionEvent {
     TierRecheck,
 }
 
-/// The billing guard's banner over the composer (Phase 5 A1), as the
+/// The billing guard's banner over the composer, as the
 /// application decided it.
 ///
 /// The session view draws it and refuses to submit while `blocking` is set;
@@ -1012,8 +1012,8 @@ impl SessionView {
     /// Fold a capture file into this view: `--replay` (decision A0).
     ///
     /// The same `<-- ` lines the fixture test folds, through the same fold, with
-    /// no child and no wire. It is how most of Phase 4's screenshots are taken,
-    /// and it costs nothing at all.
+    /// no child and no wire, so screenshots can be produced without touching a
+    /// real connection, and it costs nothing at all.
     pub fn load_replay(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         self.replay = true;
         let (events, sent) = match parse_replay_file(path) {
@@ -1111,7 +1111,7 @@ impl SessionView {
     /// across frames: the pixels an item is worth change as its 72 px hint is
     /// replaced by a real measurement. This is what a smoothness trace has to
     /// sample — a smooth scroll is a straight line here, and stepping is a
-    /// staircase (D7, `docs/diagnosis/scroll-research-2026-09-13.md`).
+    /// staircase.
     pub fn bench_list_px(&self) -> f32 {
         f32::from(self.list_state.scroll_px_offset_for_scrollbar().y)
     }

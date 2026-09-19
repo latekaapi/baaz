@@ -6,7 +6,7 @@
 //! closure. No component in here holds state or touches the wire — the fold is
 //! the only source of truth, and the view re-renders it whole every frame.
 //!
-//! The approval and question cards are **live** from Phase 4 on: a choice
+//! The approval and question cards are **live**: a choice
 //! becomes `approval/decide`, an answer becomes `userInput/answer`, and both go
 //! out through [`Cards`], which the session view fills in. A replayed capture
 //! wires them up too — opening a preview and picking an option are local, and a

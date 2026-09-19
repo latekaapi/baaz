@@ -25,8 +25,7 @@ impl Harness {
     }
 
     /// The Sessions view menu's "Search all projects": flip the scope the
-    /// next query reads, persist it, and re-run an open palette. Package 2's
-    /// palette reads the scope; the toggle lands in this package.
+    /// next query reads, persist it, and re-run an open palette.
     pub(crate) fn toggle_search_scope(&mut self, cx: &mut Context<Self>) {
         self.layout.search_all_projects = !self.layout.search_all_projects;
         layout::write(&self.layout);

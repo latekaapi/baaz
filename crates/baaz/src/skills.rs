@@ -11,8 +11,8 @@
 //!
 //! and the scope is the prefix of `id` (`bundled` / `user` / `project` /
 //! `plugin`), which is exactly what `CommandItem::source_tag` shows. A skill row
-//! inserts `/name ` as text; the server resolves it, as the Phase 3 `/plan`
-//! probe proved.
+//! inserts `/name ` as text; the server resolves it, as a probe against a
+//! live `muse serve` connection confirmed.
 
 use std::process::Command;
 

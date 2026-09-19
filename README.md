@@ -125,7 +125,7 @@ verbs spend a turn).
 ```
 crates/muse-client    the transport and the typed MSP schema
 crates/muse-adapter   MuseFold: MSP events → aui_protocol deltas
-crates/baaz        the gpui application
+crates/baaz           the gpui application
 fixtures/msp          checked-in wire captures; every one of them replays
 ```
 

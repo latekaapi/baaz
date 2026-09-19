@@ -2297,7 +2297,7 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
 ///   as parameter pairs and the result pretty-printed — still a folded code
 ///   body, never a raw one-liner;
 /// * a **read** renders as its header plus the line count, which is the
-///   library's own rendering for a read and what the Phase 2 review asked for;
+///   library's own rendering for a read;
 /// * a **search** promotes `path:line:text` output to real hits when every
 ///   line parses, and otherwise keeps the raw output;
 /// * everything else keeps the raw output, because a card with no body would

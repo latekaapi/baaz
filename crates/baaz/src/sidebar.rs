@@ -24,8 +24,8 @@ use crate::sessions::SessionMeta;
 
 /// What a session with nothing to be called is called.
 ///
-/// The last resort, and the one Phase 4's sidebar reached fourteen times in a
-/// row (finding F10). Every step before it is a real fact about the session.
+/// The last resort, and what a whole sidebar reads when every step before it
+/// comes up empty. Each of those steps is a real fact about the session.
 pub const UNNAMED: &str = "New session";
 
 /// The label the header crumb and the window title show for a row: while a

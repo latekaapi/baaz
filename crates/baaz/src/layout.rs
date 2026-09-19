@@ -48,7 +48,7 @@ pub struct Layout {
     #[serde(rename = "expandedGroups", default, skip_serializing_if = "Vec::is_empty")]
     pub expanded_groups: Vec<String>,
     /// Whether the search palette looks across every project (`true`) or
-    /// only the current one. Read by package 2's palette; stored here from
+    /// only the current one. Stored here from
     /// the start so the toggle has somewhere to land.
     #[serde(rename = "searchAllProjects", default = "default_search_all")]
     pub search_all_projects: bool,

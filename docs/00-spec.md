@@ -1,19 +1,19 @@
 # Baaz — Muse Code chat slice: specification
 
 Status: frozen 2026-09-08. Change only by agreement; record changes in
-`docs/CHANGELOG.md`.
+`CHANGELOG.md`.
 
 This repository is the agentic coding **harness**. Its first slice is a feature-complete
 macOS chat interface to Meta's **Muse Code** agent (`muse` CLI 1.0.3, subscription, the
 owner is already logged in), built on the `aui` component library at
 `/Users/alex/Projects/agentic-ui` (gpui-pre 0.3.3 + gpui-kit 0.6, path dependencies).
 
-Ground truth for everything about Muse is
-`/Users/alex/Projects/agentic-ui/docs/10-muse-research.md` (the "research doc"). Wire
+Ground truth for everything about Muse is the research doc kept in the `agentic-ui`
+checkout beside this repository. Wire
 captures from live `muse serve` sessions are in `fixtures/msp/*.jsonl`, the exact schema for
 this binary in `fixtures/msp/msp/` and `fixtures/msp/msp-ts/msp.d.ts`. When the research doc
 and a capture disagree, the capture wins; when the schema and a capture disagree, the capture
-wins and the discrepancy is written down in `docs/CHANGELOG.md`.
+wins and the discrepancy is written down in `CHANGELOG.md`.
 
 ## 1. Goal and scope
 
@@ -143,11 +143,11 @@ MSP has no plan mode; the TUI's `/plan` is a skill. Plan mode in Baaz:
   mode and focuses the composer. Reject restores the mode and does nothing else.
 - Phase 3 must first probe whether sending the literal text `/plan <prompt>` invokes the skill
   server-side (one real turn). If it does, use that instead of the preamble and keep
-  `denyUnmatched`; record the finding in `docs/CHANGELOG.md`.
+  `denyUnmatched`; record the finding in `CHANGELOG.md`.
 
 ### 3.2 Auth
 
-Superseded 2026-09-11 by docs/diagnosis/login.md (D22–D29).
+Superseded 2026-09-11 by a later login rework.
 
 - Signed-in probe at boot: `~/.config/muse/auth.json` has `providers.meta` **and**
   `model/list` reports `source: "providerCatalog"`. Either missing → login screen.
@@ -243,8 +243,8 @@ the same menu tagged `skill`, and insert `/name ` as text.
 
 Library changes are made in the `agentic-ui` checkout beside this repository, on a feature
 branch, committed per phase with the library's gates (`cargo build --workspace`, `cargo test
---workspace`, clippy `-D warnings`, doc `-D warnings`, `docs/06-api.md` regenerated). Design
-rules of the library apply (docs/00-agent-brief.md, docs/04-design-rules.md); new components
+--workspace`, clippy `-D warnings`, doc `-D warnings`, the library's generated API reference
+regenerated). The library's own design rules apply; new components
 get a gallery entry with sample data.
 
 `aui-protocol`: `Provider::Muse`; `PermissionMode` → the four MSP modes + plan overlay;
@@ -294,7 +294,7 @@ Real-provider spend: at most five real turns per phase; everything else on `echo
 
 ## 6. Conventions
 
-Inherited from agentic-ui `docs/00-agent-brief.md`: no literal colours/sizes/durations,
+Inherited from the agentic-ui library's design rules: no literal colours/sizes/durations,
 stateless `RenderOnce` components with intents out, `popover_layer` for anything that
 overflows, `AuiStyled` text roles, both themes, `export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"` before every cargo command, own `CARGO_TARGET_DIR` per
 worktree when building from more than one at once. Rust 2021, `rust-version` matching agentic-ui, clippy

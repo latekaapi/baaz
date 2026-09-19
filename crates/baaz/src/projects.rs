@@ -174,7 +174,7 @@ pub fn canonical_str(root: &str) -> String {
 /// One batch's canonicalization answers: each distinct root is read from
 /// the disk once, no matter how many rows name it.
 ///
-/// [`SessionEntry::join`] canonicalizes its row's root and compares it
+/// [`crate::sidebar::SessionEntry::join`] canonicalizes its row's root and compares it
 /// against every adopted root, so a cold list of N rows in P projects pays
 /// N×(1+P) `canonicalize` syscalls on the UI thread. The rows of one
 /// refresh share a handful of distinct roots, so the refresh hoists one of
@@ -253,10 +253,6 @@ impl Projects {
     /// Forget the adoption. Sessions keep their rows — they resolve to
     /// "Other workspaces" now — and a `current` pointing at it is cleared.
     /// Returns whether anything was forgotten.
-    ///
-    /// Package 2's project menu calls this; package 1 only re-resolves after
-    /// it.
-    #[allow(dead_code)]
     pub fn remove(&mut self, id: &str) -> bool {
         let before = self.projects.len();
         self.projects.retain(|p| p.id != id);

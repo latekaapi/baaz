@@ -26,8 +26,8 @@ optimistic local write.** The table below is that gate, control by control.
 on `TurnSteerParams` — and nowhere else. There is no echo on the `userMessage`
 item, none on `turn/started`, and no `session/…Changed` for it. The chip
 therefore shows the client's own value, and says "Default" when the field is
-omitted. A probe script (`fixtures/msp/probe_phase3.py`, removed 2026-09-12;
-git history has it), against the capture `fixtures/msp/transcript-phase3.jsonl`,
+omitted. A probe script (removed from the tree 2026-09-12; git history has it),
+against the capture `fixtures/msp/transcript-phase3.jsonl`,
 confirmed `high`, `ultra` and `none` are all admitted on the echo provider, so
 the picker is live rather than disabled.
 

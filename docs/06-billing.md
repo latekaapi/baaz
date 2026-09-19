@@ -224,7 +224,7 @@ of the guard.
 
 ```bash
 cargo run -p baaz -- --replay fixtures/msp/transcript-approve.jsonl \
-  --tier payg --theme dark --screenshot docs/images/phase5-tier-payg-dark.png
+  --tier payg --theme dark --screenshot /tmp/phase5-tier-payg-dark.png
 ```
 
 | image | run |

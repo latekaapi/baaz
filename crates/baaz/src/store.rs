@@ -2,8 +2,8 @@
 //!
 //! Muse owns `~/.config/muse` and `~/.local/share/muse`; Baaz never
 //! writes to either. What Baaz has to remember — the billing tier it
-//! last probed (Phase 5 A1), the session names and hidden flags MSP has no
-//! room for (A2) — lives under `~/Library/Application Support/baaz`,
+//! last probed, the session names and hidden flags MSP has no
+//! room for — lives under `~/Library/Application Support/baaz`,
 //! which is the macOS answer for an application's own state.
 //!
 //! Two rules:
@@ -261,7 +261,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The regression this guards: on the owner's machine a tier probe wrote
+    /// The regression this guards: a tier probe once wrote
     /// `baaz/tier-probe` before any launch could migrate, and the old
     /// `new.exists()` guard then refused forever — 73 sessions stranded in
     /// `harness/sessions.json` with no warning. A partial new directory must

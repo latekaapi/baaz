@@ -1,8 +1,7 @@
 //! Generated session titles (auto-titles).
 //!
 //! Muse never generates titles: the index holds either the literal `New
-//! session` or an echo of the first prompt (diagnosis
-//! `docs/diagnosis/auto-titles-2026-09-16.md` §1–2). So Baaz asks
+//! session` or an echo of the first prompt. So Baaz asks
 //! once, with ONE call to the cheapest model, on the first send, in a
 //! throwaway side session — and the real transcript stays clean because the
 //! billed turn runs under a different session id entirely.
