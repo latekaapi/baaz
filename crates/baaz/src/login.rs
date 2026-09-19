@@ -39,10 +39,13 @@
 //! `--login-steps` run be followed from a log.
 
 use aui::data::secret_field;
+use aui::shell::drag_region;
 use aui::overlay::DialogKind;
 use aui::screens::{login, LoginIntent, LoginMethod, LoginState};
-use gpui::{prelude::*, AnyElement, Context, Entity, Focusable as _, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, Focusable as _, SharedString, Window};
+use gpui_kit::base::v_flex;
 use gpui_kit::base::input::InputState;
+use aui_tokens::{scale, ActiveAui, AuiStyled};
 use muse_client::schema::{
     AccountLoginCompletedParams, AccountLoginOutcome, AccountLoginStartParams, AccountLoginType,
     AccountState, AccountStateKind,
@@ -54,6 +57,13 @@ use crate::overlays::{Dialog, DialogAction};
 use crate::tier::Tier;
 use crate::wire::WireCall;
 use crate::LoginSample;
+
+/// How wide the welcome prose is allowed to run before it wraps.
+///
+/// The sign-in card sets the optical column of this screen; prose much wider
+/// than it reads as a different page sitting above the card rather than the
+/// same one.
+const WELCOME_MEASURE: f32 = 420.0;
 
 /// Where the boot probe got to: sign-in is on the wire now,
 /// so this is the `account/read` answer.
@@ -670,7 +680,15 @@ impl Harness {
     }
 
 
-    pub(crate) fn render_login(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The signed-out screen: a drag strip standing in for the shell's
+    /// header, the welcome that says what Baaz is, and the sign-in card.
+    ///
+    /// This is the first thing a new install shows, and the only screen the
+    /// app draws without the shell — so the window chrome the shell's header
+    /// normally carries has to be built here instead. Without the strip the
+    /// window cannot be moved or zoomed at all while signed out, which is
+    /// what a person meets before anything else.
+    pub(crate) fn render_login(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
             this.login_intent(*intent, window, cx);
         });
@@ -704,6 +722,50 @@ impl Harness {
             .provider(aui_icons::Provider::Muse)
             .api_key_field(field);
         let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        card.on_intent(move |i, window, cx| intent(&i, window, cx)).into_any_element()
+        let card = card.on_intent(move |i, window, cx| intent(&i, window, cx));
+
+        let p = cx.aui().colors;
+        // The strip matches the shell's header height, so the native traffic
+        // lights — positioned once at window creation for the header row —
+        // sit centred here too rather than floating against a taller gap.
+        let header_h = cx.aui().metrics.header;
+        v_flex()
+            .size_full()
+            .bg(p.bg)
+            .child(drag_region("login-drag").child(div().w_full().h(header_h)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(scale::SP_6))
+                    .child(crate::mascot::welcome_mascot(window, cx))
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap(px(scale::SP_2))
+                            .max_w(px(WELCOME_MEASURE))
+                            .child(div().ui(scale::FS_24).semibold().text_color(p.ink).child("Baaz"))
+                            .child(
+                                div()
+                                    .ui(scale::FS_14)
+                                    .text_color(p.ink_2)
+                                    .text_center()
+                                    .child("An agentic harness: a native window around the coding agent you already run in the terminal."),
+                            )
+                            // What Baaz speaks today, said plainly rather than
+                            // implied by the sign-in card being about Muse.
+                            .child(
+                                div()
+                                    .ui(scale::FS_12)
+                                    .text_color(p.ink_3)
+                                    .text_center()
+                                    .child("Muse Code today. Codex, Claude and more to come."),
+                            ),
+                    )
+                    .child(div().w_full().flex_none().child(card)),
+            )
+            .into_any_element()
     }
 }

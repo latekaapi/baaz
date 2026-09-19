@@ -239,6 +239,17 @@ pub fn boot_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
     mascot_hero_element(BOOT_GREETING, "baaz-boot-mascot", window, cx)
 }
 
+/// The welcome hero on the signed-out screen: the same greeting the boot
+/// screen wears, under its own presence id so the two never share an enter.
+///
+/// They cannot appear together — the login screen owns the whole window and
+/// the shell is not built behind it — but a shared id would still hand the
+/// second one a presence the first had already settled, so it would draw
+/// without its enter the first time a person saw it.
+pub fn welcome_mascot(window: &mut Window, cx: &mut App) -> AnyElement {
+    mascot_hero_element(BOOT_GREETING, "baaz-welcome-mascot", window, cx)
+}
+
 /// One hero-sized mascot, faded and risen in once on appear. `id` keys the
 /// presence, so two heroes on different surfaces do not share a state.
 fn mascot_hero_element(path: &'static str, id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {

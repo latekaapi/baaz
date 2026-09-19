@@ -477,6 +477,26 @@ pub fn parse_effort(text: &str) -> Option<aui_protocol::ReasoningEffort> {
     serde_json::from_value::<aui_protocol::ReasoningEffort>(serde_json::Value::String(text.to_owned())).ok()
 }
 
+/// The shared shape behind [`start_params`] and [`start_params_for_root`]:
+/// a fresh command id, `root` canonicalized (so `/tmp/x` and `/private/tmp/x`
+/// are the one workspace `session/list` will later filter on), and whatever
+/// model default and approval mode the caller already resolved.
+fn build_start_params(
+    root: &Path,
+    provider: &str,
+    model_id: Option<String>,
+    approval_mode: Option<muse_client::schema::ApprovalMode>,
+) -> muse_client::schema::SessionStartParams {
+    muse_client::schema::SessionStartParams {
+        command_id: muse_client::new_command_id(),
+        workspace_root: Some(canonical_path(root).to_string_lossy().into_owned()),
+        provider_id: Some(provider.to_owned()),
+        model_id,
+        approval_mode,
+        ..Default::default()
+    }
+}
+
 /// The `session/start` params for a new session in `project_id`: the
 /// project's root and defaults, with the command line's approval mode
 /// winning over the stored one. `None` when there is no such project, which
@@ -488,14 +508,24 @@ pub fn start_params(
     cli_approval: Option<muse_client::schema::ApprovalMode>,
 ) -> Option<muse_client::schema::SessionStartParams> {
     let project = project_id.and_then(|id| projects.find(id))?;
-    Some(muse_client::schema::SessionStartParams {
-        command_id: muse_client::new_command_id(),
-        workspace_root: Some(project.root.to_string_lossy().into_owned()),
-        provider_id: Some(provider.to_owned()),
-        model_id: project.defaults.model_id.clone(),
-        approval_mode: cli_approval.or_else(|| project.defaults.approval_mode.clone()),
-        ..Default::default()
-    })
+    Some(build_start_params(
+        &project.root,
+        provider,
+        project.defaults.model_id.clone(),
+        cli_approval.or_else(|| project.defaults.approval_mode.clone()),
+    ))
+}
+
+/// The `session/start` params for a session in `root` that is not being
+/// adopted as a project (the "start here without remembering it" path):
+/// no project to draw a model or approval-mode default from, so `model_id`
+/// is `None` and the command line's approval mode is the only one in play.
+pub fn start_params_for_root(
+    root: &Path,
+    provider: &str,
+    cli_approval: Option<muse_client::schema::ApprovalMode>,
+) -> muse_client::schema::SessionStartParams {
+    build_start_params(root, provider, None, cli_approval)
 }
 
 #[cfg(test)]
@@ -833,6 +863,23 @@ mod tests {
         assert_eq!(params.provider_id.as_deref(), Some("meta"));
         // The command line wins over the stored mode.
         let params = start_params(&projects, Some(&id), "meta", Some(ApprovalMode::AllowAll)).expect("params");
+        assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_params_for_root_carries_no_project_defaults() {
+        use muse_client::schema::ApprovalMode;
+        let dir = state_dir("start-params-root");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let params = start_params_for_root(&dir, "meta", None);
+        assert_eq!(params.workspace_root.as_deref(), Some(canonical_str(&dir.to_string_lossy()).as_str()));
+        assert_eq!(params.model_id, None);
+        assert_eq!(params.approval_mode, None);
+        assert_eq!(params.provider_id.as_deref(), Some("meta"));
+        // The command line still wins when it names a mode, exactly as it
+        // does for a project's own defaults.
+        let params = start_params_for_root(&dir, "meta", Some(ApprovalMode::AllowAll));
         assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
         let _ = std::fs::remove_dir_all(&dir);
     }
