@@ -11,6 +11,13 @@ the `aui` component library.
 - **Chat over Muse Code.** Drives `muse serve` as a child process and speaks
   MSP (JSON-RPC 2.0 as NDJSON over stdio); signs in the way the CLI does
   (device code or an API key).
+- **Search finds a project by name.** The project's name is indexed now,
+  rather than only reachable when its path happened to appear in transcript
+  text. A renamed project answers to both the name on screen and the folder
+  it lives in.
+- **Stop always settles the view.** A turn the server had already finished
+  left the composer counting and answered Stop with a red banner, with
+  nothing else to try. Baaz now takes the server's answer and settles.
 - **Sessions do not need a project.** Muse needs a folder for every session,
   so Baaz makes one — `~/baaz-sessions` — at first boot and starts there when nothing
   has been adopted. A first launch can ask a question straight away; adding a

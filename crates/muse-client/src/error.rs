@@ -47,6 +47,20 @@ impl MuseError {
         }
     }
 
+    /// The failure-detail vocabulary beside the kind (`data.reason`) — for
+    /// example `"already_terminal"` on a [`ErrorKind::CommandRejected`]
+    /// answer to `turn/interrupt`, which says the turn being stopped had
+    /// already finished.
+    ///
+    /// A branch point like [`Self::kind`], and for the same reason: the
+    /// message string is explicitly not one (research §1.14).
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            MuseError::Rpc(err) => err.data.as_ref().and_then(|d| d.reason.as_deref()),
+            _ => None,
+        }
+    }
+
     /// Whether this is the stale-sidecar `-32603`: a `view/page` (or
     /// `session/read`, or `session/resume`) reached a session whose
     /// `.msp-view-v1` sidecar is stale, before a leased load regenerated it

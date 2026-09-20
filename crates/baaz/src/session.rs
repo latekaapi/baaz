@@ -830,6 +830,18 @@ impl SessionView {
     }
 
     /// Whether a turn is running, which is what the send button morphs on.
+    /// Forget the running turn: its id, its ticker, and the last elapsed
+    /// tick the footer painted.
+    ///
+    /// The three move together. A ticker that outlives its turn is exactly
+    /// what paints a finished turn as still counting, and there is no way
+    /// out of that from the window.
+    pub(crate) fn clear_running(&mut self) {
+        self.running = None;
+        self.ticker = None;
+        self.last_tick_secs = None;
+    }
+
     pub fn busy(&self) -> bool {
         self.running.is_some() || self.submitting
     }

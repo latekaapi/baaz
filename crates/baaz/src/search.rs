@@ -2,12 +2,14 @@
 //!
 //! Two FTS5 tables in a Baaz-owned `search.db` under the support dir:
 //!
-//! * `sessions_fts(session_id UNINDEXED, label, title, first_prompt, body)` —
+//! * `sessions_fts(session_id UNINDEXED, label, title, first_prompt, body,
+//!   project, workspace UNINDEXED)` —
 //!   fed from [`crate::index::read`] (Muse's `search_text`, which carries
 //!   transcript text) plus the `sessions.json` overrides that name the rows.
 //!   It is a cache: Muse's index stays the freshness source and this db is
 //!   rebuilt off the UI thread at boot and after each index refresh.
-//! * `files_fts(path, session_id UNINDEXED, kind)` — "files we created", i.e.
+//! * `files_fts(path, session_id UNINDEXED, kind, project, workspace
+//!   UNINDEXED)` — "files we created", i.e.
 //!   workspace-relative targets of tool calls with write/edit verbs, recorded
 //!   when a turn completes. A path the agent only read is not a file we
 //!   created, so reads, searches, shells and web tools never land here.
@@ -34,7 +36,12 @@ pub const LIMIT: usize = 12;
 /// a version bump drops and recreates both tables: `sessions_fts` is rebuilt
 /// from the list anyway, and `files_fts` starts empty (a completed turn
 /// re-records its session's files on the next completion).
-const SCHEMA_VERSION: u32 = 2;
+///
+/// 3 added the indexed `project` column. Before it, the only reason typing a
+/// project's name found anything was that its path happened to appear in
+/// transcript text, so it worked in some sessions and not others for no
+/// reason a person could see.
+const SCHEMA_VERSION: u32 = 3;
 
 /// One session row to index.
 pub struct SessionRow {
@@ -48,7 +55,11 @@ pub struct SessionRow {
     pub first_prompt: String,
     /// The index's `search_text`: transcript text Muse made searchable.
     pub body: String,
-    /// The session's workspace, canonicalized when it exists.
+    /// What a person would type to mean this row's project — see
+    /// [`project_terms`], which is what fills it.
+    pub project: String,
+    /// The session's workspace, canonicalized when it exists. Not indexed:
+    /// it is how a hit is scoped to a project, never how one is found.
     pub workspace: Option<String>,
 }
 
@@ -60,7 +71,11 @@ pub struct FileRecord {
     pub session_id: String,
     /// `"write"` or `"edit"`: the verb family that produced it.
     pub kind: String,
-    /// The session's workspace, canonicalized when it exists.
+    /// What a person would type to mean this file's project — see
+    /// [`project_terms`].
+    pub project: String,
+    /// The session's workspace, canonicalized when it exists. Not indexed:
+    /// it is how a hit is scoped to a project, never how one is found.
     pub workspace: String,
 }
 
@@ -138,8 +153,8 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             "DROP TABLE IF EXISTS sessions_fts;
              DROP TABLE IF EXISTS files_fts;
              DROP TABLE IF EXISTS files_seen;
-             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, workspace UNINDEXED);
-             CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
              CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
         )?;
         connection.execute(
@@ -148,8 +163,8 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         )?;
     } else {
         connection.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, workspace UNINDEXED);
-             CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind, workspace UNINDEXED);",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);",
         )?;
     }
     // Dedupe for `files_fts`, which cannot hold a unique index of its own:
@@ -178,7 +193,7 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
     transaction.execute("DELETE FROM sessions_fts", [])?;
     {
         let mut insert = transaction.prepare(
-            "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body, workspace) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions_fts(session_id, label, title, first_prompt, body, project, workspace) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for row in rows {
             insert.execute(params![
@@ -187,11 +202,35 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
                 row.title,
                 row.first_prompt,
                 row.body,
+                row.project,
                 row.workspace
             ])?;
         }
     }
     transaction.commit()
+}
+
+/// The words a person would type to mean "this project", for the indexed
+/// `project` column.
+///
+/// The workspace folder's own name, which is what an unadopted root has to
+/// go on, plus the adopted project's name when it has been renamed — a
+/// person who renamed `acme-web` to `Storefront` will type either one, and
+/// both should find it.
+///
+/// Deliberately not the whole workspace path: its leading segments are the
+/// same for every project on the machine, so indexing them would make
+/// "Projects" or a home-directory name match everything.
+pub fn project_terms(workspace: Option<&str>, adopted_name: Option<&str>) -> String {
+    let folder = workspace.map(crate::sidebar::workspace_folder).unwrap_or_default();
+    let name = adopted_name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or_default();
+    if name.is_empty() || name.eq_ignore_ascii_case(&folder) {
+        return folder;
+    }
+    if folder.is_empty() {
+        return name.to_owned();
+    }
+    format!("{name} {folder}")
 }
 
 /// Record created files, ignoring ones already recorded.
@@ -205,14 +244,14 @@ pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(
     let mut claim = connection
         .prepare("INSERT OR IGNORE INTO files_seen(path, session_id) VALUES (?1, ?2)")?;
     let mut insert = connection
-        .prepare("INSERT INTO files_fts(path, session_id, kind, workspace) VALUES (?1, ?2, ?3, ?4)")?;
+        .prepare("INSERT INTO files_fts(path, session_id, kind, project, workspace) VALUES (?1, ?2, ?3, ?4, ?5)")?;
     for record in records {
         // `execute` returns the rows it changed: 0 means the key was already
         // claimed, which is exactly "already recorded".
         if claim.execute(params![record.path, record.session_id])? == 0 {
             continue;
         }
-        insert.execute(params![record.path, record.session_id, record.kind, record.workspace])?;
+        insert.execute(params![record.path, record.session_id, record.kind, record.project, record.workspace])?;
     }
     Ok(())
 }
@@ -485,12 +524,70 @@ mod tests {
             title: format!("session {session_id}"),
             first_prompt: String::new(),
             body: body.into(),
+            project: project_terms(workspace, None),
             workspace: workspace.map(str::to_owned),
         }
     }
 
     fn file_record(path: &str, session_id: &str, workspace: &str) -> FileRecord {
-        FileRecord { path: path.into(), session_id: session_id.into(), kind: "write".into(), workspace: workspace.into() }
+        FileRecord {
+            path: path.into(),
+            session_id: session_id.into(),
+            kind: "write".into(),
+            project: project_terms(Some(workspace), None),
+            workspace: workspace.into(),
+        }
+    }
+
+    /// The reported bug: typing a project's name found its sessions only
+    /// when the path happened to appear in transcript text, so it worked in
+    /// some sessions and not others. The name is indexed now.
+    #[test]
+    fn a_project_name_finds_its_sessions_whatever_the_transcript_says() {
+        let mut connection = memory();
+        rebuild_sessions(
+            &mut connection,
+            &[
+                session_row("s1", "nothing in here names the folder", Some("/work/acme-web")),
+                session_row("s2", "nothing in here either", Some("/work/notes")),
+            ],
+        )
+        .expect("rebuild");
+
+        let hits = query_sessions(&connection, "acme-web", LIMIT);
+        let ids: Vec<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
+        assert_eq!(ids, ["s1"], "the folder name finds its own session and no other");
+
+        // A path segment every project shares must not match everything —
+        // which is why the column carries the folder name, not the path.
+        assert!(query_sessions(&connection, "work", LIMIT).is_empty());
+    }
+
+    /// A renamed project is findable by the name on screen as well as by the
+    /// folder it still lives in.
+    #[test]
+    fn a_renamed_project_answers_to_both_names() {
+        let mut connection = memory();
+        let mut row = session_row("s1", "unrelated transcript", Some("/work/acme-web"));
+        row.project = project_terms(Some("/work/acme-web"), Some("Storefront"));
+        rebuild_sessions(&mut connection, &[row]).expect("rebuild");
+
+        assert_eq!(query_sessions(&connection, "Storefront", LIMIT).len(), 1, "the name on screen");
+        assert_eq!(query_sessions(&connection, "acme-web", LIMIT).len(), 1, "and the folder");
+    }
+
+    /// The terms themselves: no duplication when a project was never
+    /// renamed, and nothing but the name when there is no workspace.
+    #[test]
+    fn project_terms_carry_the_folder_and_any_different_name() {
+        assert_eq!(project_terms(Some("/work/acme-web"), None), "acme-web");
+        assert_eq!(project_terms(Some("/work/acme-web"), Some("Storefront")), "Storefront acme-web");
+        // Same name as the folder, in any case: said once.
+        assert_eq!(project_terms(Some("/work/acme-web"), Some("acme-web")), "acme-web");
+        assert_eq!(project_terms(Some("/work/acme-web"), Some("ACME-WEB")), "acme-web");
+        assert_eq!(project_terms(Some("/work/acme-web"), Some("   ")), "acme-web");
+        assert_eq!(project_terms(None, Some("Storefront")), "Storefront");
+        assert_eq!(project_terms(None, None), "");
     }
 
     #[test]
@@ -504,6 +601,7 @@ mod tests {
                 title: "Fix the parser".into(),
                 first_prompt: "why does this panic".into(),
                 body: "the parser panics on nested generics in parser.rs".into(),
+                project: String::new(),
                 workspace: Some("/work/a".into()),
             }],
         )
@@ -588,6 +686,7 @@ mod tests {
                     title: "gold-annular".into(),
                     first_prompt: String::new(),
                     body: "rename the app".into(),
+                    project: String::new(),
                     workspace: Some("/work/harness".into()),
                 },
                 SessionRow {
@@ -596,6 +695,7 @@ mod tests {
                     title: "teal-meridian".into(),
                     first_prompt: String::new(),
                     body: "queued message".into(),
+                    project: String::new(),
                     workspace: Some("/work/harness".into()),
                 },
             ],
@@ -631,6 +731,7 @@ mod tests {
                     title: "gold-annular".into(),
                     first_prompt: String::new(),
                     body: String::new(),
+                    project: String::new(),
                     workspace: None,
                 },
                 SessionRow {
@@ -639,6 +740,7 @@ mod tests {
                     title: "gold-perigee".into(),
                     first_prompt: String::new(),
                     body: String::new(),
+                    project: String::new(),
                     workspace: None,
                 },
                 SessionRow {
@@ -647,6 +749,7 @@ mod tests {
                     title: "silver-annulus".into(),
                     first_prompt: String::new(),
                     body: String::new(),
+                    project: String::new(),
                     workspace: None,
                 },
             ],
@@ -671,7 +774,7 @@ mod tests {
     fn files_record_once_and_rank_by_recency_when_empty() {
         let connection = memory();
         let records =
-            |path: &str| FileRecord { path: path.into(), session_id: "s1".into(), kind: "write".into(), workspace: "/work/a".into() };
+            |path: &str| FileRecord { path: path.into(), session_id: "s1".into(), kind: "write".into(), project: String::new(), workspace: "/work/a".into() };
         record_files(&connection, &[records("src/main.rs"), records("src/main.rs")]).expect("record");
         record_files(&connection, &[records("docs/notes.md")]).expect("record");
         // Recorded twice, stored once.
@@ -688,6 +791,7 @@ mod tests {
             path: "src/main.rs".into(),
             session_id: session.into(),
             kind: "write".into(),
+            project: String::new(),
             workspace: "/work/a".into(),
         };
         record_files(&connection, &[record("s1"), record("s2"), record("s1")]).expect("record");
@@ -719,6 +823,7 @@ mod tests {
                 path: "src/main.rs".into(),
                 session_id: "s1".into(),
                 kind: "write".into(),
+                project: String::new(),
                 workspace: "/work/a".into(),
             }],
         )
