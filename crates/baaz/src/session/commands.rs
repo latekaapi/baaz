@@ -225,6 +225,23 @@ impl SessionView {
         let Some(client) = self.wire_client(cx) else { return };
         self.wire_call(cx, move || client.turn_interrupt(&params), |this, result, cx| {
             if let Err(error) = result {
+                // `commandRejected` / `already_terminal` is not a failure to
+                // report: the server is saying the turn this asked to stop
+                // had already finished. That is a better answer about the
+                // turn than the local state, which still believes it is
+                // running — so take it, and let the window settle.
+                //
+                // Without this the only thing a person can do about a turn
+                // the server has forgotten is press Stop, and Stop answers
+                // with a red banner and leaves the composer counting. The
+                // turn seen behind this was "running" for twelve hours.
+                if interrupt_found_turn_over(&error) {
+                    crate::baaz_log!("interrupt: the turn was already over; settling the view");
+                    this.clear_running();
+                    this.submitting = false;
+                    cx.notify();
+                    return;
+                }
                 this.report(&error, cx);
             }
         });
@@ -527,5 +544,68 @@ impl SessionView {
             aui_protocol::Turn::Assistant { id: turn_id, blocks, .. } if turn_id == id => blocks.first().cloned(),
             _ => None,
         })
+    }
+}
+
+/// Whether a failed `turn/interrupt` means the turn had already finished.
+///
+/// `commandRejected` with reason `already_terminal` is the server declining
+/// to stop something that is already stopped — an answer about the turn, not
+/// an error about the request. Branching on the kind and the reason rather
+/// than the message is the wire contract (research §1.14); the message for
+/// this case reads `turn/interrupt command <id> rejected: already_terminal`
+/// and is explicitly not a branch point.
+pub(crate) fn interrupt_found_turn_over(error: &MuseError) -> bool {
+    matches!(error.kind(), Some(ErrorKind::CommandRejected)) && error.reason() == Some("already_terminal")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rpc(code: i64, message: &str, data: serde_json::Value) -> MuseError {
+        let object: muse_client::schema::ErrorObject =
+            serde_json::from_value(serde_json::json!({"code": code, "message": message, "data": data}))
+                .expect("error object decodes");
+        MuseError::Rpc(Box::new(object))
+    }
+
+    /// The case that stranded a session for twelve hours: Stop is the only
+    /// way out of a turn the window thinks is running, and the server
+    /// answers that there is nothing to stop.
+    #[test]
+    fn an_already_terminal_rejection_means_the_turn_is_over() {
+        let error = rpc(
+            -32030,
+            "turn/interrupt command 01a0be2a-99f3-7640-a50c-6f5e8b0fa152 rejected: already_terminal",
+            serde_json::json!({"kind": "commandRejected", "reason": "already_terminal"}),
+        );
+        assert!(interrupt_found_turn_over(&error));
+    }
+
+    /// Every other rejection still reports: `not_paired_interrupt` means the
+    /// request was malformed, which is worth a banner.
+    #[test]
+    fn other_rejections_are_still_errors() {
+        let other = rpc(
+            -32030,
+            "rejected: not_paired_interrupt",
+            serde_json::json!({"kind": "commandRejected", "reason": "not_paired_interrupt"}),
+        );
+        assert!(!interrupt_found_turn_over(&other));
+
+        let no_reason = rpc(-32030, "rejected", serde_json::json!({"kind": "commandRejected"}));
+        assert!(!interrupt_found_turn_over(&no_reason));
+
+        // The reason alone is not enough: it has to be a rejection.
+        let wrong_kind = rpc(
+            -32603,
+            "internal",
+            serde_json::json!({"kind": "internal", "reason": "already_terminal"}),
+        );
+        assert!(!interrupt_found_turn_over(&wrong_kind));
+
+        // And a transport failure carries no kind at all.
+        assert!(!interrupt_found_turn_over(&MuseError::Closed));
     }
 }

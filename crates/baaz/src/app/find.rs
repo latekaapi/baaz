@@ -117,13 +117,22 @@ impl Harness {
                     .filter(|s| !s.is_empty());
                 let label =
                     name.or_else(|| entry.label()).or(derived).unwrap_or(crate::sidebar::UNNAMED);
+                let workspace = entry.workspace_root.as_deref().map(|root| canon.get(root));
+                // The adopted name too, when this root has one: a renamed
+                // project is findable by the name on screen as well as by
+                // the folder it still lives in.
+                let adopted = workspace
+                    .as_deref()
+                    .and_then(|root| self.projects.find_by_root(std::path::Path::new(root)))
+                    .map(|p| p.name.clone());
                 crate::search::SessionRow {
                     session_id: session_id.clone(),
                     label: label.to_owned(),
                     title: entry.title.clone(),
                     first_prompt: entry.first_user_prompt.clone().unwrap_or_default(),
                     body: entry.search_text.clone(),
-                    workspace: entry.workspace_root.as_deref().map(|root| canon.get(root)),
+                    project: crate::search::project_terms(workspace.as_deref(), adopted.as_deref()),
+                    workspace,
                 }
             })
             .collect();

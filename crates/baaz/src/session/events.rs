@@ -70,9 +70,7 @@ impl SessionView {
                         self.completed_turns.insert(turn_id.to_owned());
                     }
                     if self.running.as_ref().is_some_and(|r| Some(r.turn_id.as_str()) == ours) {
-                        self.running = None;
-                        self.ticker = None;
-                        self.last_tick_secs = None;
+                        self.clear_running();
                     }
                     self.submitting = false;
                     if let Some(turn_id) = ours {
@@ -155,11 +153,16 @@ impl SessionView {
             let aui_protocol::Block::ToolCall { kind, target, .. } = block else { continue };
             let Some(verb) = search::created_target(kind, target) else { continue };
             let Some(path) = search::relativize(&self.workspace, target) else { continue };
+            let workspace = crate::projects::canonical_str(&self.workspace);
             records.push(search::FileRecord {
                 path,
                 session_id: self.session_id.clone(),
                 kind: verb.to_owned(),
-                workspace: crate::projects::canonical_str(&self.workspace),
+                // The folder's own name only: a session view knows its
+                // workspace, not the projects store, and a rename is rare
+                // enough not to be worth carrying the store down here.
+                project: search::project_terms(Some(&workspace), None),
+                workspace,
             });
         }
         if records.is_empty() {
