@@ -1967,7 +1967,7 @@ mod tests {
         // store, so the temp dir keeps the real store untouched.
         let dir = std::env::temp_dir().join(format!("baaz-armed-hover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("probe state dir");
-        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", &dir);
         let args = crate::Args {
@@ -2137,7 +2137,7 @@ mod tests {
         // store, so the temp dir keeps the real store untouched.
         let dir = std::env::temp_dir().join(format!("baaz-hover-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("probe state dir");
-        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", &dir);
         let args = crate::Args {

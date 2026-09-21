@@ -428,4 +428,21 @@ mod tests {
         assert_eq!(title_from_command("$ git status -sb"), "git status -sb");
         assert_eq!(title_from_command(""), "shell");
     }
+
+    /// The dock's render path only reads (`tabs_for`, `active_for`, `get`,
+    /// `pick`, `busy`): querying a fresh host must never create a tab, so a
+    /// render alone can never spawn a shell — only `open`/`open_fake`, the
+    /// explicit-action routes, create sessions.
+    #[test]
+    fn read_only_queries_never_open_tabs() {
+        let host = TerminalHost::new();
+        let root = Path::new("/acme");
+        assert!(host.tabs_for(root).is_empty());
+        assert!(host.active_for(root).is_none());
+        assert!(host.get("t1").is_none());
+        assert!(
+            host.tabs_for(root).is_empty(),
+            "queries must not create tabs: a render alone spawns nothing"
+        );
+    }
 }

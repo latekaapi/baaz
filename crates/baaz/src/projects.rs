@@ -579,7 +579,7 @@ mod tests {
     /// that touches the variable, since two tests pointing it at two dirs at
     /// once would read each other's state.
     fn with_state_dir(dir: &Path) -> (std::sync::MutexGuard<'static, ()>, Option<OsString>) {
-        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", dir);
         (guard, old)
