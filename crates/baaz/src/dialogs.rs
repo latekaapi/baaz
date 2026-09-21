@@ -96,6 +96,68 @@ impl Harness {
         cx.notify();
     }
 
+    /// The quit confirmation (D52): names the running command. `others`
+    /// counts the running commands past the named one, so a second tab is
+    /// not a surprise after the first is confirmed. Pure, so the naming
+    /// has a test without a window.
+    pub(crate) fn quit_terminal_dialog(command: &str, others: usize) -> Dialog {
+        let detail = if others == 0 {
+            format!("`{command}` is still running. Quitting stops it.")
+        } else {
+            format!(
+                "{total} terminal commands are still running, including `{command}`. Quitting stops them.",
+                total = others + 1
+            )
+        };
+        Dialog {
+            title: "Quit with a terminal command running?".into(),
+            detail,
+            kind: DialogKind::Warning,
+            primary: "Quit",
+            action: DialogAction::QuitWithRunningTerminal,
+            archive_target: None,
+        }
+    }
+
+    /// The close-tab confirmation (D52), or `None` when the tab is idle: a
+    /// busy tab asks first, naming its running command; an idle tab closes
+    /// without asking. Pure, so both halves have a test without a window.
+    pub(crate) fn close_tab_dialog(tab_id: &str, running_command: Option<&str>) -> Option<Dialog> {
+        let command = running_command?;
+        Some(Dialog {
+            title: format!("Close this terminal while `{command}` is running?"),
+            detail: "Closing the tab stops the command.".into(),
+            kind: DialogKind::Warning,
+            primary: "Close Tab",
+            action: DialogAction::CloseTerminalTab,
+            archive_target: Some(tab_id.to_owned()),
+        })
+    }
+
+    /// ⌘Q with a terminal command running asks first through
+    /// [`Self::quit_terminal_dialog`], naming the command. Returns `true`
+    /// when it asked — the caller must not quit.
+    pub(crate) fn maybe_confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        let running = self.terminal_host.read(cx).running_terminals(cx);
+        let Some((_, command)) = running.first() else { return false };
+        let dialog = Self::quit_terminal_dialog(command, running.len() - 1);
+        self.set_dialog(cx, dialog);
+        true
+    }
+
+    /// The close-tab dialog's primary button: the tab id rode the dialog,
+    /// so dismissing it any other way already dropped the target.
+    pub(crate) fn confirm_close_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+            (d.action == DialogAction::CloseTerminalTab).then(|| d.archive_target.clone()).flatten()
+        });
+        self.close_dialog(cx);
+        if let Some(id) = target {
+            self.terminal_host.update(cx, |host, _| host.close(&id));
+        }
+        cx.notify();
+    }
+
     /// The two lists the `/` and `@` menus are built from, walked per root
     /// on the background executor: at boot, when a session view for a root
     /// opens and the cache lacks that root, and when a new session starts.
@@ -743,7 +805,10 @@ impl Harness {
         // the entity's borrow and `cx.listener` cannot be alive at once.
         let (title, detail, kind, primary_label, action, danger) = {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
-            let danger = modal.action == DialogAction::Archive || modal.action == DialogAction::RemoveProject;
+            let danger = modal.action == DialogAction::Archive
+                || modal.action == DialogAction::RemoveProject
+                || modal.action == DialogAction::QuitWithRunningTerminal
+                || modal.action == DialogAction::CloseTerminalTab;
             (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, danger)
         };
         // The archive target stays on the dialog until its own button runs:
@@ -766,6 +831,12 @@ impl Harness {
                 this.confirm_remove_project(cx);
                 return;
             }
+            // Confirmed through its own path, like Archive: the tab id rode
+            // the dialog, so closing any other way already dropped it.
+            if action == DialogAction::CloseTerminalTab {
+                this.confirm_close_terminal_tab(cx);
+                return;
+            }
             this.close_dialog(cx);
             match action {
                 DialogAction::Dismiss => {}
@@ -781,6 +852,12 @@ impl Harness {
                 DialogAction::Archive => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::RemoveProject => {}
+                DialogAction::QuitWithRunningTerminal => {
+                    crate::tier::cleanup_probes();
+                    cx.quit();
+                }
+                // Confirmed through the early return above, like Archive.
+                DialogAction::CloseTerminalTab => {}
             }
             cx.notify();
         });
@@ -1011,6 +1088,32 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::tilde_root;
+    use crate::app::Harness;
+    use crate::overlays::DialogAction;
+
+    /// A busy tab asks before it closes, naming its running command; an
+    /// idle tab gets no dialog at all.
+    #[test]
+    fn the_close_tab_confirmation_fires_for_busy_tabs_only() {
+        let dialog = Harness::close_tab_dialog("t1", Some("sleep 300")).expect("a busy tab asks");
+        assert!(dialog.title.contains("sleep 300"), "it names the command");
+        assert_eq!(dialog.action, DialogAction::CloseTerminalTab);
+        assert_eq!(dialog.archive_target.as_deref(), Some("t1"));
+        assert_eq!(dialog.primary, "Close Tab");
+        assert!(Harness::close_tab_dialog("t1", None).is_none(), "an idle tab closes outright");
+    }
+
+    /// Quitting names the running command, and counts the ones past it.
+    #[test]
+    fn the_quit_confirmation_names_the_running_command() {
+        let dialog = Harness::quit_terminal_dialog("pnpm vitest", 0);
+        assert_eq!(dialog.action, DialogAction::QuitWithRunningTerminal);
+        assert_eq!(dialog.primary, "Quit");
+        assert!(dialog.detail.contains("pnpm vitest"), "it names the command");
+        let crowded = Harness::quit_terminal_dialog("pnpm vitest", 2);
+        assert!(crowded.detail.contains("pnpm vitest"), "still names one command");
+        assert!(crowded.detail.contains('3'), "and counts all three");
+    }
 
     #[test]
     fn home_folds_to_a_tilde_and_other_roots_stand() {

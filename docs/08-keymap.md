@@ -69,7 +69,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘⇧O | The Projects palette: adopted projects to switch to, recent Muse workspaces to adopt |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
 | ⌘W | Close the window (File → Close Window): probe cleanup, then the app hides; the Dock icon or ⌘-Tab brings the same window and session back |
-| ⌘Q | Quit (Baaz → Quit Baaz; probe cleanup first) |
+| ⌘Q | Quit (Baaz → Quit Baaz; probe cleanup first; asks first when a terminal command is running, naming it) |
 | ⌘M | Minimize the window |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
 
@@ -84,7 +84,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘K | The command palette (gains "Toggle terminal" and "New terminal") | `AuiRoot` |
 | ⌘B | Sidebar ↔ collapsed rail | `AuiRoot` |
 | ⌘W | Close the window | `AuiRoot` |
-| ⌘Q | Quit | `AuiRoot` |
+| ⌘Q | Quit (asks first when a terminal command is running, naming it) | `AuiRoot` |
 | ⌘N | New session in this workspace | `AuiRoot` |
 
 The grid runs under `BaazTerminal`: every key reaches the pty except the
@@ -115,7 +115,10 @@ tier-probe cleanup (`tier::cleanup_probes`), so the window and the `muse serve`
 child survive and the Dock icon and ⌘-Tab bring the same session back;
 `on_reopen` re-activates, or rebuilds the window through the shared
 `open_shell_window` if it was removed some other way. ⌘Q quits through
-`cx.quit()` after the same cleanup.
+`cx.quit()` after the same cleanup — unless a terminal tab holds a running
+block, in which case it asks first through the dialog, naming the command
+(`docs/14-terminal.md` D52). Closing a busy tab asks the same way; an idle
+tab closes outright.
 
 ## Deliberately not bound
 

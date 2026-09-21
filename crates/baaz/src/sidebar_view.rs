@@ -1947,6 +1947,7 @@ mod tests {
             turn_started: None,
             last_error: None,
             branch: None,
+            terminals_running: 0,
         }
     }
 
@@ -2205,6 +2206,7 @@ mod tests {
                     turn_started: None,
                     last_error: None,
                     branch: None,
+                    terminals_running: 0,
                 });
                 h.invalidate_list();
             });
@@ -2427,6 +2429,7 @@ mod tests {
                     turn_started: None,
                     last_error: None,
                     branch: None,
+                    terminals_running: 0,
                 })
             })
             .collect();

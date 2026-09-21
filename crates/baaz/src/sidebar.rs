@@ -94,6 +94,11 @@ pub struct SessionEntry {
     /// shown on the meta line. The live-change signal stays
     /// `session/branchChanged`; this is the index's last derived value.
     pub branch: Option<String>,
+    /// How many of this session's terminal tabs hold a running block right
+    /// now (D52). Stamped by the window from the terminal host on every
+    /// list build — never stored, never on the wire — and read by
+    /// [`Self::summary`] for the meta-line hint.
+    pub terminals_running: u32,
     /// Placed locally at `session/start`: the wire lists a session only
     /// after its log flushes on `turn/completed`, so the window holds this
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
@@ -263,6 +268,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             branch: session.branch.clone(),
+            terminals_running: 0,
         }
     }
 
@@ -356,6 +362,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             branch: None,
+            terminals_running: 0,
         })
     }
 
@@ -401,6 +408,7 @@ impl SessionEntry {
             turn_started: None,
             last_error: None,
             branch: None,
+            terminals_running: 0,
         }
     }
 
@@ -585,6 +593,17 @@ impl SessionEntry {
         }
     }
 
+    /// The sidebar's terminal hint (D52): `· 1 terminal running`,
+    /// pluralised. `None` while no tab from this session is busy, so the
+    /// meta line stays exactly as it was.
+    pub fn terminal_hint(count: u32) -> Option<String> {
+        match count {
+            0 => None,
+            1 => Some("· 1 terminal running".to_owned()),
+            n => Some(format!("· {n} terminals running")),
+        }
+    }
+
     /// The library row for this session, labelled against `now`. No
     /// provider mark: the sidebar rows read title, preview and elapsed only.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
@@ -623,6 +642,11 @@ impl SessionEntry {
                     }
                 }
             }
+        }
+        // A tab from this session holds a running block (D52): the hint
+        // joins the meta line, so it shows wherever the meta line does.
+        if let Some(hint) = Self::terminal_hint(self.terminals_running) {
+            row = row.meta(aui::nav::MetaItem::Text(hint.into()));
         }
         // A provisional row carries no turn count, no running bit and no
         // status verb — the index knows none of them — so the status line
@@ -722,6 +746,7 @@ pub fn local_started_row(
         turn_started: Some(updated),
         last_error: None,
         branch: None,
+        terminals_running: 0,
     }
 }
 
@@ -1681,7 +1706,33 @@ mod tests {
             turn_started: None,
             last_error: None,
             branch: None,
+            terminals_running: 0,
         }
+    }
+
+    /// The terminal hint (D52): nothing while idle, singular for one busy
+    /// tab, plural past it — and it rides the meta line.
+    #[test]
+    fn the_terminal_hint_shows_only_while_a_tab_runs() {
+        use aui::nav::MetaItem;
+        assert_eq!(SessionEntry::terminal_hint(0), None);
+        assert_eq!(SessionEntry::terminal_hint(1).as_deref(), Some("· 1 terminal running"));
+        assert_eq!(SessionEntry::terminal_hint(2).as_deref(), Some("· 2 terminals running"));
+        let now = Local::now();
+        let idle = entry("idle");
+        assert!(idle.summary(now).meta.is_empty(), "no busy tab, no hint");
+        let mut one = entry("one");
+        one.terminals_running = 1;
+        assert!(
+            one.summary(now).meta.contains(&MetaItem::Text("· 1 terminal running".into())),
+            "one busy tab reads singular"
+        );
+        let mut many = entry("many");
+        many.terminals_running = 3;
+        assert!(
+            many.summary(now).meta.contains(&MetaItem::Text("· 3 terminals running".into())),
+            "several busy tabs pluralise"
+        );
     }
 
     #[test]
