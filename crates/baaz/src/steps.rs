@@ -82,6 +82,8 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
+//! | `right:<browser\|diff\|git\|files>` | open the right pane on that kind (same-kind-closes, like the ⌘K rows); empty toggles; unknown records a step failure, free |
+//! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
 //! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `baaz: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
@@ -253,6 +255,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "hidden", run: |this, _, _, cx| this.step_toggle_hidden(cx) },
     WindowVerb { verb: "empty", run: |this, _, _, cx| this.step_toggle_empty(cx) },
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
+    WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
+    WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
@@ -296,6 +300,43 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
 ];
+
+impl Harness {
+    /// `right:<browser|diff|git|files>`: open the right pane on that kind
+    /// through the same [`Harness::show_right`] the ⌘K rows call, so the
+    /// capture shows the production pane — same-kind-closes included.
+    /// Empty toggles the pane through [`Harness::toggle_right`]. An
+    /// unknown slug records a step failure instead of capturing a window
+    /// where nothing happened (a known verb that silently does nothing
+    /// reports success). Free: no turn, no wire.
+    pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let slug = rest.trim();
+        if slug.is_empty() {
+            self.toggle_right(cx);
+            return;
+        }
+        match crate::layout::RightKind::parse(slug) {
+            Some(kind) => self.show_right(kind, cx),
+            None => {
+                record_step_failure(&format!("right:{rest}"));
+                crate::baaz_log!("unknown right pane kind `{rest}`");
+            }
+        }
+    }
+
+    /// `right-width:<px>`: settle the right pane's divider at a width,
+    /// clamped into the library range exactly like a released drag, so a
+    /// capture never depends on whatever `layout.json` holds on the
+    /// machine running the probe. Unparseable payloads keep the current
+    /// width, like `sidebar-width:`. Free: no turn, no wire.
+    pub(crate) fn step_right_width(&mut self, rest: &str, cx: &mut Context<Self>) {
+        if let Ok(width) = rest.trim().parse::<f32>() {
+            self.layout.right_width = Some(aui::shell::clamp_right_width(width));
+            crate::layout::write(&self.layout);
+        }
+        cx.notify();
+    }
+}
 
 /// The open session's `--steps` verbs.
 pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
@@ -633,6 +674,26 @@ mod tests {
     }
 
     #[test]
+    fn right_slugs_round_trip_and_unknown_is_none() {
+        use crate::layout::RightKind;
+        for kind in RightKind::ALL {
+            assert_eq!(RightKind::parse(kind.slug()), Some(kind), "{kind:?} slug parses back");
+        }
+        assert_eq!(RightKind::parse("nope"), None);
+        assert_eq!(RightKind::parse(""), None);
+    }
+
+    #[test]
+    fn right_verbs_are_known_steps() {
+        assert!(super::is_known_step("right:browser"));
+        assert!(super::is_known_step("right:diff"));
+        assert!(super::is_known_step("right:git"));
+        assert!(super::is_known_step("right:files"));
+        assert!(super::is_known_step("right-width:400"));
+        assert!(super::is_known_step("right:"));
+    }
+
+    #[test]
     fn unknown_steps_classify_as_failures_and_wait_is_known() {
         assert!(super::is_known_step("palette"));
         assert!(super::is_known_step("draft:hello"));
@@ -651,5 +712,149 @@ mod tests {
         assert!(super::is_session_step("send:hi"));
         assert!(super::is_session_step("wait:3000"));
         assert!(super::is_session_step("bogusverb"));
+    }
+
+    use std::path::PathBuf;
+
+    use crate::app::Harness;
+    // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
+    use gpui::AppContext as _;
+
+    /// A real `Harness` would read and write the developer's state dir, so
+    /// point `BAAZ_STATE_DIR` at a fresh temp dir for the test's duration.
+    /// Mirrors the `app.rs` hermetic helper: the lock keeps two tests from
+    /// sharing a dir.
+    fn hermetic_state(name: &str) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-steps-right-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_state(state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf)) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
+    fn step_test_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    /// Every slug in `RightKind::ALL` opens the pane on that kind through
+    /// `step_right`, with no session open.
+    #[gpui::test]
+    fn step_right_accepts_every_slug(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("slugs");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        for kind in crate::layout::RightKind::ALL {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(kind.slug(), cx)));
+            assert!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} opens the pane"
+            );
+            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+        }
+        restore_state(state);
+    }
+
+    /// The empty payload toggles, and an unknown slug records a step
+    /// failure while leaving the pane alone.
+    #[gpui::test]
+    fn step_right_empty_toggles_and_unknown_fails(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("toggle-fail");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let start = vc.update(|_, cx| baaz.read(cx).layout.right_open);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            !start,
+            "empty payload toggles the pane"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            start,
+            "empty payload toggles back"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("not-a-kind", cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            start,
+            "unknown slug changes nothing on screen"
+        );
+        assert!(
+            super::step_failure_names().iter().any(|name| name == "right:not-a-kind"),
+            "unknown slug is recorded as a step failure"
+        );
+        restore_state(state);
+    }
+
+    /// `step_right_width` pins the width and clamps into the library range.
+    #[gpui::test]
+    fn step_right_width_pins_and_clamps(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("width");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx)));
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_width), Some(400.0));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_width),
+            Some(aui::shell::RIGHT_MAX_WIDTH)
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("1", cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_width),
+            Some(aui::shell::RIGHT_MIN_WIDTH)
+        );
+        restore_state(state);
     }
 }
