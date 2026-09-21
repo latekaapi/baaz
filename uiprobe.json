@@ -1,0 +1,11 @@
+{
+  "probe": "uiprobe/1",
+  "cwd": ".",
+  "verbs": {
+    "shot": ["python3", "scripts/uiprobe.py", "--entry", "{entry}", "--probe-shot", "{out}"],
+    "idle": ["python3", "scripts/uiprobe.py", "--entry", "{entry}", "--probe-idle", "{ms}"]
+  },
+  "baseline_dir": "design/baseline",
+  "idle_ms": 2000,
+  "timeout_s": 240
+}
