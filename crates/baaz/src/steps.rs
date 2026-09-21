@@ -315,7 +315,14 @@ impl Harness {
             self.toggle_right(cx);
             return;
         }
-        // `off` closes it; a kind OPENS it, idempotently.
+        // `off` closes it; a kind OPENS it, idempotently, and NEITHER
+        // persists.
+        //
+        // A capture aid must not write `layout.json`. These verbs did, and
+        // the entries quietly contaminated each other: running `right-git`
+        // left the pane open on disk, so `signed-in` — which scripts nothing
+        // at all — booted with a right pane it never asked for and reported
+        // 22 changed regions. Run order decided what the suite saw.
         //
         // Deliberately not `show_right`, which toggles when asked for the
         // kind already showing — correct for ⌘K, wrong for a capture. The
@@ -325,7 +332,6 @@ impl Harness {
         // two-captures-must-agree rule failed four entries out of five.
         if slug.eq_ignore_ascii_case("off") || slug.eq_ignore_ascii_case("closed") {
             self.layout.right_open = false;
-            crate::layout::write(&self.layout);
             cx.notify();
             return;
         }
@@ -333,7 +339,6 @@ impl Harness {
             Some(kind) => {
                 self.layout.right_kind = Some(kind);
                 self.layout.right_open = true;
-                crate::layout::write(&self.layout);
                 cx.notify();
             }
             None => {
@@ -352,7 +357,6 @@ impl Harness {
     pub(crate) fn step_right_width(&mut self, rest: &str, cx: &mut Context<Self>) {
         if let Ok(width) = rest.trim().parse::<f32>() {
             self.layout.right_width = Some(aui::shell::clamp_right_width(width));
-            crate::layout::write(&self.layout);
         }
         cx.notify();
     }
