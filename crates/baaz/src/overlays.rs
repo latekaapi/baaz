@@ -356,11 +356,27 @@ pub enum Command {
     Logout,
     /// Show this menu, unfiltered.
     Help,
+    /// Show the browser in the right pane.
+    RightBrowser,
+    /// Review the diff in the right pane.
+    RightDiff,
+    /// Show git changes and the PR form.
+    RightGit,
+    /// Show the file tree in the right pane.
+    RightFiles,
+    /// Toggle the terminal dock.
+    Terminal,
+    /// Open a new terminal tab.
+    NewTerminalCmd,
 }
 
 impl Command {
     /// Every command, in the order the menu lists them.
-    pub const ALL: [Command; 17] = [
+    ///
+    /// The six window-level commands sit together just before `Help`: the
+    /// four right-pane commands as one group, then the two terminal commands
+    /// as another, with `Help` still closing the list.
+    pub const ALL: [Command; 23] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -377,6 +393,12 @@ impl Command {
         Command::Hide,
         Command::Empty,
         Command::Logout,
+        Command::RightBrowser,
+        Command::RightDiff,
+        Command::RightGit,
+        Command::RightFiles,
+        Command::Terminal,
+        Command::NewTerminalCmd,
         Command::Help,
     ];
 
@@ -400,6 +422,12 @@ impl Command {
             Command::Project => "/project",
             Command::Logout => "/logout",
             Command::Help => "/help",
+            Command::RightBrowser => "/browser",
+            Command::RightDiff => "/diff",
+            Command::RightGit => "/changes",
+            Command::RightFiles => "/files",
+            Command::Terminal => "/terminal",
+            Command::NewTerminalCmd => "/new-terminal",
         }
     }
 
@@ -423,6 +451,12 @@ impl Command {
             Command::Project => "Add or switch project",
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
+            Command::RightBrowser => "Show the browser in the right pane",
+            Command::RightDiff => "Review the diff in the right pane",
+            Command::RightGit => "Show git changes and the PR form",
+            Command::RightFiles => "Show the file tree in the right pane",
+            Command::Terminal => "Toggle the terminal dock",
+            Command::NewTerminalCmd => "Open a new terminal tab",
         }
     }
 
@@ -538,8 +572,10 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
+        assert_eq!(Command::ALL.len(), 23, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
+            assert_eq!(Command::parse_line(command.slash()), Some((command, "")));
         }
         assert_eq!(Command::parse("/nope"), None);
     }

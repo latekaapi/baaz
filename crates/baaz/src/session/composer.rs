@@ -263,6 +263,17 @@ impl SessionView {
             Command::Resume => cx.emit(SessionEvent::Resume),
             Command::Search => cx.emit(SessionEvent::Search),
             Command::Project => cx.emit(SessionEvent::Projects),
+            // Window-level commands run on `Harness` from the ⌘K palette,
+            // which is their only dispatch path: the session cannot act on
+            // the window, so typed (or `/`-menu-picked) ones are ignored
+            // here rather than sent as prompts. Forwarding them to the
+            // window needs a new `SessionEvent`, owned by a later task.
+            Command::RightBrowser
+            | Command::RightDiff
+            | Command::RightGit
+            | Command::RightFiles
+            | Command::Terminal
+            | Command::NewTerminalCmd => {}
         }
     }
 
