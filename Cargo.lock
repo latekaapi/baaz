@@ -527,7 +527,7 @@ dependencies = [
 [[package]]
 name = "aui"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "anyhow",
  "aui-icons",
@@ -542,7 +542,7 @@ dependencies = [
 [[package]]
 name = "aui-icons"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -552,7 +552,7 @@ dependencies = [
 [[package]]
 name = "aui-motion"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "aui-tokens",
  "gpui-kit",
@@ -562,7 +562,7 @@ dependencies = [
 [[package]]
 name = "aui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "anyhow",
  "serde",
@@ -571,7 +571,7 @@ dependencies = [
 [[package]]
 name = "aui-terminal"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "alacritty_terminal",
  "aui",
@@ -588,7 +588,7 @@ dependencies = [
 [[package]]
 name = "aui-tokens"
 version = "0.1.0"
-source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.1#555fa4d9f100aeb930bd794da579f13a5ff4c459"
+source = "git+https://github.com/latekaapi/agentic-ui?tag=v0.2.2#651123dc04fe25cd88cb8d8ff850d0fbb33e3f56"
 dependencies = [
  "anyhow",
  "gpui-kit",
