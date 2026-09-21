@@ -44,11 +44,6 @@ pub enum RightKind {
 
 impl RightKind {
     /// Every kind, for the toggle-all-kinds test and T3's palette rows.
-    // `ALL`, `slug` and `parse` are dead in the binary until T4 adds the
-    // `right:<kind>` step verb that parses them. Remove this allow when T4
-    // lands — if it is still here afterwards, the probe entries never
-    // reached the code.
-    #[allow(dead_code)]
     pub const ALL: [RightKind; 4] =
         [RightKind::Browser, RightKind::Diff, RightKind::Git, RightKind::Files];
 
@@ -63,7 +58,6 @@ impl RightKind {
     }
 
     /// The machine name: T4's `right:<kind>` verb parses these back.
-    #[allow(dead_code)]
     pub fn slug(self) -> &'static str {
         match self {
             RightKind::Browser => "browser",
@@ -74,7 +68,6 @@ impl RightKind {
     }
 
     /// The inverse of [`RightKind::slug`]: `None` for an unknown string.
-    #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<RightKind> {
         match s {
             "browser" => Some(RightKind::Browser),
