@@ -162,7 +162,17 @@ billing tier and its two percentages; `/help` reopens the menu unfiltered.
 and `/resume` landed in Phase 5 — nothing in the list says "not in this build
 yet" any more. `/empty` toggles the sidebar's empty-session filter: sessions
 with no turns are hidden by default, and the command shows them again (or
-hides them once shown).
+hides them once shown). Six window commands sit together just before `/help`:
+`/browser` ("Show the browser in the right pane"), `/diff` ("Review the diff in
+the right pane"), `/changes` ("Show git changes and the PR form"), `/files`
+("Show the file tree in the right pane"), `/terminal` ("Toggle the terminal
+dock") and `/new-terminal` ("Open a new terminal tab").
+
+Those six do not belong to the session, so the session does not run them: typed
+in the composer they arrive as `SessionEvent::WindowCommand` and the window
+answers through `Harness::run_window_command` — the same dispatch the ⌘K
+palette calls first, before any session delegation, which is why a window
+command acts with no session open. One implementation, two routes.
 
 **`/fork` names a turn two ways.** Typed bare, or picked from the `/` menu, it
 opens the turn picker: the session's completed assistant turns, newest first,
