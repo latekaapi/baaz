@@ -40,18 +40,18 @@ gpui-kit = "0.6.0"
 
 # The aui component library, pinned to a tag rather than tracked on a branch:
 # `aui` is pre-1.0 and breaks between minor versions, so a moving `main`
-# would break this build at a time of its choosing. All five entries share
+# would break this build at a time of its choosing. All six entries share
 # one tag — they are one workspace and are only ever released together.
 #
 # To build against a local checkout instead (developing both at once), add a
 # patch to `.cargo/config.toml` or the workspace root rather than editing
 # these lines; `CONTRIBUTING.md` has the snippet.
-aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
-aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
-aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
-aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
-aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
-aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2", features = ["pty", "tui"] }
+aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3" }
+aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3" }
+aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3" }
+aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3" }
+aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3" }
+aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.3", features = ["pty", "tui"] }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }
