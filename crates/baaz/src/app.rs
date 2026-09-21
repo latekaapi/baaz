@@ -1541,10 +1541,6 @@ impl Harness {
     /// it works with no session open and never touches [`Self::active`].
     /// Calling it with the kind already showing while the pane is open
     /// closes the pane again, the way pressing a menu's own button closes it.
-    // Dead in the binary until T3 wires the ⌘K commands that call it; the
-    // tests below do exercise it. Remove this allow when T3 lands — if it is
-    // still here afterwards, the palette entries were never connected.
-    #[allow(dead_code)]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         if self.layout.right_open && self.layout.right_kind == Some(kind) {
             self.layout.right_open = false;
