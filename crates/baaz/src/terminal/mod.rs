@@ -7,6 +7,7 @@
 
 pub mod dock;
 pub mod host;
+pub mod intents;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub(crate) use host::key_input;

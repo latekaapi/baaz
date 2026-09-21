@@ -1174,6 +1174,12 @@ impl SessionView {
         self.images.is_empty() && self.files.is_empty() && self.composer.read(cx).value().trim().is_empty()
     }
 
+    /// The composer's current text, for hosts that append to the draft
+    /// rather than clobbering it.
+    pub(crate) fn draft_text(&self, cx: &gpui::App) -> String {
+        self.composer.read(cx).value().to_string()
+    }
+
     /// Put text in the composer. Only the scripted `--send` uses this; a person
     /// types.
     pub fn set_draft(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {

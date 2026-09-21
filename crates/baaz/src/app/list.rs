@@ -17,10 +17,12 @@ use super::*;
 /// (the empty filter never hides the open session, so a switch changes the
 /// rows) plus the click's target (the grouping rescues it past the fold, so
 /// a click must rebuild) plus the grouping mode, the closed set and the
-/// expanded set (a toggle regroups the same rows).
-type ListKey = (u64, Option<String>, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>);
+/// expanded set (a toggle regroups the same rows) plus the busy-terminal
+/// counts per session (a block starting or ending restamps the hint).
+type ListKey =
+    (u64, Option<String>, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>, Vec<(String, u32)>);
 
-/// Validity is six keys, not a timestamp (see [`ListKey`]), and the grouping
+/// Validity is seven keys, not a timestamp (see [`ListKey`]), and the grouping
 /// carries the minute it labelled its rows against.
 #[derive(Default)]
 pub(crate) struct ListCache {
@@ -539,15 +541,22 @@ impl Harness {
         // fold, so a click (or an `open:` step) that names a held-back row
         // must rebuild the grouping on its own frame.
         let pending = self.pending_id.clone();
+        // Whose tabs hold a running block (D52): what stamps the sidebar
+        // hint below. Part of the key, so a block starting or ending
+        // rebuilds the rows without waiting for a list invalidation.
+        let terminals = self.terminal_host.read(cx).busy_counts(cx);
         let mut cache = self.list_cache.borrow_mut();
-        if cache.key.as_ref().is_some_and(|(epoch, id, awaited, cached_group, cached_closed, cached_expanded)| {
-            *epoch == self.list_epoch
-                && *id == active
-                && *awaited == pending
-                && *cached_group == group_by
-                && *cached_closed == closed
-                && *cached_expanded == expanded
-        }) {
+        if cache.key.as_ref().is_some_and(
+            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_terminals)| {
+                *epoch == self.list_epoch
+                    && *id == active
+                    && *awaited == pending
+                    && *cached_group == group_by
+                    && *cached_closed == closed
+                    && *cached_expanded == expanded
+                    && *cached_terminals == terminals
+            },
+        ) {
             return Rc::clone(&cache.visible);
         }
         let mut rows: Vec<SessionEntry> = self
@@ -573,7 +582,16 @@ impl Harness {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        cache.key = Some((self.list_epoch, active, pending, group_by, closed, expanded));
+        // The terminal hint's counts, stamped onto copies: the stored rows
+        // stay clean of frame-rate liveness.
+        if !terminals.is_empty() {
+            for row in &mut rows {
+                if let Some((_, count)) = terminals.iter().find(|(id, _)| *id == row.id) {
+                    row.terminals_running = *count;
+                }
+            }
+        }
+        cache.key = Some((self.list_epoch, active, pending, group_by, closed, expanded, terminals));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)

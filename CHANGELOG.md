@@ -149,6 +149,18 @@ the `aui` component library.
   verb replays a scripted tab for deterministic captures
   (`docs/images/terminal-dock-dark.png`,
   `docs/images/terminal-dock-light.png`).
+- **Block hover actions.** A block's Copy, Rerun, Stop and Ask buttons do
+  what they say: Copy takes the block's output text, Rerun runs its command
+  in the same tab when idle else a new one, Stop sends `⌃C` (a no-op on a
+  finished block), and Ask quotes the command and its capped output into the
+  open session's composer draft — appended, never sent, never clobbering.
+  `⌘`-clicked links open only for `http`/`https`.
+- **Quitting and closing ask before killing a command.** ⌘Q with a terminal
+  command running asks first, naming the command; so does closing a busy
+  tab. Idle tabs close outright.
+- **The sidebar names running terminals.** A session row whose tab holds a
+  running block reads `· 1 terminal running` on its meta line (pluralised
+  past one).
 
 ### Projects
 

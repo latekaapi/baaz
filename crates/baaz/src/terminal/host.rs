@@ -210,6 +210,12 @@ impl TerminalHost {
         pick_tab(&self.states(cx), project_root, active, prefer_active)
     }
 
+    /// D43 for a block rerun: the originating tab when it is idle, else a
+    /// new tab — [`pick_tab`] with the origin as the candidate.
+    pub fn pick_rerun(&self, cx: &App, project_root: &Path, tab_id: &str) -> Pick {
+        pick_tab(&self.states(cx), project_root, Some(tab_id), true)
+    }
+
     /// The pure rows [`pick_tab`] decides on, with liveness read now.
     fn states(&self, cx: &App) -> Vec<TabState> {
         self.tabs
@@ -228,6 +234,52 @@ impl TerminalHost {
             let session = tab.session.read(cx);
             session.alt_screen() || session.blocks().iter().any(|block| block.running())
         })
+    }
+
+    /// The tab's running command, for confirmations that name it (D52): the
+    /// first still-running block's command, or the tab title when the block
+    /// carries none (alt-screen, or an unscraped echo). `None` when the tab
+    /// is missing or idle.
+    pub fn running_command(&self, cx: &App, id: &str) -> Option<String> {
+        let tab = self.get(id)?;
+        let session = tab.session.read(cx);
+        let command = session.blocks().iter().find(|block| block.running()).map(|block| block.command.clone());
+        match command {
+            Some(command) if !command.trim().is_empty() => Some(command),
+            _ if self.busy(cx, id) => Some(tab.title.clone()),
+            _ => None,
+        }
+    }
+
+    /// Every busy tab's `(tab id, running command)`, in open order: what a
+    /// quit confirmation names (D52).
+    pub fn running_terminals(&self, cx: &App) -> Vec<(String, String)> {
+        self.tabs
+            .iter()
+            .filter(|tab| {
+                let session = tab.session.read(cx);
+                session.alt_screen() || session.blocks().iter().any(|block| block.running())
+            })
+            .filter_map(|tab| self.running_command(cx, &tab.id).map(|command| (tab.id.clone(), command)))
+            .collect()
+    }
+
+    /// How many busy tabs each origin session holds, oldest session first:
+    /// what stamps the sidebar hint (D52). Tabs opened with no session
+    /// (or idle ones) count nowhere.
+    pub fn busy_counts(&self, cx: &App) -> Vec<(SessionId, u32)> {
+        let mut counts: HashMap<&SessionId, u32> = HashMap::new();
+        for tab in &self.tabs {
+            let Some(origin) = tab.origin_session.as_ref() else { continue };
+            let session = tab.session.read(cx);
+            if session.alt_screen() || session.blocks().iter().any(|block| block.running()) {
+                *counts.entry(origin).or_default() += 1;
+            }
+        }
+        let mut counts: Vec<(SessionId, u32)> =
+            counts.into_iter().map(|(origin, count)| (origin.clone(), count)).collect();
+        counts.sort_by(|a, b| a.0.cmp(&b.0));
+        counts
     }
 
     /// Open a tab on the project's root: `$SHELL -l -i` with shell
@@ -427,6 +479,88 @@ mod tests {
         assert_eq!(title_from_command("pnpm vitest"), "pnpm vitest");
         assert_eq!(title_from_command("$ git status -sb"), "git status -sb");
         assert_eq!(title_from_command(""), "shell");
+    }
+
+    /// A rerun goes through [`pick_tab`] with the originating tab as the
+    /// active one: an idle tab takes the command, a busy one opens a new
+    /// tab (D43). The rule the unit tests pin above is the rule a rerun
+    /// runs — this names it once, so the wiring has a test to answer to.
+    #[test]
+    fn rerun_reuses_an_idle_tab_and_opens_a_new_one_when_busy() {
+        let root = Path::new("/acme");
+        let idle = vec![tab("t1", "/acme", false)];
+        assert_eq!(pick_tab(&idle, root, Some("t1"), true), Pick::Existing("t1".into()));
+        let busy = vec![tab("t1", "/acme", true)];
+        assert_eq!(pick_tab(&busy, root, Some("t1"), true), Pick::New);
+    }
+
+    /// One scripted chunk of raw grid bytes, like [`deterministic_script`].
+    fn raw(bytes: String) -> aui_terminal::ScriptChunk {
+        aui_terminal::ScriptChunk { at: std::time::Duration::from_millis(0), bytes: bytes.into_bytes() }
+    }
+
+    /// A tab whose one block is still running: `C` arrived, `D` never did.
+    /// The command rides the `C` marker's payload, as our shell integration
+    /// sends it.
+    fn running_script(nonce: &str, command: &str) -> Vec<aui_terminal::ScriptChunk> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(command);
+        vec![raw(format!(
+            "\x1b]133;A;k={nonce}\x07~/work ❯ \x1b]133;C;k={nonce};cmd={encoded};enc=b64\x07\r\npartial output"
+        ))]
+    }
+
+    fn open_scripted(
+        host: &gpui::Entity<TerminalHost>,
+        cx: &mut gpui::App,
+        title: &str,
+        origin: Option<SessionId>,
+        script: Vec<aui_terminal::ScriptChunk>,
+        nonce: &str,
+    ) -> String {
+        let root = PathBuf::from("/acme");
+        host.update(cx, |host, cx| {
+            let id = host.open_fake(&root, title.to_owned(), TabOwner::User, origin, script, nonce, cx);
+            host.drain(&id, cx);
+            id
+        })
+    }
+
+    /// The confirmation names the running block's command, and stays quiet
+    /// for a finished block.
+    #[gpui::test]
+    fn the_running_command_is_the_block_still_open(cx: &mut gpui::TestAppContext) {
+        let host = cx.new(|_| TerminalHost::new());
+        let nonce = "confirm-nonce";
+        let running =
+            cx.update(|cx| open_scripted(&host, cx, "sleep 300", Some("s1".into()), running_script(nonce, "sleep 300"), nonce));
+        let done = cx.update(|cx| {
+            open_scripted(&host, cx, "shell", Some("s1".into()), deterministic_script("done-nonce"), "done-nonce")
+        });
+        cx.read(|cx| {
+            let host = host.read(cx);
+            assert!(host.busy(cx, &running));
+            assert_eq!(host.running_command(cx, &running).as_deref(), Some("sleep 300"));
+            assert!(!host.busy(cx, &done));
+            assert_eq!(host.running_command(cx, &done), None);
+            assert_eq!(host.running_command(cx, "t404"), None);
+        });
+    }
+
+    /// The sidebar's counts: one busy tab of the session counts once, a
+    /// finished one and a session-less one count nowhere.
+    #[gpui::test]
+    fn busy_counts_cover_only_busy_origin_tabs(cx: &mut gpui::TestAppContext) {
+        let host = cx.new(|_| TerminalHost::new());
+        let nonce = "counts-nonce";
+        cx.update(|cx| {
+            open_scripted(&host, cx, "sleep 300", Some("s1".into()), running_script(nonce, "sleep 300"), nonce);
+            open_scripted(&host, cx, "shell", Some("s1".into()), deterministic_script("d1"), "d1");
+            open_scripted(&host, cx, "sleep 60", None, running_script(nonce, "sleep 60"), nonce);
+        });
+        cx.read(|cx| {
+            assert_eq!(host.read(cx).busy_counts(cx), vec![("s1".to_owned(), 1)]);
+        });
     }
 
     /// The dock's render path only reads (`tabs_for`, `active_for`, `get`,

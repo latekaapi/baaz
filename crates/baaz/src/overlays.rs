@@ -32,14 +32,15 @@ pub struct Dialog {
     /// What the primary button does.
     pub action: DialogAction,
     /// When the action archives, the session it archives; when it removes a
-    /// project, that project's id. The target lives on the dialog so
-    /// dismissing it — Escape, the scrim, Cancel — drops the target with it
-    /// and nothing can confirm afterwards.
+    /// project, that project's id; when it closes a terminal tab, that
+    /// tab's id. The target lives on the dialog so dismissing it — Escape,
+    /// the scrim, Cancel — drops the target with it and nothing can confirm
+    /// afterwards.
     pub archive_target: Option<String>,
 }
 
 /// What a dialog's primary button does.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogAction {
     /// Close it and carry on.
     Dismiss,
@@ -52,6 +53,11 @@ pub enum DialogAction {
     /// Remove the dialog's `archive_target` project from the sidebar (its
     /// sessions stay on disk and move to Unfiled).
     RemoveProject,
+    /// Quit the app after confirming a still-running terminal command (D52).
+    QuitWithRunningTerminal,
+    /// Close the dialog's `archive_target` terminal tab after confirming
+    /// its still-running command (D52).
+    CloseTerminalTab,
 }
 
 /// Which popover is open over the composer.

@@ -70,6 +70,7 @@ use gpui::{
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::Root;
 use muse_client::schema::{
     AccountStateKind, SessionListParams, SessionResumeParams,
 };
@@ -325,6 +326,30 @@ pub fn set_menus(cx: &mut App) {
     });
     cx.on_action(|_: &QuitApp, cx: &mut App| {
         crate::baaz_log!("QuitApp (global)");
+        // A running terminal command asks first (D52), naming the command:
+        // the first window holding one opens the confirm dialog instead of
+        // quitting. This stays a global listener — validation consults the
+        // focused window's dispatch tree, which is empty on the login
+        // screen — and reaches the window's `Harness` through its root.
+        for window in cx.windows() {
+            let asked = window
+                .downcast::<Root>()
+                .and_then(|handle| {
+                    handle
+                        .update(cx, |root, _, cx| {
+                            root.view()
+                                .clone()
+                                .downcast::<Harness>()
+                                .map(|harness| harness.update(cx, |this, cx| this.maybe_confirm_quit(cx)))
+                                .unwrap_or(false)
+                        })
+                        .ok()
+                })
+                .unwrap_or(false);
+            if asked {
+                return;
+            }
+        }
         crate::tier::cleanup_probes();
         cx.quit();
     });
@@ -1551,14 +1576,138 @@ impl Harness {
         }
     }
 
-    /// Close the project's n-th tab, in open order.
+    /// Close the project's n-th tab, in open order — asking first when it
+    /// is busy (D52), naming the running command. An idle tab closes
+    /// outright.
     fn close_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
         let id = self.terminal_host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
         if let Some(id) = id {
-            self.terminal_host.update(cx, |host, _| host.close(&id));
+            let running = self.terminal_host.read(cx).running_command(cx, &id);
+            if let Some(dialog) = Self::close_tab_dialog(&id, running.as_deref()) {
+                self.set_dialog(cx, dialog);
+            } else {
+                self.terminal_host.update(cx, |host, _| host.close(&id));
+            }
             cx.notify();
         }
+    }
+
+    /// One block hover action from the active tab's grid (D44). The library
+    /// performs none of these — it only reports the intent with a block
+    /// index, and the host reads the block back and decides. Nothing here
+    /// touches the wire: no turn, no send.
+    fn handle_terminal_intent(
+        &mut self,
+        tab_id: &str,
+        intent: TerminalGridIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            TerminalGridIntent::OpenUrl(url) => {
+                // A program can print any OSC 8 link it likes, so only
+                // `http`/`https` ever reach the browser — the rest are
+                // ignored (D53).
+                if terminal::intents::openable_url(&url) {
+                    cx.open_url(&url);
+                }
+            }
+            TerminalGridIntent::Copy(block) => {
+                let text = self
+                    .terminal_host
+                    .read(cx)
+                    .get(tab_id)
+                    .and_then(|tab| tab.session.read(cx).block_text(block));
+                if let Some(text) = text {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            TerminalGridIntent::Stop(block) => {
+                // A finished (or missing) block is a no-op; a running one
+                // takes `⌃C`.
+                let running = self.terminal_host.read(cx).get(tab_id).is_some_and(|tab| {
+                    tab.session.read(cx).blocks().get(block).is_some_and(|block| block.running())
+                });
+                if running {
+                    let session =
+                        self.terminal_host.read(cx).get(tab_id).map(|tab| tab.session.clone());
+                    if let Some(session) = session {
+                        session.update(cx, |session, _| session.write(b"\x03"));
+                    }
+                }
+            }
+            TerminalGridIntent::Rerun(block) => self.rerun_block(tab_id, block, window, cx),
+            TerminalGridIntent::Ask(block) => self.ask_about_block(tab_id, block, window, cx),
+        }
+    }
+
+    /// Rerun a block's command: the same tab when it is idle, otherwise a
+    /// new one — [`terminal::host::pick_tab`]'s rule (D43). Bracketed
+    /// paste plus Enter, like the play buttons.
+    fn rerun_block(&mut self, tab_id: &str, block: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        let command = self
+            .terminal_host
+            .read(cx)
+            .get(tab_id)
+            .and_then(|tab| tab.session.read(cx).blocks().get(block).map(|block| block.command.clone()))
+            .filter(|command| !command.trim().is_empty());
+        let Some(command) = command else { return };
+        // D43 with the originating tab as the candidate: idle reuses it,
+        // busy opens a new tab.
+        match self.terminal_host.read(cx).pick_rerun(cx, &root, tab_id) {
+            terminal::Pick::Existing(id) => {
+                let session = self.terminal_host.read(cx).get(&id).map(|tab| tab.session.clone());
+                if let Some(session) = session {
+                    session.update(cx, |session, _| {
+                        session.paste(&command);
+                        session.write(b"\r");
+                    });
+                }
+            }
+            terminal::Pick::New => {
+                let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+                let title = terminal::title_from_command(&command);
+                let session = self.terminal_host.update(cx, |host, cx| {
+                    let id = host.open(&root, title, TabOwner::User, origin, cx);
+                    host.get(&id).map(|tab| tab.session.clone())
+                });
+                if let Some(session) = session {
+                    session.update(cx, |session, _| {
+                        session.paste(&command);
+                        session.write(b"\r");
+                    });
+                }
+            }
+        }
+        window.focus(&self.terminal_focus, cx);
+        cx.notify();
+    }
+
+    /// Ask about a block: its command and capped ANSI-free output land in
+    /// the current session's composer draft as a quoted block — and stay
+    /// there unsent. An occupied composer is appended to, never clobbered.
+    fn ask_about_block(&mut self, tab_id: &str, block: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else {
+            self.overlays.update(cx, |overlays, _| {
+                overlays.toast("No open session", "Open a session to ask about this terminal output.");
+            });
+            cx.notify();
+            return;
+        };
+        let payload = self.terminal_host.read(cx).get(tab_id).and_then(|tab| {
+            let session = tab.session.read(cx);
+            let command = session.blocks().get(block).map(|block| block.command.clone())?;
+            let output = session.block_text(block)?;
+            Some((command, output))
+        });
+        let Some((command, output)) = payload else { return };
+        // `set_draft` only: the draft is never sent from here.
+        view.update(cx, |view, cx| {
+            let existing = view.draft_text(cx);
+            view.set_draft(terminal::intents::build_ask_draft(&command, &output, &existing), window, cx);
+        });
     }
 
     /// The `--steps` verb's route: open the dock over a FakePty-backed tab
@@ -1608,12 +1757,12 @@ impl Harness {
         let host = self.terminal_host.read(cx);
         let mut tabs = Vec::new();
         let mut active_ix = 0;
-        let mut active_session = None;
+        let mut active_tab: Option<(String, Entity<aui_terminal::TerminalSession>)> = None;
         let active_id = host.active_for(&root).map(|tab| tab.id.clone());
         for tab in host.tabs_for(&root) {
             if Some(tab.id.as_str()) == active_id.as_deref() {
                 active_ix = tabs.len();
-                active_session = Some(tab.session.clone());
+                active_tab = Some((tab.id.clone(), tab.session.clone()));
             }
             let mut view = TermTab::new(tab.id.clone(), tab.title.clone());
             if tab.owner == TabOwner::Agent {
@@ -1630,8 +1779,10 @@ impl Harness {
             TerminalTabsAction::New => this.new_terminal(window, cx),
         });
         let header = terminal_tabs("terminal-tabs", tabs, active_ix).on_action(select);
-        let body = active_session.map(|session| {
-            let intent = cx.processor(|_: &mut Self, _: TerminalGridIntent, _, _| {});
+        let body = active_tab.map(|(tab_id, session)| {
+            let intent = cx.processor(move |this: &mut Self, intent: TerminalGridIntent, window, cx| {
+                this.handle_terminal_intent(&tab_id, intent, window, cx);
+            });
             terminal_grid(&session).on_intent(intent).into_any_element()
         });
         let maximised = height >= terminal::clamp_dock_height(f32::MAX, self.centre_height(window)) - 0.5;
