@@ -36,3 +36,4 @@ __pycache__/
 /docs/15-*
 # The old phase-by-phase internal diary; superseded by the root CHANGELOG.md.
 /docs/CHANGELOG.md
+!/design/baseline/**/*.png
