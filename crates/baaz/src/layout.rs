@@ -26,6 +26,66 @@ pub enum GroupBy {
     Project,
 }
 
+/// Which right-pane kind was last shown, so reopening restores it. Task
+/// T3's ⌘K rows reuse [`RightKind::label`]; task T4's `right:<kind>` step
+/// verb parses [`RightKind::slug`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RightKind {
+    /// An embedded browser.
+    Browser,
+    /// A diff review surface.
+    Diff,
+    /// The uncommitted changes.
+    Git,
+    /// The workspace file tree.
+    Files,
+}
+
+impl RightKind {
+    /// Every kind, for the toggle-all-kinds test and T3's palette rows.
+    // `ALL`, `slug` and `parse` are dead in the binary until T4 adds the
+    // `right:<kind>` step verb that parses them. Remove this allow when T4
+    // lands — if it is still here afterwards, the probe entries never
+    // reached the code.
+    #[allow(dead_code)]
+    pub const ALL: [RightKind; 4] =
+        [RightKind::Browser, RightKind::Diff, RightKind::Git, RightKind::Files];
+
+    /// The user-visible name: the right header's title, and T3's ⌘K labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            RightKind::Browser => "Browser",
+            RightKind::Diff => "Diff review",
+            RightKind::Git => "Changes",
+            RightKind::Files => "Files",
+        }
+    }
+
+    /// The machine name: T4's `right:<kind>` verb parses these back.
+    #[allow(dead_code)]
+    pub fn slug(self) -> &'static str {
+        match self {
+            RightKind::Browser => "browser",
+            RightKind::Diff => "diff",
+            RightKind::Git => "git",
+            RightKind::Files => "files",
+        }
+    }
+
+    /// The inverse of [`RightKind::slug`]: `None` for an unknown string.
+    #[allow(dead_code)]
+    pub fn parse(s: &str) -> Option<RightKind> {
+        match s {
+            "browser" => Some(RightKind::Browser),
+            "diff" => Some(RightKind::Diff),
+            "git" => Some(RightKind::Git),
+            "files" => Some(RightKind::Files),
+            _ => None,
+        }
+    }
+}
+
 /// What `layout.json` holds. `None` is "never resized": the default width.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layout {
@@ -91,6 +151,19 @@ pub struct Layout {
     /// one. `None` is "never resized": the default height.
     #[serde(rename = "terminalHeight", default, skip_serializing_if = "Option::is_none")]
     pub terminal_height: Option<f32>,
+    /// Whether the right pane stands open in the window's right column.
+    /// Closed by default: the pane is asked for, never assumed, exactly
+    /// as the dock is.
+    #[serde(rename = "rightOpen", default)]
+    pub right_open: bool,
+    /// The settled right-pane width in window pixels, if the person ever
+    /// set one. `None` is "never resized": the default width.
+    #[serde(rename = "rightWidth", default, skip_serializing_if = "Option::is_none")]
+    pub right_width: Option<f32>,
+    /// Which of the four right-pane kinds was last shown, so reopening
+    /// restores it. `None` is "never opened": [`RightKind::Files`].
+    #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
+    pub right_kind: Option<RightKind>,
 }
 
 /// The default for the auto-title and auto-summary switches: ON. A missing
@@ -118,6 +191,9 @@ impl Default for Layout {
             auto_summary: true,
             terminal_open: false,
             terminal_height: None,
+            right_open: false,
+            right_width: None,
+            right_kind: None,
         }
     }
 }
@@ -155,6 +231,30 @@ pub fn sidebar_width(layout: &Layout) -> f32 {
 /// divider follows from where it started, clamped into the library range.
 pub fn drag_width(start_w: f32, grab_x: f32, x: f32) -> f32 {
     aui::shell::clamp_sidebar_width(start_w + (x - grab_x))
+}
+
+/// The width the right pane should open at: the stored one, clamped into
+/// the library range, or the default when nothing was ever stored.
+pub fn right_width(layout: &Layout) -> f32 {
+    match layout.right_width {
+        Some(width) => aui::shell::clamp_right_width(width),
+        None => aui::shell::RIGHT_WIDTH,
+    }
+}
+
+/// The kind the right pane should show: the last one stored, or Files when
+/// nothing was ever stored.
+pub fn right_kind(layout: &Layout) -> RightKind {
+    layout.right_kind.unwrap_or(RightKind::Files)
+}
+
+/// One drag move on the right pane's divider. The minus is the whole
+/// difference from [`drag_width`]: the sidebar's divider sits on the
+/// sidebar's RIGHT edge, so moving the pointer right widens it, while the
+/// right pane's divider sits on the pane's LEFT edge, so moving the pointer
+/// right NARROWS it.
+pub fn right_drag_width(start_w: f32, grab_x: f32, x: f32) -> f32 {
+    aui::shell::clamp_right_width(start_w - (x - grab_x))
 }
 
 #[cfg(test)]
@@ -203,6 +303,9 @@ mod tests {
             auto_summary: true,
             terminal_open: true,
             terminal_height: Some(300.0),
+            right_open: true,
+            right_width: Some(420.0),
+            right_kind: Some(RightKind::Diff),
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -214,6 +317,9 @@ mod tests {
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"terminalOpen\":true"));
         assert!(text.contains("\"terminalHeight\":300.0"));
+        assert!(text.contains("\"rightOpen\":true"));
+        assert!(text.contains("\"rightWidth\":420.0"));
+        assert!(text.contains("\"rightKind\":\"diff\""));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
@@ -224,6 +330,9 @@ mod tests {
         assert!(back.group_branch);
         assert!(back.terminal_open);
         assert_eq!(back.terminal_height, Some(300.0));
+        assert!(back.right_open);
+        assert_eq!(back.right_width, Some(420.0));
+        assert_eq!(back.right_kind, Some(RightKind::Diff));
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.group_by, None);
@@ -243,6 +352,48 @@ mod tests {
         assert_eq!(Layout::default().terminal_height, None);
         assert!(!old.terminal_open);
         assert_eq!(old.terminal_height, None);
+        // The right pane starts closed at its default width showing Files,
+        // old files included.
+        assert!(!Layout::default().right_open);
+        assert_eq!(Layout::default().right_width, None);
+        assert_eq!(Layout::default().right_kind, None);
+        assert!(!old.right_open);
+        assert_eq!(old.right_width, None);
+        assert_eq!(old.right_kind, None);
+        assert_eq!(right_kind(&Layout::default()), RightKind::Files);
+        assert_eq!(right_kind(&old), RightKind::Files);
+    }
+
+    #[test]
+    fn every_kind_parses_back_from_its_slug() {
+        for kind in RightKind::ALL {
+            assert_eq!(RightKind::parse(kind.slug()), Some(kind));
+        }
+        assert_eq!(RightKind::parse("nope"), None);
+        assert_eq!(RightKind::parse(""), None);
+        assert_eq!(RightKind::parse("DIFF"), None);
+    }
+
+    #[test]
+    fn a_right_drag_moves_the_divider_against_the_pointer() {
+        // The divider sits on the pane's LEFT edge: moving the pointer
+        // right narrows the pane, moving it left widens it — the opposite
+        // of the sidebar's divider.
+        assert_eq!(right_drag_width(400.0, 100.0, 120.0), 380.0);
+        assert_eq!(right_drag_width(400.0, 100.0, 80.0), 420.0);
+    }
+
+    #[test]
+    fn a_right_drag_never_leaves_the_library_range() {
+        assert_eq!(right_drag_width(400.0, 0.0, -10_000.0), aui::shell::RIGHT_MAX_WIDTH);
+        assert_eq!(right_drag_width(400.0, 0.0, 10_000.0), aui::shell::RIGHT_MIN_WIDTH);
+        assert_eq!(right_drag_width(700.0, 200.0, 100.0), aui::shell::RIGHT_MAX_WIDTH);
+        assert_eq!(right_drag_width(300.0, 200.0, 300.0), aui::shell::RIGHT_MIN_WIDTH);
+    }
+
+    #[test]
+    fn an_empty_store_opens_the_right_pane_at_the_default_width() {
+        assert_eq!(right_width(&Layout::default()), aui::shell::RIGHT_WIDTH);
     }
 
     fn with_width(width: f32) -> Layout {
