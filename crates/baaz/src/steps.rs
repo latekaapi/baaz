@@ -82,7 +82,7 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
-//! | `right:<browser\|diff\|git\|files>` | open the right pane on that kind (same-kind-closes, like the ⌘K rows); empty toggles; unknown records a step failure, free |
+//! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
@@ -302,7 +302,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
 ];
 
 impl Harness {
-    /// `right:<browser|diff|git|files>`: open the right pane on that kind
+    /// `right:<browser|diff|git|files|off>`: open the right pane on that kind
     /// through the same [`Harness::show_right`] the ⌘K rows call, so the
     /// capture shows the production pane — same-kind-closes included.
     /// Empty toggles the pane through [`Harness::toggle_right`]. An
@@ -315,8 +315,27 @@ impl Harness {
             self.toggle_right(cx);
             return;
         }
+        // `off` closes it; a kind OPENS it, idempotently.
+        //
+        // Deliberately not `show_right`, which toggles when asked for the
+        // kind already showing — correct for ⌘K, wrong for a capture. The
+        // verb also persists, so a toggling verb made captures alternate:
+        // run one opened the pane and saved it, run two booted open on that
+        // kind and the same step closed it again, and the probe's
+        // two-captures-must-agree rule failed four entries out of five.
+        if slug.eq_ignore_ascii_case("off") || slug.eq_ignore_ascii_case("closed") {
+            self.layout.right_open = false;
+            crate::layout::write(&self.layout);
+            cx.notify();
+            return;
+        }
         match crate::layout::RightKind::parse(slug) {
-            Some(kind) => self.show_right(kind, cx),
+            Some(kind) => {
+                self.layout.right_kind = Some(kind);
+                self.layout.right_open = true;
+                crate::layout::write(&self.layout);
+                cx.notify();
+            }
             None => {
                 record_step_failure(&format!("right:{rest}"));
                 let known: Vec<&str> = crate::layout::RightKind::ALL.iter().map(|kind| kind.slug()).collect();

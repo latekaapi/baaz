@@ -53,7 +53,7 @@ ENTRIES = {
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
     "right-closed":         {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "right-width:400;right:files;right:files"]},
+                                      "--steps", "right-width:400;right:files;right:off"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
