@@ -8,7 +8,9 @@
 pub mod dock;
 pub mod host;
 pub mod intents;
+pub mod run;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub(crate) use host::key_input;
 pub use host::{Pick, TabOwner, TerminalHost, deterministic_script, title_from_command};
+pub use run::{RunRequest, send_enter_for_alt};

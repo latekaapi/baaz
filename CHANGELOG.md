@@ -161,6 +161,18 @@ the `aui` component library.
 - **The sidebar names running terminals.** A session row whose tab holds a
   running block reads `· 1 terminal running` on its meta line (pluralised
   past one).
+- **Play buttons run in the terminal.** Every shell tool card (Muse's shell
+  and the `!` userShell) carries **Run in terminal** in its header, and a
+  runnable fenced code block (`sh`, `bash`, `zsh`, `shell`, `terminal`,
+  `console`, or an untagged `$ `-prompt block) offers **Run** under its
+  turn. A click opens the dock, picks the project's idle active tab (else a
+  new one), bracketed-pastes the whole command and sends Enter; ⌥-click
+  pastes without Enter. `console` and `$ ` blocks run the prompt lines with
+  prompts stripped. Never auto-run, never a turn, never the wire — so the
+  buttons work under `--replay` too. (Placement note: the library's
+  markdown view carries no per-fence action slot, so the code-block buttons
+  ride as a row under the turn rather than in the fence headers; grouped
+  tool cards gain theirs when the library's group card grows the slot.)
 
 ### Projects
 

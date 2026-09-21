@@ -320,6 +320,16 @@ pub enum SessionEvent {
     TierOverride,
     /// "Check again" on the unknown-plan banner: re-probe the billing tier.
     TierRecheck,
+    /// A D49 play button was pressed: run `command` in the terminal dock.
+    /// Entirely local — the application pastes into a tab, never a turn,
+    /// never the wire — so it is honoured under `--replay` too.
+    RunInTerminal {
+        /// The exact command to paste, whole.
+        command: String,
+        /// A plain click sends Enter after the paste; an ⌥-click pastes
+        /// without it.
+        send_enter: bool,
+    },
 }
 
 /// The billing guard's banner over the composer, as the
