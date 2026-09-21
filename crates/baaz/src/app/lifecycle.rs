@@ -119,9 +119,19 @@ pub(crate) fn steps_ready_for(
     offline: bool,
     connected: bool,
     session_open: bool,
+    window_only: bool,
 ) -> bool {
     if !steps_pending {
         return false;
+    }
+    // A script that only touches the window needs no session. Offline with
+    // `--login signed-in` never opens one, so requiring a session there meant
+    // every window verb — the right pane, the menus, the sidebar flags —
+    // silently never ran: the capture came out clean and the run still exited
+    // 0. That is how five right-pane entries were written, gated green, and
+    // produced five byte-identical screenshots of a shell with no pane in it.
+    if window_only {
+        return true;
     }
     if replay || offline {
         return session_open;
@@ -570,6 +580,7 @@ impl Harness {
             self.args.offline,
             self.client.is_some(),
             self.active.is_some(),
+            crate::steps::all_window_steps(&self.args.steps),
         )
     }
 
@@ -2270,20 +2281,30 @@ mod tests {
     #[test]
     fn steps_run_live_only_with_a_wire_and_a_session() {
         // Live: both.
-        assert!(steps_ready_for(true, false, false, true, true));
-        assert!(!steps_ready_for(true, false, false, true, false));
-        assert!(!steps_ready_for(true, false, false, false, true));
-        assert!(!steps_ready_for(true, false, false, false, false));
+        assert!(steps_ready_for(true, false, false, true, true, false));
+        assert!(!steps_ready_for(true, false, false, true, false, false));
+        assert!(!steps_ready_for(true, false, false, false, true, false));
+        assert!(!steps_ready_for(true, false, false, false, false, false));
         // Replay and offline have no wire: the open session alone decides,
         // connected or not.
-        assert!(steps_ready_for(true, true, false, false, true));
-        assert!(steps_ready_for(true, false, true, false, true));
-        assert!(!steps_ready_for(true, true, false, false, false));
-        assert!(!steps_ready_for(true, false, true, false, false));
+        assert!(steps_ready_for(true, true, false, false, true, false));
+        assert!(steps_ready_for(true, false, true, false, true, false));
+        assert!(!steps_ready_for(true, true, false, false, false, false));
+        assert!(!steps_ready_for(true, false, true, false, false, false));
+        // A window-only script needs no session at all. This is the arm that
+        // was missing: `--login signed-in --no-connect` opens no session, so
+        // every window verb was silently skipped and the capture still
+        // exited 0. Five right-pane entries were written against that and
+        // produced five identical screenshots of an empty shell.
+        assert!(steps_ready_for(true, false, true, false, false, true));
+        assert!(steps_ready_for(true, false, false, false, false, true));
+        assert!(steps_ready_for(true, true, false, false, false, true));
+        // Still nothing to do with no steps pending, whatever else holds.
+        assert!(!steps_ready_for(false, false, true, false, false, true));
         // No script left, nowhere: never ready, in every mode.
-        assert!(!steps_ready_for(false, false, false, true, true));
-        assert!(!steps_ready_for(false, true, false, false, true));
-        assert!(!steps_ready_for(false, false, true, false, true));
+        assert!(!steps_ready_for(false, false, false, true, true, false));
+        assert!(!steps_ready_for(false, true, false, false, true, false));
+        assert!(!steps_ready_for(false, false, true, false, true, false));
     }
 
     #[test]

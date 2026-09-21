@@ -319,7 +319,8 @@ impl Harness {
             Some(kind) => self.show_right(kind, cx),
             None => {
                 record_step_failure(&format!("right:{rest}"));
-                crate::baaz_log!("unknown right pane kind `{rest}`");
+                let known: Vec<&str> = crate::layout::RightKind::ALL.iter().map(|kind| kind.slug()).collect();
+                crate::baaz_log!("unknown right pane kind `{rest}`; known kinds are {}", known.join(", "));
             }
         }
     }
@@ -455,6 +456,22 @@ pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Wind
 
 /// Whether a `--steps` item runs against the open session (as opposed to
 /// the window): mirrors [`window_step`]'s lookup without running anything.
+/// Whether every step in `steps` is a window verb — nothing that needs an
+/// open session. `wait:` counts as window-only: it touches nothing.
+///
+/// This is what lets an offline capture script the window with no session
+/// open. See [`crate::app::lifecycle::steps_ready_for`].
+pub(crate) fn all_window_steps(steps: &[String]) -> bool {
+    !steps.is_empty()
+        && steps.iter().all(|step| {
+            if step.strip_prefix("wait:").is_some() {
+                return true;
+            }
+            let (head, _) = split(step);
+            WINDOW_VERBS.iter().any(|v| v.verb == head)
+        })
+}
+
 fn is_session_step(step: &str) -> bool {
     let (head, _) = split(step);
     WINDOW_VERBS.iter().all(|v| v.verb != head)
@@ -624,7 +641,7 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOGIN_VERBS, SESSION_VERBS, WINDOW_VERBS};
+    use super::{all_window_steps, LOGIN_VERBS, SESSION_VERBS, WINDOW_VERBS};
     use std::collections::BTreeSet;
 
     /// This very file, so the documented tables and the verb tables can be
@@ -664,6 +681,18 @@ mod tests {
     fn every_login_steps_verb_is_documented_and_every_documented_verb_exists() {
         let known: BTreeSet<String> = LOGIN_VERBS.iter().map(|v| v.verb.to_owned()).collect();
         assert_eq!(documented("//! # `--login-steps <a;b;c>`"), known);
+    }
+
+    #[test]
+    fn a_window_only_script_is_recognised() {
+        assert!(all_window_steps(&["right:files".into(), "right-width:400".into()]));
+        assert!(all_window_steps(&["right:files".into(), "wait:100".into()]));
+        // One session verb is enough to need a session.
+        assert!(!all_window_steps(&["right:files".into(), "draft:hello".into()]));
+        // An unknown verb is not a window verb; the run must not be let
+        // through on the strength of a typo.
+        assert!(!all_window_steps(&["right:files".into(), "nonsense".into()]));
+        assert!(!all_window_steps(&[]));
     }
 
     #[test]
