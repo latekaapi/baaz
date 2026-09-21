@@ -17,8 +17,10 @@ wins and the discrepancy is written down in `CHANGELOG.md`.
 
 ## 1. Goal and scope
 
-One window. Left: the sessions sidebar. Centre: transcript + docked composer. No right pane
-in this slice (the shell keeps the slot; `ToggleRightPane` is a no-op that stays wired).
+One window. Left: the sessions sidebar. Centre: transcript + docked composer. Right: the
+right pane, closed until asked for — a browser, a diff review, git changes with a PR form,
+or the workspace file tree — opened on its kind and toggled with ⌘⌥B (`ToggleRightPane`)
+or the centre header's PanelRight button.
 
 In scope, all against the real `muse serve` backend:
 
@@ -42,7 +44,7 @@ In scope, all against the real `muse serve` backend:
   session-identity and protocol errors; reconnect on child exit.
 - **Keyboard**: full keyboard operation of composer, menus, approvals and questions (§3.9).
 
-Out of scope: right pane (diffs/terminal/browser), subagent drill-in, workflows control,
+Out of scope: subagent drill-in, workflows control,
 voice, worktrees, enterprise config, any other provider.
 
 ## 2. Architecture
@@ -236,7 +238,10 @@ over title + first prompt + search text.
 ### 3.10 Slash commands (client-side)
 
 `/model`, `/effort`, `/mode`, `/plan`, `/compact`, `/fork`, `/name`, `/resume`, `/status`,
-`/usage`, `/clear` (new session), `/logout`, `/help`. Skills from `muse skills list` appear in
+`/usage`, `/clear` (new session), `/logout`, `/help`. Six window commands sit together just
+before `/help`: `/browser`, `/diff`, `/changes` and `/files` open the right pane on that
+kind, and `/terminal` and `/new-terminal` toggle the terminal dock and open a new terminal
+tab. Skills from `muse skills list` appear in
 the same menu tagged `skill`, and insert `/name ` as text.
 
 ## 4. Library changes (in agentic-ui)

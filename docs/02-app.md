@@ -587,10 +587,32 @@ elides to one line, so a whole first prompt as the label can never push the
 overflow button out. Renaming the open session swaps the session label for
 the same dense single-line field the sidebar row uses, and renaming the
 project swaps the crumb's name, both through the same confirm/Escape path.
-There is no
-right-pane toggle and no right-header close button — the right pane's slot
-stays empty; the shell is always given `right_open(false)`, and there is no
-per-session state for it any more (B-DEAD-3, 2026-09-12). The
+The centre header carries the right-pane toggle (the PanelRight button, ⌘⌥B's button,
+lit while the pane stands open), and the right header carries its title and close button.
+The right pane holds one of four kinds — Browser, Diff review, Changes (git changes with
+the PR form), Files (the workspace file tree) — and reopening it restores whichever kind
+was last shown. The toggle flips the pane; opening a kind records it and shows it, and
+opening the shown kind closes the pane again. Four ⌘K commands open it directly on a kind
+(`/browser`, `/diff`, `/changes`, `/files`), and two more own the terminal dock
+(`/terminal`, `/new-terminal`); all six are window commands, answered before any session
+delegation, which is why they act with no session open.
+
+The panes show real read-only data — the working tree's unstaged diff, its git status, a
+one-level file walk — but every action in them is deliberately inert in this stage: each
+button logs `right pane: <pane> action <action> is not wired yet` and raises a toast
+saying nothing happened. A button that looked live and did nothing would be worse than one
+that says plainly it is not wired yet. The browser pane has no web engine attached, so it
+is chrome over a placeholder that says so; the address bar does nothing for now.
+
+The pane's state is global, not per-session: open, width and last-shown kind persist in
+`layout.json` as `rightOpen`, `rightWidth` and `rightKind` (restored at boot, `Files` when
+nothing was ever stored), and there is no per-session state for it
+(B-DEAD-3, 2026-09-12). The divider drags against the pointer — it sits on the pane's
+left edge, so moving right narrows — and settles clamped into the library range
+(`aui::shell::RIGHT_MIN_WIDTH` to `RIGHT_MAX_WIDTH`, 280 to 720 px; 400 px when never
+resized). `--steps right:<browser|diff|git|files|off>` opens the pane on that kind (`off`
+closes it, empty toggles) and `--steps right-width:<px>` settles the divider for
+captures. The
 shell wraps the header row in its drag region, so press-drag moves the window
 and double-click zooms while the buttons and the rename field keep their
 clicks. Collapsed (⌘B), only the pane below becomes the 48 px rail: the header
@@ -1183,8 +1205,6 @@ The banner stays up until the new child answers.
 
 ## 8. What is deliberately not here
 
-- **No right pane.** The shell keeps the column and `ToggleRightPane` stays
-  bound as a no-op, so nothing has to move when Phase 5 fills it.
 - **Approvals and questions are read-only.** A card that looked actionable and
   did nothing would be worse than one that plainly is not. Stop still works.
 - **No queue strip, no menus, no context meter, no plan mode, no mentions, no

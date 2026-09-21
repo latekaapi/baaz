@@ -62,9 +62,10 @@ stays where the person was typing and the needs-you banner is the way over.
 | Key | What it does |
 |---|---|
 | ⌘B | Sidebar ↔ collapsed rail |
+| ⌘⌥B | The right pane ↔ closed; reopening restores the last-shown kind (Browser, Diff review, Changes, Files) |
 | ⌘N | New session in this workspace |
 | ⌘, | The Settings dialog (File → Settings…; its Sidebar section owns the three group flags) |
-| ⌘K | The command palette: every `/` command and every session operation |
+| ⌘K | The command palette: every `/` command and every session operation — the six window commands among them act with no session open |
 | ⌘⇧F | The full-text search palette (`docs/12-search.md`); its empty query lists recent sessions, which is what the old sidebar filter did |
 | ⌘⇧O | The Projects palette: adopted projects to switch to, recent Muse workspaces to adopt |
 | ⌘⇧M / ⌘⇧E / ⌘⇧P | Model / reasoning effort / approval mode |
@@ -81,7 +82,7 @@ stays where the person was typing and the needs-you banner is the way over.
 | Every other key | To the pty | `BaazTerminal` |
 | ⌃C | SIGINT to the active tab | `BaazTerminal` |
 | ⌘C | Copy the grid selection, if any | `BaazTerminal` |
-| ⌘K | The command palette (gains "Toggle terminal" and "New terminal") | `AuiRoot` |
+| ⌘K | The command palette (gains "Toggle the terminal dock" and "Open a new terminal tab", with the four right-pane commands beside them) | `AuiRoot` |
 | ⌘B | Sidebar ↔ collapsed rail | `AuiRoot` |
 | ⌘W | Close the window | `AuiRoot` |
 | ⌘Q | Quit (asks first when a terminal command is running, naming it) | `AuiRoot` |
