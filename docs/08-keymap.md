@@ -73,6 +73,25 @@ stays where the person was typing and the needs-you banner is the way over.
 | ⌘M | Minimize the window |
 | Tab / ⇧Tab | The next / previous tab stop, and it arms the focus ring |
 
+## Terminal
+
+| Key | What it does | Context |
+|---|---|---|
+| ⌃` | Toggle the terminal dock, focusing it on open | `AuiRoot` |
+| Every other key | To the pty | `BaazTerminal` |
+| ⌃C | SIGINT to the active tab | `BaazTerminal` |
+| ⌘C | Copy the grid selection, if any | `BaazTerminal` |
+| ⌘K | The command palette (gains "Toggle terminal" and "New terminal") | `AuiRoot` |
+| ⌘B | Sidebar ↔ collapsed rail | `AuiRoot` |
+| ⌘W | Close the window | `AuiRoot` |
+| ⌘Q | Quit | `AuiRoot` |
+| ⌘N | New session in this workspace | `AuiRoot` |
+
+The grid runs under `BaazTerminal`: every key reaches the pty except the
+rows above. The composer's Enter, paste, history and ⇧Tab keys, and the
+turn's ⌃C, are nulled in `BaazTerminal` so they never fire while the dock
+holds the keyboard.
+
 ## Focus rings
 
 gpui has no `:focus-visible`, so the library keeps one window-wide flag: a key

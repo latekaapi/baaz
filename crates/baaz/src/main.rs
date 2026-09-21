@@ -68,6 +68,7 @@ mod sidebar_view;
 mod skills;
 mod steps;
 mod store;
+mod terminal;
 mod tier;
 mod titles;
 mod transcript;
