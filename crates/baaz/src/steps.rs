@@ -147,6 +147,65 @@ use crate::overlays::{Command, MenuKind, PaletteKind};
 use crate::session::{SessionEvent, SessionView};
 use crate::wire::WireCall;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Scripted-step accounting: a flow script that names a renamed verb used to
+/// pass silently (a stderr line, exit 0), so the script rotted into a no-op
+/// unnoticed. Every unknown step now counts one failure, and the scripted-run
+/// exit fails the process when the count is non-zero. This closes exactly
+/// that hole; a known step that silently does nothing is still not detected.
+static STEP_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Every scripted item seen: drained items counted by the runners below, plus
+/// any list the capture finds still undrained because the run never became
+/// able to execute it (see `record_unrun_steps`).
+static STEPS_RAN: AtomicU64 = AtomicU64::new(0);
+/// The unknown step names behind `STEP_FAILURES`, in order, for the
+/// one-line-per-failure report before exit.
+static FAILED_STEP_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Failures so far; the scripted-run exit fails when this is non-zero.
+pub(crate) fn step_failures() -> u64 {
+    STEP_FAILURES.load(Ordering::Relaxed)
+}
+
+/// Scripted items seen so far, for the `steps: ran=<n> failed=<n>` line.
+pub(crate) fn steps_ran() -> u64 {
+    STEPS_RAN.load(Ordering::Relaxed)
+}
+
+/// Unknown step names behind `step_failures`, in order.
+pub(crate) fn step_failure_names() -> Vec<String> {
+    FAILED_STEP_NAMES.lock().map(|names| names.clone()).unwrap_or_default()
+}
+
+/// Count one scripted item, failing it when it names no known verb. Free:
+/// table lookups only, nothing reaches the wire.
+pub(crate) fn record_unrun_steps(steps: &[String]) {
+    for step in steps {
+        STEPS_RAN.fetch_add(1, Ordering::Relaxed);
+        if !is_known_step(step) {
+            record_step_failure(step);
+        }
+    }
+}
+
+/// Whether a `--steps` item names a known verb, window or session. `wait:`
+/// never reaches a table; it is the runners' own.
+fn is_known_step(step: &str) -> bool {
+    if step.strip_prefix("wait:").is_some() {
+        return true;
+    }
+    let (head, _) = split(step);
+    WINDOW_VERBS.iter().any(|v| v.verb == head) || SESSION_VERBS.iter().any(|v| v.verb == head)
+}
+
+fn record_step_failure(step: &str) {
+    STEP_FAILURES.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut names) = FAILED_STEP_NAMES.lock() {
+        names.push(step.to_owned());
+    }
+}
+
 /// The one parser: a step is `verb` or `verb:<payload>`.
 ///
 /// The payload keeps every character after the first colon, which is what lets
@@ -346,7 +405,10 @@ pub(crate) fn session_step(view: &mut SessionView, step: &str, window: &mut Wind
     let (head, rest) = split(step);
     match SESSION_VERBS.iter().find(|v| v.verb == head) {
         Some(verb) => (verb.run)(view, rest, window, cx),
-        None => crate::baaz_log!("unknown step `{head}`"),
+        None => {
+            record_step_failure(step);
+            crate::baaz_log!("unknown step `{head}`")
+        }
     }
 }
 
@@ -371,6 +433,7 @@ pub(crate) fn login_step(this: &mut Harness, step: &str, window: &mut Window, cx
     match LOGIN_VERBS.iter().find(|v| v.verb == head) {
         Some(verb) => (verb.run)(this, rest, window, cx),
         None => {
+            record_step_failure(step);
             crate::baaz_log!("unknown login step `{step}`");
             false
         }
@@ -393,6 +456,7 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
+            STEPS_RAN.fetch_add(1, Ordering::Relaxed);
             if let Some(ms) = step.strip_prefix("wait:") {
                 let ms: u64 = ms.parse().unwrap_or(0);
                 cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
@@ -434,6 +498,9 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                     .unwrap_or(false);
                 if !has_session {
                     crate::baaz_log!("`{step}`: no open session; skipped");
+                    if !is_known_step(&step) {
+                        record_step_failure(&step);
+                    }
                     continue;
                 }
             }
@@ -490,6 +557,7 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
+            STEPS_RAN.fetch_add(1, Ordering::Relaxed);
             if let Some(ms) = step.strip_prefix("wait:") {
                 let ms: u64 = ms.parse().unwrap_or(0);
                 cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
@@ -562,6 +630,14 @@ mod tests {
         assert_eq!(super::split("plan"), ("plan", ""));
         assert_eq!(super::split("draft:hello"), ("draft", "hello"));
         assert_eq!(super::split("select-text:2:0-40"), ("select-text", "2:0-40"));
+    }
+
+    #[test]
+    fn unknown_steps_classify_as_failures_and_wait_is_known() {
+        assert!(super::is_known_step("palette"));
+        assert!(super::is_known_step("draft:hello"));
+        assert!(super::is_known_step("wait:3000"));
+        assert!(!super::is_known_step("totally-bogus-verb"));
     }
 
     #[test]
