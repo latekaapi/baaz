@@ -58,6 +58,7 @@ mod plan;
 mod project_menu;
 mod projects;
 mod resize;
+mod right;
 mod search;
 mod session;
 mod sessions;
