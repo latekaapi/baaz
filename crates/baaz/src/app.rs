@@ -19,7 +19,7 @@
 //!
 //! Two, and the auth probe decides which: the login screen (spec §3.2) or
 //! the shell. The shell's right
-//! pane is not used; the column is always closed.
+//! pane opens on demand (⌘⌥B); the column starts closed.
 //!
 //! # What lives elsewhere
 //!
@@ -36,7 +36,7 @@
 //!   palette, the toast stack and the header's overflow menu.
 //! * [`crate::billing`] — the tier probe's lifecycle and the banner it hands
 //!   to the open session.
-//! * [`crate::resize`] — the sidebar divider's drag.
+//! * [`crate::resize`] — the sidebar and right-pane dividers' drags.
 //! * [`crate::steps`] — `--steps` and `--login-steps`: the verb tables, the
 //!   parser and the two runners.
 //! * [`crate::wire`] — background call, then update.
@@ -64,9 +64,9 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, actions, div, point,
-    prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding,
-    ListState, NoAction, SharedString, Subscription, Task, Window,
+    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, StyleRefinement,
+    Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle,
+    Focusable, KeyBinding, ListState, NoAction, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -81,7 +81,8 @@ use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
-use crate::resize::ResizeDrag;
+use crate::resize::{ResizeDrag, RightResizeDrag};
+use crate::right;
 use crate::shot::CaptureToken;
 use crate::session::{self, Draft, SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
@@ -140,6 +141,8 @@ actions!(
         ConfirmRename,
         /// Toggle the terminal dock (⌃`).
         ToggleTerminal,
+        /// Toggle the right pane (⌘⌥B).
+        ToggleRightPane,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -279,6 +282,7 @@ pub fn bind_keys(cx: &mut App) {
         // ⌘K, ⌘B, ⌘W, ⌘Q and ⌘N stay bound at the root, above the grid, and
         // ⌘C with a selection is the grid's own copy.
         KeyBinding::new("ctrl-`", ToggleTerminal, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("cmd-alt-b", ToggleRightPane, Some(aui::keys::ROOT_CONTEXT)),
         KeyBinding::new("ctrl-c", TerminalSigint, Some(TERMINAL_CONTEXT)),
         KeyBinding::new("enter", NoAction {}, Some("BaazTerminal && !menu")),
         KeyBinding::new("up", NoAction {}, Some("BaazTerminal && !menu")),
@@ -509,6 +513,10 @@ pub struct Harness {
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
+    /// The right pane divider's width and whatever drag is in flight over
+    /// it. Never active while [`Self::resize`] is: the two dividers cannot
+    /// both be under the pointer, so one capture overlay covers both drags.
+    pub(crate) right_resize: RightResizeDrag,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -785,6 +793,8 @@ impl Harness {
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
         // The divider's last settled x, or the default for a fresh store.
         let restored = layout::sidebar_width(&layout::read());
+        // The right divider's last settled width, or the default.
+        let right_restored = layout::right_width(&layout::read());
         let mut this = Self {
             args,
             client: None,
@@ -808,6 +818,7 @@ impl Harness {
             overlays: cx.new(|_| Overlays::default()),
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
+            right_resize: RightResizeDrag::restored(right_restored),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -1516,6 +1527,36 @@ impl Harness {
         cx.notify();
     }
 
+    /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
+    /// flips the open state, persists it, notifies.
+    pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        self.layout.right_open = !self.layout.right_open;
+        crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
+        layout::write(&self.layout);
+        cx.notify();
+    }
+
+    /// Open the right pane on `kind`: records the kind, forces the pane
+    /// open, persists, notifies. Task T3 calls this from the ⌘K palette, so
+    /// it works with no session open and never touches [`Self::active`].
+    /// Calling it with the kind already showing while the pane is open
+    /// closes the pane again, the way pressing a menu's own button closes it.
+    // Dead in the binary until T3 wires the ⌘K commands that call it; the
+    // tests below do exercise it. Remove this allow when T3 lands — if it is
+    // still here afterwards, the palette entries were never connected.
+    #[allow(dead_code)]
+    pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        if self.layout.right_open && self.layout.right_kind == Some(kind) {
+            self.layout.right_open = false;
+        } else {
+            self.layout.right_kind = Some(kind);
+            self.layout.right_open = true;
+        }
+        crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
+        layout::write(&self.layout);
+        cx.notify();
+    }
+
     /// A new terminal tab on the current project, opening the dock for it.
     ///
     /// Goes through D43's [`pick`](terminal::TerminalHost::pick) with a
@@ -1962,6 +2003,34 @@ impl Harness {
         } else {
             term_button = term_button.muted().on_click(term_toggle);
         }
+        // The right-pane toggle: ⌘⌥B's button, lit while the pane stands
+        // open. The centre cell is a custom `header_cell` (project crumb,
+        // session rename, overflow seating), not the library's
+        // `centre_header`, so the library's `on_toggle_right` has no
+        // compatible builder here — and the right cell collapses to width
+        // zero while closed, so a toggle placed there could close but never
+        // reopen. This is the same ghost `PanelRight` the library paints,
+        // wired straight to `toggle_right`, with a hover label naming what
+        // it does.
+        let right_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.toggle_right(cx);
+        });
+        let mut right_button =
+            icon_button("hd-centre-toggle-right", IconName::PanelRight).ghost().size(ButtonSize::Sm);
+        if self.layout.right_open {
+            right_button = right_button.on_click(right_toggle);
+        } else {
+            right_button = right_button.muted().on_click(right_toggle);
+        }
+        // The tooltip names the button for a pointer; the role and label name
+        // it for everything else. `icon_button` yields a `Button`, which has
+        // no aria builder of its own, so the wrapper carries both.
+        let right_tip = div()
+            .id("hd-centre-toggle-right-tip")
+            .role(gpui::Role::Button)
+            .aria_label("Toggle right pane")
+            .tooltip(|_, cx| cx.new(|_| RightToggleTip).into())
+            .child(right_button);
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
@@ -1987,6 +2056,7 @@ impl Harness {
                             .on_click(overflow),
                     ),
             )
+            .child(right_tip)
             .into_any_element()
     }
 
@@ -2189,6 +2259,9 @@ impl Harness {
             }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRightPane, _, cx| {
+                this.toggle_right(cx);
             }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.new_terminal(window, cx);
@@ -2393,6 +2466,27 @@ impl Harness {
 ///
 /// A session with no user prompt still did something, and what it did is the
 /// only honest thing to call it. `session/read` makes no model call.
+/// The hover label on the header's right-pane toggle: what it does, not
+/// what it is.
+struct RightToggleTip;
+
+impl gpui::Render for RightToggleTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let p = cx.aui().colors;
+        div()
+            .px(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .rounded(px(scale::R_SM))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.overlay)
+            .text_color(p.ink)
+            .ui(scale::FS_12)
+            .whitespace_nowrap()
+            .child("Toggle right pane")
+    }
+}
+
 fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<String> {
     // The server decides what it serves, never the client: `mode: inline`
     // fills `items`, a snapshot fills `snapshot.state.items`, and both carry
@@ -2455,6 +2549,13 @@ impl Harness {
         if self.resize.active && !self.resize.scripted && !window.is_window_active() {
             self.resize.active = false;
             self.resize.persist();
+        }
+        // The right drag's twin: a release outside the window never reaches
+        // the overlay either, so an armed right drag settles where it stands
+        // when the window goes inactive.
+        if self.right_resize.active && !self.right_resize.scripted && !window.is_window_active() {
+            self.right_resize.active = false;
+            self.right_resize.persist();
         }
         // A frame-paced width sweep marches the divider one step per
         // rendered frame (scripting only): each tick logs
@@ -2607,16 +2708,18 @@ impl Render for Harness {
             let centre = self.render_centre(window, cx);
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
+            let kind = layout::right_kind(&self.layout);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
-                .resizing(self.resize.active)
+                .right_width(px(self.right_resize.width))
+                .resizing(self.resize.active || self.right_resize.active)
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
                 // The header row stands still while the pane collapses: the
                 // sidebar cell keeps its width — and the native-lights
                 // reservation — so the toggle and search stay where they are.
                 .header_follows_sidebar(false)
-                .right_open(false)
+                .right_open(self.layout.right_open)
                 .header_sidebar(
                     sidebar_header("hd-side")
                         .native_lights(true)
@@ -2624,13 +2727,18 @@ impl Render for Harness {
                         .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
                 )
                 .header_centre(self.render_centre_header(window, cx))
-                // The right pane is never opened; its header cell carries
-                // nothing.
-                .header_right(header_cell("hd-right").child(div()))
+                .header_right(
+                    header_cell("hd-right").child(
+                        div()
+                            .id("hd-right-title")
+                            .role(gpui::Role::Label)
+                            .aria_label(kind.label())
+                            .child(kind.label()),
+                    ),
+                )
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
-                // The right pane is never opened; the slot stays empty.
-                .right(div().size_full())
+                .right(right::render(kind, cx))
                 .centre(centre)
                 .into_any_element();
             // The strip sits over the divider, centred on the settled edge:
@@ -2661,6 +2769,37 @@ impl Render for Harness {
                         ),
                 );
             }
+            // The right strip sits over the right divider, centred on the
+            // settled edge from the RIGHT: the pane fills the window's right
+            // edge, so the divider stands `width` left of it. Hidden with
+            // the pane: there is no divider to grab while it stands closed.
+            if self.layout.right_open {
+                let press = cx.entity().downgrade();
+                let travel = cx.entity().downgrade();
+                let release = cx.entity().downgrade();
+                stack = stack.child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .right(px(self.right_resize.width - RESIZE_HANDLE_W / 2.0))
+                        .id("right-resize-area")
+                        .role(gpui::Role::Splitter)
+                        .aria_label("Resize right pane")
+                        .child(
+                            resize_handle("right-resize")
+                                .on_drag_start(move |x, _, cx| {
+                                    press.update(cx, |this, cx| this.begin_right_resize(x, cx)).ok();
+                                })
+                                .on_drag(move |x, _, cx| {
+                                    travel.update(cx, |this, cx| this.drag_right_resize(x, cx)).ok();
+                                })
+                                .on_drag_end(move |_, cx| {
+                                    release.update(cx, |this, cx| this.end_right_resize(cx)).ok();
+                                }),
+                        ),
+                );
+            }
             stack.into_any_element()
         } else {
             self.render_login(window, cx).into_any_element()
@@ -2671,18 +2810,37 @@ impl Render for Harness {
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
-        let capture: Option<AnyElement> = self.resize.active.then(|| {
-            let travel = cx.entity().downgrade();
-            let release = cx.entity().downgrade();
-            drag_capture_overlay("resize-capture")
-                .on_drag(move |x, _, cx| {
-                    travel.update(cx, |this, cx| this.drag_resize(x, cx)).ok();
-                })
-                .on_drag_end(move |_, cx| {
-                    release.update(cx, |this, cx| this.end_resize(cx)).ok();
-                })
-                .into_any_element()
-        });
+        // One overlay, not two: the two drags never run together, so it
+        // routes every move to whichever one is in flight.
+        let capture: Option<AnyElement> =
+            (self.resize.active || self.right_resize.active).then(|| {
+                let travel = cx.entity().downgrade();
+                let release = cx.entity().downgrade();
+                drag_capture_overlay("resize-capture")
+                    .on_drag(move |x, _, cx| {
+                        travel
+                            .update(cx, |this, cx| {
+                                if this.resize.active {
+                                    this.drag_resize(x, cx);
+                                } else {
+                                    this.drag_right_resize(x, cx);
+                                }
+                            })
+                            .ok();
+                    })
+                    .on_drag_end(move |_, cx| {
+                        release
+                            .update(cx, |this, cx| {
+                                if this.resize.active {
+                                    this.end_resize(cx);
+                                } else {
+                                    this.end_right_resize(cx);
+                                }
+                            })
+                            .ok();
+                    })
+                    .into_any_element()
+            });
         let overflow = self.render_overflow_menu(cx);
         let row_detail = self.render_row_detail(cx);
         let view_options = self.render_view_menu(cx);
@@ -2880,7 +3038,169 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::find_docs_dir;
+    use super::Harness;
+    // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
+    use gpui::AppContext as _;
     use std::path::PathBuf;
+
+    /// A bootable [`crate::Args`] pointed at a hermetic state dir.
+    fn test_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    /// Point `BAAZ_STATE_DIR` at a fresh temp dir for the test's duration,
+    /// restoring whatever was there before. Returns the lock guard, the old
+    /// value and the dir; the caller restores and drops them at the end.
+    fn hermetic_state(name: &str) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-right-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    /// Undo [`hermetic_state`]: remove the temp dir, put the old value back,
+    /// release the lock so no test leaks its dir into another.
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_state(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf),
+    ) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
+    /// `toggle_right` twice returns the pane to its start.
+    #[gpui::test]
+    fn toggling_the_right_pane_twice_returns_to_its_start(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("toggle");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let start = vc.update(|_, cx| baaz.read(cx).layout.right_open);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            !start,
+            "one toggle flips the pane"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            start,
+            "two toggles return to the start"
+        );
+        restore_state(state);
+    }
+
+    /// `show_right` opens each of the four kinds, closes the pane when
+    /// called with the kind already showing, and switches kinds without
+    /// closing — all with no session open.
+    #[gpui::test]
+    fn show_right_opens_each_kind_and_closes_the_current_one(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("show");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "no session is open");
+        for kind in crate::layout::RightKind::ALL {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
+            assert!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} opens the pane"
+            );
+            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            // The same kind again closes the pane, keeping the kind so a
+            // later reopen restores it.
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
+            assert!(
+                !vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} again closes the pane"
+            );
+            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "show_right never opens a session");
+        }
+        // A different kind while open switches without closing.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Files, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx))
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).layout.right_kind),
+            Some(crate::layout::RightKind::Diff)
+        );
+        restore_state(state);
+    }
+
+    /// Beginning one divider's drag while the other runs is a no-op: both
+    /// drags are never active at once.
+    #[gpui::test]
+    fn the_two_resize_drags_never_run_together(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("drags");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.begin_resize(100.0, cx);
+                assert!(h.resize.active);
+                h.begin_right_resize(100.0, cx);
+                assert!(!h.right_resize.active, "a right press mid-sidebar-drag is a no-op");
+                h.end_resize(cx);
+                assert!(!h.resize.active);
+                h.begin_right_resize(100.0, cx);
+                assert!(h.right_resize.active);
+                h.begin_resize(100.0, cx);
+                assert!(!h.resize.active, "a sidebar press mid-right-drag is a no-op");
+                h.end_right_resize(cx);
+                assert!(!h.right_resize.active);
+            })
+        });
+        restore_state(state);
+    }
 
     /// A scratch root with an optional `docs/` child, removed on drop.
     struct Scratch {
