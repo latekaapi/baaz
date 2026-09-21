@@ -138,6 +138,18 @@ the `aui` component library.
   `/`-command menu (including skills from `muse skills list`); prompt
   history; image attachments.
 
+### Terminal
+
+- **The terminal dock.** A real terminal under the composer (⌃` toggles it,
+  and the centre header carries its button): per-project tabs over `$SHELL
+  -l -i` with shell integration, outliving session switches and dying with
+  the app. Open state and height persist in `layout.json`; the grid runs
+  under the `BaazTerminal` key context, so every key reaches the pty except
+  ⌃`, ⌘K, ⌘B, ⌘W, ⌘Q, ⌘N and ⌘C with a selection. A `terminal-dock:` steps
+  verb replays a scripted tab for deterministic captures
+  (`docs/images/terminal-dock-dark.png`,
+  `docs/images/terminal-dock-light.png`).
+
 ### Projects
 
 - **Projects.** A sidebar over several workspaces at once — add a folder,

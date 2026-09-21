@@ -25,6 +25,7 @@ aui-protocol.workspace = true
 aui-motion.workspace = true
 aui-tokens.workspace = true
 aui-icons.workspace = true
+aui-terminal.workspace = true
 muse-client.workspace = true
 muse-adapter.workspace = true
 anyhow.workspace = true

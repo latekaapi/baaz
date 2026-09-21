@@ -82,6 +82,15 @@ pub struct Layout {
     /// preview rung only. Same ownership as [`Self::auto_title`].
     #[serde(rename = "autoSummary", default = "default_true")]
     pub auto_summary: bool,
+    /// Whether the terminal dock stands open in the centre column, under
+    /// the composer (D42). Closed by default: the dock is asked for, never
+    /// assumed.
+    #[serde(rename = "terminalOpen", default)]
+    pub terminal_open: bool,
+    /// The settled dock height in window pixels, if the person ever set
+    /// one. `None` is "never resized": the default height.
+    #[serde(rename = "terminalHeight", default, skip_serializing_if = "Option::is_none")]
+    pub terminal_height: Option<f32>,
 }
 
 /// The default for the auto-title and auto-summary switches: ON. A missing
@@ -107,6 +116,8 @@ impl Default for Layout {
             group_branch: false,
             auto_title: true,
             auto_summary: true,
+            terminal_open: false,
+            terminal_height: None,
         }
     }
 }
@@ -190,6 +201,8 @@ mod tests {
             group_branch: true,
             auto_title: true,
             auto_summary: true,
+            terminal_open: true,
+            terminal_height: Some(300.0),
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -199,6 +212,8 @@ mod tests {
         assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
         assert!(text.contains("\"groupBranch\":true"));
+        assert!(text.contains("\"terminalOpen\":true"));
+        assert!(text.contains("\"terminalHeight\":300.0"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
@@ -207,6 +222,8 @@ mod tests {
         assert!(back.group_chevron);
         assert!(back.group_bar);
         assert!(back.group_branch);
+        assert!(back.terminal_open);
+        assert_eq!(back.terminal_height, Some(300.0));
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.group_by, None);
@@ -221,6 +238,11 @@ mod tests {
         assert!(Layout::default().auto_summary);
         assert!(old.auto_title);
         assert!(old.auto_summary);
+        // The dock starts closed at its default height, old files included.
+        assert!(!Layout::default().terminal_open);
+        assert_eq!(Layout::default().terminal_height, None);
+        assert!(!old.terminal_open);
+        assert_eq!(old.terminal_height, None);
     }
 
     fn with_width(width: f32) -> Layout {

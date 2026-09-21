@@ -43,6 +43,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -56,14 +57,16 @@ use aui::shell::{
     RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
     header_cell, resize_handle, sidebar_header,
 };
-use aui_icons::{icon, IconName};
+use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
+use aui_icons::{icon, IconName, Provider};
+use aui_terminal::{terminal_grid, TerminalGridIntent};
 use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
     Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, actions, div, point,
     prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding,
-    ListState, SharedString, Subscription, Task, Window,
+    KeyDownEvent, ListState, NoAction, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -89,6 +92,7 @@ use aui::nav::{sidebar_list_state, SidebarRow};
 use crate::sidebar::{self, Grouping, SessionEntry};
 use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState};
 use crate::search::{FileHit, SessionHit};
+use crate::terminal::{self, TabOwner, TerminalHost};
 use crate::wire::WireCall;
 use crate::{layout, Args};
 
@@ -133,6 +137,12 @@ actions!(
         FocusSearch,
         /// Commit the sidebar row's inline rename (Enter).
         ConfirmRename,
+        /// Toggle the terminal dock (⌃`).
+        ToggleTerminal,
+        /// Open a new terminal tab on the current project.
+        NewTerminal,
+        /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
+        TerminalSigint,
         /// Copy the transcript's held text selection (⌘C).
         CopySelection,
         /// Close the window (⌘W), after the tier-probe cleanup.
@@ -181,6 +191,16 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 /// the prompt history). With none of them set, the arrow keys belong to the
 /// editor, where they always did.
 const COMPOSER_CONTEXT: &str = "BaazComposer";
+
+/// The context the terminal dock wears (`docs/14-terminal.md:192`). The grid
+/// runs under it: every key reaches the pty except ⌃`, ⌘K, ⌘B, ⌘W, ⌘Q, ⌘N
+/// (bound above the grid, at the root) and ⌘C with a selection (which the
+/// grid copies itself). The `NoAction` bindings in [`bind_keys`] keep the
+/// composer's Enter, paste and history keys — and the turn's ⌃C — from
+/// firing while the dock holds the keyboard: `BaazTerminal` hangs deeper in
+/// the tree than they do, so it wins, and `NoAction` consumes the keystroke
+/// without an action, which hands it to the grid's own key handler.
+pub(crate) const TERMINAL_CONTEXT: &str = "BaazTerminal";
 
 /// The toast stack's own width, the library's `.toast{width:320px}`.
 pub(crate) const TOAST_W: f32 = 320.0;
@@ -250,6 +270,22 @@ pub fn bind_keys(cx: &mut App) {
         // The transcript list wears `TRANSCRIPT_CONTEXT`; the predicate keeps
         // this off the composer and every field, so copy there stays native.
         KeyBinding::new("cmd-c", CopySelection, Some(crate::session::TRANSCRIPT_COPY_KEYS)),
+        // The terminal dock: ⌃` toggles it from anywhere. The grid runs
+        // under `BaazTerminal` (see [`TERMINAL_CONTEXT`]): every other key
+        // reaches the pty, so the composer's Enter/paste/history keys and
+        // the turn's ⌃C are nulled there — `NoAction` suppresses the weaker
+        // match and the keystroke falls through to the grid's own handler.
+        // ⌘K, ⌘B, ⌘W, ⌘Q and ⌘N stay bound at the root, above the grid, and
+        // ⌘C with a selection is the grid's own copy.
+        KeyBinding::new("ctrl-`", ToggleTerminal, Some(aui::keys::ROOT_CONTEXT)),
+        KeyBinding::new("ctrl-c", TerminalSigint, Some(TERMINAL_CONTEXT)),
+        KeyBinding::new("enter", NoAction {}, Some("BaazTerminal && !menu")),
+        KeyBinding::new("up", NoAction {}, Some("BaazTerminal && !menu")),
+        KeyBinding::new("down", NoAction {}, Some("BaazTerminal && !menu")),
+        KeyBinding::new("cmd-v", NoAction {}, Some("BaazTerminal")),
+        KeyBinding::new("cmd-u", NoAction {}, Some("BaazTerminal")),
+        KeyBinding::new("cmd-enter", NoAction {}, Some("BaazTerminal")),
+        KeyBinding::new("shift-tab", NoAction {}, Some("BaazTerminal")),
     ]);
 }
 
@@ -542,6 +578,14 @@ pub struct Harness {
     sessions_list_stale: bool,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
+    /// The terminal tabs behind the dock, keyed by project root (D43).
+    pub(crate) terminal_host: Entity<TerminalHost>,
+    /// The dock's own focus: ⌃` focuses it on open, so keys reach the pty
+    /// through the wrapper until a click hands the keyboard to the grid.
+    pub(crate) terminal_focus: FocusHandle,
+    /// A dock resize drag in flight: the grab position and the start height,
+    /// both in window pixels.
+    pub(crate) terminal_drag: Option<(f32, f32)>,
     /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
     pub(crate) show_hidden: bool,
     /// Real session ids with a title generation in flight: their rows read
@@ -764,6 +808,9 @@ impl Harness {
             sessions_list_in_flight: false,
             sessions_list_stale: false,
             layout: layout::read(),
+            terminal_host: cx.new(|_| TerminalHost::new()),
+            terminal_focus: cx.focus_handle(),
+            terminal_drag: None,
             show_hidden: false,
             show_empty: false,
             show_archived: false,
@@ -1432,6 +1479,262 @@ impl Harness {
         cx.notify();
     }
 
+    /// The dock toggle (⌃`): flips the open state, persists it, and focuses
+    /// the dock on open so keys reach the pty.
+    pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout.terminal_open = !self.layout.terminal_open;
+        if self.layout.terminal_open {
+            self.ensure_terminal_tab(cx);
+            window.focus(&self.terminal_focus, cx);
+        }
+        layout::write(&self.layout);
+        cx.notify();
+    }
+
+    /// A new terminal tab on the current project, opening the dock for it.
+    ///
+    /// Goes through D43's [`pick`](terminal::TerminalHost::pick) with a
+    /// `"new"` route, so the rule the unit tests pin is the rule this runs.
+    pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout.terminal_open = true;
+        if let Some(root) = self.current_project().map(|project| project.root.clone()) {
+            let decision = self.terminal_host.read(cx).pick(cx, &root, false);
+            match decision {
+                terminal::Pick::New => {
+                    let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+                    let title = terminal::title_from_command("shell");
+                    self.terminal_host.update(cx, |host, cx| {
+                        host.open(&root, title, TabOwner::User, origin, cx);
+                    });
+                }
+                terminal::Pick::Existing(id) => {
+                    self.terminal_host.update(cx, |host, _| host.activate(&id));
+                }
+            }
+        }
+        window.focus(&self.terminal_focus, cx);
+        layout::write(&self.layout);
+        cx.notify();
+    }
+
+    /// The first open creates the project's tab; later opens keep it. Tabs
+    /// belong to the project, not the session, so this never runs twice for
+    /// one project in a window's life (D43).
+    fn ensure_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        if !self.terminal_host.read(cx).tabs_for(&root).is_empty() {
+            return;
+        }
+        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        self.terminal_host.update(cx, |host, cx| {
+            host.open(&root, "shell".to_owned(), TabOwner::User, origin, cx);
+        });
+    }
+
+    /// ⌃C while the dock holds the keyboard: SIGINT to the project's active
+    /// tab, where ⌃C while the composer holds it stops the running turn.
+    fn terminal_sigint(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        let session = self.terminal_host.read(cx).active_for(&root).map(|tab| tab.session.clone());
+        if let Some(session) = session {
+            session.update(cx, |session, _| session.write(b"\x03"));
+        }
+    }
+
+    /// Point the project's active tab at its n-th tab, in open order.
+    fn activate_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        let id = self.terminal_host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
+        if let Some(id) = id {
+            self.terminal_host.update(cx, |host, _| host.activate(&id));
+            cx.notify();
+        }
+    }
+
+    /// Close the project's n-th tab, in open order.
+    fn close_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        let id = self.terminal_host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
+        if let Some(id) = id {
+            self.terminal_host.update(cx, |host, _| host.close(&id));
+            cx.notify();
+        }
+    }
+
+    /// The `--steps` verb's route: open the dock over a FakePty-backed tab
+    /// and drain its script at once, so the capture replays the same bytes
+    /// on every run. The payload names the tab; empty is "terminal".
+    pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let title = rest.trim();
+        let title = if title.is_empty() { "terminal".to_owned() } else { title.to_owned() };
+        let root = self
+            .current_project()
+            .map(|project| project.root.clone())
+            .unwrap_or_else(|| PathBuf::from(self.workspace()));
+        self.layout.terminal_open = true;
+        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let nonce = aui_terminal::generate_nonce();
+        let script = terminal::deterministic_script(&nonce);
+        self.terminal_host.update(cx, |host, cx| {
+            let id = host.open_fake(&root, title, TabOwner::User, origin, script, &nonce, cx);
+            host.drain(&id, cx);
+        });
+        layout::write(&self.layout);
+        window.focus(&self.terminal_focus, cx);
+        cx.notify();
+    }
+
+    /// The centre column's height: the window minus the 44 px header cell.
+    fn centre_height(&self, window: &Window) -> f32 {
+        f32::from(window.bounds().size.height).max(0.0) - 44.0
+    }
+
+    /// The dock's height now: the stored one, clamped into `[120px, 70% of
+    /// the centre column]`.
+    fn dock_height(&self, window: &Window) -> f32 {
+        let want = self.layout.terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT);
+        terminal::clamp_dock_height(want, self.centre_height(window))
+    }
+
+    /// The terminal dock under the composer (D42): the library's
+    /// `terminal_dock` frame over `terminal_tabs` and the active tab's
+    /// `terminal_grid`, or the empty state when the project has no tab.
+    fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.layout.terminal_open {
+            return None;
+        }
+        let root = self.current_project().map(|project| project.root.clone())?;
+        let height = self.dock_height(window);
+        let host = self.terminal_host.read(cx);
+        let mut tabs = Vec::new();
+        let mut active_ix = 0;
+        let mut active_session = None;
+        let active_id = host.active_for(&root).map(|tab| tab.id.clone());
+        for tab in host.tabs_for(&root) {
+            if Some(tab.id.as_str()) == active_id.as_deref() {
+                active_ix = tabs.len();
+                active_session = Some(tab.session.clone());
+            }
+            let mut view = TermTab::new(tab.id.clone(), tab.title.clone());
+            if tab.owner == TabOwner::Agent {
+                view = view.agent(Provider::Muse);
+            }
+            if host.busy(cx, &tab.id) {
+                view = view.busy(true);
+            }
+            tabs.push(view);
+        }
+        let select = cx.processor(|this: &mut Self, action: TerminalTabsAction, window, cx| match action {
+            TerminalTabsAction::Select(index) => this.activate_terminal_tab(index, cx),
+            TerminalTabsAction::Close(index) => this.close_terminal_tab(index, cx),
+            TerminalTabsAction::New => this.new_terminal(window, cx),
+        });
+        let header = terminal_tabs("terminal-tabs", tabs, active_ix).on_action(select);
+        let body = active_session.map(|session| {
+            let intent = cx.processor(|_: &mut Self, _: TerminalGridIntent, _, _| {});
+            terminal_grid(&session).on_intent(intent).into_any_element()
+        });
+        let maximised = height >= terminal::clamp_dock_height(f32::MAX, self.centre_height(window)) - 0.5;
+        let dock_action =
+            cx.processor(move |this: &mut Self, action: TerminalDockAction, window, cx| match action {
+                TerminalDockAction::Maximize => {
+                    let max = terminal::clamp_dock_height(f32::MAX, this.centre_height(window));
+                    this.layout.terminal_height =
+                        if maximised { Some(terminal::DOCK_DEFAULT_HEIGHT) } else { Some(max) };
+                    layout::write(&this.layout);
+                    cx.notify();
+                }
+                TerminalDockAction::Close => {
+                    this.layout.terminal_open = false;
+                    layout::write(&this.layout);
+                    cx.notify();
+                }
+                TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
+            });
+        let dock = terminal_dock("terminal-dock", header, body)
+            .hint("Muse can type here")
+            .maximized(maximised)
+            .on_action(dock_action);
+        let resize_start = cx.processor(|this: &mut Self, grab: f32, _, _| {
+            this.terminal_drag = Some((grab, this.layout.terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT)));
+        });
+        let resize_move = cx.processor(|this: &mut Self, at: f32, window, cx| {
+            if let Some((grab, start)) = this.terminal_drag {
+                this.layout.terminal_height =
+                    Some(terminal::clamp_dock_height(start + (grab - at), this.centre_height(window)));
+                cx.notify();
+            }
+        });
+        let end_weak = cx.entity().downgrade();
+        let resize_end = move |_: &mut Window, cx: &mut App| {
+            end_weak
+                .update(cx, |this: &mut Harness, cx| {
+                    this.terminal_drag = None;
+                    layout::write(&this.layout);
+                    cx.notify();
+                })
+                .ok();
+        };
+        let dock = dock.on_resize_start(resize_start).on_resize(resize_move).on_resize_end(resize_end);
+        let forward = cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
+            this.forward_terminal_key(event, window, cx);
+        });
+        Some(
+            div()
+                .h(px(height))
+                .w_full()
+                .flex_none()
+                .key_context(gpui::KeyContext::parse(TERMINAL_CONTEXT).unwrap_or_default())
+                .track_focus(&self.terminal_focus)
+                .on_key_down(forward)
+                .child(dock)
+                .into_any_element(),
+        )
+    }
+
+    /// One keystroke for the active tab, while the dock wrapper holds the
+    /// keyboard.
+    ///
+    /// Mirrors the grid's own routing: ⌘C copies a selection and is
+    /// otherwise swallowed, ⌘V pastes, everything else encodes to the pty.
+    /// Runs only while [`Self::terminal_focus`] is focused — a click in the
+    /// grid focuses the grid instead, which handles its own keys.
+    fn forward_terminal_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_focus.is_focused(window) {
+            return;
+        }
+        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
+        let session = self.terminal_host.read(cx).active_for(&root).map(|tab| tab.session.clone());
+        let Some(session) = session else { return };
+        let mods = &event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+        if mods.platform && !mods.control && !mods.alt && key.eq_ignore_ascii_case("c") {
+            if let Some(text) = session.read(cx).selection_text() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            return;
+        }
+        if mods.platform && !mods.control && !mods.alt && key.eq_ignore_ascii_case("v") {
+            if let Some(item) = cx.read_from_clipboard() {
+                if let Some(text) = item.text() {
+                    session.update(cx, |session, _| session.paste(&text));
+                }
+            }
+            return;
+        }
+        let Some(input) = terminal::key_input(key) else { return };
+        let modifiers = aui_terminal::keys::KeyModifiers {
+            shift: mods.shift,
+            alt: mods.alt,
+            ctrl: mods.control,
+            meta: mods.platform,
+        };
+        session.update(cx, |session, _| {
+            let modes = session.key_modes();
+            session.write(&aui_terminal::keys::encode(&input, &modifiers, &modes, false));
+        });
+    }
+
     /// The centre header: the current project's crumb (`mark project ▾`),
     /// a `·` separator, the active session's label with the provider mark,
     /// and the overflow menu — and nothing else.
@@ -1556,11 +1859,23 @@ impl Harness {
         // collapses, so the toggle in the sidebar header stays put and the
         // centre cell never slides under the native lights.
         let cell = header_cell("hd-centre");
+        // The terminal toggle: ⌃`'s button, lit while the dock stands open.
+        let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.toggle_terminal(window, cx);
+        });
+        let mut term_button =
+            icon_button("hd-centre-terminal", IconName::Terminal).ghost().size(ButtonSize::Sm);
+        if self.layout.terminal_open {
+            term_button = term_button.on_click(term_toggle);
+        } else {
+            term_button = term_button.muted().on_click(term_toggle);
+        }
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
         cell
             .child(title)
+            .child(term_button)
             .child(
                 div()
                     .flex_none()
@@ -1741,6 +2056,7 @@ impl Harness {
             }
             None => self.render_no_session(window, cx),
         };
+        let dock = self.render_terminal_dock(window, cx);
         v_flex()
             .size_full()
             .key_context(gpui::KeyContext::parse(&self.composer_context(cx)).unwrap_or_default())
@@ -1779,6 +2095,15 @@ impl Harness {
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.with_session(cx, |view, cx| view.copy_selected(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
+                this.new_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalSigint, _, cx| {
+                this.terminal_sigint(cx);
+            }))
             // 1–9 on a pending approval: the n-th server-minted choice, in the
             // order the server sent them.
             .on_action(cx.listener(|this, nth: &aui::keys::ChooseNth, window, cx| {
@@ -1787,6 +2112,7 @@ impl Harness {
             }))
             .children(banner)
             .child(body)
+            .children(dock)
             .into_any_element()
     }
 

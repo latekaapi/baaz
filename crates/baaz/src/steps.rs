@@ -119,6 +119,7 @@
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `baaz: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `baaz: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
+//! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!
 //! # `--login-steps <a;b;c>`
@@ -231,6 +232,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "remove-confirm", run: |this, _, _, cx| this.step_remove_confirm(cx) },
     WindowVerb { verb: "new", run: |this, rest, window, cx| this.step_new(rest, window, cx) },
     WindowVerb { verb: "new-in", run: |this, rest, window, cx| this.step_new_in(rest, window, cx) },
+    WindowVerb { verb: "terminal-dock", run: |this, rest, window, cx| this.step_terminal_dock(rest, window, cx) },
     WindowVerb { verb: "wheel", run: |this, rest, window, cx| this.step_wheel(rest, window, cx) },
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
