@@ -46,12 +46,12 @@ gpui-kit = "0.6.0"
 # To build against a local checkout instead (developing both at once), add a
 # patch to `.cargo/config.toml` or the workspace root rather than editing
 # these lines; `CONTRIBUTING.md` has the snippet.
-aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1" }
-aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1" }
-aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1" }
-aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1" }
-aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1" }
-aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.1", features = ["pty", "tui"] }
+aui = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
+aui-protocol = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
+aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
+aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
+aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2" }
+aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.2", features = ["pty", "tui"] }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }

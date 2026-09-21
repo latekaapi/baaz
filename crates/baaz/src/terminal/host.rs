@@ -103,7 +103,14 @@ fn chunk(bytes: Vec<u8>) -> ScriptChunk {
 /// duration reads `0.0 s` on every run.
 pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
     use base64::Engine;
-    let prompt = "~/work/acme ❯ ";
+    // A LONG prompt on purpose. The cursor is positioned by a measured cell
+    // advance and the rows are painted by the text system; when those two
+    // disagree the error is proportional to the column, so a short prompt
+    // hides it. A 13-character prompt showed a ~1-cell drift that read as
+    // correct in a capture while the owner's 43-character prompt put the
+    // cursor four cells into the text. Keep this at a realistic width so a
+    // capture can fail.
+    let prompt = "latekaapi@latekaapis-MacBook-Pro acme % ";
     let block = |cmd: &str, output: &str, exit: i32| {
         let cmd = base64::engine::general_purpose::STANDARD.encode(cmd);
         // The newline after `C` is the shell's own: preexec hands the
