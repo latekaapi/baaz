@@ -66,7 +66,7 @@ use futures::StreamExt;
 use gpui::{
     Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, actions, div, point,
     prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, ListState, NoAction, SharedString, Subscription, Task, Window,
+    ListState, NoAction, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -1810,64 +1810,22 @@ impl Harness {
                 .ok();
         };
         let dock = dock.on_resize_start(resize_start).on_resize(resize_move).on_resize_end(resize_end);
-        let forward = cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
-            this.forward_terminal_key(event, window, cx);
-        });
         Some(
             div()
                 .h(px(height))
                 .w_full()
                 .flex_none()
                 .key_context(gpui::KeyContext::parse(TERMINAL_CONTEXT).unwrap_or_default())
+                // No key handler here: the grid below is given this very
+                // handle, so it IS the focus node and routes keys itself.
+                // A handler here would see every keystroke a second time
+                // as it bubbles, and the pty would receive `aa` for `a`.
                 .track_focus(&self.terminal_focus)
-                .on_key_down(forward)
                 .child(dock)
                 .into_any_element(),
         )
     }
 
-    /// One keystroke for the active tab, while the dock wrapper holds the
-    /// keyboard.
-    ///
-    /// Mirrors the grid's own routing: ⌘C copies a selection and is
-    /// otherwise swallowed, ⌘V pastes, everything else encodes to the pty.
-    /// Runs only while [`Self::terminal_focus`] is focused — a click in the
-    /// grid focuses the grid instead, which handles its own keys.
-    fn forward_terminal_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.terminal_focus.is_focused(window) {
-            return;
-        }
-        let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
-        let session = self.terminal_host.read(cx).active_for(&root).map(|tab| tab.session.clone());
-        let Some(session) = session else { return };
-        let mods = &event.keystroke.modifiers;
-        let key = event.keystroke.key.as_str();
-        if mods.platform && !mods.control && !mods.alt && key.eq_ignore_ascii_case("c") {
-            if let Some(text) = session.read(cx).selection_text() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            }
-            return;
-        }
-        if mods.platform && !mods.control && !mods.alt && key.eq_ignore_ascii_case("v") {
-            if let Some(item) = cx.read_from_clipboard() {
-                if let Some(text) = item.text() {
-                    session.update(cx, |session, _| session.paste(&text));
-                }
-            }
-            return;
-        }
-        let Some(input) = terminal::key_input(key) else { return };
-        let modifiers = aui_terminal::keys::KeyModifiers {
-            shift: mods.shift,
-            alt: mods.alt,
-            ctrl: mods.control,
-            meta: mods.platform,
-        };
-        session.update(cx, |session, _| {
-            let modes = session.key_modes();
-            session.write(&aui_terminal::keys::encode(&input, &modifiers, &modes, false));
-        });
-    }
 
     /// The centre header: the current project's crumb (`mark project ▾`),
     /// a `·` separator, the active session's label with the provider mark,

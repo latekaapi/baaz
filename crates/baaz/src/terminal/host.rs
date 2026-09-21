@@ -140,44 +140,6 @@ pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
     vec![chunk(bytes.into_bytes())]
 }
 
-/// Maps a gpui key name onto the encoder's input, mirroring the grid's own
-/// routing: single characters pass through as text; the rest is the
-/// terminal's special-key set. Anything unknown returns `None` and is
-/// ignored.
-pub(crate) fn key_input(key: &str) -> Option<aui_terminal::keys::KeyInput> {
-    use aui_terminal::keys::{KeyInput, SpecialKey};
-    if key.chars().count() == 1 {
-        return key.chars().next().map(KeyInput::Text);
-    }
-    let special = match key {
-        "enter" => SpecialKey::Enter,
-        "tab" => SpecialKey::Tab,
-        "backspace" => SpecialKey::Backspace,
-        "escape" => SpecialKey::Escape,
-        "left" => SpecialKey::Left,
-        "up" => SpecialKey::Up,
-        "right" => SpecialKey::Right,
-        "down" => SpecialKey::Down,
-        "home" => SpecialKey::Home,
-        "end" => SpecialKey::End,
-        "insert" => SpecialKey::Insert,
-        "delete" => SpecialKey::Delete,
-        "pageup" => SpecialKey::PageUp,
-        "pagedown" => SpecialKey::PageDown,
-        "space" => return Some(KeyInput::Text(' ')),
-        _ => {
-            if let Some(number) = key.strip_prefix('f') {
-                if let Ok(n) = number.parse::<u8>() {
-                    if (1..=20).contains(&n) {
-                        return Some(KeyInput::Key(SpecialKey::F(n)));
-                    }
-                }
-            }
-            return None;
-        }
-    };
-    Some(KeyInput::Key(special))
-}
 
 /// A tab title from a command line: the first line, without a leading
 /// `$ ` prompt, capped at 32 characters.
