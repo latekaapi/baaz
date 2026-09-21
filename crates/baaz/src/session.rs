@@ -254,6 +254,11 @@ pub enum SessionEvent {
     },
     /// The child exited; the application owns the reconnect.
     Closed,
+    /// A window-level slash command typed in the composer or picked from its
+    /// `/` menu. The session cannot act on the window, so it hands the command
+    /// up to `Harness::run_window_command` — the same dispatch the ⌘K palette
+    /// uses, so both routes run one implementation.
+    WindowCommand(crate::overlays::Command),
     /// `/clear`: start a new session in this workspace.
     NewSession,
     /// `session/fork` succeeded: open the new session as the active one.

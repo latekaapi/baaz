@@ -506,7 +506,7 @@ impl Harness {
     /// session is open. Session commands return `false` and keep their old
     /// path. Both sides list their variants explicitly, with no `_` arm:
     /// adding command 24 must force a decision about which side it is on.
-    fn run_window_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn run_window_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match command {
             Command::RightBrowser => {
                 self.show_right(RightKind::Browser, cx);
@@ -1292,6 +1292,43 @@ mod tests {
             window_count += usize::from(handled);
         }
         assert_eq!(window_count, 6, "exactly the six new commands are window-level");
+        restore_state(state);
+    }
+
+    /// The composer's route reaches the window, not just the palette's.
+    ///
+    /// These six also appear in the composer's `/` menu, which is built from
+    /// [`Command::ALL`] in `session/render.rs`. They were originally swallowed
+    /// in `SessionView::run_command` with an empty arm, so the menu rows and
+    /// the typed commands did nothing at all — a gate cannot see that, and it
+    /// is the reason this test exists rather than a second palette test.
+    #[gpui::test]
+    fn a_window_command_from_the_composer_reaches_the_window(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-window");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        // The event the composer emits for a window command, delivered the way
+        // the session would deliver it.
+        for (command, kind) in [
+            (Command::RightFiles, crate::layout::RightKind::Files),
+            (Command::RightGit, crate::layout::RightKind::Git),
+        ] {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| {
+                    assert!(
+                        harness.run_window_command(command, window, cx),
+                        "{command:?} must be handled on the window side"
+                    );
+                })
+            });
+            let (open, shown) =
+                vc.update(|_, cx| (baaz.read(cx).layout.right_open, baaz.read(cx).layout.right_kind));
+            assert!(open, "{command:?} left the right pane shut");
+            assert_eq!(shown, Some(kind), "{command:?} opened the wrong kind");
+        }
         restore_state(state);
     }
 
