@@ -209,10 +209,15 @@ pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Pat
 
 /// Serializes the tests that point `BAAZ_STATE_DIR` at a temp dir: two
 /// tests pointing it at two dirs at once would read each other's state.
+///
+/// Returns the guard directly, poison-tolerant on purpose: a test that
+/// panics while holding the guard poisons a plain `Mutex`, and every later
+/// `.lock().expect(..)` dies with `PoisonError` — a cascade, not a signal.
+/// Recovering the guard keeps one test's failure from failing the suite.
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    &LOCK
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -295,5 +300,19 @@ mod tests {
         // Running again finds nothing missing and reports so.
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::NotNeeded);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A test that panics while holding the env lock must not fail every
+    /// later env-guarded test with `PoisonError`: the lock recovers, so one
+    /// failure stays one failure instead of cascading across the suite.
+    #[test]
+    fn a_panicking_test_does_not_poison_the_next_tests_lock() {
+        let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = super::test_env_lock();
+            panic!("a failing test panics while holding the env lock");
+        }));
+        assert!(probe.is_err(), "the probe must really panic while holding the lock");
+        // The next acquisition recovers instead of dying with PoisonError.
+        let _guard = super::test_env_lock();
     }
 }

@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn the_file_lives_under_baaz_state_dir() {
         let dir = std::env::temp_dir().join(format!("baaz-history-{}", std::process::id()));
-        let guard = crate::store::test_env_lock().lock().expect("test env lock");
+        let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", &dir);
         assert_eq!(path(), dir.join("history.json"));
