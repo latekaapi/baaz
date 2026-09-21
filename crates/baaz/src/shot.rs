@@ -343,6 +343,49 @@ pub fn capture_and_quit(
         // on drop — and wait, bounded, for that drop, so the pid file is
         // gone too and no `muse` process outlives this quit.
         crate::tier::cleanup_probes();
+        // A scripted run fails when any step did. Steps that ran were
+        // already counted by the runners; whatever list is still undrained
+        // here never became runnable at all (no open session to run it
+        // against), so classify it now — free table lookups, nothing
+        // reaches the wire. One line per failure naming the step, then the
+        // machine-readable summary, then a non-zero exit. Unscripted
+        // captures print nothing new.
+        if await_steps {
+            let leftover: Vec<String> = cx.update(|cx| {
+                handle
+                    .update(cx, |root, _window, cx| {
+                        root.view()
+                            .clone()
+                            .downcast::<crate::app::Harness>()
+                            .ok()
+                            .map(|baaz| {
+                                let harness = baaz.read(cx);
+                                harness
+                                    .args
+                                    .steps
+                                    .iter()
+                                    .chain(harness.args.login_steps.iter())
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
+            });
+            crate::steps::record_unrun_steps(&leftover);
+            for name in crate::steps::step_failure_names() {
+                println!("steps: failed step `{name}`");
+            }
+            println!(
+                "steps: ran={} failed={}",
+                crate::steps::steps_ran(),
+                crate::steps::step_failures()
+            );
+        }
+        if crate::steps::step_failures() > 0 {
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(1);
+        }
         cx.update(|cx| cx.quit());
     })
     .detach();
