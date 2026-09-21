@@ -2057,6 +2057,16 @@ impl Harness {
                     let _ = this.update_in(cx, |this, window, cx| this.open_search(window, cx));
                 }));
             }
+            // Rejoins through a window the way the paths above do; the event
+            // carries no window of its own.
+            SessionEvent::WindowCommand(command) => {
+                let command = *command;
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.run_window_command(command, window, cx);
+                    });
+                }));
+            }
         }
         cx.notify();
     }

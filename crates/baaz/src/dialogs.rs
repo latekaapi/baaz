@@ -31,6 +31,7 @@ use gpui_kit::base::h_flex;
 use gpui_kit::component::input::Textarea;
 
 use crate::app::{Harness, Wire, PALETTE_ROWS, PALETTE_SCRIM, PALETTE_TOP, TOAST_STACK_H, TOAST_TOP, TOAST_W};
+use crate::layout::RightKind;
 use crate::login::Auth;
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Palette, PaletteKind};
 use crate::wire::WireCall;
@@ -488,11 +489,67 @@ impl Harness {
             }
             PaletteKind::Commands => {
                 if let Some(command) = Command::parse(&id) {
-                    self.with_session(cx, |view, cx| view.run_command(command, window, cx));
+                    if !self.run_window_command(command, window, cx) {
+                        self.with_session(cx, |view, cx| view.run_command(command, window, cx));
+                    }
                 }
             }
         }
         cx.notify();
+    }
+
+    /// Run one window-level ⌘K command, returning whether it was one.
+    ///
+    /// Window commands act on the window itself — the right pane, the
+    /// terminal dock — so they run here on [`Harness`], before the session
+    /// delegation in [`Self::run_palette_row`], which does nothing when no
+    /// session is open. Session commands return `false` and keep their old
+    /// path. Both sides list their variants explicitly, with no `_` arm:
+    /// adding command 24 must force a decision about which side it is on.
+    pub(crate) fn run_window_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match command {
+            Command::RightBrowser => {
+                self.show_right(RightKind::Browser, cx);
+                true
+            }
+            Command::RightDiff => {
+                self.show_right(RightKind::Diff, cx);
+                true
+            }
+            Command::RightGit => {
+                self.show_right(RightKind::Git, cx);
+                true
+            }
+            Command::RightFiles => {
+                self.show_right(RightKind::Files, cx);
+                true
+            }
+            Command::Terminal => {
+                self.toggle_terminal(window, cx);
+                true
+            }
+            Command::NewTerminalCmd => {
+                self.new_terminal(window, cx);
+                true
+            }
+            Command::Model
+            | Command::Effort
+            | Command::Mode
+            | Command::Plan
+            | Command::Compact
+            | Command::Status
+            | Command::Usage
+            | Command::Clear
+            | Command::Project
+            | Command::Fork
+            | Command::Name
+            | Command::Resume
+            | Command::Search
+            | Command::Hide
+            | Command::Empty
+            | Command::Logout
+            | Command::Help => false,
+        }
     }
 
     /// Open a header/footer menu, replacing whatever is open. Clicking its
@@ -1089,7 +1146,191 @@ impl Harness {
 mod tests {
     use super::tilde_root;
     use crate::app::Harness;
-    use crate::overlays::DialogAction;
+    use crate::layout::RightKind;
+    use crate::overlays::{Command, DialogAction};
+    // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
+    use gpui::AppContext as _;
+    use std::path::PathBuf;
+
+    /// A bootable [`crate::Args`] pointed at a hermetic state dir, mirroring
+    /// the helper in `app.rs`'s tests (which this module cannot import).
+    fn test_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    /// Point `BAAZ_STATE_DIR` at a fresh temp dir for the test's duration,
+    /// restoring whatever was there before.
+    fn hermetic_state(name: &str) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-palette-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    /// Undo [`hermetic_state`]: remove the temp dir, put the old value back,
+    /// release the lock so no test leaks its dir into another.
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_state(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf),
+    ) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
+    /// The six window commands mutate `layout` with no session open — the
+    /// defect this task exists to prevent is `true` without an effect, so
+    /// every arm asserts the effect, not just the return. Each command runs
+    /// on a fresh [`Harness`] with `active == None`, so no state carries
+    /// between arms.
+    #[gpui::test]
+    fn window_commands_land_with_no_session_open(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("window");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        for (command, kind) in [
+            (Command::RightBrowser, RightKind::Browser),
+            (Command::RightDiff, RightKind::Diff),
+            (Command::RightGit, RightKind::Git),
+            (Command::RightFiles, RightKind::Files),
+        ] {
+            let baaz = vc.update(|window, cx| {
+                cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            });
+            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "{command:?} runs with no session open");
+            let handled = vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| harness.run_window_command(command, window, cx))
+            });
+            assert!(handled, "{command:?} is a window command");
+            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open), "{command:?} opens the right pane");
+            assert_eq!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_kind),
+                Some(kind),
+                "{command:?} opens on {kind:?}"
+            );
+        }
+        for command in [Command::Terminal, Command::NewTerminalCmd] {
+            let baaz = vc.update(|window, cx| {
+                cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            });
+            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "{command:?} runs with no session open");
+            let handled = vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| harness.run_window_command(command, window, cx))
+            });
+            assert!(handled, "{command:?} is a window command");
+            assert!(
+                vc.update(|_, cx| baaz.read(cx).layout.terminal_open),
+                "{command:?} opens the dock from closed"
+            );
+        }
+        restore_state(state);
+    }
+
+    /// The two dispatch paths are exhaustive and disjoint: every variant of
+    /// [`Command::ALL`] is either a window command (`run_window_command`
+    /// returns `true`) or a session command (`false`), the six new ones are
+    /// in the window set, and the original 17 are not. A 24th variant that
+    /// lands in neither path fails here.
+    #[gpui::test]
+    fn every_command_is_on_exactly_one_dispatch_side(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("sides");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let mut window_count = 0;
+        for command in Command::ALL {
+            let handled = vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| harness.run_window_command(command, window, cx))
+            });
+            let is_window = matches!(
+                command,
+                Command::RightBrowser
+                    | Command::RightDiff
+                    | Command::RightGit
+                    | Command::RightFiles
+                    | Command::Terminal
+                    | Command::NewTerminalCmd
+            );
+            assert_eq!(handled, is_window, "{command:?} is classified on the wrong side");
+            window_count += usize::from(handled);
+        }
+        assert_eq!(window_count, 6, "exactly the six new commands are window-level");
+        restore_state(state);
+    }
+
+    /// The composer's route reaches the window, not just the palette's.
+    ///
+    /// These six also appear in the composer's `/` menu, which is built from
+    /// [`Command::ALL`] in `session/render.rs`. They were originally swallowed
+    /// in `SessionView::run_command` with an empty arm, so the menu rows and
+    /// the typed commands did nothing at all — a gate cannot see that, and it
+    /// is the reason this test exists rather than a second palette test.
+    #[gpui::test]
+    fn a_window_command_from_the_composer_reaches_the_window(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("composer-window");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        // The event the composer emits for a window command, delivered the way
+        // the session would deliver it.
+        for (command, kind) in [
+            (Command::RightFiles, crate::layout::RightKind::Files),
+            (Command::RightGit, crate::layout::RightKind::Git),
+        ] {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| {
+                    assert!(
+                        harness.run_window_command(command, window, cx),
+                        "{command:?} must be handled on the window side"
+                    );
+                })
+            });
+            let (open, shown) =
+                vc.update(|_, cx| (baaz.read(cx).layout.right_open, baaz.read(cx).layout.right_kind));
+            assert!(open, "{command:?} left the right pane shut");
+            assert_eq!(shown, Some(kind), "{command:?} opened the wrong kind");
+        }
+        restore_state(state);
+    }
 
     /// A busy tab asks before it closes, naming its running command; an
     /// idle tab gets no dialog at all.
