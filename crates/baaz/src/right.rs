@@ -369,7 +369,52 @@ struct GitStatus {
     removed: u32,
 }
 
+/// A fixed working tree for deterministic captures.
+///
+/// The git and diff panes read the real repository, which is exactly what
+/// makes them useful and exactly what makes them impossible to baseline: the
+/// screenshot changes with every commit, so the entries would report findings
+/// for ever and teach everyone to ignore them. Under `BAAZ_DETERMINISTIC`
+/// they read this instead, so the baseline pins how the pane RENDERS rather
+/// than what the repository happens to contain today.
+fn fixture_git_status() -> GitStatus {
+    let files = vec![
+        (FileChange { path: "crates/baaz/src/right.rs".into(), change: ChangeKind::Modified, added: 148, removed: 12 }, false),
+        (FileChange { path: "crates/baaz/src/layout.rs".into(), change: ChangeKind::Modified, added: 31, removed: 4 }, true),
+        (FileChange { path: "docs/02-app.md".into(), change: ChangeKind::Modified, added: 22, removed: 9 }, false),
+        (FileChange { path: "crates/baaz/src/panes/mod.rs".into(), change: ChangeKind::Added, added: 64, removed: 0 }, false),
+        (FileChange { path: "scripts/old_probe.py".into(), change: ChangeKind::Deleted, added: 0, removed: 37 }, false),
+    ];
+    let added = files.iter().map(|(change, _)| change.added).sum();
+    let removed = files.iter().map(|(change, _)| change.removed).sum();
+    GitStatus { files, branch: "right-pane".into(), ahead: 2, behind: 1, added, removed }
+}
+
+/// The diff the fixture's first file shows. Small on purpose: a capture wants
+/// a legible hunk, not a realistic one.
+fn fixture_diff() -> Diff {
+    let line = |kind, old_no, new_no, text: &str| DiffLine { kind, old_no, new_no, text: text.to_string() };
+    Diff {
+        path: "crates/baaz/src/right.rs".into(),
+        hunks: vec![Hunk {
+            header: "@@ -41,7 +41,9 @@ fn render(kind: RightKind)".into(),
+            lines: vec![
+                line(DiffKind::Context, Some(41), Some(41), "    let notify = toast_sink(cx.weak_entity());"),
+                line(DiffKind::Del, Some(42), None, "    match kind {"),
+                line(DiffKind::Add, None, Some(42), "    match kind {"),
+                line(DiffKind::Add, None, Some(43), "        RightKind::Browser => browser_pane(&notify),"),
+                line(DiffKind::Context, Some(43), Some(44), "        RightKind::Files => files_pane(root, &notify),"),
+            ],
+        }],
+        added: 2,
+        removed: 1,
+    }
+}
+
 fn read_git_status(root: &Path) -> Option<GitStatus> {
+    if crate::clock::deterministic() {
+        return Some(fixture_git_status());
+    }
     let porcelain = run_git(root, &["status", "--porcelain=v1", "--untracked-files=normal"])?;
     let branch = run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|name| name.trim().to_string())
@@ -724,8 +769,12 @@ fn diff_pane(root: &Path, notify: &ToastSink) -> AnyElement {
             "The working tree is clean — there is nothing to review.",
         );
     }
-    let raw = run_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"]).unwrap_or_default();
-    let parsed = parse_unified_diff(&raw);
+    let parsed = if crate::clock::deterministic() {
+        ParsedDiffs { diffs: vec![fixture_diff()], truncated: false }
+    } else {
+        let raw = run_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"]).unwrap_or_default();
+        parse_unified_diff(&raw)
+    };
     let review_files: Vec<ReviewFile> = status.files.iter().take(DIFF_FILES_CAP).enumerate()
         .map(|(index, (change, _))| ReviewFile { change: change.clone(), notes: 0, selected: index == 0 })
         .collect();
