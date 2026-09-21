@@ -115,10 +115,27 @@ pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
             "\x1b]133;A;k={nonce}\x07{prompt}\x1b]133;C;k={nonce};cmd={cmd};enc=b64\x07\r\n{output}\x1b]133;D;{exit};k={nonce}\x07"
         )
     };
+    // Coloured exactly as the real tools colour it: `git status -sb` paints
+    // its branch line, a test runner paints its ticks, a linter paints the
+    // error red. A capture in plain white proves nothing about whether SGR
+    // renders, and this capture is the picture the terminal is judged by.
     let bytes = format!(
-        "{}{}\x1b]133;A;k={nonce}\x07{prompt}",
-        block("git status -sb", "## main...origin/main\r\n", 0),
-        block("pnpm vitest", " ✓ 12 passed\r\n", 0),
+        "{}{}{}\x1b]133;A;k={nonce}\x07{prompt}",
+        block(
+            "git status -sb",
+            "\x1b[32m## \x1b[1;32mmain\x1b[0m\x1b[32m...origin/main\x1b[0m\r\n\x1b[31m M\x1b[0m src/checkout/validators.ts\r\n\x1b[32mA \x1b[0m src/checkout/validators.test.ts\r\n",
+            0,
+        ),
+        block(
+            "pnpm vitest run",
+            "\x1b[32m ✓\x1b[0m validators.test.ts \x1b[2m(18)\x1b[0m \x1b[32m412ms\x1b[0m\r\n\x1b[32m ✓\x1b[0m AddressForm.test.tsx \x1b[2m(9)\x1b[0m \x1b[32m1.1s\x1b[0m\r\n\x1b[1;32m Test Files  2 passed\x1b[0m \x1b[2m(2)\x1b[0m\r\n",
+            0,
+        ),
+        block(
+            "pnpm lint",
+            "\x1b[1msrc/checkout/validators.ts\x1b[0m\r\n\x1b[2m  46:5\x1b[0m  \x1b[31merror\x1b[0m  'validateCanadianPostal' is not defined  \x1b[2mno-undef\x1b[0m\r\n\x1b[1;31m 1 problem\x1b[0m \x1b[2m(1 error, 0 warnings)\x1b[0m\r\n",
+            1,
+        ),
     );
     vec![chunk(bytes.into_bytes())]
 }
@@ -293,8 +310,17 @@ impl TerminalHost {
         origin_session: Option<SessionId>,
         cx: &mut Context<Self>,
     ) -> String {
-        let config =
-            aui_terminal::PtyConfig::login(project_root).with_env("BAAZ_TERMINAL", "1");
+        // `CLICOLOR` is why a macOS terminal looks alive rather than white.
+        // The library already advertises `TERM=xterm-256color` and
+        // `COLORTERM=truecolor`, but BSD `ls` gates its colour on `CLICOLOR`
+        // specifically — measured on this machine, `COLORTERM` alone leaves
+        // `ls` monochrome while `CLICOLOR=1` paints it. Advertising a
+        // capability is the library's job; deciding that this terminal's
+        // tools should use it is the host's, so it is set here. A user who
+        // wants it off can unset it in their rc, which runs after this.
+        let config = aui_terminal::PtyConfig::login(project_root)
+            .with_env("BAAZ_TERMINAL", "1")
+            .with_env("CLICOLOR", "1");
         let nonce = config.nonce().to_owned();
         let mut pty = aui_terminal::Pty::new();
         let _ = pty.spawn_config(&config);
