@@ -263,6 +263,18 @@ impl SessionView {
             Command::Resume => cx.emit(SessionEvent::Resume),
             Command::Search => cx.emit(SessionEvent::Search),
             Command::Project => cx.emit(SessionEvent::Projects),
+            // Window-level commands: the session cannot act on the window, so
+            // it hands them up. They reach the same `run_window_command` the
+            // ⌘K palette uses, which is what keeps the two routes honest —
+            // these six also appear in the composer's own `/` menu (it is
+            // built from `Command::ALL`), and a menu row that did nothing
+            // would be worse than no row.
+            Command::RightBrowser
+            | Command::RightDiff
+            | Command::RightGit
+            | Command::RightFiles
+            | Command::Terminal
+            | Command::NewTerminalCmd => cx.emit(SessionEvent::WindowCommand(command)),
         }
     }
 
