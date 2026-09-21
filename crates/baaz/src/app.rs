@@ -1758,7 +1758,15 @@ impl Harness {
             let intent = cx.processor(move |this: &mut Self, intent: TerminalGridIntent, window, cx| {
                 this.handle_terminal_intent(&tab_id, intent, window, cx);
             });
-            terminal_grid(&session).on_intent(intent).into_any_element()
+            // The grid draws its cursor focused — and blinks it — only while
+            // the handle it was GIVEN is focused. Hand it the dock's own
+            // handle, the one `track_focus` binds below and ⌃` focuses, or
+            // the grid falls back to a handle nothing in this app ever
+            // focuses and the cursor stays hollow and still forever.
+            terminal_grid(&session)
+                .focus_handle(self.terminal_focus.clone())
+                .on_intent(intent)
+                .into_any_element()
         });
         let maximised = height >= terminal::clamp_dock_height(f32::MAX, self.centre_height(window)) - 0.5;
         let dock_action =
