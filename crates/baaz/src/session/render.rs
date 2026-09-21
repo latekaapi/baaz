@@ -337,6 +337,19 @@ impl SessionView {
                     },
                 ))
             },
+            // D49 play buttons: the request goes to the application as an
+            // event, never a turn — honoured under `--replay` like every
+            // other local intent here.
+            terminal_run: {
+                let run = cx.listener(|this: &mut Self, request: &crate::terminal::RunRequest, _, cx| {
+                    this.handle_terminal_run(request.clone(), cx);
+                });
+                Some(Rc::new(
+                    move |request: crate::terminal::RunRequest, window: &mut Window, cx: &mut gpui::App| {
+                        run(&request, window, cx)
+                    },
+                ))
+            },
         }
     }
 
@@ -798,27 +811,78 @@ impl SessionView {
         &mut self,
         key: String,
         intent: ToolGroupIntent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match intent {
             ToolGroupIntent::Toggle => self.toggle_fold(key, cx),
             ToolGroupIntent::Call { index, intent } => match intent {
                 ToolCardIntent::OpenInPane => self.reveal_tool_target(&key, index, cx),
+                // The library's group cards render no header actions today,
+                // so this arm waits for the slot; it resolves the same way
+                // lone cards do, so grouped shell calls behave the moment
+                // the slot exists.
+                ToolCardIntent::Action(_) => self.run_grouped_tool_call(&key, index, window, cx),
                 _ => self.toggle_fold(format!("{key}:{index}"), cx),
             },
+        }
+    }
+
+    /// A play button press (D49): emit it for the application, which pastes
+    /// the command into the terminal dock. Local-only by construction —
+    /// this is an event, not a submit, so no path here can start a turn or
+    /// reach the wire.
+    pub(super) fn handle_terminal_run(
+        &mut self,
+        request: crate::terminal::RunRequest,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(SessionEvent::RunInTerminal {
+            command: request.command,
+            send_enter: request.send_enter,
+        });
+    }
+
+    /// A grouped shell call's run action (D49): the call's command text
+    /// into the dock, like a lone card. Anything else just toggles.
+    pub(super) fn run_grouped_tool_call(
+        &mut self,
+        key: &str,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self
+            .tool_call_in_group(key, index)
+            .and_then(|call| crate::transcript::shell_run_command(&call))
+        {
+            Some(command) => {
+                if let Some(request) = crate::terminal::RunRequest::new(
+                    command,
+                    crate::terminal::send_enter_for_alt(window.modifiers().alt),
+                ) {
+                    self.handle_terminal_run(request, cx);
+                }
+            }
+            None => self.toggle_fold(format!("{key}:{index}"), cx),
         }
     }
 
     /// A grouped call's header target, back to the text the lone card would
     /// have shown. The group key is `<turn id>:<block index>`.
     pub(super) fn tool_call_target(&self, turn_id: &str, block_index: usize, call_index: usize) -> Option<String> {
+        self.tool_call_in_group(&format!("{turn_id}:{block_index}"), call_index).map(|call| call.target)
+    }
+
+    /// A grouped call's full shape, back to the fold. The group key is
+    /// `<turn id>:<block index>`.
+    pub(super) fn tool_call_in_group(&self, key: &str, index: usize) -> Option<aui_protocol::ToolCall> {
+        let (turn_id, block_index) = key.rsplit_once(':').unwrap_or((key, ""));
+        let block_index = block_index.parse::<usize>().unwrap_or(usize::MAX);
         let session = self.fold.session(&self.session_id)?;
         session.turns.iter().find_map(|turn| match turn {
             Turn::Assistant { id, blocks, .. } if id == turn_id => match blocks.get(block_index) {
-                Some(Block::ToolGroup { calls, .. }) => {
-                    calls.get(call_index).map(|call| call.target.clone())
-                }
+                Some(Block::ToolGroup { calls, .. }) => calls.get(index).cloned(),
                 _ => None,
             },
             _ => None,
@@ -1945,6 +2009,73 @@ mod tests {
     /// open through the platform dispatch, which the headless platform does
     /// not implement; the resolver tests above pin that outside paths reach
     /// the existence check rather than a workspace rejection.)
+    #[gpui::test]
+    /// D49: a play button press emits `RunInTerminal` — an event for the
+    /// application's terminal dock — and does nothing else. In particular
+    /// it never submits: the composer draft is untouched, no toast fires,
+    /// and the view holds no client, so no path here can start a turn or
+    /// reach the wire. `handle_terminal_run`'s only effect is the emit
+    /// below, which is what this pins.
+    #[gpui::test]
+    fn play_buttons_emit_a_run_never_a_turn(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let root = std::env::temp_dir().join(format!("baaz-run-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("probe dir");
+        let vc = cx.add_empty_window();
+        let seen: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        // Emitted events flush when the update that raised them ends, so
+        // the presses run in one update and the assertions read in the
+        // next; the subscription outlives both.
+        let (view, overlays, _sub) = vc.update(|window, cx| {
+            let overlays = cx.new(|_| crate::overlays::Overlays::default());
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: root.to_string_lossy().into_owned(),
+                overlays: overlays.clone(),
+                capture: crate::shot::CaptureToken::default(),
+            };
+            let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
+            let record = seen.clone();
+            let sub = cx.subscribe(&view, move |_, event: &crate::session::SessionEvent, _| {
+                match event {
+                    crate::session::SessionEvent::RunInTerminal { command, send_enter } => {
+                        record.borrow_mut().push((command.clone(), *send_enter));
+                    }
+                    _ => record.borrow_mut().push((String::from("unexpected event"), false)),
+                }
+            });
+            view.update(cx, |view, cx| {
+                view.handle_terminal_run(
+                    crate::terminal::RunRequest { command: "npm test".to_owned(), send_enter: true },
+                    cx,
+                );
+                // ⌥-click pastes without Enter: the same press with the
+                // modifier held resolves before the emit, above this seam.
+                view.handle_terminal_run(
+                    crate::terminal::RunRequest { command: "git status".to_owned(), send_enter: false },
+                    cx,
+                );
+            });
+            (view, overlays, sub)
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                *seen.borrow(),
+                vec![
+                    ("npm test".to_owned(), true),
+                    ("git status".to_owned(), false),
+                ],
+                "two presses, two local run events, in order"
+            );
+            assert!(view.read(cx).draft_text(cx).is_empty(), "no turn was drafted, let alone sent");
+            assert!(overlays.read(cx).toasts.is_empty(), "no toast, no banner, no wire");
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[gpui::test]
     fn missing_linked_paths_toast_quietly(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));

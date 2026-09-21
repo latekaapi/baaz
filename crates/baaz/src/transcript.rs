@@ -17,16 +17,19 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use aui::data::button;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
-    goal_card, marker_row, plan_card, question_card, summary_card, thinking_block, todo_list,
-    tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget, MessageSelection, QuestionOutcome,
-    SpanEvent, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
+    goal_card, marker_row, parse_markdown, plan_card, question_card, runnable_command, summary_card,
+    thinking_block, todo_list, tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget,
+    MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent, ToolCardAction, ToolCardIntent,
+    ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{
     ActivityState, Answer, Block, MarkerKind, PlanSection, PlanState, Step, ThinkingState, ToolBody,
-    ToolCall, Turn, TurnMeta,
+    ToolCall, ToolKind, Turn, TurnMeta,
 };
+use crate::terminal::{RunRequest, send_enter_for_alt};
 use aui_tokens::scale;
 use aui_icons::IconName;
 use aui_motion::stream_reveal;
@@ -100,6 +103,94 @@ pub struct Folds {
     pub span_event: Option<SpanEventHandler>,
     /// Tool-group header and per-call intents, keyed by the group's fold key (C8).
     pub tool_group: Option<ToolGroupActionHandler>,
+    /// D49 play buttons: run the request in the terminal dock. Wired on
+    /// shell tool cards ("Run in terminal") and under assistant turns with
+    /// runnable fences ("Run"), and honoured under `--replay` — the request
+    /// is entirely local, never a turn, never the wire.
+    pub terminal_run: Option<TerminalRunHandler>,
+}
+
+/// A play button press: the resolved command and whether Enter follows the
+/// paste. The view emits it as [`crate::session::SessionEvent::RunInTerminal`];
+/// the application owns the dock.
+pub type TerminalRunHandler = Rc<dyn Fn(RunRequest, &mut Window, &mut App)>;
+
+/// The header action id of "Run in terminal" on shell tool cards.
+pub const RUN_IN_TERMINAL_ACTION_ID: &str = "run-in-terminal";
+
+/// The header action label of "Run in terminal" on shell tool cards.
+pub const RUN_IN_TERMINAL_LABEL: &str = "Run in terminal";
+
+/// The run row's button label under assistant turns with runnable fences.
+pub const RUN_LABEL: &str = "Run";
+
+/// The command a shell tool card offers to run (D49): Muse's shell tool and
+/// the `!` userShell both fold to [`ToolKind::Shell`] with a
+/// [`ToolBody::Shell`] body, so one match covers both. The card's command
+/// text is its target; anything else — a read, a search that fell back to a
+/// shell body, a blank target — offers no button.
+pub fn shell_run_command(call: &ToolCall) -> Option<String> {
+    match (&call.kind, &call.body) {
+        (ToolKind::Shell, ToolBody::Shell { .. }) if !call.target.trim().is_empty() => {
+            Some(call.target.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Whether the pressed header action is the run action: the payload of
+/// [`ToolCardIntent::Action`] is the action's index in the order the card
+/// received them, so the check is against the id at that index — a card
+/// carrying more than one action still maps back to the right command.
+pub fn action_is_run(actions: &[ToolCardAction], index: usize) -> bool {
+    actions.get(index).is_some_and(|action| action.id == RUN_IN_TERMINAL_ACTION_ID)
+}
+
+/// The command a fenced code block offers to run (D49): exactly what
+/// [`runnable_command`] returns — the decision function owns which fences
+/// count, so a `console` block runs its prompt lines with prompts stripped,
+/// and a `rust` block offers no button.
+pub fn code_run_command(lang: Option<&str>, code: &str) -> Option<String> {
+    runnable_command(lang.unwrap_or(""), code)
+}
+
+/// One runnable fence of an assistant turn, in fence order: the label the
+/// run row shows and the exact command the press runs.
+pub struct RunnableBlock {
+    /// The command's first line, elided: what the run row names.
+    pub label: String,
+    /// What [`runnable_command`] returned: what the press runs.
+    pub command: String,
+}
+
+/// A command's first line as a one-line label, overlong commands cut with
+/// an ellipsis.
+fn run_label(command: &str) -> String {
+    const MAX: usize = 80;
+    let first = command.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= MAX {
+        return first.to_owned();
+    }
+    let cut: String = first.chars().take(MAX - 1).collect();
+    format!("{cut}…")
+}
+
+/// The runnable fenced blocks of assistant prose, in fence order: exactly
+/// the fences [`runnable_command`] returns `Some` for, running what it
+/// returns.
+pub fn runnable_blocks(text: &str) -> Vec<RunnableBlock> {
+    parse_markdown(text)
+        .iter()
+        .filter_map(|block| match block {
+            MarkdownBlock::CodeBlock { lang, text } => {
+                code_run_command(lang.as_deref(), text).map(|command| RunnableBlock {
+                    label: run_label(&command),
+                    command,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// A markdown link click: the target the library parsed out.
@@ -514,7 +605,7 @@ fn block(
 ) -> AnyElement {
     let id = ElementId::from(SharedString::from(key.to_owned()));
     match block {
-        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds),
+        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds, cx),
         Block::Thinking { text, elapsed_ms, summary, state } => {
             thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
         }
@@ -578,10 +669,11 @@ fn text_card(
     meta: Option<&TurnMeta>,
     timestamp: Option<u64>,
     folds: &Folds,
+    cx: &mut App,
 ) -> AnyElement {
     // Pin has no meaning on a turn — it lives on sidebar sessions — so the
     // row keeps copy, retry and fork only.
-    let mut turn = assistant_turn(id, text.to_owned())
+    let mut turn = assistant_turn(id.clone(), text.to_owned())
         .actions(&[AssistantTurnAction::Copy, AssistantTurnAction::Retry, AssistantTurnAction::Fork])
         .streaming(streaming)
         .actions_bottom(last);
@@ -630,7 +722,69 @@ fn text_card(
             turn = turn.on_action(move |action, window, cx| act(turn_id.clone(), action, window, cx));
         }
     }
-    turn.into_any_element()
+    let body = turn.into_any_element();
+    // D49's "Run" row: one button per runnable fence, in fence order. The
+    // library's markdown view carries no per-fence action slot, so the row
+    // rides under the turn, in the same transcript row — the turn itself
+    // renders exactly as before, and a turn with no runnable fence renders
+    // no row at all.
+    match (&folds.terminal_run, runnable_blocks(text)) {
+        (Some(run), blocks) if !blocks.is_empty() => {
+            v_flex().child(body).child(code_run_row(&id, &blocks, run, cx)).into_any_element()
+        }
+        _ => body,
+    }
+}
+
+/// The "Run" row under an assistant turn with runnable fences (D49): one
+/// ghost button per fence with the command's first line beside it. A press
+/// runs what [`runnable_command`] returned for that fence — for a `console`
+/// block the prompt lines, prompts stripped, not the raw fence — pasting
+/// the whole command; ⌥-click pastes without Enter.
+fn code_run_row(
+    id: &ElementId,
+    blocks: &[RunnableBlock],
+    run: &TerminalRunHandler,
+    cx: &mut App,
+) -> AnyElement {
+    use aui_tokens::{ActiveAui, AuiStyled};
+    let p = cx.aui().colors;
+    let mut row = v_flex().w_full().pt(px(4.0)).gap(px(2.0));
+    for (index, block) in blocks.iter().enumerate() {
+        let run = run.clone();
+        let command = block.command.clone();
+        let label = block.label.clone();
+        row = row.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    button((id.clone(), SharedString::from(format!("run-{index}"))), RUN_LABEL)
+                        .xs()
+                        .ghost()
+                        .icon(IconName::Play)
+                        .on_click(move |_, window, cx| {
+                            if let Some(request) = RunRequest::new(
+                                command.clone(),
+                                send_enter_for_alt(window.modifiers().alt),
+                            ) {
+                                run(request, window, cx);
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .mono(scale::FS_12)
+                        .text_color(p.ink_3)
+                        .child(SharedString::from(label)),
+                ),
+        );
+    }
+    row.into_any_element()
 }
 
 /// The reasoning trace: a live one stays open, a finished one collapses to
@@ -926,9 +1080,24 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
         .unwrap_or((false, false));
     let show = folds.show_full_output.clone();
-    tool_card(id, call.verb.clone(), call.target.clone(), call.status, body)
+    // D49's "Run in terminal": shell tool cards (Muse's shell and the `!`
+    // userShell) carry the card's command text in the header's action slot.
+    let run_command = shell_run_command(call);
+    let mut actions = Vec::new();
+    if run_command.is_some() {
+        actions.push(
+            ToolCardAction::new(RUN_IN_TERMINAL_ACTION_ID, RUN_IN_TERMINAL_LABEL)
+                .icon(IconName::Play),
+        );
+    }
+    let mut card = tool_card(id, call.verb.clone(), call.target.clone(), call.status, body)
         .duration_ms(call.duration_ms)
-        .open(folds.open(key, true))
+        .open(folds.open(key, true));
+    if !actions.is_empty() {
+        card = card.actions(actions.clone());
+    }
+    let run = folds.terminal_run.clone();
+    card
         .on_intent({
             let toggle = folds.toggle.clone();
             let key = key.to_owned();
@@ -940,6 +1109,19 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
                         toggle(key.clone(), window, cx);
                     }
                 }
+                // ⌥-click pastes without Enter; a plain click sends it.
+                // Anything that is not the run action still just toggles.
+                ToolCardIntent::Action(index) => match (&run, &run_command) {
+                    (Some(run), Some(command)) if action_is_run(&actions, index) => {
+                        if let Some(request) = RunRequest::new(
+                            command.clone(),
+                            send_enter_for_alt(window.modifiers().alt),
+                        ) {
+                            run(request, window, cx);
+                        }
+                    }
+                    _ => toggle(key.clone(), window, cx),
+                },
                 _ => toggle(key.clone(), window, cx),
             }
         })
@@ -1234,5 +1416,119 @@ mod tests {
                 "419 reasoning, thought silently".to_owned(),
             ]
         );
+    }
+
+    fn shell_call(verb: &str, target: &str) -> ToolCall {
+        ToolCall {
+            id: "call-1".to_owned(),
+            kind: ToolKind::Shell,
+            verb: verb.to_owned(),
+            target: target.to_owned(),
+            status: aui_protocol::ToolStatus::Success,
+            duration_ms: None,
+            body: ToolBody::Shell { output_lines: vec!["ok".to_owned()], exit_code: Some(0), live: false },
+        }
+    }
+
+    /// D49: a shell tool card carries the card's command text — Muse's
+    /// shell tool and the `!` userShell fold to the same shape, so one
+    /// wiring covers both.
+    #[test]
+    fn shell_cards_carry_their_command_text() {
+        assert_eq!(
+            shell_run_command(&shell_call("Ran", "npm test -- --watch")),
+            Some("npm test -- --watch".to_owned())
+        );
+        assert_eq!(
+            shell_run_command(&shell_call("$", "git status -sb")),
+            Some("git status -sb".to_owned())
+        );
+    }
+
+    #[test]
+    fn non_shell_cards_offer_no_run() {
+        let mut read = shell_call("Read", "src/main.rs");
+        read.kind = ToolKind::Read;
+        read.body = ToolBody::Read { lines: 3 };
+        assert_eq!(shell_run_command(&read), None);
+        // A search that fell back to a shell body is not a command: its
+        // target is a pattern, so it must not offer to run.
+        let mut search = shell_call("Searched", "pattern");
+        search.kind = ToolKind::Search;
+        assert_eq!(shell_run_command(&search), None);
+        assert_eq!(shell_run_command(&shell_call("Ran", "   ")), None);
+    }
+
+    fn run_actions() -> Vec<ToolCardAction> {
+        vec![
+            ToolCardAction::new("copy-output", "Copy output"),
+            ToolCardAction::new(RUN_IN_TERMINAL_ACTION_ID, RUN_IN_TERMINAL_LABEL),
+        ]
+    }
+
+    /// D49: the `Action(usize)` payload is an index, so the run resolves by
+    /// id at that index — a card carrying more than one action still maps
+    /// back to the right command.
+    #[test]
+    fn the_action_index_maps_back_to_the_run() {
+        let actions = run_actions();
+        assert!(!action_is_run(&actions, 0));
+        assert!(action_is_run(&actions, 1));
+        assert!(!action_is_run(&actions, 2));
+        assert!(!action_is_run(&[], 0));
+    }
+
+    /// D49: `runnable_command`'s output is what gets run — a `bash` block
+    /// whole, a `console` block's prompt lines with prompts stripped, an
+    /// untagged `$ `-prefixed block the same way.
+    #[test]
+    fn runnable_fences_run_what_runnable_command_returns() {
+        assert_eq!(
+            code_run_command(Some("bash"), "npm test -- --watch"),
+            Some("npm test -- --watch".to_owned())
+        );
+        assert_eq!(
+            code_run_command(Some("console"), "$ npm test\n42 passing\n$ npm run lint"),
+            Some("npm test\nnpm run lint".to_owned())
+        );
+        assert_eq!(
+            code_run_command(None, "$ git status\n$ git diff --stat"),
+            Some("git status\ngit diff --stat".to_owned())
+        );
+    }
+
+    /// D49: a `rust` block offers no button, and neither does an untagged
+    /// block mixing prompts with output.
+    #[test]
+    fn unrunnable_fences_offer_no_run() {
+        assert_eq!(code_run_command(Some("rust"), "let x = 1;"), None);
+        assert_eq!(code_run_command(Some("python"), "print('hi')"), None);
+        assert_eq!(code_run_command(None, "$ git status\nOn branch main"), None);
+        assert_eq!(code_run_command(None, "let x = 1;"), None);
+    }
+
+    /// D49: multi-line blocks paste whole — the shell runs the lines in
+    /// order — so the offer keeps every line.
+    #[test]
+    fn multi_line_blocks_run_whole() {
+        let command = "npm test -- --watch\nnpm run lint";
+        assert_eq!(code_run_command(Some("bash"), command), Some(command.to_owned()));
+        let blocks = runnable_blocks(&format!("Try it:\n\n```bash\n{command}\n```\n"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].command, command);
+        assert_eq!(blocks[0].label, "npm test -- --watch");
+    }
+
+    /// The run row offers one button per runnable fence, in fence order,
+    /// and nothing for prose or unrunnable fences.
+    #[test]
+    fn the_run_row_lists_exactly_the_runnable_fences() {
+        let text = "First:\n\n```bash\ngit status\n```\n\nThen:\n\n```rust\nlet x = 1;\n```\n\nFinally:\n\n```console\n$ npm test\nok\n```\n";
+        let blocks = runnable_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].command, "git status");
+        assert_eq!(blocks[1].command, "npm test");
+        assert!(runnable_blocks("Just prose, no fences.").is_empty());
+        assert!(runnable_blocks("```rust\nlet x = 1;\n```\n").is_empty());
     }
 }

@@ -92,6 +92,17 @@ rows above. The composer's Enter, paste, history and ⇧Tab keys, and the
 turn's ⌃C, are nulled in `BaazTerminal` so they never fire while the dock
 holds the keyboard.
 
+## Play buttons
+
+No binding — both are clicks, and no click means no execution. Every shell
+tool card (Muse's shell and the `!` userShell) carries **Run in terminal**
+in its header; a runnable fenced code block (`sh`, `bash`, `zsh`, `shell`,
+`terminal`, `console`, or an untagged `$ `-prompt block) offers **Run**
+under its turn. A click opens the dock, picks the project's idle active
+tab (else a new one), bracketed-pastes the whole command and sends Enter;
+⌥-click pastes without Enter. Entirely local: no turn, no wire, and it
+works under `--replay`.
+
 ## Focus rings
 
 gpui has no `:focus-visible`, so the library keeps one window-wide flag: a key

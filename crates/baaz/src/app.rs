@@ -1643,8 +1643,10 @@ impl Harness {
     }
 
     /// Rerun a block's command: the same tab when it is idle, otherwise a
-    /// new one — [`terminal::host::pick_tab`]'s rule (D43). Bracketed
-    /// paste plus Enter, like the play buttons.
+    /// new one — [`terminal::host::pick_tab`]'s rule (D43) with the
+    /// originating tab as the candidate. The dock open, paste, Enter and
+    /// focus below are the play buttons' own entry point
+    /// ([`Harness::run_in_terminal`]).
     fn rerun_block(&mut self, tab_id: &str, block: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.current_project().map(|project| project.root.clone()) else { return };
         let command = self
@@ -1654,35 +1656,8 @@ impl Harness {
             .and_then(|tab| tab.session.read(cx).blocks().get(block).map(|block| block.command.clone()))
             .filter(|command| !command.trim().is_empty());
         let Some(command) = command else { return };
-        // D43 with the originating tab as the candidate: idle reuses it,
-        // busy opens a new tab.
-        match self.terminal_host.read(cx).pick_rerun(cx, &root, tab_id) {
-            terminal::Pick::Existing(id) => {
-                let session = self.terminal_host.read(cx).get(&id).map(|tab| tab.session.clone());
-                if let Some(session) = session {
-                    session.update(cx, |session, _| {
-                        session.paste(&command);
-                        session.write(b"\r");
-                    });
-                }
-            }
-            terminal::Pick::New => {
-                let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-                let title = terminal::title_from_command(&command);
-                let session = self.terminal_host.update(cx, |host, cx| {
-                    let id = host.open(&root, title, TabOwner::User, origin, cx);
-                    host.get(&id).map(|tab| tab.session.clone())
-                });
-                if let Some(session) = session {
-                    session.update(cx, |session, _| {
-                        session.paste(&command);
-                        session.write(b"\r");
-                    });
-                }
-            }
-        }
-        window.focus(&self.terminal_focus, cx);
-        cx.notify();
+        let pick = self.terminal_host.read(cx).pick_rerun(cx, &root, tab_id);
+        self.run_in_picked(&root, pick, &command, true, window, cx);
     }
 
     /// Ask about a block: its command and capped ANSI-free output land in

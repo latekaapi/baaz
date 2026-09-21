@@ -2033,6 +2033,20 @@ impl Harness {
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
+            // A D49 play button: local-only, so no project means nowhere
+            // to run rather than an error. The focus needs a window, which
+            // the event does not carry, so this rejoins through one like
+            // the rename and palette paths do.
+            SessionEvent::RunInTerminal { command, send_enter } => {
+                let (command, send_enter) = (command.clone(), *send_enter);
+                if let Some(root) = self.current_project().map(|project| project.root.clone()) {
+                    self.tasks.push(cx.spawn(async move |this, cx| {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.run_in_terminal(&root, &command, send_enter, window, cx);
+                        });
+                    }));
+                }
+            }
             SessionEvent::Projects => {
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.open_projects(false, window, cx));
