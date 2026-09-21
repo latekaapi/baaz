@@ -10,10 +10,25 @@ run costs nothing and reaches no model.
     uiprobe.py --entry login-choose --probe-shot out.png
     uiprobe.py --entry login-choose --probe-idle 2000
 """
-import argparse, json, os, subprocess, sys, tempfile
+import argparse, json, os, shutil, subprocess, sys, tempfile
+
+# How many captures to take looking for two that agree.
+SETTLE_TRIES = 6
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BAAZ = os.path.join(REPO, "target", "debug", "baaz")
+
+# baaz's own switch for this, and its doc comment says exactly what it is for:
+# "Whether captures must be byte-identical run to run." It freezes the clock and
+# holds the platform reduced-motion flag, so every tween, spring and shimmer
+# resolves to its resting state in one frame.
+#
+# Without it, gpui renders on demand and an entrance animation advances by
+# however many frames the machine had spare during the settle delay — so a
+# baseline taken on an idle machine and compared on a busy one differs by the
+# remaining fade. Measured: a whole sign-in card at partial opacity, 19 findings
+# across five screens, not one of them a real change.
+PROBE_ENV = {**os.environ, "BAAZ_DETERMINISTIC": "1"}
 
 # Two kinds of entry, because baaz measures them with different flags.
 #   shot: a login-screen state, booted offline. Free, ~2s, no running turn.
@@ -58,12 +73,29 @@ def main():
 
     if a.probe_shot:
         cmd = boot(a.entry, "shot") + extra
-        cmd += ["--screenshot", a.probe_shot, "--screenshot-delay", str(a.delay_ms)]
-        p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=180)
-        if p.returncode != 0 or not os.path.exists(a.probe_shot):
-            sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
-            return 1
-        return 0
+        # Capture twice and require the two to agree. With BAAZ_DETERMINISTIC
+        # set they always should, so this is cheap; when they do not, the screen
+        # is genuinely still animating and reporting that beats baselining an
+        # arbitrary frame.
+        import filecmp, tempfile
+        tmp, prev = tempfile.mkdtemp(), None
+        for attempt in range(SETTLE_TRIES):
+            shot = os.path.join(tmp, f"s{attempt}.png")
+            p = subprocess.run(cmd + ["--screenshot", shot,
+                                      "--screenshot-delay", str(a.delay_ms)],
+                               cwd=REPO, capture_output=True, text=True,
+                               timeout=180, env=PROBE_ENV)
+            if p.returncode != 0 or not os.path.exists(shot):
+                sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
+                return 1
+            if prev and filecmp.cmp(prev, shot, shallow=False):
+                shutil.copyfile(shot, a.probe_shot)
+                return 0
+            prev = shot
+        sys.stderr.write(
+            f"uiprobe: '{a.entry}' never rendered the same twice in "
+            f"{SETTLE_TRIES} captures - still animating, not baselined\n")
+        return 1
 
     if a.probe_idle:
         cmd = boot(a.entry, "idle") + extra
@@ -71,7 +103,8 @@ def main():
         # `idle_frames_2s`. Translate it onto the contract's shape.
         out = os.path.join(tempfile.mkdtemp(), "bench.json")
         p = subprocess.run(cmd + ["--bench-frames", "60", "--bench-out", out],
-                           cwd=REPO, capture_output=True, text=True, timeout=180)
+                           cwd=REPO, capture_output=True, text=True, timeout=180,
+                           env=PROBE_ENV)
         if not os.path.exists(out):
             sys.stderr.write("bench produced no output:\n" + (p.stderr[-1000:] or p.stdout[-1000:]))
             return 1
