@@ -39,6 +39,9 @@ pub struct PendingApproval {
     pub session_id: String,
     /// One-line human summary of what is being approved.
     pub headline: String,
+    /// The opaque stage token [`crate::Command::DecideApproval`] must echo
+    /// back verbatim. `None` when the backend has no staged approvals.
+    pub stage_token: Option<String>,
 }
 
 /// One pending question, pointed at — the full prompt arrives as a delta.
@@ -84,7 +87,9 @@ pub enum Ack {
     ModelCatalog {
         /// Visible rows, provider order.
         models: Vec<ModelSummary>,
-        /// The catalog's provider.
+        /// Which model vendor within the backend this catalog came from —
+        /// not the backend itself (see [`crate::ProviderAdapter::id`]).
+        /// The commands spell the same routing `model_provider`.
         provider: String,
     },
     /// A session's pending set, point-in-time.

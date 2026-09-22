@@ -190,7 +190,7 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
             request_id: "r-1".into(),
             workspace: None,
             model: None,
-            provider: None,
+            model_provider: None,
         })
         .expect("open")
     else {
@@ -246,16 +246,61 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
     assert_eq!(body, "echo: hello");
 }
 
-/// Every command the scripted provider does not implement answers
-/// `Unsupported` naming the capability — never `Ok`.
-#[test]
-fn unimplemented_commands_are_typed_refusals_not_success() {
-    let mut provider = ScriptedProvider::new();
-    provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
+/// Every command the scripted provider refuses, each paired with the
+/// capability name its refusal must carry.
+///
+/// The list is built through the `classify` helper's exhaustive `match`
+/// with no catch-all arm: adding a `Command` variant breaks compilation there until
+/// the new variant is classified — implemented (a `None` arm, handled in
+/// `send`) or refused (a `Some` arm plus a constructor below). A bare
+/// `commands.len()` count could never do that: it fires only when someone
+/// edits the list without fixing the count, not when a new variant is never
+/// listed at all.
+///
+/// The expected names are string literals, deliberately *not*
+/// `command.capability()`: the production `send` arm calls that same method,
+/// so comparing against it could not catch a bug in `capability()` itself.
+fn refused_commands() -> Vec<(Command, &'static str)> {
+    /// Implemented commands pass through as `None`; every refused one comes
+    /// back as `Some` with its capability name. Exhaustive — no wildcard.
+    fn classify(command: Command) -> Option<(Command, &'static str)> {
+        match command {
+            Command::OpenSession { .. }
+            | Command::SubmitInput { .. }
+            | Command::FollowSession { .. } => None,
+            command @ Command::ResumeSession { .. } => Some((command, "resume-session")),
+            command @ Command::ForkSession { .. } => Some((command, "fork-session")),
+            command @ Command::ListSessions { .. } => Some((command, "list-sessions")),
+            command @ Command::ReadSession { .. } => Some((command, "read-session")),
+            command @ Command::CompactSession { .. } => Some((command, "compact-session")),
+            command @ Command::SelectModel { .. } => Some((command, "select-model")),
+            command @ Command::SelectApprovalMode { .. } => {
+                Some((command, "select-approval-mode"))
+            }
+            command @ Command::RunShell { .. } => Some((command, "run-shell")),
+            command @ Command::SteerInput { .. } => Some((command, "steer-input")),
+            command @ Command::InterruptTurn { .. } => Some((command, "interrupt-turn")),
+            command @ Command::CancelTurn { .. } => Some((command, "cancel-turn")),
+            command @ Command::ReclaimQueued { .. } => Some((command, "reclaim-queued")),
+            command @ Command::ListModels { .. } => Some((command, "list-models")),
+            command @ Command::DecideApproval { .. } => Some((command, "decide-approval")),
+            command @ Command::ListPending { .. } => Some((command, "list-pending")),
+            command @ Command::AnswerQuestion { .. } => Some((command, "answer-question")),
+            command @ Command::DismissQuestion { .. } => Some((command, "dismiss-question")),
+            command @ Command::ClarifyQuestion { .. } => Some((command, "clarify-question")),
+            command @ Command::PageTranscript { .. } => Some((command, "page-transcript")),
+            command @ Command::UnfollowSession { .. } => Some((command, "unfollow-session")),
+            command @ Command::ReadStoredOutput { .. } => Some((command, "read-stored-output")),
+            command @ Command::ReadAccount => Some((command, "read-account")),
+            command @ Command::BeginLogin { .. } => Some((command, "begin-login")),
+            command @ Command::CancelLogin => Some((command, "cancel-login")),
+            command @ Command::LogOut => Some((command, "log-out")),
+        }
+    }
 
     // OpenSession, SubmitInput and FollowSession are the three the double
     // implements; everything else must refuse.
-    let commands: Vec<Command> = vec![
+    let candidates: Vec<Command> = vec![
         Command::ResumeSession {
             request_id: "r".into(),
             session_id: "s".into(),
@@ -275,7 +320,7 @@ fn unimplemented_commands_are_typed_refusals_not_success() {
             request_id: "r".into(),
             session_id: "s".into(),
             model: "m".into(),
-            provider: None,
+            model_provider: None,
         },
         Command::SelectApprovalMode {
             request_id: "r".into(),
@@ -303,7 +348,7 @@ fn unimplemented_commands_are_typed_refusals_not_success() {
             session_id: "s".into(),
             approval: "a".into(),
             choice: "c".into(),
-            stage: 0,
+            stage_token: None,
             feedback: None,
         },
         Command::ListPending { session_id: "s".into() },
@@ -346,13 +391,30 @@ fn unimplemented_commands_are_typed_refusals_not_success() {
         Command::LogOut,
     ];
 
-    // 28 commands total, 3 implemented: the list above must stay exhaustive.
-    assert_eq!(commands.len(), 25, "a new Command variant must be added to this test");
-    for command in &commands {
-        let expected = command.capability();
+    let mut refused = Vec::with_capacity(candidates.len());
+    for command in candidates {
+        match classify(command) {
+            Some(pair) => refused.push(pair),
+            None => panic!("the refusal list names an implemented command"),
+        }
+    }
+    // Backstop for edits to the list itself (duplicates, dropped entries):
+    // new variants are caught by `classify`, not by this count.
+    assert_eq!(refused.len(), 25, "the refusal list drifted from the 25 unimplemented commands");
+    refused
+}
+
+/// Every command the scripted provider does not implement answers
+/// `Unsupported` naming the capability — never `Ok`.
+#[test]
+fn unimplemented_commands_are_typed_refusals_not_success() {
+    let mut provider = ScriptedProvider::new();
+    provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
+
+    for (command, expected) in &refused_commands() {
         match provider.send(command.clone()) {
             Err(ProviderError::Unsupported { capability, .. }) => {
-                assert_eq!(capability, expected, "the refusal must name the capability");
+                assert_eq!(capability, *expected, "the refusal must name the capability");
             }
             other => panic!("{expected} must refuse, not answer {other:?}"),
         }

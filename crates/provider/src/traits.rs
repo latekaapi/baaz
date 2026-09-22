@@ -19,7 +19,8 @@ pub struct ConnectInfo {
     pub client_name: String,
     /// Client version string.
     pub client_version: String,
-    /// Capability names the client wants, e.g. `"userShell"`. Unknown
+    /// Capability names the client wants, e.g. `"bulk-export"`. These are
+    /// backend-defined identifiers the seam does not interpret: unknown
     /// entries are not an error — the provider grants what it knows.
     pub capabilities: Vec<String>,
 }
