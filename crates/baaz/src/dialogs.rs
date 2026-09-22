@@ -53,6 +53,23 @@ fn palette_items(
     rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone())).collect()
 }
 
+/// The Commands palette's filter: [`Command::ALL`] narrowed to the query,
+/// matching the slash and the description case-insensitively. The empty
+/// query lists every command. The drawn rows come from
+/// [`Harness::palette_rows`], which reads the palette's own query field,
+/// so the keyboard and the click walk the same filtered list.
+fn filter_commands(query: &str) -> Vec<Command> {
+    let needle = query.trim().to_lowercase();
+    Command::ALL
+        .into_iter()
+        .filter(|command| {
+            needle.is_empty()
+                || command.slash().to_lowercase().contains(&needle)
+                || command.description().to_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
 /// One row of the Projects palette: its stable id, whether it belongs to
 /// the Add section, and the drawn item.
 struct ProjectsRow {
@@ -263,6 +280,21 @@ impl Harness {
         });
     }
 
+    /// Keep the Commands selection inside the filtered rows after a
+    /// keystroke: the rows are rebuilt at render, so a selection past the
+    /// new end wraps to the head.
+    pub(crate) fn clamp_commands_selection(&mut self, cx: &mut Context<Self>) {
+        let query = self.commands_query.read(cx).value().trim().to_owned();
+        let count = filter_commands(&query).len();
+        self.overlays.update(cx, |overlays, _| {
+            if let Some(palette) = overlays.palette.as_mut() {
+                if palette.kind == PaletteKind::Commands && palette.selected >= count {
+                    palette.selected = 0;
+                }
+            }
+        });
+    }
+
     /// The native folder panel, directories only: a chosen folder is adopted
     /// exactly like a recent workspace. Cancel does nothing.
     ///
@@ -396,10 +428,13 @@ impl Harness {
     /// click agree about what row 3 is.
     fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
         match kind {
-            PaletteKind::Commands => Command::ALL
-                .into_iter()
-                .map(|c| (c.slash().into(), c.slash().into(), c.description().into()))
-                .collect(),
+            PaletteKind::Commands => {
+                let query = self.commands_query.read(cx).value().trim().to_owned();
+                filter_commands(&query)
+                    .into_iter()
+                    .map(|c| (c.slash().into(), c.slash().into(), c.description().into()))
+                    .collect()
+            }
             PaletteKind::Resume => self
                 .visible_sessions(cx)
                 .iter()
@@ -659,6 +694,21 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The Commands palette's query editor, drawn inside the card's own
+    /// query row through the library's slot, like the search palette's:
+    /// one surface, the field where the placeholder would be, no chrome
+    /// of its own. The query filters [`Command::ALL`] on slash and
+    /// description, synchronously.
+    fn commands_query_editor(&self) -> AnyElement {
+        Textarea::new(&self.commands_query)
+            .appearance(false)
+            .bordered(false)
+            .text_size(aui_tokens::scaled(scale::FS_14))
+            .h_auto()
+            .whitespace_nowrap()
+            .into_any_element()
+    }
+
     /// ⌘K and `/resume`: the command palette, over everything.
     ///
     /// The same primitive for both lists, because they are the same gesture —
@@ -671,14 +721,22 @@ impl Harness {
         // the search palette edits through its own field above the card, so
         // the card's row carries the result count instead.
         let (query, placeholder, sections) = match kind {
-            PaletteKind::Commands => (
-                SharedString::from(""),
-                SharedString::from("Every command in this build"),
-                vec![PaletteSection::new(
-                    "Commands",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Slash)),
-                )],
-            ),
+            PaletteKind::Commands => {
+                // The rows already carry the filter; the match emphasis
+                // covers the label, like the search palette's.
+                let needle = self.commands_query.read(cx).value().trim().to_owned();
+                let items = palette_items(&rows, PaletteIcon::Glyph(IconName::Slash));
+                let items = if needle.is_empty() {
+                    items
+                } else {
+                    items.into_iter().map(|item| item.matching(&needle)).collect()
+                };
+                (
+                    SharedString::from(""),
+                    SharedString::from("Every command in this build"),
+                    vec![PaletteSection::new("Commands", items)],
+                )
+            }
             PaletteKind::Resume => (
                 SharedString::from(""),
                 SharedString::from("Resume a session in this workspace"),
@@ -794,6 +852,9 @@ impl Harness {
         }
         if kind == PaletteKind::Projects {
             card = card.query_slot(self.projects_query_editor());
+        }
+        if kind == PaletteKind::Commands {
+            card = card.query_slot(self.commands_query_editor());
         }
         if self.still() {
             card = card.at_rest();
@@ -1144,10 +1205,10 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
-    use super::tilde_root;
+    use super::{filter_commands, tilde_root};
     use crate::app::Harness;
     use crate::layout::RightKind;
-    use crate::overlays::{Command, DialogAction};
+    use crate::overlays::{Command, DialogAction, PaletteKind};
     // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
     use gpui::AppContext as _;
     use std::path::PathBuf;
@@ -1354,6 +1415,50 @@ mod tests {
         let crowded = Harness::quit_terminal_dialog("pnpm vitest", 2);
         assert!(crowded.detail.contains("pnpm vitest"), "still names one command");
         assert!(crowded.detail.contains('3'), "and counts all three");
+    }
+
+    /// The Commands filter reads the slash and the description,
+    /// case-insensitively: `brow` is `/browser`, `reasoning` is a
+    /// description word only, nonsense is nothing, empty is all 23.
+    #[test]
+    fn the_command_filter_matches_slash_and_description() {
+        assert_eq!(filter_commands("brow"), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("BROW"), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("reasoning"), vec![Command::Effort]);
+        assert!(filter_commands("zzz-no-such-command").is_empty());
+        assert_eq!(filter_commands("").len(), 23, "an empty query lists every command");
+        assert_eq!(filter_commands("   ").len(), 23, "whitespace is an empty query");
+    }
+
+    /// `Commands` owns a query editor, and the drawn rows follow it: the
+    /// field opens empty with all 23 rows, and setting it to `brow`
+    /// leaves `/browser` alone — the same rows the keyboard walks.
+    #[gpui::test]
+    fn the_command_palette_has_a_query_field_and_filters(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("commands-query");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).commands_query.read(cx).value().is_empty()));
+        let empty = vc.update(|_, cx| {
+            let app: &gpui::App = cx;
+            baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
+        });
+        assert_eq!(empty, 23, "an empty query lists every command");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));
+            });
+        });
+        let rows = vc.update(|_, cx| {
+            let app: &gpui::App = cx;
+            baaz.read(app).palette_rows(PaletteKind::Commands, app)
+        });
+        assert_eq!(rows.len(), 1, "only /browser matches `brow`");
+        assert!(rows[0].0.as_ref() == "/browser", "the row is the slash command");
+        restore_state(state);
     }
 
     #[test]
