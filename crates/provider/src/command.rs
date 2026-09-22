@@ -61,8 +61,10 @@ pub enum Command {
         workspace: Option<String>,
         /// Initial model; provider default when absent.
         model: Option<String>,
-        /// Upstream agent route; provider default when absent.
-        provider: Option<String>,
+        /// Which model vendor within the backend a request routes to.
+        /// This is not the backend itself (see [`crate::ProviderAdapter::id`]):
+        /// a backend with no such routing leaves it `None`.
+        model_provider: Option<String>,
     },
     /// Re-attach to a stored session. With `cursor` the provider serves only
     /// the suffix after it; with `metadata_only` it serves no history and
@@ -124,8 +126,10 @@ pub enum Command {
         session_id: String,
         /// Catalog model id.
         model: String,
-        /// Provider routing; absent means no change.
-        provider: Option<String>,
+        /// Which model vendor within the backend a request routes to, as in
+        /// [`Command::OpenSession`]: not the backend itself, and absent means
+        /// no change.
+        model_provider: Option<String>,
     },
     /// Switch a session's approval enforcement mode. Applies forward: an
     /// in-flight approval is not decided retroactively.
@@ -212,10 +216,10 @@ pub enum Command {
         /// Flag the row matching this session's effective model.
         session: Option<String>,
     },
-    /// Decide a pending approval. `stage` must equal the approval's current
-    /// stage — the race guard that keeps a stale decision from satisfying a
-    /// newer stage. A non-terminal decision satisfies the stage but leaves
-    /// the approval pending.
+    /// Decide a pending approval. `stage_token` must echo the approval's
+    /// current stage token — the race guard that keeps a stale decision from
+    /// satisfying a newer stage. A non-terminal decision satisfies the stage
+    /// but leaves the approval pending.
     DecideApproval {
         /// Client-minted idempotency handle.
         request_id: String,
@@ -225,8 +229,11 @@ pub enum Command {
         approval: String,
         /// One of the approval's offered choices.
         choice: String,
-        /// The stage this decision is aimed at.
-        stage: u32,
+        /// Opaque per-stage token, learned from the pending set and passed
+        /// back verbatim: the seam never parses, orders, or compares it.
+        /// `None` means the backend has no staged approvals (a single
+        /// yes/no per approval); a backend that stages requires `Some`.
+        stage_token: Option<String>,
         /// Free-text guidance delivered with the decision, on choices that
         /// accept it.
         feedback: Option<String>,

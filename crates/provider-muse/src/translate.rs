@@ -57,6 +57,22 @@ fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
     }
 }
 
+/// MSP's per-stage race guard, carried across the seam as an opaque string.
+/// The neutral side never looks inside: [`Command::DecideApproval`] echoes
+/// the token [`Command::ListPending`] minted, and only this adapter
+/// encodes and decodes it.
+fn encode_stage_token(requirement: &ApprovalRequirementRef) -> String {
+    serde_json::to_string(requirement).expect("stage token serializes")
+}
+
+/// Decode a stage token back to MSP's guard. A token this adapter did not
+/// mint is a refusal, not a guess.
+fn decode_stage_token(token: &str) -> Result<ApprovalRequirementRef, ProviderError> {
+    serde_json::from_str(token).map_err(|_| ProviderError::Rejected {
+        reason: "the approval stage token is not one this backend issued".into(),
+    })
+}
+
 /// A neutral answer, translated to the wire's answer.
 fn answer(answer: QuestionAnswer) -> UserInputAnswer {
     UserInputAnswer {
@@ -132,14 +148,14 @@ pub fn dispatch(
     command: Command,
 ) -> Result<Ack, ProviderError> {
     match command {
-        Command::OpenSession { request_id, workspace, model, provider } => {
+        Command::OpenSession { request_id, workspace, model, model_provider } => {
             let result = client
                 .session_start(&SessionStartParams {
                     approval_mode: None,
                     command_id: request_id,
                     config: None,
                     model_id: model,
-                    provider_id: provider,
+                    provider_id: model_provider,
                     session_id: None,
                     workspace_root: workspace,
                 })
@@ -224,7 +240,7 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             Ok(Ack::Accepted)
         }
-        Command::SelectModel { request_id, session_id, model, provider } => {
+        Command::SelectModel { request_id, session_id, model, model_provider } => {
             client
                 .session_set_model(&SessionSetModelParams {
                     command_id: request_id,
@@ -232,7 +248,7 @@ pub fn dispatch(
                         display_label: None,
                         model_id: model,
                         profile_id: None,
-                        provider_id: provider,
+                        provider_id: model_provider,
                     },
                     session_id,
                 })
@@ -332,17 +348,21 @@ pub fn dispatch(
                 provider: result.provider_id,
             })
         }
-        Command::DecideApproval { request_id, session_id, approval, choice, stage, feedback } => {
+        Command::DecideApproval { request_id, session_id, approval, choice, stage_token, feedback } => {
+            let Some(token) = stage_token else {
+                return Err(ProviderError::Rejected {
+                    reason: "this backend stages its approvals: decide with the stage token, not without one"
+                        .into(),
+                });
+            };
+            let requirement_id = decode_stage_token(&token)?;
             client
                 .approval_decide(&ApprovalDecideParams {
-                    approval_id: approval.clone(),
+                    approval_id: approval,
                     choice_id: choice,
                     command_id: request_id,
                     feedback,
-                    requirement_id: ApprovalRequirementRef {
-                        approval_id: approval,
-                        source_index: stage,
-                    },
+                    requirement_id,
                     session_id,
                 })
                 .map_err(transport_error)?;
@@ -362,6 +382,9 @@ pub fn dispatch(
                         id: approval.approval_id.clone(),
                         session_id: approval.session_id.clone(),
                         headline: approval_headline(approval),
+                        stage_token: Some(encode_stage_token(
+                            &approval.current_requirement_id,
+                        )),
                     })
                     .collect(),
                 questions: result
