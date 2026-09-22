@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-muse"]
 
 [workspace.package]
 version = "0.1.0"
@@ -56,6 +56,8 @@ aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.2.5"
 # Internal crates
 muse-client = { path = "crates/muse-client" }
 muse-adapter = { path = "crates/muse-adapter" }
+provider = { path = "crates/provider" }
+provider-muse = { path = "crates/provider-muse" }
 
 [profile.dev]
 opt-level = 1

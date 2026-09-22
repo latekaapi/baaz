@@ -5737,6 +5737,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+]
+
+[[package]]
+name = "provider-muse"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+ "muse-adapter",
+ "muse-client",
+ "provider",
+ "serde_json",
+]
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
