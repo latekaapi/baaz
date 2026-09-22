@@ -16,9 +16,12 @@
 //! Since muse 1.3.0 the numbers the card shows are on the wire, typed:
 //! `usage/read` answers `UsageReadResult { usage: Option<SubscriptionUsage> }`
 //! and the server emits `usage/changed` as observations land. Those are the
-//! primary oracle now ([`tier_from_usage`], [`usage_read`]): on `Some(usage)`
-//! the tier is built directly from it and cached through [`remember`] exactly
-//! as a probe answer is.
+//! primary oracle now ([`tier_from_usage`], [`read_usage_value`],
+//! [`observation_is_current`]): on `Some(usage)` made after the current
+//! credential was installed the tier is built directly from it and cached
+//! through [`remember`] exactly as a probe answer is. The wire carries no
+//! credential identity, so anything older belongs to a previous login and
+//! falls through to the scrape instead.
 //!
 //! The wire cannot replace the scrape outright, so the scrape stays as the
 //! fallback ([`probe`]). Two verified reasons:
@@ -574,9 +577,15 @@ fn complete(tier: &Tier) -> bool {
 /// schema says those are valid. [`Tier::weekly_fraction`] clamps for the
 /// meter; [`Tier::status_lines`] prints the true number.
 ///
-/// `observed_at_ms` is deliberately not consulted: it stamps when the host
-/// received the observation, not now, and a stale observation is still the
-/// truth about the last thing seen. No freshness rule hides it.
+/// `observed_at_ms` is not consulted here: this builder trusts its input,
+/// and currency is the callers' job. [`probe_primary`] and
+/// [`tier_from_changed_current`] admit only observations made after the
+/// current credential was installed ([`observation_is_current`]), because the
+/// wire carries no account or credential identity and the host serves its
+/// last observation across a sign-out and sign-in on the same connection. A
+/// stale observation belongs to a previous login and must never become the
+/// tier: trusting it would show a subscription while the login bills
+/// pay-as-you-go rates with no blocking banner.
 pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
     let mut resets = Vec::new();
     if let Some(clause) = format_reset(usage.window.resets_at_ms, false) {
@@ -619,6 +628,26 @@ pub fn tier_from_changed(params: &serde_json::Value) -> Option<Tier> {
     serde_json::from_value::<SubscriptionUsage>(params.clone()).ok().map(|usage| tier_from_usage(&usage))
 }
 
+/// One `usage/changed` notification's params → the tier it names, when the
+/// observation belongs to the credential now installed.
+///
+/// [`tier_from_changed`] decodes and builds; this admits in between. A
+/// notification stamped before the current credential was installed belongs
+/// to a previous login — the wire carries no account identity — and reads as
+/// `None`, so the caller keeps what it had instead of painting another
+/// login's plan. The build still goes through the pure arm, so the tested
+/// wording stays in one place.
+pub fn tier_from_changed_current(
+    params: &serde_json::Value,
+    auth_mtime_secs: Option<u64>,
+) -> Option<Tier> {
+    let usage: SubscriptionUsage = serde_json::from_value(params.clone()).ok()?;
+    if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
+        return None;
+    }
+    tier_from_changed(params)
+}
+
 /// One reset clause in the card's own register, from an epoch-millisecond
 /// stamp, in the person's local timezone (`chrono::Local` — the same clock
 /// the sidebar and transcript timestamps already use, and the one the card
@@ -639,29 +668,80 @@ fn format_reset(resets_at_ms: u64, with_date: bool) -> Option<String> {
     }
 }
 
-/// Issue `usage/read` on a live connection: `Some` tier when the host has an
-/// observation, `None` on a cold host (`{}`) or any read failure.
+/// Whether a wire observation belongs to the credential now installed.
 ///
-/// Blocking: call it on a background thread. `None` falls through to the pty
-/// probe — a failed read never stops the app and never becomes
-/// [`Tier::Unavailable`] directly.
-pub fn usage_read(client: &MuseClient) -> Option<Tier> {
-    let value = client.request("usage/read", None).ok()?;
-    tier_from_read_value(&value)
+/// `observed_at_ms` is the host's arrival stamp in epoch **milliseconds**;
+/// `auth_mtime_secs` is `auth.json`'s modification time in whole epoch
+/// **seconds** ([`auth_mtime`]). The comparison converts the observation down
+/// to whole seconds (`observed_at_ms / 1000`) and trusts it only when that
+/// whole second is strictly after the credential's — no skew tolerance: both
+/// stamps come from this machine's clock, so there is no skew to budget for,
+/// and a same-second-or-older observation falls through to the scrape. The
+/// tie goes to distrust on purpose: a false fall-through costs a four-second
+/// scrape, while a false trust bills the person with no warning. `None` (no
+/// `auth.json`) trusts nothing.
+pub fn observation_is_current(observed_at_ms: u64, auth_mtime_secs: Option<u64>) -> bool {
+    match auth_mtime_secs {
+        Some(mtime) => observed_at_ms / 1000 > mtime,
+        None => false,
+    }
 }
 
-/// The primary oracle first, the scrape second: `usage/read` when `client`
-/// is up and has an observation, the [`probe`] pty fallback otherwise.
+/// Issue `usage/read` on a live connection and return the result object as
+/// read: `Some` on any answer (including the `{}` cold host), `None` on a
+/// read failure.
+///
+/// Blocking: call it on a background thread. The edge of the decision, not
+/// the decision: the caller admits the observation through
+/// [`tier_from_read_current`] (see [`probe_primary`]) rather than trusting
+/// whatever the host last saw. A failed read never stops the app and never
+/// becomes [`Tier::Unavailable`] directly.
+pub fn read_usage_value(client: &MuseClient) -> Option<serde_json::Value> {
+    client.request("usage/read", None).ok()
+}
+
+/// The gated arm: decode, admit, build.
+///
+/// [`tier_from_read_value`] decodes and builds; this admits in between. An
+/// observation stamped before the current credential was installed belongs
+/// to a previous login — the wire carries no account identity — and reads as
+/// `None`, falling through to the scrape. The build still goes through the
+/// pure arm, so the tested wording stays in one place.
+pub fn tier_from_read_current(
+    value: &serde_json::Value,
+    auth_mtime_secs: Option<u64>,
+) -> Option<Tier> {
+    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
+    let usage = result.usage.as_ref()?;
+    if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
+        return None;
+    }
+    tier_from_read_value(value)
+}
+
+/// Decide the primary oracle's answer from an already-read `usage/read`
+/// result object.
+///
+/// Testable by construction: the wire read ([`read_usage_value`]) and the
+/// scrape ([`probe`]) both live outside, so a test drives this directly with
+/// a fixed result object and a recording fallback — no live connection, no
+/// pseudo-terminal. A current observation ([`tier_from_read_current`])
+/// answers at once and the fallback never runs; anything else — no result
+/// (a read failure), no observation (the `{}` cold host), a stale one from a
+/// previous login, or no credential at all — runs the fallback, which stays
+/// the only oracle that can say pay-as-you-go.
 ///
 /// Every error is a `String` that is safe to show: it names what went wrong,
 /// never what the terminal said.
-pub fn probe_primary(muse: &str, client: Option<&MuseClient>) -> Result<Tier, String> {
-    if let Some(client) = client {
-        if let Some(tier) = usage_read(client) {
-            return Ok(tier);
-        }
+pub fn probe_primary(
+    read: Option<&serde_json::Value>,
+    auth_mtime_secs: Option<u64>,
+    fallback: impl FnOnce() -> Result<Tier, String>,
+) -> Result<Tier, String> {
+    if let Some(tier) = read.and_then(|value| tier_from_read_current(value, auth_mtime_secs)) {
+        return Ok(tier);
     }
-    probe(muse)
+    fallback()
 }
 
 /// Drive the TUI and read the `/upgrade` card. Blocking for up to
@@ -1447,8 +1527,8 @@ mod tests {
     /// the status lines print the true number.
     #[test]
     fn usage_read_some_builds_the_subscription_verbatim() {
-        // Through the call site's own arm (`tier_from_read_value`, what
-        // `usage_read` feeds the probe): a helper pinned below the arm would
+        // Through the call site's own arm (`tier_from_read_value`, what the
+        // wire read feeds the probe): a helper pinned below the arm would
         // keep passing with the arm reverted to `None`.
         let result = serde_json::json!({
             "usage": {
@@ -1534,6 +1614,141 @@ mod tests {
         assert!(window.starts_with("Resets at "), "{window}");
         assert!(weekly.starts_with("Resets ") && weekly.contains(" at "), "{weekly}");
         assert_ne!(window, weekly);
+    }
+
+    /// One `usage/read` result object with a chosen arrival stamp, for
+    /// driving the decision ([`probe_primary`]) without a live connection.
+    fn test_read(observed_at_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "usage": {
+                "observedAtMs": observed_at_ms,
+                "tier": "Muse Code High Usage",
+                "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+                "window": {
+                    "resetsAtMs": 1_786_003_020_000u64,
+                    "usedPercent": 12,
+                    "windowDurationMins": 300,
+                },
+            },
+        })
+    }
+
+    /// A fresh observation answers from the wire and the scrape never runs.
+    ///
+    /// This drives the decision ([`probe_primary`]), not the pure builders
+    /// below it: deleting the primary-oracle path fails here first.
+    #[test]
+    fn primary_fresh_observation_answers_without_the_scrape() {
+        let mtime = 1_786_000_000u64;
+        let read = test_read((mtime + 120) * 1000);
+        let mut scraped = false;
+        let tier = probe_primary(Some(&read), Some(mtime), || {
+            scraped = true;
+            Ok(Tier::PayAsYouGo)
+        })
+        .expect("a current observation is an answer, not a fallback");
+        assert!(!scraped, "the fallback must not run when the wire answers");
+        let Tier::Subscription { plan, current_pct, weekly_pct, .. } = &tier else {
+            panic!("expected a subscription, got {tier:?}");
+        };
+        assert_eq!(plan, "Muse Code High Usage");
+        assert_eq!(*current_pct, Some(12));
+        assert_eq!(*weekly_pct, Some(9));
+    }
+
+    /// The regression guard: an observation older than the installed
+    /// credential belongs to a previous login and falls through to the
+    /// scrape, which stays the only oracle that can say pay-as-you-go.
+    ///
+    /// The shape of the real incident: a subscription turn observed, then a
+    /// sign-out and sign-in on pay-as-you-go over the same connection, with
+    /// the host still serving the previous account's window. Trusting it
+    /// would hide the blocking banner while every turn bills API rates.
+    #[test]
+    fn primary_stale_observation_falls_through_to_the_scrape() {
+        let mtime = 1_786_000_000u64;
+        let read = test_read((mtime - 60) * 1000);
+        let mut scraped = false;
+        let tier = probe_primary(Some(&read), Some(mtime), || {
+            scraped = true;
+            Ok(Tier::PayAsYouGo)
+        })
+        .expect("the fallback answers");
+        assert!(scraped, "a previous login's observation must not be trusted");
+        assert_eq!(tier, Tier::PayAsYouGo);
+    }
+
+    /// The tie goes to distrust: an observation stamped in the same whole
+    /// second as the credential falls through, and with no `auth.json` at
+    /// all nothing is trusted.
+    #[test]
+    fn primary_same_second_observation_falls_through() {
+        let mtime = 1_786_000_000u64;
+        let mut scraped = false;
+        let read = test_read(mtime * 1000 + 500);
+        let tier = probe_primary(Some(&read), Some(mtime), || {
+            scraped = true;
+            Ok(Tier::PayAsYouGo)
+        })
+        .expect("the fallback answers");
+        assert!(scraped, "same-second is not strictly newer, so it falls through");
+        assert_eq!(tier, Tier::PayAsYouGo);
+        let mut scraped = false;
+        let read = test_read((mtime + 120) * 1000);
+        let tier = probe_primary(Some(&read), None, || {
+            scraped = true;
+            Ok(Tier::PayAsYouGo)
+        })
+        .expect("the fallback answers");
+        assert!(scraped, "no credential trusts nothing");
+        assert_eq!(tier, Tier::PayAsYouGo);
+    }
+
+    /// No observation (the `{}` cold host) falls through to the scrape.
+    #[test]
+    fn primary_no_observation_falls_through_to_the_scrape() {
+        let mut scraped = false;
+        let tier = probe_primary(None, Some(1_786_000_000), || {
+            scraped = true;
+            Ok(Tier::PayAsYouGo)
+        })
+        .expect("the fallback answers");
+        assert!(scraped, "nothing observed means the scrape decides");
+        assert_eq!(tier, Tier::PayAsYouGo);
+    }
+
+    /// A `usage/changed` stamped before the installed credential belongs to a
+    /// previous login and must not move the tier; a current one still does.
+    #[test]
+    fn usage_changed_for_a_stale_credential_does_not_update() {
+        let mtime = 1_786_000_000u64;
+        let stale = serde_json::json!({
+            "observedAtMs": (mtime - 60) * 1000,
+            "tier": "Muse Code High Usage",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": { "resetsAtMs": 1_786_003_020_000u64, "usedPercent": 4, "windowDurationMins": 300 },
+        });
+        // Decoding still works; admission is the gate.
+        assert!(tier_from_changed(&stale).is_some());
+        assert_eq!(
+            tier_from_changed_current(&stale, Some(mtime)),
+            None,
+            "a previous login's notification must not update the tier"
+        );
+        let fresh = serde_json::json!({
+            "observedAtMs": (mtime + 60) * 1000,
+            "tier": "Muse Code High Usage",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": { "resetsAtMs": 1_786_003_020_000u64, "usedPercent": 4, "windowDurationMins": 300 },
+        });
+        let updated = tier_from_changed_current(&fresh, Some(mtime))
+            .expect("a current notification is an answer");
+        let Tier::Subscription { current_pct, weekly_pct, .. } = &updated else {
+            panic!("expected a subscription, got {updated:?}");
+        };
+        assert_eq!(*current_pct, Some(4));
+        assert_eq!(*weekly_pct, Some(9));
+        assert_eq!(tier_from_changed_current(&fresh, None), None, "no credential trusts nothing");
     }
 
     /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same

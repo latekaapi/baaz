@@ -61,7 +61,13 @@ impl Harness {
         let client = self.client.clone();
         self.wire_call(
             cx,
-            move || tier::probe_primary(&program, client.as_ref().map(|client| client.as_ref())),
+            move || {
+                // The wire read stays at the edge: `probe_primary` decides
+                // from the already-read observation, which is what makes the
+                // decision reachable from a test without a live connection.
+                let read = client.as_ref().and_then(|client| tier::read_usage_value(client));
+                tier::probe_primary(read.as_ref(), tier::auth_mtime(), || tier::probe(&program))
+            },
             move |this, result, cx| {
                 this.tier_probing = false;
                 // The reason is the module's own words, never the terminal's.
@@ -123,9 +129,12 @@ impl Harness {
     /// footer meter and the banner follow through [`Self::push_tier`].
     ///
     /// A frame that does not decode keeps the known tier — it never clears
-    /// it. Cached through [`tier::remember`] exactly as a probe answer is.
+    /// it — and so does a frame stamped before the installed credential: the
+    /// wire carries no account identity, and a notification for a login that
+    /// is no longer installed must not move the tier. Cached through
+    /// [`tier::remember`] exactly as a probe answer is.
     pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
-        if let Some(tier) = tier::tier_from_changed(params) {
+        if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()) {
             tier::remember(&tier);
             self.tier = Some(tier);
             self.push_tier(cx);
