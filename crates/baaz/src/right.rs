@@ -911,7 +911,11 @@ fn files_pane_from(
         format!("{count} files and folders")
     };
     let inert_handler = files_handler(notify.clone());
+    // Flush: these are panes and stacked panels, not cards floating on a
+    // surface. Their own rounded border inside a column that already has
+    // edges is what the owner saw as "extra borders and rounded corners".
     let tree = file_tree("right-files", nodes.to_vec())
+        .flush()
         .header(name)
         .footer(footer)
         .on_action(move |action, window, cx| {
@@ -964,6 +968,7 @@ fn browser_pane(notify: &ToastSink) -> AnyElement {
 /// reach [`inert`] and never shell out. The status arrives already read.
 fn git_pane_from(status: &GitStatus, notify: &ToastSink) -> AnyElement {
     let changes = git_changes("right-git", status.files.clone(), "", status.ahead, status.behind)
+        .flush()
         .branch(status.branch.clone())
         .on_action(git_handler(notify.clone()));
     let form = pr_form(
@@ -973,6 +978,7 @@ fn git_pane_from(status: &GitStatus, notify: &ToastSink) -> AnyElement {
         vec![PrDescription::Text(SharedString::from(format!("Head branch: {}", status.branch)))],
         Vec::new(),
     )
+    .flush()
     .on_action(pr_handler(notify.clone()));
     v_flex()
         .id("right-git-pane")
@@ -1009,6 +1015,7 @@ fn diff_pane_from(status: &GitStatus, parsed: &ParsedDiffs, notify: &ToastSink) 
         "Unstaged changes".to_string()
     };
     let review = diff_review("right-diff", review_files, shown, Vec::new(), DiffScope::Unstaged, DiffView::Unified)
+        .flush()
         .summary(lead, status.added, status.removed)
         .on_action(diff_handler(notify.clone()));
     v_flex()
