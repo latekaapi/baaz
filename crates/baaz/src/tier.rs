@@ -11,18 +11,39 @@
 //! carries only the mechanism, the storage, the API base and the person's name
 //! and email, and the session log records only a `credential_backend`.
 //!
-//! # The one oracle
+//! # Two oracles: the wire first, the screen scrape as fallback
 //!
-//! The `muse` TUI's `/upgrade` card. It reads either
+//! Since muse 1.3.0 the numbers the card shows are on the wire, typed:
+//! `usage/read` answers `UsageReadResult { usage: Option<SubscriptionUsage> }`
+//! and the server emits `usage/changed` as observations land. Those are the
+//! primary oracle now ([`tier_from_usage`], [`usage_read`]): on `Some(usage)`
+//! the tier is built directly from it and cached through [`remember`] exactly
+//! as a probe answer is.
+//!
+//! The wire cannot replace the scrape outright, so the scrape stays as the
+//! fallback ([`probe`]). Two verified reasons:
+//!
+//! 1. `usage/read` answers `{}` on a cold host — it only populates after a
+//!    turn has observed a provider response, so a fresh boot has nothing.
+//! 2. Nothing on the wire says a login is pay-as-you-go. `usage/read`
+//!    returns a `SubscriptionUsage` when a subscription observation exists
+//!    and nothing otherwise; absence is "not known yet", not pay-as-you-go.
+//!
+//! The `muse` TUI's `/upgrade` card is still the only oracle that
+//! distinguishes [`Tier::PayAsYouGo`] from [`Tier::Unavailable`] — and
+//! `PayAsYouGo` is what raises the blocking banner that stops the person
+//! being billed API rates by surprise. So on `None` (the `{}` case) or any
+//! read failure, the existing pty probe runs unchanged: it spawns `muse`
+//! under a pseudo-terminal with no prompt, answers the cursor-position query
+//! the TUI opens with (`ESC [ 6 n` → `ESC [ 1;1 R`, without which it never
+//! draws), types `/upgrade`, presses Enter and reads the card, which says
+//! either
 //!
 //! > You are currently subscribed to the *Muse Code High Usage* plan.
 //! > Current 2% used · Resets at … Weekly 2% used · Resets …
 //!
 //! or "you're on pay-as-you-go" / "Subscriptions aren't currently available
-//! for your account". So [`probe`] runs `muse` under a pseudo-terminal with no
-//! prompt, answers the cursor-position query the TUI opens with
-//! (`ESC [ 6 n` → `ESC [ 1;1 R`, without which it never draws), types
-//! `/upgrade`, presses Enter and reads the card. **Opening the TUI starts a
+//! for your account". **Opening the TUI starts a
 //! session record and makes no model call**, so the probe costs nothing.
 //!
 //! Two rules this module keeps:
@@ -43,6 +64,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+use muse_client::schema::{SubscriptionUsage, UsageReadResult};
+use muse_client::MuseClient;
 
 /// The ceiling on one probe, start to finish.
 const PROBE_CEILING: Duration = Duration::from_secs(20);
@@ -533,6 +557,111 @@ fn complete(tier: &Tier) -> bool {
         }
         Tier::PayAsYouGo | Tier::Unavailable(_) => true,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The wire oracle (muse 1.3.0): `usage/read` first, `usage/changed` live
+// ---------------------------------------------------------------------------
+
+/// Build a [`Tier::Subscription`] from one wire observation.
+///
+/// `plan` is the provider's subscription tier id verbatim, `current_pct` the
+/// window's `used_percent`, `weekly_pct` the weekly block's, and `resets`
+/// the two reset clauses rendered from their epoch-millisecond stamps in the
+/// card's own register (see [`format_reset`]).
+///
+/// The percentages are verbatim, including over-quota values above 100 — the
+/// schema says those are valid. [`Tier::weekly_fraction`] clamps for the
+/// meter; [`Tier::status_lines`] prints the true number.
+///
+/// `observed_at_ms` is deliberately not consulted: it stamps when the host
+/// received the observation, not now, and a stale observation is still the
+/// truth about the last thing seen. No freshness rule hides it.
+pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
+    let mut resets = Vec::new();
+    if let Some(clause) = format_reset(usage.window.resets_at_ms, false) {
+        resets.push(clause);
+    }
+    if let Some(clause) = format_reset(usage.weekly.resets_at_ms, true) {
+        resets.push(clause);
+    }
+    Tier::Subscription {
+        plan: usage.tier.clone(),
+        current_pct: Some(usage.window.used_percent),
+        weekly_pct: Some(usage.weekly.used_percent),
+        resets,
+        usage_unavailable: false,
+    }
+}
+
+/// One `usage/read` result object → the tier it names, or `None` when the
+/// host has observed nothing (the `{}` case: the `usage` key absent, never
+/// `null`) or the result does not decode.
+///
+/// `None` is **not** [`Tier::Unavailable`]: it is "not known yet", and the
+/// caller falls through to the pty fallback ([`probe`]) rather than settling
+/// for unknown.
+pub fn tier_from_read_value(value: &serde_json::Value) -> Option<Tier> {
+    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
+    tier_from_read_result(&result)
+}
+
+/// [`tier_from_read_value`] without the JSON: `Some` builds the subscription,
+/// `None` (the `{}` case) falls through to the fallback.
+pub fn tier_from_read_result(result: &UsageReadResult) -> Option<Tier> {
+    result.usage.as_ref().map(tier_from_usage)
+}
+
+/// One `usage/changed` notification's params → the tier it names, or `None`
+/// when the params do not decode. A malformed frame never clears a known
+/// tier: the caller keeps what it had.
+pub fn tier_from_changed(params: &serde_json::Value) -> Option<Tier> {
+    serde_json::from_value::<SubscriptionUsage>(params.clone()).ok().map(|usage| tier_from_usage(&usage))
+}
+
+/// One reset clause in the card's own register, from an epoch-millisecond
+/// stamp, in the person's local timezone (`chrono::Local` — the same clock
+/// the sidebar and transcript timestamps already use, and the one the card
+/// itself prints in).
+///
+/// The window reads `Resets at 5:17 PM`; the weekly block reads
+/// `Resets Sep 14 at 5:30 AM`, the date keeping the two clauses apart exactly
+/// as the card's two clauses do. `None` only when the stamp is not a
+/// representable local time, in which case the clause is skipped rather than
+/// printed wrong.
+fn format_reset(resets_at_ms: u64, with_date: bool) -> Option<String> {
+    use chrono::{Local, TimeZone};
+    let at = Local.timestamp_millis_opt(resets_at_ms as i64).single()?;
+    if with_date {
+        Some(format!("Resets {} at {}", at.format("%b %-d"), at.format("%-I:%M %p")))
+    } else {
+        Some(format!("Resets at {}", at.format("%-I:%M %p")))
+    }
+}
+
+/// Issue `usage/read` on a live connection: `Some` tier when the host has an
+/// observation, `None` on a cold host (`{}`) or any read failure.
+///
+/// Blocking: call it on a background thread. `None` falls through to the pty
+/// probe — a failed read never stops the app and never becomes
+/// [`Tier::Unavailable`] directly.
+pub fn usage_read(client: &MuseClient) -> Option<Tier> {
+    let value = client.request("usage/read", None).ok()?;
+    tier_from_read_value(&value)
+}
+
+/// The primary oracle first, the scrape second: `usage/read` when `client`
+/// is up and has an observation, the [`probe`] pty fallback otherwise.
+///
+/// Every error is a `String` that is safe to show: it names what went wrong,
+/// never what the terminal said.
+pub fn probe_primary(muse: &str, client: Option<&MuseClient>) -> Result<Tier, String> {
+    if let Some(client) = client {
+        if let Some(tier) = usage_read(client) {
+            return Ok(tier);
+        }
+    }
+    probe(muse)
 }
 
 /// Drive the TUI and read the `/upgrade` card. Blocking for up to
@@ -1310,6 +1439,101 @@ mod tests {
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(1));
         assert!(!pid_alive(u32::MAX));
+    }
+
+    /// `usage/read` with an observation builds the subscription directly —
+    /// plan, both percentages and both reset clauses — with the numbers
+    /// verbatim, including an over-quota weekly above 100. The meter clamps;
+    /// the status lines print the true number.
+    #[test]
+    fn usage_read_some_builds_the_subscription_verbatim() {
+        // Through the call site's own arm (`tier_from_read_value`, what
+        // `usage_read` feeds the probe): a helper pinned below the arm would
+        // keep passing with the arm reverted to `None`.
+        let result = serde_json::json!({
+            "usage": {
+                "observedAtMs": 1_786_000_000_000u64,
+                "tier": "Muse Code High Usage",
+                "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 137 },
+                "window": {
+                    "resetsAtMs": 1_786_003_020_000u64,
+                    "usedPercent": 12,
+                    "windowDurationMins": 300,
+                },
+            },
+        });
+        let tier = tier_from_read_value(&result).expect("Some(usage) is an answer, not a fallback");
+        let Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable } = &tier else {
+            panic!("expected a subscription, got {tier:?}");
+        };
+        assert_eq!(plan, "Muse Code High Usage");
+        assert_eq!(*current_pct, Some(12));
+        // Over-quota values above 100 are valid and carried verbatim.
+        assert_eq!(*weekly_pct, Some(137));
+        assert!(!usage_unavailable);
+        assert_eq!(resets.len(), 2, "{resets:?}");
+        assert!(resets[0].starts_with("Resets at "), "{resets:?}");
+        assert!(resets[1].starts_with("Resets ") && resets[1].contains(" at "), "{resets:?}");
+        // The meter clamps; the status lines print the true number.
+        assert_eq!(tier.weekly_fraction(), Some(1.0));
+        assert!(tier.status_lines().contains("Weekly usage: 137% used"), "{}", tier.status_lines());
+        assert!(tier.status_lines().contains("Current usage: 12% used"), "{}", tier.status_lines());
+    }
+
+    /// `usage/read` on a cold host answers `{}` — the `usage` key absent,
+    /// never `null` — and that is "not known yet", not `Unavailable`: it
+    /// falls through to the pty fallback rather than settling for unknown.
+    #[test]
+    fn usage_read_empty_falls_through_to_the_fallback() {
+        let cold: serde_json::Value = serde_json::json!({});
+        assert_eq!(tier_from_read_value(&cold), None, "the {{}} case falls through, it is not Unavailable");
+        // The typed shape says the same: absent usage is the cold host.
+        let decoded: UsageReadResult = serde_json::from_value(cold).expect("{} decodes");
+        assert_eq!(decoded.usage, None);
+        assert_eq!(tier_from_read_result(&decoded), None);
+    }
+
+    /// A `usage/changed` notification replaces an already-known tier in place
+    /// — the footer meter stops being a boot-time snapshot. A malformed frame
+    /// never clears what was known.
+    #[test]
+    fn usage_changed_updates_an_already_known_tier() {
+        let known = Tier::Subscription {
+            plan: "Muse Code High Usage".into(),
+            current_pct: Some(2),
+            weekly_pct: Some(2),
+            resets: vec!["Resets at 3:00 PM".into()],
+            usage_unavailable: false,
+        };
+        let params = serde_json::json!({
+            "observedAtMs": 1_786_000_000_000u64,
+            "tier": "Muse Code High Usage",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": { "resetsAtMs": 1_786_003_020_000u64, "usedPercent": 4, "windowDurationMins": 300 },
+        });
+        let updated = tier_from_changed(&params).expect("a well-formed notification is an answer");
+        assert_ne!(updated, known, "the notification moves the tier it found");
+        let Tier::Subscription { current_pct, weekly_pct, .. } = &updated else {
+            panic!("expected a subscription, got {updated:?}");
+        };
+        assert_eq!(*current_pct, Some(4));
+        assert_eq!(*weekly_pct, Some(9));
+        // A frame that does not decode keeps the known tier: the caller only
+        // replaces on `Some`.
+        assert_eq!(tier_from_changed(&serde_json::json!({"tier": 7})), None);
+        assert_eq!(tier_from_changed(&serde_json::json!({})), None);
+    }
+
+    /// The wire's reset clauses speak the card's register, in local time:
+    /// `Resets at …` for the window, `Resets <date> at …` for the weekly
+    /// block, so the two stay apart exactly as the card's two clauses do.
+    #[test]
+    fn wire_reset_clauses_follow_the_card() {
+        let window = format_reset(1_786_003_020_000, false).expect("a representable stamp formats");
+        let weekly = format_reset(1_786_012_200_000, true).expect("a representable stamp formats");
+        assert!(window.starts_with("Resets at "), "{window}");
+        assert!(weekly.starts_with("Resets ") && weekly.contains(" at "), "{weekly}");
+        assert_ne!(window, weekly);
     }
 
     /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same

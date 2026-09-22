@@ -1202,6 +1202,12 @@ impl Harness {
                 cx.notify();
                 return;
             }
+            // `usage/changed` keeps the tier live past its boot-time reading:
+            // the footer meter and the banner follow through `push_tier`. A
+            // frame that does not decode keeps the known tier.
+            if method == "usage/changed" {
+                self.apply_usage_changed(params, cx);
+            }
         }
         // A finished turn is when the index has something new to say about the
         // session, so the sidebar is refreshed then rather than on a timer.

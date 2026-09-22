@@ -114,6 +114,38 @@ never the pid alone). Closing the window or quitting mid-probe runs the same kil
 
 The first two are pinned by `tier::tests::the_card_this_muse_really_draws_parses`.
 
+### The wire is primary now; the scrape is the fallback that cannot be deleted
+
+Since muse 1.3.0 the card's numbers are on the wire, typed, and Baaz reads
+them first:
+
+- `usage/read` is issued with every tier probe (`probe_tier`, on connect and
+  on every asked-for re-probe). On `Some(usage)` the tier is built directly
+  from it — plan from `tier`, both percentages verbatim, reset clauses
+  rendered from the two `resets_at_ms` stamps in the card's own register
+  (`Resets at …` / `Resets <date> at …`, local time) — and cached through
+  `tier::remember` exactly as a probe answer is.
+- `usage/changed` is folded into the tier in place on every notification, so
+  the sidebar footer meter tracks the window as the person works instead of
+  freezing at a boot-time snapshot. The update reaches `push_tier`, so the
+  banner follows too.
+
+The scrape stays, demoted to fallback: on `{}` (a cold host, before any turn
+has observed a provider response) or any read failure, the pty probe runs
+unchanged. It cannot be deleted, because it answers the one question the wire
+never does — **pay-as-you-go vs not known**. `usage/read` returns a
+`SubscriptionUsage` when a subscription observation exists and nothing
+otherwise; absence is "not known yet", never pay-as-you-go. Only the
+`/upgrade` card distinguishes `Tier::PayAsYouGo` from `Tier::Unavailable`,
+and `PayAsYouGo` is what raises the blocking banner that stops the person
+being billed API rates by surprise. Deleting the scrape would silently turn
+that protection into "Plan unknown", which does not block.
+
+`observed_at_ms` stamps when the host received the observation, not now; a
+stale observation is still the truth about the last thing seen, so no
+freshness rule hides it. `used_percent` may exceed 100 (over-quota is valid):
+the meter clamps to `0..=1`, `/status` and `/usage` print the true number.
+
 ### The rule the module keeps
 
 **The raw terminal output is never logged.** The card's footer carries a URL,
