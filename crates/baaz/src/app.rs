@@ -197,6 +197,19 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 /// editor, where they always did.
 pub(crate) const COMPOSER_CONTEXT: &str = "BaazComposer";
 
+/// The predicate the palette's arrow keys bind in: a menu scrim above a text
+/// field. The palette scrim wears [`aui::keys::MENU_CONTEXT`] and the query
+/// editor wears the input layer's `Input` context, whose own `up`/`down`
+/// bindings (caret moves) match deeper than anything on an ancestor — which
+/// is why the scrim's `SelectPrev`/`SelectNext` never fired while a query
+/// field was focused. A descendant predicate matches at the full depth of
+/// the focused field, tying the textarea's own binding; the tie breaks by
+/// registration order, and Baaz binds after the libraries (`aui::init`
+/// before [`bind_keys`] in `main.rs`), so the palette's binding wins. Only
+/// the two arrows are rebound, and only under a menu scrim, so typing —
+/// `j`, `k`, every other key — still reaches the field untouched.
+pub(crate) const PALETTE_QUERY_CONTEXT: &str = "AuiMenu > Input";
+
 /// The context the terminal dock wears (`docs/14-terminal.md:192`). The grid
 /// runs under it: every key reaches the pty except ⌃`, ⌘K, ⌘B, ⌘W, ⌘Q, ⌘N
 /// (bound above the grid, at the root) and ⌘C with a selection (which the

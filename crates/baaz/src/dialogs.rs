@@ -1433,6 +1433,164 @@ mod tests {
         restore_state(state);
     }
 
+    /// ↑/↓ reach the palette list past its query field.
+    ///
+    /// The query palettes (Search, Commands, Projects) focus a `gpui_kit`
+    /// textarea whose own `Input` context binds the arrows to caret moves at
+    /// a deeper depth than the scrim's `AuiMenu` — so the scrim's
+    /// `SelectPrev`/`SelectNext` never fired while the field was focused, and
+    /// Enter always ran row 0. Two keymap rows rebind the arrows at
+    /// `AuiMenu > Input` (`crate::app::PALETTE_QUERY_CONTEXT`), which ties
+    /// the textarea's binding at full depth and wins by later registration.
+    #[gpui::test]
+    fn palette_arrows_move_the_selection_with_a_query_field(cx: &mut gpui::TestAppContext) {
+        use crate::sidebar::SessionEntry;
+
+        let state = hermetic_state("palette-arrows");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        // The Harness must be the window's root view (`add_window_view`), not
+        // an entity made with `cx.new` — an unrendered entity has no element
+        // tree, so no dispatch path and no handlers.
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        let selected = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected))
+        };
+        // Rows for the session-backed palettes: three visible sessions feed
+        // both Search (empty query lists recents) and Resume.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                for (n, id) in ["s-arrow-1", "s-arrow-2", "s-arrow-3"].iter().enumerate() {
+                    harness.sessions.push(SessionEntry {
+                        id: id.to_string(),
+                        label: format!("Arrow session {n}"),
+                        updated: chrono::Local::now(),
+                        running: false,
+                        turns: 3,
+                        hidden: false,
+                        pinned: false,
+                        archived: false,
+                        description: "the ask".into(),
+                        replayed: false,
+                        named: true,
+                        needs_title: false,
+                        title_pending: false,
+                        last_ask: Some("the ask".into()),
+                        local: false,
+                        provisional: false,
+                        workspace: None,
+                        project: None,
+                        project_name: None,
+                        attention: Vec::new(),
+                        approval_command: None,
+                        pending_question: None,
+                        turn_started: None,
+                        last_error: None,
+                        branch: None,
+                        terminals_running: 0,
+                    });
+                }
+                harness.invalidate_list();
+            })
+        });
+        // Rows for the Projects palette: two adopted folders. (Boot may have
+        // adopted the workspace already, so the asserts below only assume at
+        // least two rows.)
+        for name in ["proj-a", "proj-b"] {
+            let dir = state.2.join(name);
+            std::fs::create_dir_all(&dir).expect("probe project dir");
+            vc.update(|_, cx| {
+                baaz.update(cx, |harness, cx| {
+                    harness.adopt_root(&dir, cx);
+                })
+            });
+        }
+
+        // Commands (⌘K): the palette with a query field.
+        vc.simulate_keystrokes("cmd-k");
+        assert_eq!(selected(vc), Some(0));
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(1), "down did not move the selection");
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(2));
+        vc.simulate_keystrokes("up");
+        assert_eq!(selected(vc), Some(1), "up did not move back");
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(2));
+        // The selected row is the third command, and Enter runs it — not row
+        // 0. `Command::ALL[2]` is `/mode`, a session command: with no session
+        // open it runs quietly, and the palette closing proves the confirm
+        // path ran with this selection.
+        let third = vc.update(|_, cx| {
+            let app: &gpui::App = cx;
+            baaz.read(app).palette_rows(PaletteKind::Commands, app)[2].0.to_string()
+        });
+        assert_eq!(Command::ALL[2].slash(), "/mode");
+        assert_eq!(third, Command::ALL[2].slash(), "the third row is not the third command");
+        vc.simulate_keystrokes("enter");
+        assert_eq!(selected(vc), None, "enter did not confirm the selection");
+        // Typing still reaches the field, including `j` and `k`.
+        vc.simulate_keystrokes("cmd-k");
+        vc.simulate_input("jk");
+        let query = vc.update(|_, cx| baaz.read(cx).commands_query.read(cx).value().to_string());
+        assert_eq!(query, "jk", "typing no longer reaches the query field");
+        assert_eq!(selected(vc), Some(0), "the selection escaped the filtered rows");
+        vc.simulate_keystrokes("escape");
+        assert_eq!(selected(vc), None, "escape did not dismiss the query palette");
+        // Enter acts on the SELECTED row: filtered to `/browser`, Enter opens
+        // the right pane on Browser — row 0 of the unfiltered list (`/model`)
+        // would have done nothing observable.
+        vc.simulate_keystrokes("cmd-k");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.commands_query.update(cx, |field, cx| field.set_value(String::new(), window, cx));
+            })
+        });
+        vc.simulate_input("brow");
+        assert_eq!(selected(vc), Some(0));
+        vc.simulate_keystrokes("enter");
+        let (open, kind) =
+            vc.update(|_, cx| (baaz.read(cx).layout.right_open, baaz.read(cx).layout.right_kind));
+        assert!(open, "enter did not run the selected row");
+        assert_eq!(kind, Some(RightKind::Browser), "enter ran the wrong row");
+
+        // Search (⌘⇧F): the other query palette from the owner's report.
+        vc.simulate_keystrokes("cmd-shift-f");
+        assert_eq!(selected(vc), Some(0));
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(1), "down did not move the Search selection");
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(2));
+        vc.simulate_keystrokes("up");
+        assert_eq!(selected(vc), Some(1), "up did not move the Search selection back");
+        vc.simulate_keystrokes("escape");
+        assert_eq!(selected(vc), None, "escape did not dismiss Search");
+
+        // Projects (⌘⇧O): the third query palette.
+        vc.simulate_keystrokes("cmd-shift-o");
+        assert_eq!(selected(vc), Some(0));
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(1), "down did not move the Projects selection");
+        vc.simulate_keystrokes("up");
+        assert_eq!(selected(vc), Some(0), "up did not move the Projects selection back");
+        vc.simulate_keystrokes("escape");
+        assert_eq!(selected(vc), None, "escape did not dismiss Projects");
+
+        // Resume has no query field and must keep working: arrows move over
+        // its rows, and a scrim click still dismisses.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.open_palette(PaletteKind::Resume, cx))
+        });
+        assert_eq!(selected(vc), Some(0));
+        vc.simulate_keystrokes("down");
+        assert_eq!(selected(vc), Some(1), "down stopped working where no query field exists");
+        vc.simulate_click(gpui::point(gpui::px(10.), gpui::px(10.)), gpui::Modifiers::default());
+        assert_eq!(selected(vc), None, "the scrim click stopped dismissing the palette");
+        restore_state(state);
+    }
+
     /// A busy tab asks before it closes, naming its running command; an
     /// idle tab gets no dialog at all.
     #[test]
