@@ -67,7 +67,7 @@ use futures::StreamExt;
 use gpui::{
     Bounds, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _, StyleRefinement,
     Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths, FocusHandle,
-    Focusable, KeyBinding, ListState, NoAction, SharedString, Subscription, Task, Window,
+    Focusable, ListState, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::base::{h_flex, v_flex};
@@ -195,7 +195,7 @@ pub(crate) const RENAME_CONTEXT: &str = "BaazRename";
 /// `histdown` while the caret is on the draft's first or last line (↑/↓ walk
 /// the prompt history). With none of them set, the arrow keys belong to the
 /// editor, where they always did.
-const COMPOSER_CONTEXT: &str = "BaazComposer";
+pub(crate) const COMPOSER_CONTEXT: &str = "BaazComposer";
 
 /// The context the terminal dock wears (`docs/14-terminal.md:192`). The grid
 /// runs under it: every key reaches the pty except ⌃`, ⌘K, ⌘B, ⌘W, ⌘Q, ⌘N
@@ -245,54 +245,11 @@ const MAX_TITLE_READS: usize = 12;
 /// triad; these are the ones only this app knows about. The window keys live
 /// here too, so the native menu bar ([`set_menus`]) can show their shortcuts:
 /// macOS reads each item's shortcut from the keymap.
+///
+/// The bindings themselves live in one table, [`crate::keymap::KEYMAP`];
+/// this only installs what [`crate::keymap::build_bindings`] builds from it.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("enter", SendTurn, Some("BaazComposer && !menu && !field")),
-        KeyBinding::new("enter", MenuConfirm, Some("BaazComposer && menu")),
-        // A card's own field owns Enter while it is open: the person is writing
-        // a refusal, not a prompt.
-        KeyBinding::new("enter", ConfirmField, Some("BaazComposer && field")),
-        KeyBinding::new("cmd-enter", SteerTurn, Some(COMPOSER_CONTEXT)),
-        KeyBinding::new("up", MenuUp, Some("BaazComposer && menu")),
-        KeyBinding::new("down", MenuDown, Some("BaazComposer && menu")),
-        KeyBinding::new("up", HistoryPrev, Some("BaazComposer && histup && !menu")),
-        KeyBinding::new("down", HistoryNext, Some("BaazComposer && histdown && !menu")),
-        KeyBinding::new("cmd-v", PasteMaybeImage, Some(COMPOSER_CONTEXT)),
-        KeyBinding::new("cmd-u", AttachFile, Some(COMPOSER_CONTEXT)),
-        KeyBinding::new("shift-tab", TogglePlan, Some(COMPOSER_CONTEXT)),
-        KeyBinding::new("ctrl-c", Interrupt, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-n", NewSession, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-shift-o", AddProject, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-shift-m", OpenModelMenu, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-shift-e", OpenEffortMenu, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-shift-p", OpenModeMenu, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-shift-f", FocusSearch, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-w", CloseWindow, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-q", QuitApp, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-m", MinimizeWindow, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("enter", ConfirmRename, Some(RENAME_CONTEXT)),
-        // The transcript list wears `TRANSCRIPT_CONTEXT`; the predicate keeps
-        // this off the composer and every field, so copy there stays native.
-        KeyBinding::new("cmd-c", CopySelection, Some(crate::session::TRANSCRIPT_COPY_KEYS)),
-        // The terminal dock: ⌃` toggles it from anywhere. The grid runs
-        // under `BaazTerminal` (see [`TERMINAL_CONTEXT`]): every other key
-        // reaches the pty, so the composer's Enter/paste/history keys and
-        // the turn's ⌃C are nulled there — `NoAction` suppresses the weaker
-        // match and the keystroke falls through to the grid's own handler.
-        // ⌘K, ⌘B, ⌘W, ⌘Q and ⌘N stay bound at the root, above the grid, and
-        // ⌘C with a selection is the grid's own copy.
-        KeyBinding::new("ctrl-`", ToggleTerminal, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("cmd-alt-b", ToggleRightPane, Some(aui::keys::ROOT_CONTEXT)),
-        KeyBinding::new("ctrl-c", TerminalSigint, Some(TERMINAL_CONTEXT)),
-        KeyBinding::new("enter", NoAction {}, Some("BaazTerminal && !menu")),
-        KeyBinding::new("up", NoAction {}, Some("BaazTerminal && !menu")),
-        KeyBinding::new("down", NoAction {}, Some("BaazTerminal && !menu")),
-        KeyBinding::new("cmd-v", NoAction {}, Some("BaazTerminal")),
-        KeyBinding::new("cmd-u", NoAction {}, Some("BaazTerminal")),
-        KeyBinding::new("cmd-enter", NoAction {}, Some("BaazTerminal")),
-        KeyBinding::new("shift-tab", NoAction {}, Some("BaazTerminal")),
-    ]);
+    cx.bind_keys(crate::keymap::build_bindings());
 }
 
 /// The native menu bar.
@@ -3030,6 +2987,17 @@ impl Render for Harness {
         } else if palette.is_some() && !self.focus_palette.is_focused(window) {
             window.focus(&self.focus_palette, cx);
         }
+        // An overlay that closes unmounts its focused element, which leaves
+        // the window holding no focus at all — and a binding with a context
+        // only matches against the focused element's ancestor chain, so
+        // every `ROOT_CONTEXT` shortcut goes dead with it. Park focus back
+        // on the root, which wears that context. This runs only when nothing
+        // else holds focus: the composer is deliberately focused from
+        // `on_frame` on its frames, and the terminal dock owns the keyboard
+        // while it is up, and neither is disturbed here.
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus_root, cx);
+        }
         aui::keys::track_pointer(
             div()
                 .size_full()
@@ -3053,6 +3021,15 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
+                }))
+                // `aui::keys` binds ⌘\ to *its own* `ToggleRightPane`, a
+                // different action type from baaz's same-named one (bound
+                // to ⌘⌥B and handled on the centre below) — two crates,
+                // one name. Nothing listened for the library's, so ⌘\
+                // dispatched into the void. Handle it here, on the root,
+                // next to the library's other actions.
+                .on_action(cx.listener(|this, _: &aui::keys::ToggleRightPane, _, cx| {
+                    this.toggle_right(cx);
                 }))
                 .on_action(|_: &FocusNext, window, cx| {
                     aui::keys::set_keyboard_nav(true, cx);
@@ -3265,6 +3242,40 @@ mod tests {
             None => std::env::remove_var("BAAZ_STATE_DIR"),
         }
         drop(guard);
+    }
+
+    /// K1: a root-context shortcut's precondition survives an overlay
+    /// closing. The palette opens and closes over the model, then one draw
+    /// lets the frame's focus logic run: the open palette renders through
+    /// a deferred layer, and drawing that layer across two test draws
+    /// trips gpui's stale-arena panic, so the test draws once, after the
+    /// close — which is also the state the assertion is about. Adjusted
+    /// from the report's sketch, which never drew the view and so could
+    /// hold no focus either way.
+    #[gpui::test]
+    fn a_root_shortcut_still_fires_after_an_overlay_closes(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::PaletteKind;
+        use gpui::prelude::*;
+        let state = hermetic_state("shortcut-repro");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.overlays.update(cx, |o, _| o.palette = None);
+        }));
+        vc.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1440.), gpui::px(900.)),
+            |_, _| baaz.clone().into_any_element(),
+        );
+        let focused = vc.update(|window, cx| window.focused(cx).is_some());
+        assert!(focused, "nothing holds focus after the overlay closed, so every root-context binding is dead");
+        restore_state(state);
     }
 
     /// `toggle_right` twice returns the pane to its start.
