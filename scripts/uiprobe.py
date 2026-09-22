@@ -54,6 +54,10 @@ ENTRIES = {
                                       "--steps", "right-width:400;right:files"]},
     "right-closed":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files;right:off"]},
+    # The ⌘K palette, open. It had no coverage at all, which is why a list
+    # that never scrolls to its selection went unseen: nothing ever drew it.
+    "palette":              {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "palette"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
