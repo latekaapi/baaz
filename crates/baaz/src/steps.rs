@@ -356,7 +356,15 @@ impl Harness {
     /// width, like `sidebar-width:`. Free: no turn, no wire.
     pub(crate) fn step_right_width(&mut self, rest: &str, cx: &mut Context<Self>) {
         if let Ok(width) = rest.trim().parse::<f32>() {
-            self.layout.right_width = Some(aui::shell::clamp_right_width(width));
+            let width = aui::shell::clamp_right_width(width);
+            // BOTH, and the second one is the one that renders. The shell is
+            // given `self.right_resize.width`; `layout.right_width` is only
+            // what boot reads to seed it. Setting the layout field alone left
+            // the verb inert for the capture, so every right-pane entry drew
+            // at whatever width the person had last dragged to and persisted —
+            // the baselines were pinned to user state without anyone noticing.
+            self.layout.right_width = Some(width);
+            self.right_resize.width = width;
         }
         cx.notify();
     }
@@ -895,8 +903,17 @@ mod tests {
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
+        // Start somewhere the default is NOT, or the assertion below passes
+        // whether or not the verb touches the field — the hermetic state opens
+        // at RIGHT_WIDTH, which is the very value most captures ask for.
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.right_resize.width = 615.0));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx)));
         assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_width), Some(400.0));
+        // The field the shell actually renders (`app.rs` hands the shell
+        // `self.right_resize.width`). Asserting only the layout field above is
+        // what let this verb ship inert: the captures drew at whatever width
+        // the person had last dragged to.
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).right_resize.width), 400.0);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx)));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_width),
