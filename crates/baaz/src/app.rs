@@ -722,6 +722,10 @@ pub struct Harness {
     /// by name and path, synchronously — a dozen adopted roots and a dozen
     /// recent workspaces need no background task.
     pub(crate) projects_query: Entity<TextareaState>,
+    /// The Commands palette's query field: the query filters every command
+    /// on its slash and its description, synchronously — twenty-three rows
+    /// need no background task.
+    pub(crate) commands_query: Entity<TextareaState>,
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
@@ -794,6 +798,7 @@ impl Harness {
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
+        let commands_query = cx.new(|cx| composer_state_rows("Every command in this build", 1, 1, window, cx));
         // The sidebar column's own view: the weak handle
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
@@ -889,6 +894,7 @@ impl Harness {
             project_menu_bounds: None,
             group_menu_bounds: HashMap::new(),
             projects_query: projects_query.clone(),
+            commands_query: commands_query.clone(),
             titled: std::collections::HashSet::new(),
             undo_stack: Vec::new(),
             window_title: None,
@@ -927,6 +933,15 @@ impl Harness {
         this.subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.clamp_projects_selection(cx);
+                cx.notify();
+            }
+        }));
+        // Typing in the Commands palette's query only redraws: the rows are
+        // filtered synchronously at render, so the selection is clamped to
+        // the filtered rows here.
+        this.subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.clamp_commands_selection(cx);
                 cx.notify();
             }
         }));
@@ -2965,10 +2980,13 @@ impl Render for Harness {
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the
         // arrows and the return reach the list through the overlay's own menu
-        // context. The Projects palette is the same, with its own field.
+        // context. The Projects and Commands palettes are the same, each with
+        // its own field.
         let searching = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search);
         let projecting =
             self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Projects);
+        let commanding =
+            self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Commands);
         if searching {
             let query = self.search_query.focus_handle(cx);
             if !query.is_focused(window) {
@@ -2976,6 +2994,11 @@ impl Render for Harness {
             }
         } else if projecting {
             let query = self.projects_query.focus_handle(cx);
+            if !query.is_focused(window) {
+                window.focus(&query, cx);
+            }
+        } else if commanding {
+            let query = self.commands_query.focus_handle(cx);
             if !query.is_focused(window) {
                 window.focus(&query, cx);
             }
