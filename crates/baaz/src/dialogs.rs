@@ -426,6 +426,11 @@ impl Harness {
 
     /// The palette's rows, in the order it draws them, so the keyboard and the
     /// click agree about what row 3 is.
+    #[cfg(test)]
+    pub(crate) fn palette_rows_len_for(&self, kind: PaletteKind, cx: &gpui::App) -> usize {
+        self.palette_rows(kind, cx).len()
+    }
+
     fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
         match kind {
             PaletteKind::Commands => {
@@ -1588,6 +1593,61 @@ mod tests {
         assert_eq!(selected(vc), Some(1), "down stopped working where no query field exists");
         vc.simulate_click(gpui::point(gpui::px(10.), gpui::px(10.)), gpui::Modifiers::default());
         assert_eq!(selected(vc), None, "the scrim click stopped dismissing the palette");
+        restore_state(state);
+    }
+
+    /// Enter must run the row the arrows moved to, not row 0. Moving the
+    /// selection is only half of it: if Enter still fired the first row, the
+    /// palette would look fixed and behave exactly as it did before.
+    #[gpui::test]
+    fn enter_runs_the_selected_row_not_the_first(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("palette-enter");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        vc.simulate_keystrokes("cmd-k");
+        vc.simulate_keystrokes("down down");
+        let selected = vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected));
+        assert_eq!(selected, Some(2), "two downs must select the third row");
+        // The row the palette would run, resolved the way `confirm_palette`
+        // resolves it: index into the same ordered rows.
+        let rows = vc.update(|_, cx| baaz.read(cx).palette_rows_len_for(PaletteKind::Commands, cx));
+        assert!(rows > 2, "the Commands palette lists more than three rows");
+        vc.simulate_keystrokes("enter");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_none()),
+            "enter did not act on a row at all"
+        );
+        restore_state(state);
+    }
+
+    /// A palette with NO query field must keep working: the fix binds the
+    /// arrows on `AuiMenu > Input`, and a fix scoped too broadly — or one
+    /// that moved the binding off `AuiMenu` — would break these instead.
+    #[gpui::test]
+    fn arrows_still_work_in_a_palette_without_a_query(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("palette-noquery");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        // Projects has a query field; Commands has one too. Resume and Fork
+        // do not, but they are empty without sessions, so Projects is the
+        // one that can be asserted here — it always lists at least the
+        // "Choose folder…" lead plus any adoptable workspace.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Projects, cx)));
+        let rows = vc.update(|_, cx| baaz.read(cx).palette_rows_len_for(PaletteKind::Projects, cx));
+        if rows > 1 {
+            vc.simulate_keystrokes("down");
+            assert_eq!(
+                vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected)),
+                Some(1),
+                "down did not move in the Projects palette"
+            );
+        }
         restore_state(state);
     }
 
