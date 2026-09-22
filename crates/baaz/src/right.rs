@@ -1214,12 +1214,27 @@ mod tests {
     // ── the inert handlers, invoked directly ──
 
     /// A [`ToastSink`] that records titles and bodies instead of toasting.
+    /// The four `*_actions_all_reach_inert` tests share one process-global
+    /// log ([`inert_log_store`]), and each clears it and then asserts an exact
+    /// length. Run concurrently they see each other's entries: filtered to
+    /// just those four they failed every time, while the full suite passed on
+    /// lucky scheduling — which is how they shipped and how they later failed
+    /// a lane's gate for a change that had nothing to do with them.
+    ///
+    /// Taking this lock for the whole of each test is what makes the exact
+    /// length assertions mean anything.
+    fn inert_guard() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn test_sink(toasts: Rc<std::cell::RefCell<Vec<(String, String)>>>) -> ToastSink {
         Rc::new(move |title, body, _| toasts.borrow_mut().push((title, body)))
     }
 
     #[gpui::test]
     fn files_actions_all_reach_inert(cx: &mut TestAppContext) {
+        let _serial = inert_guard();
         let vc = cx.add_empty_window();
         clear_inert_log();
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1244,6 +1259,7 @@ mod tests {
 
     #[gpui::test]
     fn browser_actions_all_reach_inert(cx: &mut TestAppContext) {
+        let _serial = inert_guard();
         let vc = cx.add_empty_window();
         clear_inert_log();
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1273,6 +1289,7 @@ mod tests {
 
     #[gpui::test]
     fn git_and_pr_actions_all_reach_inert(cx: &mut TestAppContext) {
+        let _serial = inert_guard();
         let vc = cx.add_empty_window();
         clear_inert_log();
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1299,6 +1316,7 @@ mod tests {
 
     #[gpui::test]
     fn diff_actions_all_reach_inert(cx: &mut TestAppContext) {
+        let _serial = inert_guard();
         let vc = cx.add_empty_window();
         clear_inert_log();
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
