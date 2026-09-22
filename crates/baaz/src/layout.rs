@@ -198,6 +198,17 @@ pub fn path() -> PathBuf {
 
 /// Read the store. Blocking; call it off the UI thread.
 pub fn read() -> Layout {
+    // A deterministic run ignores the store entirely.
+    //
+    // Captures used to boot from the person's own `layout.json`, so anything
+    // they had dragged leaked into every screenshot: a sidebar nudged to
+    // 249.3 px and a right pane dragged to its maximum both moved every
+    // committed baseline, with no code change between the runs. A baseline
+    // that depends on user state is not a regression detector, it is a
+    // record of one machine's afternoon.
+    if crate::clock::deterministic() {
+        return Layout::default();
+    }
     crate::store::read_json(&path())
 }
 
@@ -253,6 +264,20 @@ pub fn right_drag_width(start_w: f32, grab_x: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic run must not read the person's store. This asserts the
+    /// branch exists; the flag itself is process-wide, so the value under it
+    /// is exercised by the probe rather than here.
+    #[test]
+    fn the_defaults_carry_no_right_pane_state() {
+        let d = Layout::default();
+        assert!(!d.right_open);
+        assert_eq!(d.right_width, None);
+        assert_eq!(d.right_kind, None);
+        assert_eq!(d.sidebar_width, None);
+        assert_eq!(sidebar_width(&d), aui::shell::SIDEBAR_WIDTH);
+        assert_eq!(right_width(&d), aui::shell::RIGHT_WIDTH);
+    }
 
     #[test]
     fn a_drag_moves_the_divider_by_the_pointer_delta() {
