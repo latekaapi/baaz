@@ -1,15 +1,22 @@
 //! The right pane's four bodies: real read-only data, inert labelled actions.
 //!
 //! [`render`] dispatches on [`RightKind`](crate::layout::RightKind) to one
-//! builder per pane. Reads are synchronous and cheap (a one-level directory
-//! walk, a handful of read-only `git` invocations each with a timeout); every
-//! action button is inert by owner decision and says so through [`inert`].
+//! builder per pane. It never touches a subprocess or the filesystem: it draws
+//! whatever [`RightCache`] holds, and an empty cache draws the pane's loading
+//! state. The reads — a one-level directory walk, a handful of read-only `git`
+//! invocations each with a timeout — happen in [`read_snapshot`], which the
+//! [`Harness`](crate::app::Harness) refresh path runs on a background task and
+//! applies with an update + notify. Every action button is inert by owner
+//! decision and says so through [`inert`], except the file tree's Refresh,
+//! which asks for a real re-read through [`refresh_files`].
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::Duration;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use aui::workbench::{
     browser_nav, diff_review, file_tree, git_changes, pr_form, BrowserAction, DiffReviewAction, DiffScope,
@@ -35,24 +42,201 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Directory names never walked into, so a naive walk stays small.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// Render the right pane for `kind`.
+/// Render-path I/O probe: incremented by [`run_git`] and [`walk_root_capped`],
+/// the two blocking reads, and by nothing else. [`render`] must never move it;
+/// the purity test renders every kind twice and asserts it stays put.
+#[cfg(test)]
+static RENDER_IO_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// How many blocking reads [`run_git`] and [`walk_root_capped`] have done
+/// since process start (or the last [`reset_io_count`]).
+#[cfg(test)]
+pub(crate) fn io_count() -> usize {
+    RENDER_IO_COUNT.load(Ordering::Relaxed)
+}
+
+/// Zero [`io_count`]; the purity test drives [`render`] between the reset and
+/// the assert.
+#[cfg(test)]
+pub(crate) fn reset_io_count() {
+    RENDER_IO_COUNT.store(0, Ordering::Relaxed)
+}
+
+/// Count one blocking read toward [`io_count`] in test builds; nothing in
+/// production, where the counter does not exist.
+fn note_io() {
+    #[cfg(test)]
+    RENDER_IO_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One cached read: what was read, for which root, and when.
+#[derive(Clone, Debug)]
+pub(crate) struct Stamped<T> {
+    /// The project root the value was read for.
+    pub root: PathBuf,
+    /// When the read landed.
+    pub at: Instant,
+    /// The read itself.
+    pub value: T,
+}
+
+/// Everything the right pane shows, read off the render path: the last
+/// [`GitStatus`] (`None` means fetched and not a repo, as opposed to never
+/// fetched), the last parsed working-tree diff, and the last file-tree listing
+/// with its cap flag — each stamped with the root it was read for and the
+/// instant it was read. [`render`] only reads this; the
+/// [`Harness`](crate::app::Harness) refresh path writes it from a background
+/// task.
+#[derive(Default)]
+pub(crate) struct RightCache {
+    /// The last git status read, by root.
+    pub git: Option<Stamped<Option<GitStatus>>>,
+    /// The last working-tree diff parsed, by root.
+    pub diffs: Option<Stamped<ParsedDiffs>>,
+    /// The last file-tree listing and whether the cap cut it, by root.
+    pub files: Option<Stamped<(Vec<FileNode>, bool)>>,
+}
+
+impl RightCache {
+    /// The cached git status for `root`: `None` when never fetched for it,
+    /// `Some(None)` when fetched and not a repo.
+    pub(crate) fn git_for(&self, root: &Path) -> Option<Option<GitStatus>> {
+        self.git.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+    }
+
+    /// The cached parsed diff for `root`, or `None` when never fetched for it.
+    pub(crate) fn diffs_for(&self, root: &Path) -> Option<ParsedDiffs> {
+        self.diffs.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+    }
+
+    /// The cached file listing and cap flag for `root`, or `None` when never
+    /// fetched for it.
+    pub(crate) fn files_for(&self, root: &Path) -> Option<(Vec<FileNode>, bool)> {
+        self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+    }
+
+    /// When the slot backing `kind` last landed for `root`, if it ever did.
+    /// The refresh path paces the steady-state interval off this.
+    pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
+        match kind {
+            RightKind::Browser => None,
+            RightKind::Git | RightKind::Diff => {
+                self.git.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at)
+            }
+            RightKind::Files => self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at),
+        }
+    }
+
+    /// Land one [`read_snapshot`]: every slot takes the snapshot's root and
+    /// the landing instant.
+    pub(crate) fn apply_snapshot(&mut self, snapshot: RightSnapshot, at: Instant) {
+        let root = snapshot.root.clone();
+        self.git = Some(Stamped { root: root.clone(), at, value: snapshot.git });
+        self.diffs = Some(Stamped { root: root.clone(), at, value: snapshot.diffs });
+        self.files = Some(Stamped { root, at, value: (snapshot.files, snapshot.files_truncated) });
+    }
+}
+
+/// One blocking re-read of everything the pane shows, run on a background
+/// thread and applied to [`RightCache`] with an update + notify. Never called
+/// from [`render`].
+#[derive(Debug)]
+pub(crate) struct RightSnapshot {
+    /// The root everything was read for.
+    pub root: PathBuf,
+    /// The status read, or `None` when the root is not a git checkout.
+    pub git: Option<GitStatus>,
+    /// The parsed working-tree diff (empty when there is nothing to review).
+    pub diffs: ParsedDiffs,
+    /// The file-tree listing.
+    pub files: Vec<FileNode>,
+    /// Whether [`FILE_WALK_CAP`] cut the listing short.
+    pub files_truncated: bool,
+}
+
+/// Re-read everything for `root`: up to six read-only git subprocesses plus a
+/// capped one-level walk. Blocking — the
+/// [`Harness`](crate::app::Harness) refresh path runs it on the background
+/// executor (inline under `BAAZ_DETERMINISTIC`, where the git reads are
+/// fixtures and the walk is the only real I/O).
+pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
+    if crate::clock::deterministic() {
+        let (files, files_truncated) = walk_root_capped(root, FILE_WALK_CAP);
+        return RightSnapshot {
+            root: root.to_path_buf(),
+            git: Some(fixture_git_status()),
+            diffs: ParsedDiffs { diffs: vec![fixture_diff()], truncated: false },
+            files,
+            files_truncated,
+        };
+    }
+    let git = read_git_status(root);
+    let diffs = match &git {
+        Some(status) if !status.files.is_empty() => {
+            let raw = run_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"]).unwrap_or_default();
+            parse_unified_diff(&raw)
+        }
+        _ => ParsedDiffs { diffs: Vec::new(), truncated: false },
+    };
+    let (files, files_truncated) = walk_root_capped(root, FILE_WALK_CAP);
+    RightSnapshot { root: root.to_path_buf(), git, diffs, files, files_truncated }
+}
+
+/// Render the right pane for `kind` from the already-read [`RightCache`].
 ///
-/// The signature stays `(kind, cx)`: this function never reads the `Harness`
-/// entity itself — `render` runs while `Harness` is borrowed for update, so
-/// `cx.entity().read(cx)` would panic. Instead the project comes from the
-/// projects store on disk (the same source `Harness` settles from at boot,
-/// resolved with the same [`crate::projects::Projects::effective_current`]
-/// rule), and toasts travel through a weak handle the action closures
-/// upgrade at click time, when no borrow is held.
-pub(crate) fn render(kind: RightKind, cx: &mut Context<Harness>) -> AnyElement {
+/// This function never reads the `Harness` entity itself — `render` runs while
+/// `Harness` is borrowed for update, so `cx.entity().read(cx)` would panic —
+/// and never touches a subprocess or the filesystem either. The project and
+/// the cache arrive as arguments (the project from the in-memory current
+/// project, which the old path re-resolved from the projects store on disk
+/// every frame); toasts travel through a weak handle the action closures
+/// upgrade at click time, when no borrow is held. An empty cache for the
+/// current kind draws the pane's loading state — never a blocking fill.
+pub(crate) fn render(
+    kind: RightKind,
+    cache: &RightCache,
+    project: Option<(PathBuf, String)>,
+    cx: &mut Context<Harness>,
+) -> AnyElement {
     let notify = toast_sink(cx.weak_entity());
-    let project = crate::projects::read()
-        .effective_current()
-        .map(|current| (current.root.clone(), current.name.clone()));
+    let harness = cx.weak_entity();
     match kind {
         RightKind::Browser => browser_pane(&notify),
         RightKind::Diff => match project {
-            Some((root, _)) => diff_pane(&root, &notify),
+            Some((root, _)) => match cache.git_for(&root) {
+                None => loading_state(
+                    "right-diff-loading",
+                    "Diff review",
+                    "Loading the working tree",
+                    "The pane re-reads the repository in the background and fills in on its own.",
+                ),
+                Some(None) => empty_state(
+                    "right-diff-empty",
+                    "Diff review",
+                    "Not a git repository",
+                    "This project's folder is not a git checkout, so there is nothing to review.",
+                ),
+                Some(Some(status)) => {
+                    if status.files.is_empty() {
+                        empty_state(
+                            "right-diff-clean",
+                            "Diff review",
+                            "No unstaged changes",
+                            "The working tree is clean — there is nothing to review.",
+                        )
+                    } else {
+                        match cache.diffs_for(&root) {
+                            None => loading_state(
+                                "right-diff-loading",
+                                "Diff review",
+                                "Loading the working tree",
+                                "The pane re-reads the repository in the background and fills in on its own.",
+                            ),
+                            Some(parsed) => diff_pane_from(&status, &parsed, &notify),
+                        }
+                    }
+                }
+            },
             None => empty_state(
                 "right-diff-empty",
                 "Diff review",
@@ -61,7 +245,21 @@ pub(crate) fn render(kind: RightKind, cx: &mut Context<Harness>) -> AnyElement {
             ),
         },
         RightKind::Git => match project {
-            Some((root, _)) => git_pane(&root, &notify),
+            Some((root, _)) => match cache.git_for(&root) {
+                None => loading_state(
+                    "right-git-loading",
+                    "Changes",
+                    "Loading changes",
+                    "The pane re-reads the repository in the background and fills in on its own.",
+                ),
+                Some(None) => empty_state(
+                    "right-git-empty",
+                    "Changes",
+                    "Not a git repository",
+                    "This project's folder is not a git checkout, so there are no changes to show.",
+                ),
+                Some(Some(status)) => git_pane_from(&status, &notify),
+            },
             None => empty_state(
                 "right-git-empty",
                 "Changes",
@@ -70,7 +268,15 @@ pub(crate) fn render(kind: RightKind, cx: &mut Context<Harness>) -> AnyElement {
             ),
         },
         RightKind::Files => match project {
-            Some((root, name)) => files_pane(&root, &name, &notify),
+            Some((root, name)) => match cache.files_for(&root) {
+                None => loading_state(
+                    "right-files-loading",
+                    "Files",
+                    "Loading files",
+                    "The pane re-reads the project in the background and fills in on its own.",
+                ),
+                Some((nodes, truncated)) => files_pane_from(&nodes, truncated, &name, &notify, harness),
+            },
             None => empty_state(
                 "right-files-empty",
                 "Files",
@@ -79,6 +285,20 @@ pub(crate) fn render(kind: RightKind, cx: &mut Context<Harness>) -> AnyElement {
             ),
         },
     }
+}
+
+/// The file tree's Refresh action, the one wired action in the pane: ask the
+/// [`Harness`](crate::app::Harness) for a real re-read off the render path.
+/// Silent when the window is already gone.
+pub(crate) fn refresh_files(harness: WeakEntity<Harness>, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.refresh_right_now(cx));
+}
+
+/// The transient placeholder while the background re-read is still out: the
+/// same shape as [`empty_state`], under its own ids so it can never collide
+/// with a baselined settled state.
+fn loading_state(id: &'static str, pane: &'static str, heading: &'static str, detail: &'static str) -> AnyElement {
+    empty_state(id, pane, heading, detail)
 }
 
 /// A labelled placeholder: never a blank pane, always a role and a label.
@@ -231,6 +451,10 @@ fn diff_action_name(action: &DiffReviewAction) -> String {
 /// One handler per component, each a thin call to [`inert`]. Factored as
 /// named functions (rather than inline closures) so tests can invoke the
 /// exact handler the pane wires up.
+///
+/// The live Files pane intercepts `Refresh` before it reaches this mapping
+/// and re-reads through [`refresh_files`] instead, so the `Refresh` arm below
+/// only fires in tests — it pins the shape the other three actions share.
 fn files_handler(notify: ToastSink) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
     move |action, _window, cx| {
         inert("Files", &files_action_name(action), &notify, cx);
@@ -267,6 +491,7 @@ fn diff_handler(notify: ToastSink) -> impl Fn(DiffReviewAction, &mut Window, &mu
 /// `None` covers everything that can go wrong: no git binary, not a repo,
 /// a hung subprocess. The pane degrades to an empty state instead.
 fn run_git(root: &Path, args: &[&str]) -> Option<String> {
+    note_io();
     let root = root.to_path_buf();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -360,7 +585,8 @@ fn parse_ahead_behind(text: &str) -> Option<(u32, u32)> {
 
 /// Everything the Git pane reads, or `None` when the project is not a git
 /// repo at all.
-struct GitStatus {
+#[derive(Clone, Debug)]
+pub(crate) struct GitStatus {
     files: Vec<(FileChange, bool)>,
     branch: String,
     ahead: u32,
@@ -487,6 +713,7 @@ fn file_type_for(name: &str) -> FileType {
 /// touch, so expansion is not functional (see the report). Returns the nodes
 /// and whether the [`FILE_WALK_CAP`] cut the listing short.
 fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
+    note_io();
     let mut dir = match std::fs::read_dir(root) {
         Ok(dir) => dir.filter_map(Result::ok).collect::<Vec<_>>(),
         Err(_) => return (Vec::new(), false),
@@ -519,7 +746,8 @@ fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
 // ── the unified-diff parser ──────────────────────────────────────────────
 
 /// What [`parse_unified_diff`] kept, and whether the caps cut anything.
-struct ParsedDiffs {
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedDiffs {
     diffs: Vec<Diff>,
     truncated: bool,
 }
@@ -663,10 +891,17 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
 
 // ── the four panes ───────────────────────────────────────────────────
 
-/// The file tree, real: one level of the project root. Header names the
-/// project's directory; the footer counts the nodes and names the cap.
-fn files_pane(root: &Path, name: &str, notify: &ToastSink) -> AnyElement {
-    let (nodes, truncated) = walk_root_capped(root, FILE_WALK_CAP);
+/// The file tree, real: one level of the project root, already read by the
+/// refresh path. Header names the project's directory; the footer counts the
+/// nodes and names the cap. `Refresh` is the one wired action and re-reads
+/// through [`refresh_files`]; the rest stay inert through [`files_handler`].
+fn files_pane_from(
+    nodes: &[FileNode],
+    truncated: bool,
+    name: &str,
+    notify: &ToastSink,
+    harness: WeakEntity<Harness>,
+) -> AnyElement {
     let count = nodes.len();
     let footer = if truncated {
         format!("{count} shown — capped at the first {FILE_WALK_CAP} entries")
@@ -675,10 +910,17 @@ fn files_pane(root: &Path, name: &str, notify: &ToastSink) -> AnyElement {
     } else {
         format!("{count} files and folders")
     };
-    let tree = file_tree("right-files", nodes)
+    let inert_handler = files_handler(notify.clone());
+    let tree = file_tree("right-files", nodes.to_vec())
         .header(name)
         .footer(footer)
-        .on_action(files_handler(notify.clone()));
+        .on_action(move |action, window, cx| {
+            if matches!(action, FileTreeAction::Refresh) {
+                refresh_files(harness.clone(), cx);
+                return;
+            }
+            inert_handler(action, window, cx);
+        });
     v_flex()
         .id("right-files-pane")
         .role(gpui::Role::Group)
@@ -719,17 +961,9 @@ fn browser_pane(notify: &ToastSink) -> AnyElement {
 /// Real status, inert verbs: the changes panel plus the PR form. The form
 /// has no head parameter, so the real branch rides in the description; the
 /// checks stay empty rather than fabricating green rows. Commit and Push
-/// reach [`inert`] and never shell out.
-fn git_pane(root: &Path, notify: &ToastSink) -> AnyElement {
-    let Some(status) = read_git_status(root) else {
-        return empty_state(
-            "right-git-empty",
-            "Changes",
-            "Not a git repository",
-            "This project's folder is not a git checkout, so there are no changes to show.",
-        );
-    };
-    let changes = git_changes("right-git", status.files, "", status.ahead, status.behind)
+/// reach [`inert`] and never shell out. The status arrives already read.
+fn git_pane_from(status: &GitStatus, notify: &ToastSink) -> AnyElement {
+    let changes = git_changes("right-git", status.files.clone(), "", status.ahead, status.behind)
         .branch(status.branch.clone())
         .on_action(git_handler(notify.clone()));
     let form = pr_form(
@@ -751,30 +985,10 @@ fn git_pane(root: &Path, notify: &ToastSink) -> AnyElement {
 }
 
 /// The working tree, read-only: unstaged diff parsed with caps, the first
-/// file selected, real numstat totals in the summary.
-fn diff_pane(root: &Path, notify: &ToastSink) -> AnyElement {
-    let Some(status) = read_git_status(root) else {
-        return empty_state(
-            "right-diff-empty",
-            "Diff review",
-            "Not a git repository",
-            "This project's folder is not a git checkout, so there is nothing to review.",
-        );
-    };
-    if status.files.is_empty() {
-        return empty_state(
-            "right-diff-clean",
-            "Diff review",
-            "No unstaged changes",
-            "The working tree is clean — there is nothing to review.",
-        );
-    }
-    let parsed = if crate::clock::deterministic() {
-        ParsedDiffs { diffs: vec![fixture_diff()], truncated: false }
-    } else {
-        let raw = run_git(root, &["diff", "--no-color", "--no-ext-diff", "--unified=3"]).unwrap_or_default();
-        parse_unified_diff(&raw)
-    };
+/// file selected, real numstat totals in the summary. Status and parsed diff
+/// arrive already read; a clean tree never reaches here (the caller draws the
+/// clean empty state instead).
+fn diff_pane_from(status: &GitStatus, parsed: &ParsedDiffs, notify: &ToastSink) -> AnyElement {
     let review_files: Vec<ReviewFile> = status.files.iter().take(DIFF_FILES_CAP).enumerate()
         .map(|(index, (change, _))| ReviewFile { change: change.clone(), notes: 0, selected: index == 0 })
         .collect();

@@ -517,6 +517,17 @@ pub struct Harness {
     /// it. Never active while [`Self::resize`] is: the two dividers cannot
     /// both be under the pointer, so one capture overlay covers both drags.
     pub(crate) right_resize: RightResizeDrag,
+    /// The right pane's last git/diff/filesystem reads, with the roots and
+    /// instants they were read for. [`right::render`](crate::right::render)
+    /// draws from this and never touches a subprocess or the filesystem
+    /// itself.
+    pub(crate) right_cache: crate::right::RightCache,
+    /// A right-pane re-read is in flight on the background executor; a second
+    /// one is not started on top of it.
+    right_refresh_in_flight: bool,
+    /// What the pane showed the last time the refresh state was reconciled:
+    /// open, kind, and project root. Any change re-reads at once.
+    right_last_key: Option<(bool, layout::RightKind, Option<std::path::PathBuf>)>,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -819,6 +830,9 @@ impl Harness {
             sidebar_open: true,
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
+            right_cache: crate::right::RightCache::default(),
+            right_refresh_in_flight: false,
+            right_last_key: None,
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -1528,11 +1542,13 @@ impl Harness {
     }
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
-    /// flips the open state, persists it, notifies.
+    /// flips the open state, persists it, notifies, and re-reads the pane's
+    /// data off the render path when it ends up open.
     pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         layout::write(&self.layout);
+        self.refresh_right_now(cx);
         cx.notify();
     }
 
@@ -1541,6 +1557,8 @@ impl Harness {
     /// it works with no session open and never touches [`Self::active`].
     /// Calling it with the kind already showing while the pane is open
     /// closes the pane again, the way pressing a menu's own button closes it.
+    /// Either way the pane's data is re-read off the render path when it ends
+    /// up open.
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         if self.layout.right_open && self.layout.right_kind == Some(kind) {
             self.layout.right_open = false;
@@ -1550,7 +1568,95 @@ impl Harness {
         }
         crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
         layout::write(&self.layout);
+        self.refresh_right_now(cx);
         cx.notify();
+    }
+
+    /// How often the open pane re-reads git and the filesystem while it sits
+    /// open on a kind that reads them: at most once per interval.
+    const RIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// Whether `kind` shows data read from git or the filesystem: everything
+    /// but the Browser.
+    fn right_needs_data(kind: layout::RightKind) -> bool {
+        !matches!(kind, layout::RightKind::Browser)
+    }
+
+    /// The project the right pane reads for: root plus display name, from the
+    /// in-memory current project — never the projects store on disk, which the
+    /// old render path re-read on every frame.
+    pub(crate) fn right_project(&self) -> Option<(std::path::PathBuf, String)> {
+        self.current_project().map(|project| (project.root.clone(), project.name.clone()))
+    }
+
+    /// Re-read git and the filesystem for the open pane, off the render path.
+    /// No-op while the pane is closed, on Browser, or with no project. At most
+    /// one re-read is ever in flight: an explicit request (opening, a kind
+    /// switch, the file tree's Refresh) while one runs is coalesced, and the
+    /// interval in [`Self::sync_right_cache`] paces the steady state. Under
+    /// `BAAZ_DETERMINISTIC` the read is fixtures plus a capped walk and runs
+    /// inline, so captures settle on their first frame; otherwise it runs on
+    /// the background executor and lands with an update + notify. Nothing here
+    /// blocks the UI thread.
+    pub(crate) fn refresh_right_now(&mut self, cx: &mut Context<Self>) {
+        let kind = layout::right_kind(&self.layout);
+        if !self.layout.right_open || !Self::right_needs_data(kind) {
+            return;
+        }
+        let Some((root, _)) = self.right_project() else { return };
+        if crate::clock::deterministic() {
+            let at = std::time::Instant::now();
+            let snapshot = crate::right::read_snapshot(&root);
+            self.right_cache.apply_snapshot(snapshot, at);
+            self.right_last_key = Some((true, kind, Some(root)));
+            cx.notify();
+            return;
+        }
+        if self.right_refresh_in_flight {
+            return;
+        }
+        self.right_refresh_in_flight = true;
+        cx.spawn(async move |this, cx| {
+            let snapshot =
+                cx.background_executor().spawn(async move { crate::right::read_snapshot(&root) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.right_refresh_in_flight = false;
+                this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Reconcile the refresh state every frame: re-read at once when the pane
+    /// opened, its kind changed, or its project changed; re-read on the
+    /// interval while it sits open on a data kind; never while closed or on
+    /// Browser. The `right:` step verb writes the layout directly, so it is
+    /// covered here rather than at a call site.
+    fn sync_right_cache(&mut self, cx: &mut Context<Self>) {
+        let kind = layout::right_kind(&self.layout);
+        let open = self.layout.right_open;
+        let root = self.right_project().map(|(root, _)| root);
+        if !open || !Self::right_needs_data(kind) {
+            self.right_last_key = Some((open, kind, root));
+            return;
+        }
+        if self.right_last_key != Some((open, kind, root.clone())) {
+            self.right_last_key = Some((open, kind, root));
+            self.refresh_right_now(cx);
+            return;
+        }
+        // The steady state, paced off when the slot for this kind last
+        // landed: never fetched re-reads at once, a fresh landing waits out
+        // the interval, and a hung in-flight read is never doubled.
+        let Some(root) = root else { return };
+        let due = self
+            .right_cache
+            .fetched_at(kind, &root)
+            .is_none_or(|at| at.elapsed() >= Self::RIGHT_REFRESH_INTERVAL);
+        if due && !self.right_refresh_in_flight {
+            self.refresh_right_now(cx);
+        }
     }
 
     /// A new terminal tab on the current project, opening the dock for it.
@@ -2665,6 +2771,10 @@ impl Harness {
         if !matches!(self.auth, Auth::SignedIn(_)) {
             return;
         }
+        // The right pane's git and filesystem reads, reconciled off the render
+        // path: at once on open, kind or project change, on the 2 s interval
+        // while open on a data kind, never while closed or on Browser.
+        self.sync_right_cache(cx);
         // The scripted boot, every frame until it fires: the first session
         // for `--session`/`--send`/`--steps` opens without waiting for
         // `session/list`, then the script runs once the session is open.
@@ -2705,6 +2815,15 @@ impl Render for Harness {
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
             let kind = layout::right_kind(&self.layout);
+            // Drawn from the cache the refresh path maintains: building this
+            // element performs no subprocess or filesystem I/O of its own.
+            // Deliberately not `.cached(...)` like the sidebar and transcript
+            // columns (see the report): the pane's rows carry live actions and
+            // hover state, and a retained subtree would need its own
+            // key/invalidation to avoid going stale — while the subtree
+            // rebuild itself is cheap once the reads are gone.
+            let right_project = self.right_project();
+            let right = right::render(kind, &self.right_cache, right_project, cx);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -2734,7 +2853,7 @@ impl Render for Harness {
                 )
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
-                .right(right::render(kind, cx))
+                .right(right)
                 .centre(centre)
                 .into_any_element();
             // The strip sits over the divider, centred on the settled edge:
@@ -3165,6 +3284,88 @@ mod tests {
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_kind),
             Some(crate::layout::RightKind::Diff)
+        );
+        restore_state(state);
+    }
+
+    /// R1: the render path performs no I/O. Rendering every kind twice moves
+    /// neither the git nor the walk counter; the explicit read path moves it,
+    /// which is what proves the counter is wired to the reads and not dead.
+    /// This is the test that would have caught the defect: the old `render`
+    /// ran up to six git subprocesses and a directory walk per frame.
+    #[gpui::test]
+    fn right_render_performs_no_io(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-pure");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let dir = std::env::temp_dir().join(format!("baaz-right-pure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("purity probe dir");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        let project = Some((dir.clone(), "pure".to_string()));
+        crate::right::reset_io_count();
+        for kind in crate::layout::RightKind::ALL {
+            for _ in 0..2 {
+                vc.update(|_, cx| {
+                    baaz.update(cx, |harness, cx| {
+                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), cx);
+                    });
+                });
+            }
+        }
+        assert_eq!(
+            crate::right::io_count(),
+            0,
+            "rendering the pane must not touch git or the filesystem"
+        );
+        let snapshot = crate::right::read_snapshot(&dir);
+        assert!(
+            crate::right::io_count() > 0,
+            "the read path must move the counter, or the purity assert above is vacuous"
+        );
+        assert_eq!(snapshot.root, dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        restore_state(state);
+    }
+
+    /// R1: the file tree's Refresh action performs a real re-read. Opening the
+    /// pane on Files requests one through `show_right`, and `refresh_files`
+    /// — what the pane's Refresh action calls — requests another; both land
+    /// the listing in the cache after the background task drains.
+    #[gpui::test]
+    fn right_refresh_fills_the_cache_off_the_render_path(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-refresh");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+        });
+        vc.run_until_parked();
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        let files = vc.update(|_, cx| baaz.read(cx).right_cache.files_for(&root));
+        assert!(files.is_some(), "the background re-read lands the file listing in the cache");
+        crate::right::reset_io_count();
+        // Outside any `Harness` update, exactly like the pane's own action
+        // dispatch: nesting an entity update inside one panics.
+        vc.update(|_, cx| {
+            crate::right::refresh_files(baaz.downgrade(), cx);
+        });
+        vc.run_until_parked();
+        assert!(
+            crate::right::io_count() > 0,
+            "Refresh re-reads the filesystem instead of toasting that it is not wired"
+        );
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).right_cache.files_for(&root)).is_some(),
+            "the Refresh re-read lands in the cache too"
         );
         restore_state(state);
     }
