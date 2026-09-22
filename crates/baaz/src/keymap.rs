@@ -47,6 +47,8 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "MenuDown", keystroke: "down", context: Some("BaazComposer && menu"), category: "composer", label: "Menu selection down" },
     KeymapEntry { action: "HistoryPrev", keystroke: "up", context: Some("BaazComposer && histup && !menu"), category: "composer", label: "Previous prompt" },
     KeymapEntry { action: "HistoryNext", keystroke: "down", context: Some("BaazComposer && histdown && !menu"), category: "composer", label: "Next prompt" },
+    KeymapEntry { action: "SelectPrev", keystroke: "up", context: Some(crate::app::PALETTE_QUERY_CONTEXT), category: "palette", label: "Palette selection up from the query field" },
+    KeymapEntry { action: "SelectNext", keystroke: "down", context: Some(crate::app::PALETTE_QUERY_CONTEXT), category: "palette", label: "Palette selection down from the query field" },
     KeymapEntry { action: "PasteMaybeImage", keystroke: "cmd-v", context: Some(crate::app::COMPOSER_CONTEXT), category: "composer", label: "Paste, or attach an image" },
     KeymapEntry { action: "AttachFile", keystroke: "cmd-u", context: Some(crate::app::COMPOSER_CONTEXT), category: "composer", label: "Attach a file or photo" },
     KeymapEntry { action: "TogglePlan", keystroke: "shift-tab", context: Some(crate::app::COMPOSER_CONTEXT), category: "composer", label: "Toggle plan mode" },
@@ -93,6 +95,8 @@ pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
                 "MenuDown" => gpui::KeyBinding::new(keystroke, crate::app::MenuDown, context),
                 "HistoryPrev" => gpui::KeyBinding::new(keystroke, crate::app::HistoryPrev, context),
                 "HistoryNext" => gpui::KeyBinding::new(keystroke, crate::app::HistoryNext, context),
+                "SelectPrev" => gpui::KeyBinding::new(keystroke, aui::keys::SelectPrev, context),
+                "SelectNext" => gpui::KeyBinding::new(keystroke, aui::keys::SelectNext, context),
                 "PasteMaybeImage" => gpui::KeyBinding::new(keystroke, crate::app::PasteMaybeImage, context),
                 "AttachFile" => gpui::KeyBinding::new(keystroke, crate::app::AttachFile, context),
                 "TogglePlan" => gpui::KeyBinding::new(keystroke, crate::app::TogglePlan, context),
@@ -162,7 +166,7 @@ mod tests {
     }
 
     /// No two rows claim the same keystroke in the same context: that is
-    /// the conflict check, and the reason a table beats 34 loose calls.
+    /// the conflict check, and the reason a table beats 36 loose calls.
     #[test]
     fn no_duplicate_keystroke_context_pairs() {
         let mut seen = HashSet::new();
@@ -182,7 +186,7 @@ mod tests {
     #[test]
     fn every_row_has_a_category_and_label() {
         let categories: HashSet<&str> = [
-            "composer", "turn", "session", "project", "picker", "search", "window", "settings",
+            "composer", "turn", "session", "project", "picker", "palette", "search", "window", "settings",
             "sidebar", "transcript", "terminal", "pane",
         ]
         .into_iter()
