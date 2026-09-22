@@ -59,6 +59,7 @@ use aui::shell::{
 };
 use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
 use aui_icons::{icon, IconName, Provider};
+use aui_motion::{SpringKind, spring_px};
 use aui_terminal::{terminal_grid, TerminalGridIntent};
 use aui_tokens::{scale, ActiveAui, AuiStyled, AuiTheme};
 use futures::channel::mpsc::UnboundedReceiver;
@@ -1881,12 +1882,31 @@ impl Harness {
     /// The terminal dock under the composer (D42): the library's
     /// `terminal_dock` frame over `terminal_tabs` and the active tab's
     /// `terminal_grid`, or the empty state when the project has no tab.
+    ///
+    /// Opens and closes on the layout spring like the right pane: the outer
+    /// height springs between the resting height and zero while the body
+    /// inside keeps its resting height, so the grid is clipped — never
+    /// re-laid-out — and the pty sees no resize storm mid-motion. The dock
+    /// stays mounted while it collapses and leaves the tree only once the
+    /// spring has settled shut.
     fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.layout.terminal_open {
+        let open = self.layout.terminal_open;
+        let resting = self.dock_height(window);
+        let target = if open { px(resting) } else { px(0.0) };
+        // Mid-drag the height feeds straight through: `spring_px` would chase
+        // a moving target and the divider would lag the pointer. On release
+        // the spring re-arms from the current height, so there is no jump.
+        // `terminal_drag` is the dock's equivalent of the columns' `resizing`.
+        let shown = if self.terminal_drag.is_some() {
+            target
+        } else {
+            spring_px(("terminal-dock", "dock-height"), target, SpringKind::Layout, window, cx).max(px(0.0))
+        };
+        if !open && shown <= px(1.0) {
             return None;
         }
         let root = self.current_project().map(|project| project.root.clone())?;
-        let height = self.dock_height(window);
+        let height = resting;
         let host = self.terminal_host.read(cx);
         let mut tabs = Vec::new();
         let mut active_ix = 0;
@@ -1970,16 +1990,21 @@ impl Harness {
         let dock = dock.on_resize_start(resize_start).on_resize(resize_move).on_resize_end(resize_end);
         Some(
             div()
-                .h(px(height))
+                .h(shown)
                 .w_full()
                 .flex_none()
+                .overflow_hidden()
                 .key_context(gpui::KeyContext::parse(TERMINAL_CONTEXT).unwrap_or_default())
                 // No key handler here: the grid below is given this very
                 // handle, so it IS the focus node and routes keys itself.
                 // A handler here would see every keystroke a second time
                 // as it bubbles, and the pty would receive `aa` for `a`.
                 .track_focus(&self.terminal_focus)
-                .child(dock)
+                // The body keeps its resting height while the outer springs,
+                // the right pane's `right_inner`: the grid measures this box,
+                // so its bounds — and the pty size it reports — never move
+                // mid-motion. The shrinking outer clips it instead.
+                .child(div().h(px(height)).w_full().flex_none().child(dock))
                 .into_any_element(),
         )
     }
