@@ -539,6 +539,10 @@ pub struct Harness {
     /// rather than letting the command fail on the wire.
     user_shell: bool,
     focus_root: FocusHandle,
+    /// Whether an overlay stood open on the previous frame. The edge from
+    /// true to false is when focus has to be parked back on the root; see
+    /// the comment at that check in `render`.
+    overlay_was_open: bool,
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
@@ -807,6 +811,7 @@ impl Harness {
             capture,
             user_shell: true,
             focus_root: cx.focus_handle(),
+            overlay_was_open: false,
             focus_dialog: cx.focus_handle(),
             focus_palette: cx.focus_handle(),
             focus_composer: true,
@@ -2987,17 +2992,38 @@ impl Render for Harness {
         } else if palette.is_some() && !self.focus_palette.is_focused(window) {
             window.focus(&self.focus_palette, cx);
         }
-        // An overlay that closes unmounts its focused element, which leaves
-        // the window holding no focus at all — and a binding with a context
-        // only matches against the focused element's ancestor chain, so
-        // every `ROOT_CONTEXT` shortcut goes dead with it. Park focus back
-        // on the root, which wears that context. This runs only when nothing
-        // else holds focus: the composer is deliberately focused from
-        // `on_frame` on its frames, and the terminal dock owns the keyboard
-        // while it is up, and neither is disturbed here.
-        if window.focused(cx).is_none() {
+        // An overlay that closes unmounts the element it had focused, and the
+        // window goes on reporting that handle as focused: `focused()` is
+        // `Some` and `is_focused()` is true, while the element is no longer
+        // in the rendered frame. gpui resolves a keystroke against the
+        // focused node *in that frame* and, finding none, falls back to the
+        // dispatch tree's root — which sits ABOVE this view's div. Every
+        // `on_action` handler mounted here is skipped from then on.
+        //
+        // That is not limited to context-scoped bindings or to the palette's
+        // own shortcut. Measured: one open-and-close of the ⌘K palette left
+        // ⌘B dead too, because both handlers hang off the same div. It is
+        // why "it works once, then it doesn't".
+        //
+        // So the trigger is the *transition* — an overlay was up last frame
+        // and is gone now — rather than "nothing is focused", which is never
+        // true here, or "nothing on screen wants the keyboard", which cannot
+        // be told from the window. Parking focus on the root only on that
+        // edge leaves the composer's own focus alone the rest of the time.
+        let overlay_now = self.overlays.read(cx).palette.is_some()
+            || self.overlays.read(cx).dialog.is_some()
+            || self.overlays.read(cx).menu.is_some()
+            || self.overlays.read(cx).settings.is_some();
+        let overlay_just_closed = self.overlay_was_open && !overlay_now;
+        // Two triggers, and both are needed. The first frame has nothing
+        // focused at all, so without the `is_none` arm the very first
+        // shortcut never fires either.
+        if (window.focused(cx).is_none() || overlay_just_closed)
+            && !self.terminal_focus.is_focused(window)
+        {
             window.focus(&self.focus_root, cx);
         }
+        self.overlay_was_open = overlay_now;
         aui::keys::track_pointer(
             div()
                 .size_full()

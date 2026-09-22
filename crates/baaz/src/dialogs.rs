@@ -1393,6 +1393,46 @@ mod tests {
         restore_state(state);
     }
 
+    /// ⌘K twice in a row must open the palette twice. The owner's report:
+    /// "hitting cmd+k still doesn't open the second time."
+    #[gpui::test]
+    fn cmd_k_opens_the_palette_every_time(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("cmdk-twice");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        // The Harness must actually be the window's root view: an entity that
+        // is never rendered has no element tree, so no dispatch path and no
+        // handlers. `add_empty_window` + `cx.new` gives exactly that.
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        let is_open = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some())
+        };
+
+        let sidebar = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).sidebar_open);
+
+        // ⌘K must open the palette every time, not only the first.
+        vc.simulate_keystrokes("cmd-k");
+        assert!(is_open(vc), "first cmd-k did not open the palette");
+        vc.simulate_keystrokes("escape");
+        assert!(!is_open(vc), "escape did not close the palette");
+        vc.simulate_keystrokes("cmd-k");
+        assert!(is_open(vc), "SECOND cmd-k did not open the palette");
+        vc.simulate_keystrokes("escape");
+
+        // And a palette cycle must not take every OTHER shortcut down with
+        // it. This is the assertion that would have caught the real defect:
+        // ⌘B worked fine until the palette had been opened once, because
+        // both handlers hang off the same div and the div left the dispatch
+        // path together.
+        let before = sidebar(vc);
+        vc.simulate_keystrokes("cmd-b");
+        let after = sidebar(vc);
+        assert_ne!(before, after, "cmd-b stopped working after a palette open/close");
+        restore_state(state);
+    }
+
     /// A busy tab asks before it closes, naming its running command; an
     /// idle tab gets no dialog at all.
     #[test]
