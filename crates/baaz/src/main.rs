@@ -49,6 +49,7 @@ mod full_output;
 mod history;
 mod images;
 mod index;
+mod keymap;
 mod layout;
 mod log;
 mod login;
