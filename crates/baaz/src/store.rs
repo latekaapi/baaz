@@ -6,6 +6,9 @@
 //! room for — lives under `~/Library/Application Support/baaz`,
 //! which is the macOS answer for an application's own state.
 //!
+//! The per-turn usage ledger lives here too, as its own `baaz.db` (see
+//! `crate::usage`), beside the search index rather than inside it.
+//!
 //! Two rules:
 //!
 //! * **Every write is atomic.** A file is written beside itself and renamed,

@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use aui_protocol::Delta;
 
 impl SessionView {
     // ---------------------------------------------------------------- events
@@ -89,7 +90,16 @@ impl SessionView {
         let was_running = self.running.is_some();
         let was_submitting = self.submitting;
         let completed_ours = matches!(&event, MuseEvent::Notification { method, .. } if method == "turn/completed");
-        let changed = !self.fold.apply(event).is_empty();
+        // The cursor beside the event is the usage key: the fold consumes
+        // the event, so it is lifted first and the finished turns below are
+        // recorded under it.
+        let cursor = match &event {
+            MuseEvent::Notification { cursor, .. } => cursor.clone(),
+            MuseEvent::ServerRequest { .. } | MuseEvent::Closed(_) => None,
+        };
+        let deltas = self.fold.apply(event);
+        let changed = !deltas.is_empty();
+        self.record_usage(&deltas, cursor, cx);
         if completed_ours {
             self.record_created_files(cx);
         }
@@ -174,6 +184,32 @@ impl SessionView {
             }
         };
         self.wire_call(cx, work, |_this, (), _cx| {});
+    }
+
+    /// One finished turn's usage row, into `baaz.db`.
+    ///
+    /// The row is keyed on the terminal event's view cursor, so a replayed
+    /// event is a no-op insert rather than a duplicate. The write runs on the
+    /// background executor and swallows every failure, exactly as the search
+    /// recorder does: usage history is a ledger, not a feature anything
+    /// blocks on. An event with no cursor carries no key and records nothing.
+    fn record_usage(&mut self, deltas: &[Delta], cursor: Option<String>, cx: &mut Context<Self>) {
+        let Some(cursor) = cursor else { return };
+        let mut rows = Vec::new();
+        for delta in deltas {
+            let Delta::TurnFinished { turn_id, meta } = delta else { continue };
+            rows.push(crate::usage::row_from_finished(
+                &self.session_id,
+                &cursor,
+                turn_id,
+                crate::usage::now_ms(),
+                meta,
+            ));
+        }
+        if rows.is_empty() {
+            return;
+        }
+        self.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
     }
 
     /// This workspace's prompt history, read off the UI thread (finding P4).
@@ -290,8 +326,32 @@ impl SessionView {
                         let events = page_events(&session_id, &page.events);
                         let n = events.len();
                         crate::log::trace_mark(&format!("page n={n}"));
+                        // The page carries finished turns Baaz never saw live
+                        // (it was closed while they ran). Their terminal
+                        // cursors key the same no-op-on-replay insert as the
+                        // live write, so overlapping a live-recorded session
+                        // adds only the new rows and changes none of the old.
+                        let mut rows = Vec::new();
                         for event in events {
-                            this.fold.apply(event);
+                            let cursor = match &event {
+                                MuseEvent::Notification { cursor, .. } => cursor.clone(),
+                                MuseEvent::ServerRequest { .. } | MuseEvent::Closed(_) => None,
+                            };
+                            for delta in this.fold.apply(event) {
+                                let Delta::TurnFinished { turn_id, meta } = delta else { continue };
+                                if let Some(cursor) = &cursor {
+                                    rows.push(crate::usage::row_from_finished(
+                                        &session_id,
+                                        cursor,
+                                        &turn_id,
+                                        crate::usage::now_ms(),
+                                        &meta,
+                                    ));
+                                }
+                            }
+                        }
+                        if !rows.is_empty() {
+                            this.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
                         }
                         crate::log::trace_mark(&format!("folded n={n}"));
                         this.follow = true;
