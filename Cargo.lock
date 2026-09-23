@@ -695,6 +695,8 @@ dependencies = [
  "muse-adapter",
  "muse-client",
  "pdf-extract",
+ "provider",
+ "provider-muse",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5734,6 +5736,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "provider"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+]
+
+[[package]]
+name = "provider-muse"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+ "muse-adapter",
+ "muse-client",
+ "provider",
+ "serde_json",
 ]
 
 [[package]]
