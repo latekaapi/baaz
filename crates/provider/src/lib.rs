@@ -45,6 +45,7 @@ mod error;
 mod event;
 pub mod scripted;
 mod traits;
+pub mod version;
 
 pub use ack::{Ack, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
 pub use aui_protocol::Delta;
@@ -54,3 +55,4 @@ pub use crossbeam_channel::Receiver;
 pub use error::ProviderError;
 pub use event::ProviderEvent;
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter};
+pub use version::{compare_versions, parse_version, version_at_least};

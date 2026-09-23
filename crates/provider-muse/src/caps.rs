@@ -25,6 +25,7 @@
 //! live probe checks it.
 
 use std::cmp::Ordering;
+use provider::compare_versions;
 
 use provider::{Capability, CapabilitySet, CapabilityState};
 
@@ -94,27 +95,3 @@ pub fn capabilities_for_version(version: &str) -> CapabilitySet {
     ])
 }
 
-/// Numeric `major.minor.patch` comparison of `version` against `floor`.
-/// A leading `v` is ignored, anything from the first `-`/`+` on is a
-/// trailer and ignored, and missing components are zero (`"1.3"` is
-/// `1.3.0`). Anything unparseable compares below everything: fail closed.
-fn compare_versions(version: &str, floor: &str) -> Ordering {
-    match (parse_version(version), parse_version(floor)) {
-        (Some(version), Some(floor)) => version.cmp(&floor),
-        (None, _) => Ordering::Less,
-        (_, None) => Ordering::Greater,
-    }
-}
-
-/// Parse `major.minor.patch` numerically. Returns `None` when the leading
-/// component is not a number at all.
-fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
-    let version = version.strip_prefix('v').unwrap_or(version);
-    let version = version.split(['-', '+']).next().unwrap_or(version);
-    let mut parts = version.split('.');
-    let mut next = || match parts.next() {
-        None | Some("") => Some(0),
-        Some(part) => part.parse::<u64>().ok(),
-    };
-    Some((next()?, next()?, next()?))
-}
