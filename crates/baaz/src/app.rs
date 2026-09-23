@@ -2,18 +2,24 @@
 //!
 //! # Thread model
 //!
-//! One [`MuseClient`] per process, owned here behind an `Arc`. It already runs
-//! its own reader and writer threads, so the pipe never touches the UI thread.
+//! One provider per process, owned here behind an [`Arc`](std::sync::Arc)
+//! as [`SharedProvider`](crate::wire::SharedProvider), sharing its one
+//! spawned child with the legacy [`MuseClient`] transport session views
+//! still ride (see [`crate::conn::Legacy`]). The child already runs its own
+//! reader and writer threads, so the pipe never touches the UI thread.
 //! Two directions cross the boundary:
 //!
-//! * **Events in.** [`crate::conn::connect`] hands back a `futures` receiver fed
-//!   by one bridging thread. A single foreground task drains it and calls
-//!   [`SessionView::apply`], so folding happens on the UI thread in wire order
-//!   and a frame always renders a consistent transcript.
+//! * **Events in.** [`crate::conn::connect`] hands back two `futures`
+//!   receivers, each fed by one bridging thread: provider events and the
+//!   raw transport events. A single foreground task drains the raw stream
+//!   and calls [`SessionView::apply`], so folding happens on the UI thread
+//!   in wire order and a frame always renders a consistent transcript; a
+//!   second task observes the provider stream.
 //! * **Commands out.** Every request blocks, so every one of them runs on
 //!   `background_spawn` and returns through `update`. The UI thread issues
 //!   intents and never waits, and [`crate::wire::WireCall`] is the one shape
-//!   every one of those calls has.
+//!   every one of those calls has — [`crate::wire::ProviderCall`] for the
+//!   ones already speaking [`Command`](provider::Command).
 //!
 //! # Screens
 //!
@@ -45,7 +51,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use aui::composer::composer_state_rows;
 use aui::data::{button, icon_button, ButtonSize};
@@ -76,6 +82,7 @@ use muse_client::schema::{
     AccountStateKind, SessionListParams, SessionResumeParams,
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
+use provider::ProviderEvent;
 
 use crate::auth::Identity;
 use crate::conn::{self, Severity};
@@ -96,7 +103,7 @@ use crate::sidebar::{self, Grouping, SessionEntry};
 use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState};
 use crate::search::{FileHit, SessionHit};
 use crate::terminal::{self, TabOwner, TerminalHost};
-use crate::wire::WireCall;
+use crate::wire::{SharedProvider, WireCall};
 use crate::{layout, Args};
 
 actions!(
@@ -260,9 +267,21 @@ const MAX_TITLE_READS: usize = 12;
 /// macOS reads each item's shortcut from the keymap.
 ///
 /// The bindings themselves live in one table, [`crate::keymap::KEYMAP`];
-/// this only installs what [`crate::keymap::build_bindings`] builds from it.
+/// this installs what [`crate::keymap::load`] returns: the table first, the
+/// person's `keymap.json` second, so a binding written in the file wins by
+/// gpui's existing depth-then-order rule.
+///
+/// The load is one best-effort file read, done once here at startup before
+/// any window opens: the event loop is not yet dispatching input or painting
+/// frames, so the blocking read cannot stall the UI. A refused user entry is
+/// never silent — every warning [`crate::keymap::load`] collects goes
+/// through `baaz_log!`, the app's diagnostics surface.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(crate::keymap::build_bindings());
+    let loaded = crate::keymap::load();
+    for warning in &loaded.warnings {
+        crate::baaz_log!("{warning}");
+    }
+    cx.bind_keys(loaded.bindings);
 }
 
 /// The native menu bar.
@@ -402,7 +421,14 @@ type SearchStatusKey = (bool, usize, usize, bool, String);
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
+    /// The legacy transport session views still ride. Same child as the
+    /// provider below — never a second spawn. Gone with the last legacy
+    /// view.
     pub(crate) client: Option<Arc<MuseClient>>,
+    /// The one way to talk to the provider: the adapter behind the
+    /// enforced capability gate. Set alongside `client` on connect and
+    /// cleared with it on reconnect.
+    pub(crate) provider: Option<SharedProvider>,
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
@@ -789,6 +815,7 @@ impl Harness {
         let mut this = Self {
             args,
             client: None,
+            provider: None,
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
@@ -1129,23 +1156,20 @@ impl Harness {
                 out
             },
             |this, result, cx| match result {
-            Ok((connection, events)) => {
+            Ok(connected) => {
                 crate::log::boot_mark("connect-reply");
-                let server = &connection.server.server_info;
-                    crate::baaz_log!("connected to {} {}", server.name, server.version);
-                if let Some(warning) = &connection.warning {
+                    crate::baaz_log!("connected to {} {}", connected.legacy.agent_name, connected.legacy.agent_version);
+                if let Some(warning) = &connected.legacy.warning {
                     // A fingerprint mismatch is additive evolution, never a
                     // failure: say so on stderr and carry on.
-                    crate::baaz_log!("{warning:?}");
+                    crate::baaz_log!("{warning}");
                 }
-                this.user_shell = connection
-                    .server
-                    .granted_capabilities
-                    .iter()
-                    .any(|c| c.as_wire() == Some("userShell"));
-                this.client = Some(connection.client);
+                this.user_shell = connected.legacy.user_shell;
+                this.client = Some(connected.legacy.transport);
+                this.provider = Some(Arc::new(Mutex::new(connected.provider)));
                 this.wire = Wire::Ready;
-                this.pump(events, cx);
+                this.pump(connected.legacy.events, cx);
+                this.observe_provider(connected.events, cx);
                 this.probe_account(cx);
                 cx.notify();
             }
@@ -1162,6 +1186,21 @@ impl Harness {
                 cx.notify();
             }
         });
+    }
+
+    /// Observe the provider stream alongside the legacy pump: the legacy
+    /// path still owns reconnect (on the transport's close) and rendering
+    /// (through the session views), so this task only notices a lost
+    /// connection for the log. It ends when the provider is dropped.
+    fn observe_provider(&mut self, mut events: UnboundedReceiver<ProviderEvent>, cx: &mut Context<Self>) {
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                if matches!(event, ProviderEvent::ConnectionLost { .. }) {
+                    crate::baaz_log!("provider reported the connection lost");
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            }
+        }));
     }
 
     /// Drain the bridge onto the UI thread, one event at a time, in wire order.
@@ -1201,6 +1240,12 @@ impl Harness {
                 self.route_account(method, params, cx);
                 cx.notify();
                 return;
+            }
+            // `usage/changed` keeps the tier live past its boot-time reading:
+            // the footer meter and the banner follow through `push_tier`. A
+            // frame that does not decode keeps the known tier.
+            if method == "usage/changed" {
+                self.apply_usage_changed(params, cx);
             }
         }
         // A finished turn is when the index has something new to say about the
@@ -1399,6 +1444,7 @@ impl Harness {
     /// keep working. Only a failed respawn takes the wire down.
     pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.client = None;
+        self.provider = None;
         let program = self.args.program.clone();
         let resume = self
             .active
@@ -1406,25 +1452,31 @@ impl Harness {
             .map(|a| (a.read(cx).session_id.clone(), a.read(cx).last_cursor()));
         let work = move || conn::connect(&program);
         self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok((connection, events)) => {
-                if let Some(warning) = &connection.warning {
+            Ok(connected) => {
+                if let Some(warning) = &connected.legacy.warning {
                     // A fingerprint mismatch is additive evolution, never a
                     // failure: say so on stderr and carry on.
-                    crate::baaz_log!("{warning:?}");
+                    crate::baaz_log!("{warning}");
                 }
-                this.client = Some(connection.client.clone());
-                this.wire = Wire::Ready;
+                // Re-seat the views before the provider moves: dropping the
+                // last legacy transport ends the old pump, so the old
+                // adapter detaches cleanly when it follows.
+                let transport = connected.legacy.transport;
                 if let Some(active) = &this.active {
-                    active.update(cx, |view, cx| view.reconnected(connection.client.clone(), cx));
+                    active.update(cx, |view, cx| view.reconnected(transport.clone(), cx));
                 }
-                this.pump(events, cx);
+                this.client = Some(transport);
+                this.provider = Some(Arc::new(Mutex::new(connected.provider)));
+                this.wire = Wire::Ready;
+                this.pump(connected.legacy.events, cx);
+                this.observe_provider(connected.events, cx);
                 this.resume_after_reconnect(resume, cx);
                 cx.notify();
             }
             Err(error) => {
                 this.wire = Wire::Down(error.to_string());
                 this.set_dialog(cx, Dialog {
-                    title: conn::title(&error),
+                    title: conn::provider_title(&error),
                     detail: error.to_string(),
                     kind: DialogKind::Error,
                     primary: "Reconnect",

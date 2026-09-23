@@ -1293,6 +1293,7 @@ mod tests {
                 tokens_out: 625,
                 reasoning_tokens,
                 cost_usd: 0.0,
+                ..TurnMeta::default()
             },
             timestamp: None,
         }
@@ -1427,6 +1428,7 @@ mod tests {
             status: aui_protocol::ToolStatus::Success,
             duration_ms: None,
             body: ToolBody::Shell { output_lines: vec!["ok".to_owned()], exit_code: Some(0), live: false },
+            diff_stat: None,
         }
     }
 

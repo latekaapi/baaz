@@ -111,7 +111,10 @@
             "tokens_in": 0,
             "tokens_out": 0,
             "reasoning_tokens": 0,
-            "cost_usd": 0.0
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
           },
           "timestamp": 1788886328808
         }
