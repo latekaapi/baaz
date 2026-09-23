@@ -23,11 +23,17 @@
 //!
 //! A provider that cannot do something answers [`ProviderError::Unsupported`]
 //! naming the capability. "Not supported" cannot be spelled as success:
-//! [`ProviderAdapter::send`] returns `Result<Ack, ProviderError>`.
+//! [`Provider::send`] returns `Result<Ack, ProviderError>`, and the refusal
+//! is enforced there — mechanically, before any adapter code runs — rather
+//! than left to each adapter's good behaviour.
 //!
 //! The declared side of the same promise is [`CapabilitySet`]: what the
 //! provider says it can do before the app asks, so a button that cannot
 //! work is not offered in the first place.
+//!
+//! The application holds a [`Provider`], never a bare
+//! `Box<dyn ProviderAdapter>`: the wrapper is the seam as far as any caller
+//! is concerned.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -46,4 +52,4 @@ pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
 pub use crossbeam_channel::Receiver;
 pub use error::ProviderError;
 pub use event::ProviderEvent;
-pub use traits::{ConnectInfo, Handshake, ProviderAdapter};
+pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter};

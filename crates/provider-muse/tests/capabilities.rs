@@ -1,17 +1,21 @@
 //! muse's declared set: complete, version-floored, and honest about what
 //! was never probed.
 //!
-//! The two grant facts are encoded, not rediscovered: muse 1.3.0 grants
-//! `sessionMcp` and `userShell`; muse 1.2.1 never granted `sessionMcp`.
-//! Reasoning traces and sub-agent turns stay `Unverified` — not `Native`
-//! because they probably work. Like the arms tests, these prove the
-//! adapter's declaration, not a real server's behavior: nothing here talks
-//! to one.
+//! The `sessionMcp` facts are encoded, not rediscovered: the 1.3.0 grant
+//! comes from the brief, the 1.2.1 never-granted observation from the live
+//! fixtures. Reasoning traces, sub-agent turns, and the session shell stay
+//! `Unverified` — not `Native` because they probably work. The shell's grant
+//! *is* on record at 1.0.3–1.2.1, but every recorded `session/userShell`
+//! execution there ends with the item in status `failed` (the sandbox was
+//! unavailable, so the command never started), and 1.3.0+ was never probed
+//! for `userShell` at all — a grant without a clean run is not `Native`
+//! evidence. Like the arms tests, these prove the adapter's declaration,
+//! not a real server's behavior: nothing here talks to one.
 
 use std::path::PathBuf;
 
 use muse_client::{MuseClient, MuseConfig};
-use provider::{Capability, CapabilityState, Command, ConnectInfo, ProviderAdapter};
+use provider::{Capability, CapabilityState, Command, ConnectInfo, Provider};
 use provider_muse::{
     capabilities_for_version, muse_version_supported, MUSE_MCP_VERSION_FLOOR, MUSE_VERSION_FLOOR,
 };
@@ -39,6 +43,12 @@ fn every_capability_has_a_state_in_muse_set() {
                 *state,
                 CapabilityState::Unverified,
                 "{capability:?} was never probed live: must stay Unverified, not Native"
+            ),
+            Capability::SessionShell => assert_eq!(
+                *state,
+                CapabilityState::Unverified,
+                "userShell was granted at 1.0.3-1.2.1 but never cleanly executed there, \
+                 and never probed at 1.3.0+: a guess stated as Native is worse than Unverified"
             ),
             _ => assert_eq!(
                 *state,
@@ -82,17 +92,22 @@ fn version_floor_passes_at_and_above_and_only_below_fails() {
 }
 
 #[test]
-fn shell_is_native_wherever_user_shell_was_granted() {
-    // `userShell` is on record as granted from 1.0.3 through 1.3.0, so the
-    // session shell is native across the whole supported range — and the
-    // grant below the seam floor changes nothing about the declaration.
-    for version in ["1.0.3", "1.1.1", "1.2.1", "1.3.0"] {
+fn shell_is_unverified_until_a_clean_grant_is_on_record() {
+    // No version has grant-log *plus* clean-execution evidence for
+    // `userShell`, so no version declares it `Native`. `Unverified` is
+    // attempted, never refused — the declaration stops guessing without
+    // changing what still sends.
+    for version in ["1.0.3", "1.1.1", "1.2.1", "1.3.0", "1.4.0"] {
         assert_eq!(
             *capabilities_for_version(version).state(Capability::SessionShell),
-            CapabilityState::Native,
-            "{version} granted userShell"
+            CapabilityState::Unverified,
+            "{version} has no clean userShell run on record"
         );
     }
+    assert!(
+        CapabilityState::Unverified.allows_attempt(),
+        "Unverified is attempted, never refused: the shell still sends"
+    );
 }
 
 #[test]
@@ -107,7 +122,7 @@ fn adapter_set_follows_the_negotiated_version_without_bricking_old_servers() {
         extra_args: Vec::new(),
     })
     .expect("fake server spawns — is python3 on PATH?");
-    let mut adapter = provider_muse::MuseAdapter::new(client);
+    let mut adapter = Provider::new(provider_muse::MuseAdapter::new(client));
     adapter.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
 
     // The puppet reports `0.0.0-test`: client tools are `Unavailable` there,

@@ -243,12 +243,13 @@ impl ProviderAdapter for MuseAdapter {
         }
     }
 
-    fn send_inner(&self, command: Command) -> Result<Ack, ProviderError> {
-        // `send_inner` takes `&self` and only the page arm touches the
+    fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
+        // `dispatch` takes `&self` and only the page arm touches the
         // fold, so the fold lives behind a mutex while the client — already
         // safe to share — stays directly owned. Commands stay concurrent
         // everywhere except the fold lock. The `Unavailable` refusal happens
-        // before this runs, in the provided `send`.
+        // before this runs, in `provider::Provider::send`, which is the only
+        // path that reaches here.
         translate::dispatch(&self.client, &self.fold, command)
     }
 
