@@ -81,7 +81,21 @@ impl MuseAdapter {
                 true
             }
             MuseEvent::ServerRequest { method, params, .. } => {
-                let tap = tap_for(&method, &params);
+                let tap = match tap_for(&method, &params) {
+                    Ok(tap) => tap,
+                    // The card still arrives through the fold below; without
+                    // this the app would show it with no prompt attached and
+                    // look like it is waiting on nothing. The closed event
+                    // enum has no prompt-shaped error, so the failure rides
+                    // the only error-shaped event — and the pump continues,
+                    // because one bad prompt must not end the session.
+                    Err(error) => {
+                        let _ = tx.send(ProviderEvent::ConnectionLost {
+                            reason: error.to_string(),
+                        });
+                        None
+                    }
+                };
                 let session_id = params
                     .get("sessionId")
                     .and_then(serde_json::Value::as_str)
@@ -104,28 +118,40 @@ impl MuseAdapter {
 
 /// The tap on the shoulder for a server request, decided from its params
 /// before the fold consumes the event. Unknown methods get no tap — their
-/// card still arrives through the fold.
-fn tap_for(method: &str, params: &serde_json::Value) -> Option<ProviderEvent> {
+/// card still arrives through the fold, and that silence is deliberate.
+/// A KNOWN method whose params fail to decode is a caller-visible error:
+/// dropping it would cost the person the prompt while the card still
+/// appears, so the app would look like it is waiting on nothing.
+fn tap_for(
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<Option<ProviderEvent>, ProviderError> {
     match method {
         "approval/request" => {
-            let request: ApprovalRequestParams = serde_json::from_value(params.clone()).ok()?;
+            let request: ApprovalRequestParams = serde_json::from_value(params.clone())
+                .map_err(|error| ProviderError::Rejected {
+                    reason: format!("unusable approval/request params: {error}"),
+                })?;
             let headline = approval_headline(&request);
-            Some(ProviderEvent::ApprovalRequested {
+            Ok(Some(ProviderEvent::ApprovalRequested {
                 session_id: request.session_id,
                 headline,
                 approval_id: request.approval_id,
-            })
+            }))
         }
         "userInput/request" => {
-            let request: UserInputRequestParams = serde_json::from_value(params.clone()).ok()?;
+            let request: UserInputRequestParams = serde_json::from_value(params.clone())
+                .map_err(|error| ProviderError::Rejected {
+                    reason: format!("unusable userInput/request params: {error}"),
+                })?;
             let headline = question_headline(&request);
-            Some(ProviderEvent::QuestionRaised {
+            Ok(Some(ProviderEvent::QuestionRaised {
                 session_id: request.session_id,
                 headline,
                 question_id: request.user_input_id,
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
