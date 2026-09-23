@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-muse", "crates/provider-claude-code"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-muse", "crates/provider-claude-code", "crates/mcp-bridge"]
 
 [workspace.package]
 version = "0.1.0"

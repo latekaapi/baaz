@@ -1,0 +1,17 @@
+[package]
+name = "mcp-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Baaz's tools spoken as MCP: a stdio JSON-RPC bridge any MCP-speaking provider can spawn."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "mcp-bridge"
+path = "src/main.rs"
