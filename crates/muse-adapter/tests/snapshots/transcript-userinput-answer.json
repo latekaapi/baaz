@@ -79,7 +79,10 @@
             "tokens_in": 62556,
             "tokens_out": 539,
             "reasoning_tokens": 278,
-            "cost_usd": 0.0
+            "cost_usd": 0.0,
+            "cache_read_tokens": 41314,
+            "cache_write_tokens": 0,
+            "cached_tokens": 41314
           },
           "timestamp": 1788938636489
         }

@@ -114,6 +114,50 @@ never the pid alone). Closing the window or quitting mid-probe runs the same kil
 
 The first two are pinned by `tier::tests::the_card_this_muse_really_draws_parses`.
 
+### The wire is primary now; the scrape is the fallback that cannot be deleted
+
+Since muse 1.3.0 the card's numbers are on the wire, typed, and Baaz reads
+them first:
+
+- `usage/read` is issued with every tier probe (`probe_tier`, on connect and
+  on every asked-for re-probe). On `Some(usage)` made after the current
+  credential was installed the tier is built directly from it — plan from
+  `tier`, both percentages verbatim, reset clauses rendered from the two
+  `resets_at_ms` stamps in the card's own register (`Resets at …` /
+  `Resets <date> at …`, local time) — and cached through `tier::remember`
+  exactly as a probe answer is. Anything older belongs to a previous login
+  (see below) and falls through to the scrape.
+- `usage/changed` is folded into the tier in place on every notification, so
+  the sidebar footer meter tracks the window as the person works instead of
+  freezing at a boot-time snapshot. The update reaches `push_tier`, so the
+  banner follows too.
+
+The scrape stays, demoted to fallback: on `{}` (a cold host, before any turn
+has observed a provider response) or any read failure, the pty probe runs
+unchanged. It cannot be deleted, because it answers the one question the wire
+never does — **pay-as-you-go vs not known**. `usage/read` returns a
+`SubscriptionUsage` when a subscription observation exists and nothing
+otherwise; absence is "not known yet", never pay-as-you-go. Only the
+`/upgrade` card distinguishes `Tier::PayAsYouGo` from `Tier::Unavailable`,
+and `PayAsYouGo` is what raises the blocking banner that stops the person
+being billed API rates by surprise. Deleting the scrape would silently turn
+that protection into "Plan unknown", which does not block.
+
+`observed_at_ms` stamps when the host received the observation, not now — and
+the wire carries no account or credential identity, so "the last thing seen"
+may belong to a previous login: signing out and back in reuses the same
+`muse serve` connection, and `usage/read` keeps serving the previous
+account's window. An observation is therefore trusted only when it was made
+after the current credential was installed — `observed_at_ms` (epoch
+milliseconds, converted down to whole seconds) strictly after `auth.json`'s
+modification time in whole seconds (`tier::auth_mtime`), with no tolerance
+for skew: both stamps come from this machine's clock, and the tie goes to
+distrust (a false fall-through costs a scrape; a false trust bills the person
+with no warning). Anything older falls through to the scrape, and a
+`usage/changed` stamped before the installed credential never updates the
+tier. `used_percent` may exceed 100 (over-quota is valid): the meter clamps
+to `0..=1`, `/status` and `/usage` print the true number.
+
 ### The rule the module keeps
 
 **The raw terminal output is never logged.** The card's footer carries a URL,
@@ -234,3 +278,38 @@ cargo run -p baaz -- --replay fixtures/msp/transcript-approve.jsonl \
 | `phase5-tier-banner-{light,dark}` | `--tier unknown` — the quiet banner and its "Check again" |
 
 All six are `--replay` runs. They spend nothing.
+
+---
+
+## 7. Usage history (`baaz.db`)
+
+Baaz keeps a ledger of finished turns in its own
+`~/Library/Application Support/baaz/baaz.db` — one row per finished turn,
+written when a turn's terminal event folds (and backfilled from `view/page`
+when a session is opened, so turns that ran while Baaz was closed are still
+recorded). This is the ledger; rendering it is a later stage.
+
+**The key is the view cursor.** Each row is keyed on
+`(session_id, view_cursor)` — the cursor of the turn's terminal event — and
+every insert is `ON CONFLICT DO NOTHING`. The cursor is opaque and strictly
+monotonic, and a `view/page` is contiguous and can never skip one, so the
+same events folded twice write the second time as a no-op. That idempotency
+is what makes the live write and the backfill safe to overlap: backfilling a
+session that was already recorded live adds only the new rows and changes
+none of the old.
+
+**`NULL` is not zero.** `cache_read_tokens` and `cache_write_tokens` are
+nullable, and a `NULL` means "the provider never told us" — the whole reason
+`TurnMeta` keeps them as `Option`. A reporting query may `COALESCE` them to
+zero, but the write never flattens the distinction: unknown stays unknown.
+
+**Baaz does not own the transcript.** Muse stays the system of record; the
+ledger holds token counts, durations and cost beside it, never the words.
+A locked database, a missing directory and a schema this build has never seen
+are all ordinary: the write logs one line and carries on, and nothing the
+person does ever blocks on it.
+
+The one index is on `finished_at_ms`, which is what a "last N days" query
+ranges over. Backfilled rows carry the time they were recorded, not the time
+the turn ran — a page carries a turn's duration but no wall-clock for its
+terminal, so the recording time is the honest stamp.
