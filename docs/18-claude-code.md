@@ -166,6 +166,41 @@ SDK offers and the CLI does not. Over the CLI the equivalent is this stdio
 server, spawned by Baaz, speaking to the child over a pipe. That is what S3.2
 builds, and this fixture is its acceptance evidence.
 
+### It has since been done with Baaz's own bridge — `mcp-rust.jsonl`
+
+The probe above used a throwaway Python server. `crates/mcp-bridge`'s real
+binary has now been put in its place and a live `claude` child drove it:
+
+    init.mcp_servers  [{"name":"baaz","status":"connected","source":"dynamic"}]
+    init.tools        contains "mcp__baaz__ping"
+    tool_use          {"name":"mcp__baaz__ping","input":{}}
+    tool_result       [{"type":"text","text":"PONG"}]
+
+That is `ClientTools: Native` earned rather than asserted, and it is the first
+time anything in this repo has been called by a second provider.
+
+**`--strict-mcp-config` is confirmed in the same run**: `init.mcp_servers`
+listed the baaz server and *nothing else*, where the unstrict run listed five
+of the operator's own claude.ai connectors beside it.
+
+### The permission gate, found the hard way
+
+The first attempt failed, and the failure is a design constraint, not a
+mishap. With the server connected and the tool listed, the call came back:
+
+    "Claude requested permissions to use mcp__baaz__ping, but you haven't
+     granted it yet." · is_error: true
+
+A connected MCP server is **not** a callable one. The child refuses every
+client tool until it is allowed, so a Baaz-spawned child must either pass
+`--allowedTools mcp__<server>__<tool>` for each tool it means to expose, or
+answer the prompt through `--permission-prompts host --permission-prompt-tool`.
+Baaz already owns an approvals surface, so routing these to it is the
+better of the two and keeps a person in the loop — but **whichever is
+chosen, "the server connected" must never be read as "the tool works".**
+An adapter that declares `ClientTools: Native` on the strength of the
+handshake alone would ship a tool surface that refuses every call.
+
 ## 5. Account, and the rate-limit frame
 
 `rate_limit_event`, captured verbatim:
@@ -215,7 +250,7 @@ which is honest ignorance and is still attempted.
 | `Questions` | Unavailable | Claude Code has no question channel distinct from the transcript. Reason: "Claude Code asks in prose; there is no question id to answer" |
 | `Transcript` | Native | `stream_event` + `assistant`, plus the stored `.jsonl` (§3) |
 | `Account` | Native | `rate_limit_event` (§5) |
-| `ClientTools` | Native | `mcp.jsonl`, end to end (§4) |
+| `ClientTools` | Native | `mcp.jsonl` **and** `mcp-rust.jsonl` — the latter drives Baaz's own bridge binary end to end (§4). Native only once the tool is allowed; see the permission gate in §4 |
 | `ReasoningTraces` | Native | `thinking` blocks with `thinking_delta`, plus `system/thinking_tokens` |
 | `SubagentTurns` | Unverified | `parent_tool_use_id` is on every streamed frame and `--forward-subagent-text` exists, but no probe ever spawned a sub-agent. Read off `--help` is not evidence; `Unverified` is attempted, never refused |
 
