@@ -4,10 +4,11 @@
 //! attempted — except `Questions`, which is `Unavailable` with its reason:
 //! Claude Code asks in prose and there is no question id to answer.
 //!
-//! Two cells carry doc §8's caveat in their comments: `ForkSession` and
-//! `SubagentTurns` were read off `--help` and frame fields, never executed
-//! live. They stay `Native` per the §6 table (the brief requires the table
-//! exactly); the report says plainly they never ran.
+//! Doc §8's caveat, cell by cell: `ForkSession` was read off `--help`
+//! and has since been executed for real (fixture `fork.jsonl`: resuming
+//! `f3815266-…` with `--fork-session` minted `c4b6fee5-…`), so it stays
+//! `Native`. `SubagentTurns` was read off frame fields and never executed,
+//! so it is `Unverified` — honest ignorance, still attempted.
 
 use provider::{version_at_least, Capability, CapabilitySet, CapabilityState};
 
@@ -32,7 +33,8 @@ pub fn claude_version_supported(version: &str) -> bool {
 pub fn capabilities() -> CapabilitySet {
     CapabilitySet::new([
         (Capability::SessionLifecycle, CapabilityState::Native),
-        // Native per §6 (--fork-session on --help); never executed — see §8.
+        // Native: executed for real (§8 caveat retired by fork.jsonl —
+        // resuming f3815266-… with --fork-session minted c4b6fee5-…).
         (Capability::ForkSession, CapabilityState::Native),
         (
             Capability::CompactSession,
@@ -67,9 +69,9 @@ pub fn capabilities() -> CapabilitySet {
         (Capability::Account, CapabilityState::Native),
         (Capability::ClientTools, CapabilityState::Native),
         (Capability::ReasoningTraces, CapabilityState::Native),
-        // Native per §6 (parent_tool_use_id on every streamed frame);
-        // never executed — see §8.
-        (Capability::SubagentTurns, CapabilityState::Native),
+        // Unverified: parent_tool_use_id on every streamed frame was read
+        // off --help and frame fields, never executed — see §8.
+        (Capability::SubagentTurns, CapabilityState::Unverified),
     ])
 }
 
@@ -102,7 +104,9 @@ mod tests {
         assert_eq!(set.state(C::Account), &S::Native);
         assert_eq!(set.state(C::ClientTools), &S::Native);
         assert_eq!(set.state(C::ReasoningTraces), &S::Native);
-        assert_eq!(set.state(C::SubagentTurns), &S::Native);
+        // NOT Native: read off frame fields, never executed. Do not
+        // upgrade without a fixture.
+        assert_eq!(set.state(C::SubagentTurns), &S::Unverified);
     }
 
     #[test]
