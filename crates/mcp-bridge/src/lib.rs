@@ -172,11 +172,16 @@ impl ToolRegistry {
     }
 
     /// Number of registered tools.
+    ///
+    /// Nothing in this crate calls it; it is here for the host that will
+    /// build the registry and want to report what it exposed.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.tools.len()
     }
 
-    /// Whether no tools are registered.
+    /// Whether no tools are registered. See [`ToolRegistry::len`].
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
@@ -258,9 +263,13 @@ fn handle_line(line: &str, registry: &ToolRegistry) -> Option<String> {
             ));
         }
     };
-    let id = object.get("id").filter(|id| !id.is_null());
-    let Some(id) = id else {
-        // A notification (no id): never a reply, even if malformed.
+    // JSON-RPC 2.0: a request is a notification when the `id` MEMBER IS
+    // ABSENT, not when its value is null. Conflating the two strands a
+    // client that sends an explicit `"id": null` — it waits for a reply
+    // that never comes, and the provider's whole session waits with it.
+    // Absent -> no reply, ever. Present-but-null -> a reply, echoing null.
+    let Some(id) = object.get("id") else {
+        // A notification: never a reply, even if malformed.
         return None;
     };
     let method = object.get("method").and_then(Value::as_str);

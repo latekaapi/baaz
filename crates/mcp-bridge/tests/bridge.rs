@@ -270,6 +270,26 @@ fn notification_gets_no_reply_and_loop_survives() {
 }
 
 #[test]
+fn an_explicit_null_id_is_a_request_and_gets_a_reply() {
+    // JSON-RPC 2.0 makes a request a notification by the ABSENCE of `id`,
+    // not by a null value. Treating `"id": null` as a notification strands
+    // the caller: it waits on a reply that is never written, and because
+    // one process serves the whole provider session, the session waits too.
+    let registry = test_registry();
+    let replies = run_session(
+        &[
+            r#"{"jsonrpc":"2.0","id":null,"method":"tools/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"ping","arguments":{}}}"#,
+        ],
+        &registry,
+    );
+    assert_eq!(replies.len(), 2, "an explicit null id is a request, not a notification");
+    assert_eq!(*id_of(&replies[0]), json!(null), "the null id is echoed as null");
+    assert!(result_of(&replies[0]).get("tools").is_some());
+    assert_eq!(*id_of(&replies[1]), json!(19));
+}
+
+#[test]
 fn panicking_handler_errors_and_loop_survives() {
     let registry = test_registry();
     let replies = run_session(
