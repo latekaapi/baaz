@@ -51,6 +51,7 @@ pub struct ClaudeCodeAdapter {
     fold: Arc<Mutex<ClaudeFold>>,
     child: Mutex<Option<RunningChild>>,
     session_id: Mutex<Option<String>>,
+    workspace: Mutex<Option<PathBuf>>,
     home_override: Option<PathBuf>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
@@ -69,6 +70,7 @@ impl ClaudeCodeAdapter {
             fold: Arc::new(Mutex::new(ClaudeFold::new())),
             child: Mutex::new(None),
             session_id: Mutex::new(None),
+            workspace: Mutex::new(None),
             home_override: None,
             connected: Mutex::new(false),
             version: Mutex::new(None),
@@ -78,6 +80,15 @@ impl ClaudeCodeAdapter {
     /// Override `$HOME` for stored-history lookup (tests).
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home_override = Some(home);
+        self
+    }
+
+    /// Override the session workspace cwd for stored-history lookup
+    /// (tests). Production sets this from `OpenSession.workspace` in
+    /// [`Self::spawn_launch`]; it is what [`history::stored_transcript_path`]
+    /// resolves and slugs.
+    pub fn with_workspace(self, workspace: PathBuf) -> Self {
+        *self.workspace.lock().expect("workspace mutex") = Some(workspace);
         self
     }
 
@@ -107,6 +118,13 @@ impl ClaudeCodeAdapter {
         })?;
         *child = Some(running);
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
+        // Remember the session's own workspace cwd for stored-history
+        // lookup. Only a stated cwd counts: resume/fork launches carry
+        // none, and an unknown cwd stays unknown (honest unavailable)
+        // rather than guessed.
+        if let Some(cwd) = &launch.cwd {
+            *self.workspace.lock().expect("workspace mutex") = Some(PathBuf::from(cwd));
+        }
         Ok(Ack::Session { session_id: launch.session_id.clone(), title: None })
     }
 
@@ -147,16 +165,16 @@ impl ClaudeCodeAdapter {
     }
 
     fn find_stored(&self, session_id: &str) -> Option<PathBuf> {
+        // The doc §3 rule: resolve the session's own workspace cwd, slug
+        // it, look in that one directory. No workspace on record, an
+        // unresolvable cwd, an absent slug directory, or a missing file
+        // all degrade to None — the callers answer honest unavailable.
+        // Never scan other directories: that would serve one workspace's
+        // transcript inside another.
+        let workspace = self.workspace.lock().expect("workspace mutex").clone()?;
         let home = self.home()?;
-        let projects = home.join(".claude").join("projects");
-        let Ok(entries) = std::fs::read_dir(projects) else { return None };
-        for entry in entries.filter_map(|entry| entry.ok()) {
-            let candidate = entry.path().join(format!("{session_id}.jsonl"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        None
+        history::stored_transcript_path(&workspace, session_id, Some(&home))
+            .filter(|candidate| candidate.is_file())
     }
 
     fn stored_deltas(&self, session_id: &str) -> Result<Vec<Delta>, ProviderError> {
@@ -429,8 +447,20 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "the CLI exposes no stored-output reference; page the stored transcript instead",
             )),
             Command::ReadAccount => {
-                let label = self.fold.lock().expect("fold mutex").account().label();
-                Ok(Ack::Account { signed_in: true, label })
+                let fold = self.fold.lock().expect("fold mutex");
+                let label = fold.account().label();
+                // `claude --version` succeeds whether or not the CLI is
+                // authenticated, so `connect()` proves nothing about auth,
+                // and this crate has no `auth status` probe — nothing here
+                // runs the CLI beyond spawn/version. The only auth evidence
+                // this adapter ever observes is a rate-limit meter reading
+                // from the live child: the CLI only emits one while making
+                // authenticated API calls. So `signed_in` is true exactly
+                // when a reading has been seen (label present); `false`
+                // means "no login observed", never "definitely logged out".
+                // A fresh or logged-out CLI reads false — fail closed, never
+                // claim a login nobody checked.
+                Ok(Ack::Account { signed_in: label.is_some(), label })
             }
             Command::BeginLogin { .. } => Err(ProviderError::unsupported(
                 "begin-login",
@@ -462,5 +492,42 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 impl Drop for ClaudeCodeAdapter {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meter_line() -> &'static str {
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1790384400,"rateLimitType":"seven_day","utilization":0.97,"isUsingOverage":true,"surpassedThreshold":0.75,"unifiedWindows":{"five_hour":{"utilization":0.9,"resetsAt":1790187000},"seven_day":{"utilization":0.97,"resetsAt":1790384400}}}}"#
+    }
+
+    #[test]
+    fn read_account_is_false_until_a_meter_reading_is_seen() {
+        // Fresh adapter: no meter observed, so no login claimed. A
+        // hardcoded `true` fails this test.
+        let adapter = ClaudeCodeAdapter::new("claude");
+        let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
+        assert!(
+            matches!(ack, Ack::Account { signed_in: false, label: None }),
+            "no reading seen, no login claimed: {ack:?}"
+        );
+    }
+
+    #[test]
+    fn read_account_is_true_after_a_meter_reading() {
+        // A rate-limit reading from the live child is authenticated API
+        // traffic observed first-hand: signed in, with the meter label.
+        let adapter = ClaudeCodeAdapter::new("claude");
+        let frame = frame::decode_line(meter_line()).expect("meter line decodes");
+        adapter.fold.lock().expect("fold mutex").apply(&frame);
+        let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
+        match ack {
+            Ack::Account { signed_in: true, label: Some(label) } => {
+                assert!(label.contains("97%"), "live meter label: {label}");
+            }
+            other => panic!("expected signed-in account with a label, got {other:?}"),
+        }
     }
 }

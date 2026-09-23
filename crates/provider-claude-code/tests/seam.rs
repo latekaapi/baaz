@@ -65,16 +65,20 @@ fn unsupported_is_never_spelled_as_success() {
 
 #[test]
 fn stored_history_serves_read_and_page_but_never_guesses() {
+    use provider_claude_code::history;
     // Plant basic.jsonl as the stored transcript for one session under a
-    // fake home, at the resolved slug for a temp cwd.
+    // fake home, at the resolved slug for a temp cwd — via the REAL slug
+    // function, so this test fails if the slugging logic drifts from the
+    // lookup path (a hand-rolled transform would pass with no slug logic
+    // at all).
     let root = std::env::temp_dir().join("cc-seam-test-history");
     let _ = std::fs::remove_dir_all(&root);
     let cwd = root.join("work");
     let home = root.join("home");
     std::fs::create_dir_all(&cwd).expect("cwd");
-    let resolved = std::fs::canonicalize(&cwd).expect("resolves");
-    let slug: String = resolved.to_string_lossy().replace('/', "-");
-    let dir = home.join(".claude").join("projects").join(slug);
+    let resolved = history::resolve_cwd(&cwd).expect("resolves");
+    let slug = history::slug_for_cwd(&resolved);
+    let dir = home.join(".claude").join("projects").join(&slug);
     std::fs::create_dir_all(&dir).expect("slug dir");
     let fixture = std::fs::read_to_string(format!(
         "{}/../../fixtures/claude-code/basic.jsonl",
@@ -82,8 +86,26 @@ fn stored_history_serves_read_and_page_but_never_guesses() {
     ))
     .expect("fixture reads");
     std::fs::write(dir.join("sess-stored.jsonl"), &fixture).expect("plant");
+    // The resolver names exactly this file — the lookup below must agree.
+    assert_eq!(
+        history::stored_transcript_path(&cwd, "sess-stored", Some(&home)),
+        Some(dir.join("sess-stored.jsonl"))
+    );
 
-    let adapter = ClaudeCodeAdapter::new("claude").with_home(home);
+    // Plant the SAME session id nowhere else, but a DIFFERENT session id
+    // under a DIFFERENT workspace's slug directory: asking for it from
+    // this workspace must answer unavailable, never that other file.
+    let other_cwd = root.join("other-work");
+    std::fs::create_dir_all(&other_cwd).expect("other cwd");
+    let other_slug =
+        history::slug_for_cwd(&history::resolve_cwd(&other_cwd).expect("other resolves"));
+    assert_ne!(other_slug, slug, "slugs must differ for this test to mean anything");
+    let other_dir = home.join(".claude").join("projects").join(&other_slug);
+    std::fs::create_dir_all(&other_dir).expect("other slug dir");
+    std::fs::write(other_dir.join("sess-decoy.jsonl"), &fixture).expect("plant decoy");
+
+    let adapter =
+        ClaudeCodeAdapter::new("claude").with_home(home).with_workspace(cwd);
     let ack = adapter
         .dispatch(Command::ReadSession { session_id: "sess-stored".into(), metadata_only: false })
         .expect("stored session reads");
@@ -110,6 +132,22 @@ fn stored_history_serves_read_and_page_but_never_guesses() {
         .expect_err("absent session must not read");
     assert!(matches!(error, ProviderError::Unavailable { .. }));
 
+    // THE POINT: this file exists, but under another workspace's slug.
+    // A directory scan would serve it; the resolver must not.
+    let error = adapter
+        .dispatch(Command::ReadSession { session_id: "sess-decoy".into(), metadata_only: false })
+        .expect_err("another workspace's file must not read here");
+    assert!(matches!(error, ProviderError::Unavailable { .. }));
+    let error = adapter
+        .dispatch(Command::PageTranscript {
+            session_id: "sess-decoy".into(),
+            after: None,
+            limit: 100,
+            backward: false,
+        })
+        .expect_err("another workspace's file must not page here");
+    assert!(matches!(error, ProviderError::Unavailable { .. }));
+
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -119,7 +157,12 @@ fn read_account_reports_the_live_meter_label() {
     let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
     match ack {
         Ack::Account { signed_in, label } => {
-            assert!(signed_in);
+            // No meter reading observed yet: no login claimed. `claude
+            // --version` succeeds logged-out, so a fresh adapter must read
+            // false — fail closed. (The true branch — a meter reading seen
+            // from the live child — is covered by the unit tests in
+            // src/lib.rs, which can reach the fold.)
+            assert!(!signed_in, "no reading seen, no login claimed");
             assert!(label.is_none(), "no meter seen yet, no label invented");
         }
         other => panic!("expected account, got {other:?}"),
