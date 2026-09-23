@@ -128,6 +128,25 @@ Its weakness is that conflicts are resolved silently and never reported.
 - The shortcut sheet and `docs/08-keymap.md` are **generated from the same
   table** the keymap validates against, so they cannot drift.
 
+### 3.2 status (C4afin, 2026-09-23) — built except the Settings section
+
+Built: the file, the load order, and the validation. `bind_keys` installs
+what `keymap::load()` returns — the table first, the accepted `keymap.json`
+entries second, so a written binding wins by gpui's depth-then-order rule —
+and every refused entry is logged through `baaz_log!`, the app's diagnostics
+surface. Unknown actions keep their default, invalid contexts and duplicates
+warn, and the reserved list (⌘Q, ⌘W, ⌘H, the text-editing keys) refuses at
+load, so a hand-edited file cannot rebind ⌘Q. Under `BAAZ_DETERMINISTIC=1`
+the file is ignored entirely. `set_binding`, `clear_binding` and
+`unbind_binding` write the file atomically, and the loader, the reserved
+list, the validation and the write path are covered by tests in `keymap.rs`.
+
+Not built: the Settings Shortcuts section. It needs a new `aui` component
+that can record a keystroke, and that component does not exist yet. Until it
+does, the only way to set a binding is to hand-edit `keymap.json` — and
+nothing here opens a window or presses a key, so the tests assert what was
+installed into gpui, not a real keystroke firing.
+
 ### 3.3 Deliberately not doing
 
 - **No base-keymap presets** (VS Code, JetBrains, …). Zed can afford eight
