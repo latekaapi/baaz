@@ -10,7 +10,9 @@
 
 use crossbeam_channel::Receiver;
 
-use crate::{Ack, Command, ProviderError, ProviderEvent, ProviderId};
+use crate::{
+    Ack, CapabilitySet, CapabilityState, Command, ProviderError, ProviderEvent, ProviderId,
+};
 
 /// Who this client is, for the provider's handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,11 +62,41 @@ pub trait ProviderAdapter: Send {
     /// called before [`Self::send`]; a second call is refused.
     fn connect(&mut self, client: &ConnectInfo) -> Result<Handshake, ProviderError>;
 
+    /// What this provider can do, before the app asks. The UI reads the
+    /// set to decide which buttons to offer; [`Self::send`] reads it to
+    /// refuse what is [`CapabilityState::Unavailable`] before any adapter
+    /// code runs.
+    fn capabilities(&self) -> CapabilitySet;
+
     /// Do one thing, synchronously. Admission only: the ack says the
     /// provider took the command, and the outcome arrives as
     /// [`ProviderEvent`]s. A provider that cannot do it answers
     /// [`ProviderError::Unsupported`] — never `Ok`.
-    fn send(&self, command: Command) -> Result<Ack, ProviderError>;
+    ///
+    /// This is a provided method, and that is the whole invariant: it looks
+    /// up the command's [`Command::required_capability`] in
+    /// [`Self::capabilities`] first, and an `Unavailable` state is refused
+    /// here, before [`Self::send_inner`] runs. An adapter that forgets to
+    /// refuse — one whose inner dispatch would have returned `Ok` — still
+    /// refuses, because its dispatch lives behind `send_inner`, which is
+    /// unreachable except through here. The app calls only this method.
+    /// (`Emulated`, `Native`, and `Unverified` all proceed: honest
+    /// ignorance is attempted, never refused.)
+    fn send(&self, command: Command) -> Result<Ack, ProviderError> {
+        let needed = command.required_capability();
+        if let CapabilityState::Unavailable { reason } = self.capabilities().state(needed) {
+            return Err(ProviderError::unsupported(command.capability(), reason.clone()));
+        }
+        self.send_inner(command)
+    }
+
+    /// The adapter's real dispatch. Only reached when the command's
+    /// capability is not [`CapabilityState::Unavailable`] — see
+    /// [`Self::send`]. May still refuse anything further with
+    /// [`ProviderError::Unsupported`]: the gate is a floor, so partial
+    /// support inside one capability (following a session but not paging
+    /// it) stays a typed refusal in the adapter.
+    fn send_inner(&self, command: Command) -> Result<Ack, ProviderError>;
 
     /// The event stream, in arrival order.
     ///

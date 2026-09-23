@@ -10,6 +10,7 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod caps;
 mod translate;
 
 use std::sync::{Arc, Mutex};
@@ -22,10 +23,13 @@ use muse_client::schema::{
 };
 use muse_client::{MuseClient, MuseEvent};
 use provider::{
-    Ack, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError, ProviderEvent,
-    ProviderId,
+    Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
+    ProviderEvent, ProviderId,
 };
 
+pub use caps::{
+    capabilities_for_version, muse_version_supported, MUSE_MCP_VERSION_FLOOR, MUSE_VERSION_FLOOR,
+};
 pub use translate::{approval_headline, question_headline};
 
 /// The muse implementation: neutral [`Command`]s in, MSP on the pipe,
@@ -41,6 +45,9 @@ pub struct MuseAdapter {
     tx: Sender<ProviderEvent>,
     rx: Receiver<ProviderEvent>,
     pump: Option<JoinHandle<()>>,
+    /// The agent version the handshake negotiated, for the version-gated
+    /// capabilities. `None` before [`ProviderAdapter::connect`] runs.
+    negotiated: Mutex<Option<String>>,
 }
 
 impl MuseAdapter {
@@ -49,7 +56,14 @@ impl MuseAdapter {
     /// provider ones. [`ProviderAdapter::connect`] runs the handshake.
     pub fn new(client: MuseClient) -> Self {
         let (tx, rx) = unbounded();
-        Self { client, fold: Arc::new(Mutex::new(MuseFold::new())), tx, rx, pump: None }
+        Self {
+            client,
+            fold: Arc::new(Mutex::new(MuseFold::new())),
+            tx,
+            rx,
+            pump: None,
+            negotiated: Mutex::new(None),
+        }
     }
 
     /// Forward one transport event: fold it, emit its deltas, and raise the
@@ -208,18 +222,33 @@ impl ProviderAdapter for MuseAdapter {
                 reason: format!("could not start the event pump: {error}"),
             })?;
         self.pump = Some(pump);
+        let version = result.server_info.version.clone();
+        *self.negotiated.lock().expect("negotiated mutex") = Some(version.clone());
         Ok(Handshake {
             provider: aui_protocol::Provider::Muse,
             agent_name: result.server_info.name,
-            agent_version: result.server_info.version,
+            agent_version: version,
         })
     }
 
-    fn send(&self, command: Command) -> Result<Ack, ProviderError> {
-        // `send` takes `&self` and only the page arm touches the fold, so
-        // the fold lives behind a mutex while the client — already safe to
-        // share — stays directly owned. Commands stay concurrent everywhere
-        // except the fold lock.
+    fn capabilities(&self) -> CapabilitySet {
+        // Before connect no version was negotiated: assume the floor, so
+        // the set is the supported one and nothing version-gated is
+        // promised. No command maps to `ClientTools`, so the pre-connect
+        // assumption never blocks a send.
+        let version = self.negotiated.lock().expect("negotiated mutex").clone();
+        match version {
+            Some(version) => caps::capabilities_for_version(&version),
+            None => caps::capabilities_for_version(caps::MUSE_VERSION_FLOOR),
+        }
+    }
+
+    fn send_inner(&self, command: Command) -> Result<Ack, ProviderError> {
+        // `send_inner` takes `&self` and only the page arm touches the
+        // fold, so the fold lives behind a mutex while the client — already
+        // safe to share — stays directly owned. Commands stay concurrent
+        // everywhere except the fold lock. The `Unavailable` refusal happens
+        // before this runs, in the provided `send`.
         translate::dispatch(&self.client, &self.fold, command)
     }
 

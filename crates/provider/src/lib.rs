@@ -24,11 +24,16 @@
 //! A provider that cannot do something answers [`ProviderError::Unsupported`]
 //! naming the capability. "Not supported" cannot be spelled as success:
 //! [`ProviderAdapter::send`] returns `Result<Ack, ProviderError>`.
+//!
+//! The declared side of the same promise is [`CapabilitySet`]: what the
+//! provider says it can do before the app asks, so a button that cannot
+//! work is not offered in the first place.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod ack;
+mod capability;
 mod command;
 mod error;
 mod event;
@@ -36,6 +41,7 @@ mod traits;
 
 pub use ack::{Ack, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
 pub use aui_protocol::Delta;
+pub use capability::{Capability, CapabilitySet, CapabilityState};
 pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
 pub use crossbeam_channel::Receiver;
 pub use error::ProviderError;

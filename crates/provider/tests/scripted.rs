@@ -13,8 +13,8 @@ use std::time::Duration;
 use aui_protocol::{Block, Delta, Provider, Session, Turn, TurnMeta};
 use crossbeam_channel::{unbounded, Receiver};
 use provider::{
-    Ack, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError, ProviderEvent,
-    ProviderId, QuestionAnswer, SubmissionPart,
+    Ack, Capability, CapabilitySet, CapabilityState, Command, ConnectInfo, Handshake,
+    ProviderAdapter, ProviderError, ProviderEvent, ProviderId, QuestionAnswer, SubmissionPart,
 };
 
 /// A provider that is not muse: canned deltas, three commands, refusals
@@ -116,7 +116,36 @@ impl ProviderAdapter for ScriptedProvider {
         })
     }
 
-    fn send(&self, command: Command) -> Result<Ack, ProviderError> {
+    fn capabilities(&self) -> CapabilitySet {
+        // The three implemented stories stay `Native`; everything else is
+        // `Unavailable` with the reason the old hand-rolled refusal
+        // carried. `Transcript` stays `Native` even though only following
+        // is implemented — the gate is a floor, and the paging arms keep
+        // their own typed refusal inside `send_inner`.
+        let off = || CapabilityState::Unavailable {
+            reason: "scripted providers only open sessions, take input, and follow them".into(),
+        };
+        CapabilitySet::new([
+            (Capability::SessionLifecycle, CapabilityState::Native),
+            (Capability::ForkSession, off()),
+            (Capability::CompactSession, off()),
+            (Capability::SessionConfig, off()),
+            (Capability::SessionShell, off()),
+            (Capability::SubmitTurn, CapabilityState::Native),
+            (Capability::SteerTurn, off()),
+            (Capability::TurnControl, off()),
+            (Capability::ModelCatalog, off()),
+            (Capability::Approvals, off()),
+            (Capability::Questions, off()),
+            (Capability::Transcript, CapabilityState::Native),
+            (Capability::Account, off()),
+            (Capability::ClientTools, off()),
+            (Capability::ReasoningTraces, off()),
+            (Capability::SubagentTurns, off()),
+        ])
+    }
+
+    fn send_inner(&self, command: Command) -> Result<Ack, ProviderError> {
         let state = self.inner.state.lock().expect("scripted mutex");
         if !state.connected {
             return Err(ProviderError::Unavailable { reason: "not connected".into() });
