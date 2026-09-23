@@ -74,6 +74,7 @@ mod terminal;
 mod tier;
 mod titles;
 mod transcript;
+mod usage;
 mod wire;
 
 use std::path::PathBuf;
