@@ -203,7 +203,7 @@ which is honest ignorance and is still attempted.
 | capability | state | evidence / reason |
 |---|---|---|
 | `SessionLifecycle` | Native | `--session-id`, `--resume`; `init` + `result` in every fixture |
-| `ForkSession` | Native | `--fork-session` documented on `--help`; **not yet executed — see §8** |
+| `ForkSession` | Native | **executed**: `fork.jsonl` — resuming `f3815266-…` with `--fork-session` minted `c4b6fee5-…`, a different id |
 | `CompactSession` | Emulated | `--autocompact <auto\|tokens>` sets a window; there is no "compact now" command over `--print`. Differs from native: it happens when the window fills, not when asked |
 | `SessionConfig` | Native | `--model`, `--permission-mode`, `--add-dir`, `--append-system-prompt` |
 | `SessionShell` | Native | the `Bash` tool is in `init.tools`; `tool_use_result` carries `stdout`/`stderr`/`interrupted` (`partial.jsonl`) |
@@ -217,7 +217,7 @@ which is honest ignorance and is still attempted.
 | `Account` | Native | `rate_limit_event` (§5) |
 | `ClientTools` | Native | `mcp.jsonl`, end to end (§4) |
 | `ReasoningTraces` | Native | `thinking` blocks with `thinking_delta`, plus `system/thinking_tokens` |
-| `SubagentTurns` | Native | `parent_tool_use_id` on every streamed frame; `--forward-subagent-text` exists. **Not yet executed — see §8** |
+| `SubagentTurns` | Unverified | `parent_tool_use_id` is on every streamed frame and `--forward-subagent-text` exists, but no probe ever spawned a sub-agent. Read off `--help` is not evidence; `Unverified` is attempted, never refused |
 
 Three `Unverified` and one `Unavailable` is the honest reading today. Raising
 any of them requires a new fixture, not an argument.
@@ -243,8 +243,9 @@ Named so nobody reads a table cell as a promise:
 
 - No turn was ever steered or interrupted. `SteerTurn` and `TurnControl` are
   `Unverified` and must ship that way.
-- `--fork-session` and sub-agent forwarding were read off `--help`, not run.
-  Either produce a fixture during S3.1 or downgrade them to `Unverified`.
+- Sub-agent forwarding was read off `--help`, not run, so `SubagentTurns` is
+  `Unverified`. (`--fork-session` **was** run after the first draft of this doc:
+  see `fork.jsonl` and §6.)
 - The `<cwd-slug>` transform is one directory's worth of observation (§3).
 - Every probe ran on Haiku with a trivial prompt. Nothing here says anything
   about long transcripts, compaction, or a turn that exceeds the window.
