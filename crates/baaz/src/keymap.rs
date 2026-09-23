@@ -472,6 +472,7 @@ fn resolve_user_blocks(blocks: &[UserBlock]) -> (Vec<AcceptedBinding>, Vec<Strin
 /// What setting, clearing or unbinding a binding can refuse. The sibling
 /// Settings UI matches on this to say why a row will not take a keystroke.
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 pub enum KeymapError {
     /// The keystroke is [`RESERVED`]: carries the keystroke and the reason.
     Reserved {
@@ -502,6 +503,7 @@ impl std::fmt::Display for KeymapError {
 impl std::error::Error for KeymapError {}
 
 /// Check one write the way the loader checks one entry, normalised.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 fn check_write(
     action: &str,
     keystroke: &str,
@@ -539,12 +541,14 @@ fn read_blocks(path: &std::path::Path) -> Vec<UserBlock> {
 
 /// Write blocks back through [`crate::store`]'s atomic rule: beside itself
 /// and renamed.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 fn write_blocks(path: &std::path::Path, blocks: &[UserBlock]) -> std::io::Result<()> {
     let text = serde_json::to_vec_pretty(blocks).unwrap_or_else(|_| b"[]".to_vec());
     crate::store::write_atomic(path, &text)
 }
 
 /// Drop empty blocks so the file stays hand-readable.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 fn prune_blocks(blocks: &mut Vec<UserBlock>) {
     blocks.retain(|block| !block.bindings.is_empty());
 }
@@ -558,6 +562,7 @@ fn prune_blocks(blocks: &mut Vec<UserBlock>) {
 /// same keystroke in the same context) or be shadowed by it (the action's
 /// old keystrokes in the same context) are removed first, so the file never
 /// holds a duplicate pair the loader would have to resolve.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 pub fn set_binding(action: &str, keystroke: &str, context: Option<&str>) -> Result<(), KeymapError> {
     let (action, key, context) = check_write(action, keystroke, context)?;
     let path = path();
@@ -592,6 +597,7 @@ pub fn set_binding(action: &str, keystroke: &str, context: Option<&str>) -> Resu
 /// Removes both rebinds and unbinds (`null`s at the action's default
 /// keystrokes); a no-op when the file says nothing about the action. Only
 /// restores, so nothing about it can be reserved.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 pub fn clear_binding(action: &str, context: Option<&str>) -> Result<(), KeymapError> {
     if !known_action(action) || action == "NoAction" {
         return Err(KeymapError::UnknownAction(action.to_string()));
@@ -631,6 +637,7 @@ pub fn clear_binding(action: &str, context: Option<&str>) -> Result<(), KeymapEr
 /// Unbind an action in a context: write `null` at its current effective
 /// keystroke. Refuses when that keystroke is [`RESERVED`] — ⌘Q stays bound —
 /// and is a no-op when the action has no binding there.
+#[allow(dead_code)] // the write API: exercised by tests, consumed by the sibling Settings UI
 pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapError> {
     if !known_action(action) || action == "NoAction" {
         return Err(KeymapError::UnknownAction(action.to_string()));
@@ -680,16 +687,24 @@ pub struct EffectiveBinding {
     /// The table action name.
     pub action: String,
     /// The keystroke that fires it, lowercase.
+    #[allow(dead_code)] // read by the sibling Settings UI
     pub keystroke: String,
     /// The context it fires in; `None` is global.
     pub context: Option<String>,
-    /// The table grouping, for the UI's sections.
+    /// The table grouping, for the UI's sections. Unused until the Settings
+    /// Shortcuts section exists; kept so the grouping cannot drift from the
+    /// binding.
+    #[allow(dead_code)]
     pub category: String,
-    /// The human label, for the UI's rows.
+    /// The human label, for the UI's rows. Unused until then, same reason.
+    #[allow(dead_code)]
     pub label: String,
-    /// False for reserved keystrokes: the row renders read-only.
+    /// False for reserved keystrokes: the row renders read-only. Unused
+    /// until then; the refusal itself is enforced at load, not here.
+    #[allow(dead_code)]
     pub editable: bool,
-    /// Why `editable` is false.
+    /// Why `editable` is false. Unused until then.
+    #[allow(dead_code)]
     pub reserved_reason: Option<String>,
 }
 
@@ -698,6 +713,11 @@ pub struct EffectiveBinding {
 /// replaces the default row (it wins the tie at dispatch); `null` removes
 /// it. `NoAction` rows are the terminal's implementation detail, not
 /// shortcuts, so they are not listed.
+/// Read-side API for the Settings Shortcuts section, which is a sibling
+/// task waiting on a library release. Unused until that UI exists; it
+/// lives here, beside the loader it reads, so the two cannot drift —
+/// the same reason `KeymapEntry::category` and `::label` are kept.
+#[allow(dead_code)]
 pub fn effective_bindings() -> Vec<EffectiveBinding> {
     let mut rows: Vec<(String, String, Option<String>)> = KEYMAP
         .iter()
@@ -742,6 +762,11 @@ pub fn effective_bindings() -> Vec<EffectiveBinding> {
 /// The current effective binding for one action in one context: the last
 /// live row, so a user rebind wins over the default. `None` when the action
 /// is unbound there.
+/// Read-side API for the Settings Shortcuts section, which is a sibling
+/// task waiting on a library release. Unused until that UI exists; it
+/// lives here, beside the loader it reads, so the two cannot drift —
+/// the same reason `KeymapEntry::category` and `::label` are kept.
+#[allow(dead_code)]
 pub fn effective_binding(action: &str, context: Option<&str>) -> Option<EffectiveBinding> {
     let context = normalise_context(context);
     effective_bindings().into_iter().rfind(|row| row.action == action && row.context == context)
