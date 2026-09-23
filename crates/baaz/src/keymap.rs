@@ -4,8 +4,9 @@
 //! keystroke, the context it matches in, and — for the Settings UI a later
 //! stage will build — the category and human label each binding belongs
 //! beside, not in a second list that drifts. [`build_bindings`] turns the
-//! table into the [`gpui::KeyBinding`]s [`crate::app::bind_keys`] installs,
-//! so there is exactly one place that says what the app's shortcuts are.
+//! table into the defaults [`load`] lays the user file over, and
+//! [`crate::app::bind_keys`] installs what `load` returns, so there is
+//! exactly one place that says what the app's shortcuts are.
 //!
 //! # The user file
 //!
@@ -743,7 +744,7 @@ pub fn effective_bindings() -> Vec<EffectiveBinding> {
 /// is unbound there.
 pub fn effective_binding(action: &str, context: Option<&str>) -> Option<EffectiveBinding> {
     let context = normalise_context(context);
-    effective_bindings().into_iter().filter(|row| row.action == action && row.context == context).last()
+    effective_bindings().into_iter().rfind(|row| row.action == action && row.context == context)
 }
 
 #[cfg(test)]
@@ -829,5 +830,409 @@ mod tests {
                 row.keystroke
             );
         }
+    }
+
+    // ── the user file over the defaults ──
+
+    use gpui::TestAppContext;
+
+    /// The action's bare name: `NewSession`, not the path gpui reports.
+    fn action_name(binding: &gpui::KeyBinding) -> &str {
+        binding.action().name().rsplit("::").next().unwrap_or("")
+    }
+
+    /// One installed keystroke in `keymap.json` spelling: `cmd-t`, `enter`.
+    /// gpui's `Display` is platform glyphs, so the tests read the parsed
+    /// modifiers and key instead — the same keystroke, in stable text.
+    fn key_id(binding: &gpui::KeyBinding) -> String {
+        binding
+            .keystrokes()
+            .iter()
+            .map(|stroke| {
+                let modifiers = stroke.modifiers();
+                format!(
+                    "{}{}{}{}{}",
+                    if modifiers.control { "ctrl-" } else { "" },
+                    if modifiers.alt { "alt-" } else { "" },
+                    if modifiers.platform { "cmd-" } else { "" },
+                    if modifiers.shift { "shift-" } else { "" },
+                    stroke.key(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The installed context in source spelling: `AuiRoot`, or `None` global.
+    fn context_text(binding: &gpui::KeyBinding) -> Option<String> {
+        binding.predicate().map(|predicate| predicate.to_string())
+    }
+
+    /// `(action, keystroke, context)` per installed binding, in order.
+    fn binding_rows(bindings: &[gpui::KeyBinding]) -> Vec<(String, String, Option<String>)> {
+        bindings
+            .iter()
+            .map(|binding| (action_name(binding).to_string(), key_id(binding), context_text(binding)))
+            .collect()
+    }
+
+    /// `(keystroke, context)` for one action, in install order: the last row
+    /// wins a tie, so the tail is what the keystroke fires.
+    fn rows_for<'a>(
+        bindings: impl Iterator<Item = &'a gpui::KeyBinding>,
+        action: &str,
+    ) -> Vec<(String, Option<String>)> {
+        bindings
+            .filter(|binding| action_name(binding) == action)
+            .map(|binding| (key_id(binding), context_text(binding)))
+            .collect()
+    }
+
+    /// A user file that touches nothing real: the caller picks the name, the
+    /// helper picks a fresh temp path.
+    fn user_file(name: &str, text: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("baaz-keymap-{name}-{pid}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("keymap test dir");
+        let path = dir.join("keymap.json");
+        std::fs::write(&path, text).expect("keymap test file");
+        path
+    }
+
+    /// Holds [`crate::store::test_env_lock`] while a test moves
+    /// `BAAZ_STATE_DIR` or `BAAZ_DETERMINISTIC`, and restores both after:
+    /// the variables are process-global, so two such tests at once would
+    /// read each other's state. `BAAZ_DETERMINISTIC` starts removed, so a
+    /// capture-mode outer environment cannot silently switch the user file
+    /// off under a test that needs it read.
+    struct EnvLock {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        state_dir: Option<std::ffi::OsString>,
+        deterministic: Option<std::ffi::OsString>,
+    }
+
+    impl EnvLock {
+        fn hold() -> Self {
+            let locked = Self {
+                _guard: crate::store::test_env_lock(),
+                state_dir: std::env::var_os("BAAZ_STATE_DIR"),
+                deterministic: std::env::var_os("BAAZ_DETERMINISTIC"),
+            };
+            std::env::remove_var("BAAZ_DETERMINISTIC");
+            locked
+        }
+
+        fn point_state_at(&self, name: &str) -> std::path::PathBuf {
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("baaz-keymap-state-{name}-{pid}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("keymap test state dir");
+            std::env::set_var("BAAZ_STATE_DIR", &dir);
+            dir
+        }
+    }
+
+    impl Drop for EnvLock {
+        fn drop(&mut self) {
+            match &self.state_dir {
+                Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+                None => std::env::remove_var("BAAZ_STATE_DIR"),
+            }
+            match &self.deterministic {
+                Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+                None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+            }
+        }
+    }
+
+    /// The reachability test: a binding written in `keymap.json` must be
+    /// installed by the real [`crate::app::bind_keys`], after the default,
+    /// so it wins the tie. Reverting `bind_keys` to `build_bindings()`
+    /// leaves only `cmd-n` and fails this.
+    #[gpui::test]
+    fn user_binding_overrides_the_default_through_bind_keys(cx: &mut TestAppContext) {
+        let _env = EnvLock::hold();
+        let dir = _env.point_state_at("override");
+        std::fs::write(
+            dir.join("keymap.json"),
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-t": "NewSession" } }]"#,
+        )
+        .expect("keymap test file");
+        cx.update(crate::app::bind_keys);
+        let installed = cx.update(|cx| {
+            let map = cx.key_bindings();
+            let borrowed = map.borrow();
+            rows_for(borrowed.bindings(), "NewSession")
+        });
+        assert_eq!(
+            installed,
+            vec![
+                ("cmd-n".to_string(), Some("AuiRoot".to_string())),
+                ("cmd-t".to_string(), Some("AuiRoot".to_string())),
+            ],
+            "the user binding installs after the default, so it wins the tie"
+        );
+    }
+
+    /// `null` unbinds: the loader appends a `NoAction` binding that loads
+    /// after the default for the same keystroke and context and consumes
+    /// it — the same mechanism the terminal rows use to hand keys to the
+    /// grid. gpui's own `bindings_for_action` then lists no live binding,
+    /// which is what "fires nothing" means here.
+    #[gpui::test]
+    fn null_unbinds_so_the_keystroke_fires_nothing(cx: &mut TestAppContext) {
+        let path = user_file("unbind", r#"[{ "context": "AuiRoot", "bindings": { "cmd-n": null } }]"#);
+        let loaded = super::load_from_path(&path, false);
+        assert!(loaded.warnings.is_empty(), "unbinding warns nothing: {:?}", loaded.warnings);
+        cx.update(|cx| {
+            cx.bind_keys(loaded.bindings);
+        });
+        let (last_action, live) = cx.update(|cx| {
+            let map = cx.key_bindings();
+            let borrowed = map.borrow();
+            let last = borrowed
+                .bindings()
+                .rfind(|binding| key_id(binding) == "cmd-n" && context_text(binding).as_deref() == Some("AuiRoot"))
+                .map(action_name)
+                .unwrap_or("<missing>")
+                .to_string();
+            let live = borrowed.bindings_for_action(&crate::app::NewSession).count();
+            (last, live)
+        });
+        assert_eq!(last_action, "NoAction", "the unbind loads after the default and consumes cmd-n");
+        assert_eq!(live, 0, "gpui lists no live NewSession binding: cmd-n fires nothing");
+    }
+
+    /// An unknown action warns and installs nothing: the default stands
+    /// alone. The assertion is the default, not the warning.
+    #[test]
+    fn unknown_action_warns_and_leaves_the_default_installed() {
+        let path = user_file(
+            "unknown-action",
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-n": "NoSuchAction" } }]"#,
+        );
+        let loaded = super::load_from_path(&path, false);
+        assert!(
+            loaded.warnings.iter().any(|warning| warning.contains("NoSuchAction")),
+            "an unknown action warns, naming it: {:?}",
+            loaded.warnings
+        );
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession"),
+            vec![("cmd-n".to_string(), Some("AuiRoot".to_string()))],
+            "the refused entry installs nothing: the default stands alone"
+        );
+    }
+
+    /// An invalid context warns and the whole block is skipped, so the
+    /// default is all that remains — and the would-be keystroke is bound
+    /// nowhere.
+    #[test]
+    fn invalid_context_warns_and_keeps_the_default() {
+        let path = user_file(
+            "invalid-context",
+            r#"[{ "context": "NoSuchContext", "bindings": { "cmd-t": "NewSession" } }]"#,
+        );
+        let loaded = super::load_from_path(&path, false);
+        assert!(
+            loaded.warnings.iter().any(|warning| warning.contains("NoSuchContext")),
+            "an invalid context warns, naming it: {:?}",
+            loaded.warnings
+        );
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession"),
+            vec![("cmd-n".to_string(), Some("AuiRoot".to_string()))],
+            "the skipped block installs nothing: the default stands alone"
+        );
+        assert!(
+            binding_rows(&loaded.bindings).iter().all(|(_, key, _)| key != "cmd-t"),
+            "the would-be keystroke is bound nowhere"
+        );
+    }
+
+    /// A duplicate `(keystroke, context)` in the user file warns and the
+    /// first entry wins: exactly one `cmd-t` survives, for the first action.
+    #[test]
+    fn duplicate_keystroke_context_warns_and_keeps_the_first() {
+        let path = user_file(
+            "duplicate",
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-t": "NewSession" } },
+                { "context": "AuiRoot", "bindings": { "cmd-t": "OpenModelMenu" } }]"#,
+        );
+        let loaded = super::load_from_path(&path, false);
+        assert!(
+            loaded.warnings.iter().any(|warning| warning.contains("twice")),
+            "a duplicate warns: {:?}",
+            loaded.warnings
+        );
+        let rows = binding_rows(&loaded.bindings);
+        let cmd_t: Vec<_> = rows
+            .iter()
+            .filter(|(_, key, context)| key == "cmd-t" && context.as_deref() == Some("AuiRoot"))
+            .collect();
+        assert_eq!(cmd_t.len(), 1, "exactly one cmd-t survives: {cmd_t:?}");
+        assert_eq!(cmd_t[0].0, "NewSession", "the first entry wins");
+    }
+
+    /// The guarantee the reserved list exists for: a hand-written
+    /// `keymap.json` that steals ⌘Q is refused at load — not only in a
+    /// Settings UI that does not exist yet — and ⌘Q still quits. Deleting
+    /// the reserved check from the load path appends the user binding after
+    /// the default and fails this.
+    #[test]
+    fn reserved_cmd_q_is_refused_at_load_and_still_quits() {
+        let path = user_file(
+            "reserved",
+            r#"[{ "context": "AuiRoot", "bindings": { "Cmd-Q": "NewSession" } }]"#,
+        );
+        let loaded = super::load_from_path(&path, false);
+        assert!(
+            loaded.warnings.iter().any(|warning| warning.contains("reserved")),
+            "refusing ⌘Q warns: {:?}",
+            loaded.warnings
+        );
+        let rows = binding_rows(&loaded.bindings);
+        let cmd_q: Vec<_> = rows
+            .iter()
+            .filter(|(_, key, context)| key == "cmd-q" && context.as_deref() == Some("AuiRoot"))
+            .collect();
+        assert_eq!(cmd_q.len(), 1, "the refused entry installs nothing beside the default: {cmd_q:?}");
+        assert_eq!(cmd_q[0].0, "QuitApp", "⌘Q still quits");
+        assert!(
+            rows.iter().all(|(action, key, _)| action != "NewSession" || key != "cmd-q"),
+            "no user binding steals ⌘Q: {rows:?}"
+        );
+    }
+
+    /// Under `BAAZ_DETERMINISTIC=1` a present `keymap.json` changes nothing:
+    /// the load is exactly the defaults, with nothing to warn about.
+    #[test]
+    fn deterministic_mode_ignores_a_present_keymap() {
+        let _env = EnvLock::hold();
+        let dir = _env.point_state_at("deterministic");
+        std::fs::write(
+            dir.join("keymap.json"),
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-t": "NewSession" } }]"#,
+        )
+        .expect("keymap test file");
+        std::env::set_var("BAAZ_DETERMINISTIC", "1");
+        let loaded = super::load();
+        let defaults = vec![("cmd-n".to_string(), Some("AuiRoot".to_string()))];
+        assert!(loaded.warnings.is_empty(), "ignored, so nothing to warn about: {:?}", loaded.warnings);
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession"),
+            defaults,
+            "the present file changes nothing"
+        );
+        let direct = super::load_from_path(&dir.join("keymap.json"), true);
+        assert_eq!(
+            rows_for(direct.bindings.iter(), "NewSession"),
+            defaults,
+            "the explicit flag ignores the file too"
+        );
+    }
+
+    /// A truncated file boots with exactly the defaults and warns once for
+    /// the whole file — per the store's best-effort-read rule, never an
+    /// error the person has to see.
+    #[test]
+    fn malformed_file_boots_with_defaults_and_warns_once() {
+        let path = user_file("malformed", "{ truncated");
+        let loaded = super::load_from_path(&path, false);
+        assert_eq!(loaded.warnings.len(), 1, "one warning for the whole file: {:?}", loaded.warnings);
+        assert_eq!(
+            binding_rows(&loaded.bindings),
+            binding_rows(&super::build_bindings()),
+            "a malformed file is exactly the defaults"
+        );
+    }
+
+    /// The write path round-trips through the file the loader reads: set a
+    /// rebind, see it load after the default; clear it, see the default
+    /// stand alone; unbind it, see `null` consume the keystroke; clear
+    /// again, see the default back. Reserved keystrokes refuse on the way
+    /// in, so the UI and a hand-edited file cannot disagree.
+    #[test]
+    fn set_clear_and_unbind_round_trip_through_the_file() {
+        let _env = EnvLock::hold();
+        let dir = _env.point_state_at("round-trip");
+        let path = dir.join("keymap.json");
+        let defaults = vec![("cmd-n".to_string(), Some("AuiRoot".to_string()))];
+
+        super::set_binding("NewSession", "cmd-t", Some("AuiRoot")).expect("set a binding");
+        let file = std::fs::read_to_string(&path).expect("the write lands in the file");
+        assert!(file.contains("cmd-t") && file.contains("NewSession"), "the file holds the rebind: {file}");
+        let loaded = super::load_from_path(&path, false);
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession").last(),
+            Some(&("cmd-t".to_string(), Some("AuiRoot".to_string()))),
+            "the rebind loads after the default, so it wins"
+        );
+
+        super::clear_binding("NewSession", Some("AuiRoot")).expect("clear restores the default");
+        let loaded = super::load_from_path(&path, false);
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession"),
+            defaults,
+            "clearing restores the default"
+        );
+
+        super::unbind_binding("NewSession", Some("AuiRoot")).expect("unbind writes null");
+        let loaded = super::load_from_path(&path, false);
+        let last = binding_rows(&loaded.bindings)
+            .into_iter()
+            .rfind(|(_, key, context)| key == "cmd-n" && context == &Some("AuiRoot".to_string()))
+            .map(|(action, _, _)| action);
+        assert_eq!(last.as_deref(), Some("NoAction"), "unbinding writes null at the default keystroke");
+
+        super::clear_binding("NewSession", Some("AuiRoot")).expect("clear removes the null");
+        let loaded = super::load_from_path(&path, false);
+        assert_eq!(
+            rows_for(loaded.bindings.iter(), "NewSession"),
+            defaults,
+            "clearing the null brings the default back"
+        );
+
+        assert!(
+            matches!(
+                super::set_binding("NewSession", "cmd-q", Some("AuiRoot")),
+                Err(super::KeymapError::Reserved { .. })
+            ),
+            "⌘Q refuses through the write path too"
+        );
+        assert!(
+            matches!(
+                super::unbind_binding("QuitApp", Some("AuiRoot")),
+                Err(super::KeymapError::Reserved { .. })
+            ),
+            "⌘Q stays bound"
+        );
+    }
+
+    /// Every write leaves a complete file and no temporary beside it: the
+    /// seed block survives the write intact, and the directory holds only
+    /// `keymap.json`. Crash-atomicity itself is [`crate::store::write_atomic`]'s
+    /// contract — write beside, then rename — covered by its own test; this
+    /// pins that the keymap's writers go through it.
+    #[test]
+    fn a_write_leaves_a_complete_file_and_no_temporary() {
+        let _env = EnvLock::hold();
+        let dir = _env.point_state_at("atomic");
+        std::fs::write(
+            dir.join("keymap.json"),
+            r#"[{ "context": null, "bindings": { "cmd-o": "OpenSettings" } }]"#,
+        )
+        .expect("seed file");
+        super::set_binding("NewSession", "cmd-t", Some("AuiRoot")).expect("a second write");
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .expect("state dir")
+            .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["keymap.json".to_string()], "no temporary beside the file: {entries:?}");
+        let text = std::fs::read_to_string(dir.join("keymap.json")).expect("the file");
+        let blocks: Vec<serde_json::Value> = serde_json::from_str(&text).expect("complete JSON, never half a write");
+        assert_eq!(blocks.len(), 2, "the seed block and the write are both there: {text}");
+        assert!(text.contains("cmd-o") && text.contains("cmd-t"), "both bindings survive: {text}");
     }
 }
