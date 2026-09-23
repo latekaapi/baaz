@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use aui_protocol::{
     ActivityState, ApprovalBadges, ApprovalChoice, ApprovalScope, ApprovalStage, ApprovalState,
-    Answer, Block, Delta, MarkerKind, PermissionMode, Provider, QuestionOption, QuestionPreview,
-    ResolvedBy, SearchHit, Session, ThinkingState, ToolBody, ToolCall, ToolKind, ToolStatus,
-    TodoItem, TodoState, Turn, TurnMeta,
+    Answer, Block, Delta, DiffStat, MarkerKind, PermissionMode, Provider, QuestionOption,
+    QuestionPreview, ResolvedBy, SearchHit, Session, ThinkingState, ToolBody, ToolCall, ToolKind,
+    ToolStatus, TodoItem, TodoState, Turn, TurnMeta,
 };
 use muse_client::schema::{self as msp, ApprovalMode};
 use muse_client::MuseEvent;
@@ -151,6 +151,18 @@ struct TurnUsage {
     prompt: u64,
     output: u64,
     reasoning: u64,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    cached_tokens: u64,
+}
+
+/// Merge one observed `Option` counter into its accumulator: absent in every
+/// event for a turn stays `None` ("the provider never told us"), present in
+/// any event becomes `Some` of the sum of the events that carried it.
+fn merge_optional_counter(into: &mut Option<u64>, observed: Option<u64>) {
+    if let Some(value) = observed {
+        *into = Some(into.unwrap_or(0) + value);
+    }
 }
 
 /// Folds a Muse session's view events into the transcript model the library
@@ -648,6 +660,16 @@ impl Folded {
             .and_then(|u| u.get("reasoningTokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        merge_optional_counter(
+            &mut entry.cache_read_tokens,
+            usage.and_then(|u| u.get("cacheReadTokens")).and_then(Value::as_u64),
+        );
+        merge_optional_counter(
+            &mut entry.cache_write_tokens,
+            usage.and_then(|u| u.get("cacheWriteTokens")).and_then(Value::as_u64),
+        );
+        entry.cached_tokens +=
+            usage.and_then(|u| u.get("cachedTokens")).and_then(Value::as_u64).unwrap_or(0);
         if let Some(model_id) = params.get("modelId").and_then(Value::as_str) {
             if self.session.model.is_empty() {
                 self.session.model = model_id.to_owned();
@@ -777,6 +799,9 @@ impl Folded {
             tokens_in: usage.prompt,
             tokens_out: usage.output,
             reasoning_tokens: usage.reasoning,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            cached_tokens: usage.cached_tokens,
             // Every live catalog row reported `cost: null`, so cost stays
             // client-side view math and is 0.0 until a catalog supplies one.
             cost_usd: 0.0,
@@ -1209,7 +1234,11 @@ impl Folded {
                     let state = group_state(&calls);
                     self.update_block(slot, Block::ToolGroup { calls, summary, state })
                 } else {
-                    calls.remove(index);
+                    // The card leaving the group is a fresh slot, so
+                    // `update_block`'s retain never sees it: carry the chip
+                    // the group member drew when the revision omits it.
+                    let removed = calls.remove(index);
+                    let block = with_diff_stat(block, removed.diff_stat);
                     let mut deltas = Vec::new();
                     if calls.len() == 1 {
                         let lone = calls.pop().expect("one call left");
@@ -1399,7 +1428,11 @@ impl Folded {
                 let (kind, verb, target) = tool_shape(&tool, item.args.as_deref());
                 let (verb, target, status, body) =
                     tool_presentation(&kind, verb, target, item, terminal);
-                Block::ToolCall { id: item.item_id.clone(), kind, verb, target, status, duration_ms: item.duration_ms, body }
+                // The header chip comes from the summary already on the wire,
+                // beside `patchRef`. Never a body fetch: `fold.rs` never draws
+                // a body the wire did not send.
+                let diff_stat = diff_stat_for(item);
+                Block::ToolCall { id: item.item_id.clone(), kind, verb, target, status, duration_ms: item.duration_ms, body, diff_stat }
             }
             msp::ItemKind::UserShell => Block::ToolCall {
                 id: item.item_id.clone(),
@@ -1413,6 +1446,8 @@ impl Folded {
                     exit_code: item.exit_code,
                     live: !terminal,
                 },
+                // No patch summary rides a shell item: nothing to chip.
+                diff_stat: None,
             },
             msp::ItemKind::Subagent => Block::ToolCall {
                 id: item.item_id.clone(),
@@ -1426,6 +1461,8 @@ impl Folded {
                 status: tool_status(&item.status),
                 duration_ms: item.duration_ms,
                 body: ToolBody::SubAgent { turns: Vec::new() },
+                // No patch summary rides a subagent item: nothing to chip.
+                diff_stat: None,
             },
             msp::ItemKind::Compaction => Block::Marker {
                 kind: MarkerKind::ContextCompacted,
@@ -1846,11 +1883,15 @@ impl Folded {
 
     fn update_block(&mut self, slot: Slot, block: Block) -> Vec<Delta> {
         let Some(turn) = self.turn_of(slot) else { return Vec::new() };
-        let delta = Delta::BlockUpdated {
-            turn_id: turn.id().to_owned(),
-            block_index: slot.block,
-            block,
+        let turn_id = turn.id().to_owned();
+        // A revision that omits the patch summary carries no news, not a
+        // zero: the chip an earlier revision drew stays until a revision
+        // that carries a summary replaces it.
+        let block = match turn.blocks().get(slot.block) {
+            Some(current) => retain_diff_stat(block, current),
+            None => block,
         };
+        let delta = Delta::BlockUpdated { turn_id, block_index: slot.block, block };
         if self.session.apply(delta.clone()) {
             vec![delta]
         } else {
@@ -2065,6 +2106,79 @@ fn todo_state(status: &msp::TodoStatus) -> TodoState {
         msp::TodoStatus::Completed => TodoState::Done,
         // A cancelled todo has no mark of its own; it reads as finished.
         _ => TodoState::Done,
+    }
+}
+
+/// The header chip for an edit-family `toolCall`: the line counts the server
+/// already sent beside `patchRef`, mapped verbatim. `None` — no summary on
+/// the wire — draws no chip, never a zeroed one.
+fn diff_stat_for(item: &msp::Item) -> Option<DiffStat> {
+    item.patch_summary.as_ref().map(|summary| DiffStat {
+        added: summary.added,
+        removed: summary.removed,
+        files: summary.files,
+    })
+}
+
+/// Fill an incoming `None` chip on a lone card from a known one. Used where
+/// the card is pushed to a fresh slot rather than updated in place, so
+/// [`retain_diff_stat`] never sees it.
+fn with_diff_stat(block: Block, kept: Option<DiffStat>) -> Block {
+    match (block, kept) {
+        (
+            Block::ToolCall { id, kind, verb, target, status, duration_ms, body, diff_stat: None },
+            Some(kept),
+        ) => Block::ToolCall {
+            id,
+            kind,
+            verb,
+            target,
+            status,
+            duration_ms,
+            body,
+            diff_stat: Some(kept),
+        },
+        (block, _) => block,
+    }
+}
+
+/// Keep a drawn diff chip across a revision that omits the patch summary.
+///
+/// The summary may arrive on a later revision than the item's first sighting
+/// (`item/completed` after a summary-less `item/started`), and a later
+/// revision may omit it again. Absence on an update is "no news", not "now
+/// zero": an incoming `None` keeps the current card's chip, while a revision
+/// that carries a summary always replaces. Only same-id cards merge, so a
+/// chip never wanders onto another call's card.
+fn retain_diff_stat(block: Block, current: &Block) -> Block {
+    match (block, current) {
+        (
+            Block::ToolCall { id, kind, verb, target, status, duration_ms, body, diff_stat: None },
+            Block::ToolCall { id: current_id, diff_stat: Some(kept), .. },
+        ) if id == *current_id => Block::ToolCall {
+            id,
+            kind,
+            verb,
+            target,
+            status,
+            duration_ms,
+            body,
+            diff_stat: Some(*kept),
+        },
+        (Block::ToolGroup { calls, summary, state }, Block::ToolGroup { calls: current_calls, .. }) => {
+            let calls = calls
+                .into_iter()
+                .map(|mut call| {
+                    if call.diff_stat.is_none() {
+                        call.diff_stat =
+                            current_calls.iter().find(|member| member.id == call.id).and_then(|member| member.diff_stat);
+                    }
+                    call
+                })
+                .collect();
+            Block::ToolGroup { calls, summary, state }
+        }
+        (block, _) => block,
     }
 }
 
@@ -2869,5 +2983,249 @@ mod tests {
             turns,
             "and adds no second turn"
         );
+    }
+
+    fn token_usage_event(turn_id: &str, usage: Value) -> MuseEvent {
+        MuseEvent::Notification {
+            method: "session/tokenUsage".to_owned(),
+            params: serde_json::json!({ "turnId": turn_id, "promptTokens": 10, "usage": usage }),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        }
+    }
+
+    fn open_assistant_turn(fold: &mut MuseFold, item_id: &str, turn_id: &str) {
+        fold.apply(MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: serde_json::json!({
+                "item": {
+                    "itemId": item_id,
+                    "turnId": turn_id,
+                    "kind": "agentMessage",
+                    "status": "completed",
+                    "revision": 1,
+                    "text": "working",
+                }
+            }),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+    }
+
+    fn finish_turn(fold: &mut MuseFold, turn_id: &str) {
+        fold.apply(MuseEvent::Notification {
+            method: "turn/completed".to_owned(),
+            params: serde_json::json!({ "turnId": turn_id, "terminal": "completed", "durationMs": 5 }),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+    }
+
+    fn finished_meta(fold: &MuseFold, turn_id: &str) -> TurnMeta {
+        let session = &fold.sessions["s"].session;
+        let turn = session.turns.iter().find(|turn| turn.id() == turn_id).expect("assistant turn");
+        match turn {
+            Turn::Assistant { meta, .. } => meta.clone(),
+            Turn::User { .. } => panic!("expected an assistant turn"),
+        }
+    }
+
+    #[test]
+    fn cache_counters_fill_from_an_event_carrying_them() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        open_assistant_turn(&mut fold, "m-1", "t-1");
+        fold.apply(token_usage_event(
+            "t-1",
+            serde_json::json!({
+                "outputTokens": 7,
+                "reasoningTokens": 3,
+                "cacheReadTokens": 11,
+                "cacheWriteTokens": 13,
+                "cachedTokens": 17,
+            }),
+        ));
+        finish_turn(&mut fold, "t-1");
+        let meta = finished_meta(&fold, "t-1");
+        assert_eq!(meta.cache_read_tokens, Some(11));
+        assert_eq!(meta.cache_write_tokens, Some(13));
+        assert_eq!(meta.cached_tokens, 17);
+    }
+
+    #[test]
+    fn missing_cache_keys_stay_unknown_not_zero() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        open_assistant_turn(&mut fold, "m-1", "t-1");
+        fold.apply(token_usage_event("t-1", serde_json::json!({ "outputTokens": 7 })));
+        finish_turn(&mut fold, "t-1");
+        let meta = finished_meta(&fold, "t-1");
+        assert_eq!(meta.cache_read_tokens, None, "unknown is not zero");
+        assert_eq!(meta.cache_write_tokens, None, "unknown is not zero");
+        assert_ne!(meta.cache_read_tokens, Some(0));
+        assert_ne!(meta.cache_write_tokens, Some(0));
+        assert_eq!(meta.cached_tokens, 0);
+    }
+
+    #[test]
+    fn absent_then_present_merges_to_some() {
+        // The easy mistake is overwriting: the second event's `Some(5)`
+        // must survive the first event's absence, not be cleared by it —
+        // and absence first must not pin the accumulator to `None`.
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        open_assistant_turn(&mut fold, "m-1", "t-1");
+        fold.apply(token_usage_event("t-1", serde_json::json!({ "outputTokens": 1 })));
+        fold.apply(token_usage_event(
+            "t-1",
+            serde_json::json!({ "outputTokens": 2, "cacheReadTokens": 5 }),
+        ));
+        finish_turn(&mut fold, "t-1");
+        let meta = finished_meta(&fold, "t-1");
+        assert_eq!(meta.cache_read_tokens, Some(5));
+        assert_eq!(meta.cache_write_tokens, None, "never carried, still unknown");
+    }
+
+    #[test]
+    fn present_cache_values_sum_across_events() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        open_assistant_turn(&mut fold, "m-1", "t-1");
+        fold.apply(token_usage_event(
+            "t-1",
+            serde_json::json!({
+                "outputTokens": 1,
+                "cacheReadTokens": 4,
+                "cacheWriteTokens": 1,
+                "cachedTokens": 10,
+            }),
+        ));
+        fold.apply(token_usage_event(
+            "t-1",
+            serde_json::json!({
+                "outputTokens": 2,
+                "cacheReadTokens": 6,
+                "cacheWriteTokens": 2,
+                "cachedTokens": 20,
+            }),
+        ));
+        finish_turn(&mut fold, "t-1");
+        let meta = finished_meta(&fold, "t-1");
+        assert_eq!(meta.cache_read_tokens, Some(10));
+        assert_eq!(meta.cache_write_tokens, Some(3));
+        assert_eq!(meta.cached_tokens, 30);
+    }
+
+    fn tool_call_item(item_id: &str, revision: u32, status: &str, summary: Option<Value>) -> Value {
+        let mut item = serde_json::json!({
+            "itemId": item_id,
+            "turnId": "t-1",
+            "kind": "toolCall",
+            "status": status,
+            "revision": revision,
+            "tool": "edit",
+        });
+        if let Some(summary) = summary {
+            item["patchSummary"] = summary;
+        }
+        serde_json::json!({ "item": item })
+    }
+
+    fn apply_item(fold: &mut MuseFold, method: &str, params: Value) {
+        fold.apply(MuseEvent::Notification {
+            method: method.to_owned(),
+            params,
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+    }
+
+    fn tool_call_block(fold: &MuseFold, item_id: &str) -> Block {
+        let session = &fold.sessions["s"].session;
+        session
+            .turns
+            .iter()
+            .flat_map(|turn| turn.blocks())
+            .find(|block| matches!(block, Block::ToolCall { id, .. } if id == item_id))
+            .cloned()
+            .expect("tool card")
+    }
+
+    #[test]
+    fn a_patch_summary_maps_to_diff_stat() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        apply_item(
+            &mut fold,
+            "item/completed",
+            tool_call_item(
+                "i-edit-1",
+                1,
+                "completed",
+                Some(serde_json::json!({ "added": 10, "files": 2, "removed": 3 })),
+            ),
+        );
+        match tool_call_block(&fold, "i-edit-1") {
+            Block::ToolCall { diff_stat, .. } => assert_eq!(
+                diff_stat,
+                Some(DiffStat { added: 10, removed: 3, files: 2 }),
+                "wire counts map verbatim"
+            ),
+            block => panic!("expected a tool card, drew {block:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_patch_summary_draws_no_chip() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        apply_item(&mut fold, "item/completed", tool_call_item("i-edit-1", 1, "completed", None));
+        match tool_call_block(&fold, "i-edit-1") {
+            Block::ToolCall { diff_stat, .. } => {
+                assert_eq!(diff_stat, None, "no summary on the wire draws no chip");
+            }
+            block => panic!("expected a tool card, drew {block:?}"),
+        }
+    }
+
+    #[test]
+    fn a_summary_arriving_late_lands_and_sticks() {
+        // The summary may first appear on `item/completed` after a
+        // summary-less `item/started`, and a later revision that omits it is
+        // "no news", not "now zero" — the chip must land, then stay.
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        apply_item(&mut fold, "item/started", tool_call_item("i-edit-1", 1, "inProgress", None));
+        match tool_call_block(&fold, "i-edit-1") {
+            Block::ToolCall { diff_stat, .. } => assert_eq!(diff_stat, None),
+            block => panic!("expected a tool card, drew {block:?}"),
+        }
+        apply_item(
+            &mut fold,
+            "item/completed",
+            tool_call_item(
+                "i-edit-1",
+                2,
+                "completed",
+                Some(serde_json::json!({ "added": 4, "files": 1, "removed": 2 })),
+            ),
+        );
+        match tool_call_block(&fold, "i-edit-1") {
+            Block::ToolCall { diff_stat, .. } => assert_eq!(
+                diff_stat,
+                Some(DiffStat { added: 4, removed: 2, files: 1 }),
+                "the late summary lands"
+            ),
+            block => panic!("expected a tool card, drew {block:?}"),
+        }
+        apply_item(&mut fold, "item/updated", tool_call_item("i-edit-1", 3, "completed", None));
+        match tool_call_block(&fold, "i-edit-1") {
+            Block::ToolCall { diff_stat, .. } => assert_eq!(
+                diff_stat,
+                Some(DiffStat { added: 4, removed: 2, files: 1 }),
+                "absence on an update is no news, not now zero"
+            ),
+            block => panic!("expected a tool card, drew {block:?}"),
+        }
     }
 }

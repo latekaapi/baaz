@@ -1,0 +1,19 @@
+# synthetic-diffstat.jsonl — HAND-WRITTEN, not a wire capture.
+#
+# An edit-family `toolCall` whose `patchSummary` arrives beside `patchRef` on
+# `item/completed` (absent on `item/started`): replaying this renders the
+# header chip from the summary already on the wire, with no `item/readOutput`
+# round trip. The turn terminates, so a `--bench` run over it ends.
+# Paths and ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing
+# here names a real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire, and
+# it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-diffstat", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-diffstat/session.jsonl", "activeTurnId": null}}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:2", "sessionId": "synthetic-diffstat", "turnId": "t-syn-1"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:3", "sessionId": "synthetic-diffstat", "item": {"itemId": "i-syn-user-1", "kind": "userMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Rename the helper and update its callers."}}}
+<-- {"jsonrpc": "2.0", "method": "item/started", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-diffstat", "item": {"itemId": "i-syn-edit-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 1, "status": "inProgress", "tool": "edit", "callId": "call_i-syn-edit-1", "args": "{\"path\": \"/tmp/synthetic/notes.txt\"}"}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-diffstat", "item": {"itemId": "i-syn-edit-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "edit", "callId": "call_i-syn-edit-1", "args": "{\"path\": \"/tmp/synthetic/notes.txt\"}", "patchRef": {"availability": "available", "byteLen": 12, "id": "p1", "kind": "tool_patch", "mediaType": "application/json", "uri": "msp:p1"}, "patchSummary": {"added": 10, "files": 2, "removed": 3}, "durationMs": 90}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-diffstat", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Renamed across two files."}}}
+<-- {"jsonrpc": "2.0", "method": "session/tokenUsage", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-diffstat", "turnId": "t-syn-1", "modelId": "muse-spark-test", "usage": {"inputTokens": 1200, "outputTokens": 115, "cachedTokens": 40, "cacheWriteTokens": 8, "cacheReadTokens": 32, "reasoningTokens": 12}, "promptTokens": 1200}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:8", "sessionId": "synthetic-diffstat", "turnId": "t-syn-1", "terminal": "completed", "durationMs": 2100}}
