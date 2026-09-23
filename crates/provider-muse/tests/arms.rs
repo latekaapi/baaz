@@ -58,6 +58,32 @@ struct Record {
     params: Value,
 }
 
+/// Block until the puppet has recorded `connect`'s whole handshake — the
+/// `initialize` request plus its trailing `initialized` notification — and
+/// return the record count.
+///
+/// Without this, the baseline below races the handshake's tail:
+/// `MuseClient::initialize` only queues the `initialized` notification to
+/// its writer thread, so the puppet can record it after `connect` has
+/// already returned, and the late arrival is then misattributed to the
+/// first command (`open-session` sees 3 records vs `seen + 1`). Stdin
+/// order means everything `connect` sent is recorded once `initialized`
+/// is, so waiting for that one line settles the whole baseline.
+fn wait_for_handshake_records(path: &PathBuf) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let all = read_records(path);
+        if all.iter().any(|record| record.method == "initialized") {
+            return all.len();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connect's `initialized` notification never reached the puppet"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn read_records(path: &PathBuf) -> Vec<Record> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     text.lines()
@@ -143,8 +169,11 @@ fn every_command_arm_sends_its_method_params_and_ack() {
     let handshake = adapter.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
     assert_eq!(handshake.agent_name, "fake-muse");
 
-    // Whatever `connect` itself said on the wire is not under test.
-    let mut seen = read_records(&records).len();
+    // Whatever `connect` itself said on the wire is not under test — once
+    // all of it has arrived (see `wait_for_handshake_records`: the
+    // `initialized` tail is fire-and-forget and must be awaited here, not
+    // charged to the first command).
+    let mut seen = wait_for_handshake_records(&records);
 
     // The stage token only exists once `list-pending` has run; the table
     // order below guarantees that row comes before `decide-approval`.
