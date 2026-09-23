@@ -1,4 +1,4 @@
-//! Usage history: one row per finished turn, keyed on the view cursor (Task C3).
+//! Usage history: one row per finished turn, keyed on the turn (Task D1).
 //!
 //! Baaz records no transcript of its own — Muse stays the system of record —
 //! but beside it Baaz keeps a ledger in its own `baaz.db` under the support
@@ -9,12 +9,19 @@
 //!
 //! One row per finished turn:
 //!
-//! * The key is `(session_id, view_cursor)`, the cursor of the turn's
-//!   terminal event. The cursor is opaque and strictly monotonic and a
-//!   `view/page` is contiguous, so replaying the same events twice is a
-//!   no-op: every insert is `ON CONFLICT DO NOTHING`. That is what makes the
-//!   live write and the backfill safe to overlap — a session recorded live
-//!   and then paged in again gains nothing twice.
+//! * The key is `(session_id, turn_id)`. An earlier schema keyed on
+//!   `(session_id, view_cursor)` — the cursor of the turn's terminal event.
+//!   That was wrong: the live path stamps a whole batch of finished turns
+//!   with one cursor while the backfill path stamps each turn with its own
+//!   event's cursor, so one turn recorded through both paths landed twice
+//!   under two cursors (seen in a real database: 16 rows, 16 cursors,
+//!   15 turns). Keying on the turn makes the two paths agree regardless of
+//!   which cursor each chose: replaying the same turn twice is a no-op,
+//!   because every insert is `ON CONFLICT DO NOTHING`. That is what makes
+//!   the live write and the backfill safe to overlap — a session recorded
+//!   live and then paged in again gains nothing twice.
+//! * `view_cursor` is still stored on every row — it says where the turn sat
+//!   in the view — but it is an ordinary data column now, not the key.
 //! * `cache_read_tokens` / `cache_write_tokens` are `NULL` when the provider
 //!   never said — not zero. `None` in [`aui_protocol::TurnMeta`] stays `NULL`
 //!   in the row; a later sum may `COALESCE` them, but the write must not.
@@ -38,11 +45,16 @@ pub fn db_path() -> PathBuf {
     crate::store::support_dir().join("baaz.db")
 }
 
-/// The ledger schema version, stamped in `meta`. This is the first schema,
-/// so there is no migration: a database stamped with anything else is left
-/// alone and every write is skipped (with a log line) until a build that
-/// knows that version arrives.
-const SCHEMA_VERSION: u32 = 1;
+/// The ledger schema version, stamped in `meta`.
+///
+/// Version 1 keyed `usage_turns` on `(session_id, view_cursor)`; version 2
+/// re-keys it on `(session_id, turn_id)` (Task D1). A version-1 database is
+/// migrated in place (see [`migrate_v1_to_v2`]): no history is dropped —
+/// rows already there are carried over, except that a turn stored twice
+/// under two cursors collapses to one row (the smallest cursor wins). A
+/// database stamped with anything else is left alone and every write is
+/// skipped (with a log line) until a build that knows that version arrives.
+const SCHEMA_VERSION: u32 = 2;
 
 /// How long a write waits for another process to let go of the database
 /// before giving up and carrying on without the row.
@@ -53,9 +65,11 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct UsageRow {
     /// The Muse session the turn ran in.
     pub session_id: String,
-    /// The cursor of the turn's terminal event — half of the primary key.
+    /// Where the turn sat in the view — an ordinary data column, not the
+    /// key. The live path and the backfill path legitimately disagree about
+    /// this for one turn, which is why it must not key the row.
     pub view_cursor: String,
-    /// The turn that finished.
+    /// The turn that finished — half of the primary key.
     pub turn_id: String,
     /// When Baaz recorded the row, as Unix milliseconds.
     pub finished_at_ms: i64,
@@ -80,11 +94,14 @@ pub struct UsageRow {
 }
 
 /// Build the row a finished turn writes: the fold's final [`TurnMeta`] for
-/// `turn_id`, keyed on the terminal event's `view_cursor`.
+/// `turn_id`, carrying the `view_cursor` the writing path saw.
 ///
 /// The `Option` cache counters pass through untouched — `None` stays `NULL`,
 /// never zero — and the token counts are stored as-is: the cache counters
 /// are not summable into `tokens_in` under every provider's convention.
+/// The cursor is data, not identity: the row is keyed on
+/// `(session_id, turn_id)`, so the same turn built with two different
+/// cursors still writes one row.
 pub fn row_from_finished(
     session_id: &str,
     view_cursor: &str,
@@ -153,70 +170,101 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    if stored != SCHEMA_VERSION {
-        if stored != 0 {
-            // A schema this build has never seen: leave the file alone and
-            // let the caller treat usage history as unavailable, exactly as
-            // `index.rs` treats a foreign session index.
-            crate::baaz_log!(
-                "usage database schema version {stored} is newer than this build ({SCHEMA_VERSION}); usage history is paused"
-            );
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "unsupported baaz.db schema version {stored}"
-            )));
-        }
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_turns(
-                session_id TEXT NOT NULL,
-                view_cursor TEXT NOT NULL,
-                turn_id TEXT NOT NULL,
-                finished_at_ms INTEGER NOT NULL,
-                model TEXT NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                tokens_in INTEGER NOT NULL,
-                tokens_out INTEGER NOT NULL,
-                reasoning_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER,
-                cache_write_tokens INTEGER,
-                cached_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                PRIMARY KEY (session_id, view_cursor)
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS usage_turns_finished_at ON usage_turns(finished_at_ms);",
-        )?;
+    if stored == 0 {
+        connection.execute_batch(LEDGER_DDL_V2)?;
         connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
-    } else {
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_turns(
-                session_id TEXT NOT NULL,
-                view_cursor TEXT NOT NULL,
-                turn_id TEXT NOT NULL,
-                finished_at_ms INTEGER NOT NULL,
-                model TEXT NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                tokens_in INTEGER NOT NULL,
-                tokens_out INTEGER NOT NULL,
-                reasoning_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER,
-                cache_write_tokens INTEGER,
-                cached_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                PRIMARY KEY (session_id, view_cursor)
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS usage_turns_finished_at ON usage_turns(finished_at_ms);",
+    } else if stored == 1 {
+        migrate_v1_to_v2(&connection)?;
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
         )?;
+    } else if stored == SCHEMA_VERSION {
+        connection.execute_batch(LEDGER_DDL_V2)?;
+    } else {
+        // A schema this build has never seen: leave the file alone and
+        // let the caller treat usage history as unavailable, exactly as
+        // `index.rs` treats a foreign session index.
+        crate::baaz_log!(
+            "usage database schema version {stored} is newer than this build ({SCHEMA_VERSION}); usage history is paused"
+        );
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "unsupported baaz.db schema version {stored}"
+        )));
     }
     Ok(connection)
 }
 
+/// The version-2 ledger: one row per `(session_id, turn_id)`, with the view
+/// cursor kept as an ordinary column.
+const LEDGER_DDL_V2: &str = "CREATE TABLE IF NOT EXISTS usage_turns(
+    session_id TEXT NOT NULL,
+    view_cursor TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    finished_at_ms INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    tokens_in INTEGER NOT NULL,
+    tokens_out INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    cached_tokens INTEGER NOT NULL,
+    cost_usd REAL NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+ ) WITHOUT ROWID;
+ CREATE INDEX IF NOT EXISTS usage_turns_finished_at ON usage_turns(finished_at_ms);";
+
+/// Re-key a version-1 ledger from `(session_id, view_cursor)` to
+/// `(session_id, turn_id)`.
+///
+/// Nothing already there is dropped, with one deliberate exception: a turn
+/// the old key stored twice under two cursors cannot survive twice under
+/// the new one, so it collapses to a single row — the copy with the
+/// smallest `view_cursor` wins (`INSERT OR IGNORE` over cursor order keeps
+/// the first). Every other row is carried over byte-identical.
+fn migrate_v1_to_v2(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let old_exists: bool = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'usage_turns'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !old_exists {
+        // Stamped 1 but the table never landed (a crash between the stamp
+        // and the write, or a hand-made file): just build the new schema.
+        connection.execute_batch(LEDGER_DDL_V2)?;
+        return Ok(());
+    }
+    connection.execute_batch("ALTER TABLE usage_turns RENAME TO usage_turns_v1;")?;
+    connection.execute_batch(LEDGER_DDL_V2)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO usage_turns(
+            session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+            tokens_in, tokens_out, reasoning_tokens,
+            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+         ) SELECT
+            session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+            tokens_in, tokens_out, reasoning_tokens,
+            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+         FROM usage_turns_v1 ORDER BY session_id, view_cursor",
+        [],
+    )?;
+    connection.execute_batch("DROP TABLE usage_turns_v1;")?;
+    Ok(())
+}
+
 /// Record one finished turn.
 ///
-/// `INSERT … ON CONFLICT DO NOTHING`: writing the same cursor twice is a
-/// no-op, not an error and not an update — replay the same events twice and
-/// the second write changes nothing. Returns whether the row was new.
+/// `INSERT … ON CONFLICT DO NOTHING`: writing the same turn twice is a
+/// no-op, not an error and not an update — the live path and the backfill
+/// path may each record a turn under a different cursor, and the second
+/// write changes nothing. Returns whether the row was new.
 pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusqlite::Error> {
     let changed = connection.execute(
         "INSERT INTO usage_turns(
@@ -224,7 +272,7 @@ pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusq
             tokens_in, tokens_out, reasoning_tokens,
             cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT(session_id, view_cursor) DO NOTHING",
+         ON CONFLICT(session_id, turn_id) DO NOTHING",
         params![
             row.session_id,
             row.view_cursor,
@@ -244,30 +292,30 @@ pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusq
     Ok(changed == 1)
 }
 
-/// The row for (`session_id`, `view_cursor`), or `None` when it was never
+/// The row for (`session_id`, `turn_id`), or `None` when it was never
 /// recorded.
 ///
 /// Best-effort, like every other read in this app: any failure yields `None`.
 /// This is the query surface the tests (and, later, the usage page) read
-/// through — nothing else needs to ask what a cursor cost yet.
+/// through — nothing else needs to ask what a turn cost yet.
 /// Test-only for now: the brief put a query API out of scope, so the
 /// only reader of the ledger today is this crate's own tests.
 #[cfg(test)]
 pub fn find_turn(
     connection: &Connection,
     session_id: &str,
-    view_cursor: &str,
+    turn_id: &str,
 ) -> Option<UsageRow> {
     let mut statement = connection
         .prepare(
             "SELECT session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
                     tokens_in, tokens_out, reasoning_tokens,
                     cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
-             FROM usage_turns WHERE session_id = ?1 AND view_cursor = ?2",
+             FROM usage_turns WHERE session_id = ?1 AND turn_id = ?2",
         )
         .ok()?;
     statement
-        .query_row(params![session_id, view_cursor], |row| {
+        .query_row(params![session_id, turn_id], |row| {
             Ok(UsageRow {
                 session_id: row.get(0)?,
                 view_cursor: row.get(1)?,
@@ -326,9 +374,10 @@ fn record_at(path: &std::path::Path, rows: &[UsageRow]) {
 /// Record finished turns — the live path and a backfilled page both come
 /// through here, a live turn simply arriving as a one-element slice.
 ///
-/// Fire-and-forget: rows whose cursor is already recorded are no-ops, so
-/// overlapping a live-recorded session is safe and cheap. That idempotence
-/// is what the view cursor as primary key buys.
+/// Fire-and-forget: rows whose turn is already recorded are no-ops, so
+/// overlapping a live-recorded session is safe and cheap — even though the
+/// two paths stamp different cursors on the same turn. That idempotence is
+/// what the turn as primary key buys.
 pub fn record_backfilled(rows: &[UsageRow]) {
     if rows.is_empty() {
         return;
@@ -358,16 +407,16 @@ mod tests {
         }
     }
 
-    fn row(cursor: &str) -> UsageRow {
-        row_from_finished("s-1", cursor, "t-1", 1_700_000_000_000, &meta())
+    fn row(cursor: &str, turn: &str) -> UsageRow {
+        row_from_finished("s-1", cursor, turn, 1_700_000_000_000, &meta())
     }
 
     #[test]
     fn a_finished_turn_writes_one_row_with_every_field() {
         let connection = memory();
-        assert!(record_turn(&connection, &row("v:s:1")).expect("record"));
-        let read = find_turn(&connection, "s-1", "v:s:1").expect("row is there");
-        assert_eq!(read, row("v:s:1"));
+        assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("record"));
+        let read = find_turn(&connection, "s-1", "t-1").expect("row is there");
+        assert_eq!(read, row("v:s:1", "t-1"));
         assert_eq!(read.model, "muse-spark");
         assert_eq!(read.duration_ms, 12_400);
         assert_eq!(read.tokens_in, 100);
@@ -391,51 +440,255 @@ mod tests {
         unknown.cached_tokens = 0;
         let row = row_from_finished("s-1", "v:s:1", "t-1", 1_700_000_000_000, &unknown);
         assert!(record_turn(&connection, &row).expect("record"));
-        let read = find_turn(&connection, "s-1", "v:s:1").expect("row is there");
+        let read = find_turn(&connection, "s-1", "t-1").expect("row is there");
         assert_eq!(read.cache_read_tokens, None);
         assert_eq!(read.cache_write_tokens, None);
         assert_eq!(read.cached_tokens, 0);
     }
 
     #[test]
-    fn writing_the_same_cursor_twice_leaves_the_row_unchanged() {
+    fn writing_the_same_turn_twice_leaves_the_row_unchanged() {
         let connection = memory();
-        assert!(record_turn(&connection, &row("v:s:1")).expect("first record"));
-        // The same cursor re-recorded with different contents: a replay, not
-        // an update. `ON CONFLICT DO UPDATE` would rewrite the row; `DO
-        // NOTHING` must leave it byte-identical.
-        let mut replay = row("v:s:1");
-        replay.turn_id = "t-2".to_owned();
+        assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("first record"));
+        // The same turn re-recorded under a different cursor with different
+        // contents: a replay, not an update. `ON CONFLICT DO UPDATE` would
+        // rewrite the row; `DO NOTHING` must leave it byte-identical.
+        let mut replay = row("v:s:2", "t-1");
         replay.model = "other-model".to_owned();
         replay.tokens_in = 999;
         replay.tokens_out = 999;
         replay.cache_read_tokens = Some(0);
         assert!(!record_turn(&connection, &replay).expect("replay records"));
         assert_eq!(count_for_session(&connection, "s-1"), 1);
-        assert_eq!(find_turn(&connection, "s-1", "v:s:1"), Some(row("v:s:1")));
+        assert_eq!(
+            find_turn(&connection, "s-1", "t-1"),
+            Some(row("v:s:1", "t-1"))
+        );
     }
 
     #[test]
     fn a_backfill_over_an_overlap_adds_only_the_new_rows() {
         let connection = memory();
         // Two turns recorded live as they finished.
-        assert!(record_turn(&connection, &row("v:s:1")).expect("live c1"));
-        assert!(record_turn(&connection, &row("v:s:2")).expect("live c2"));
-        // The page carries the same two cursors (re-recorded with different
+        assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("live t1"));
+        assert!(record_turn(&connection, &row("v:s:2", "t-2")).expect("live t2"));
+        // The page carries the same two turns (re-recorded with different
         // payloads, as a fresh fold of the same events would) plus one new one.
-        let mut again = row("v:s:1");
+        let mut again = row("v:s:1", "t-1");
         again.tokens_out = 5_000;
-        let mut again2 = row("v:s:2");
+        let mut again2 = row("v:s:2", "t-2");
         again2.model = "drifted".to_owned();
         let fresh = row_from_finished("s-1", "v:s:3", "t-3", 1_700_000_001_000, &meta());
         for candidate in [&again, &again2, &fresh] {
             let _ = record_turn(&connection, candidate).expect("backfill records");
         }
         assert_eq!(count_for_session(&connection, "s-1"), 3);
-        // The old rows are unchanged; only the new cursor added a row.
-        assert_eq!(find_turn(&connection, "s-1", "v:s:1"), Some(row("v:s:1")));
-        assert_eq!(find_turn(&connection, "s-1", "v:s:2"), Some(row("v:s:2")));
-        assert_eq!(find_turn(&connection, "s-1", "v:s:3"), Some(fresh));
+        // The old rows are unchanged; only the new turn added a row.
+        assert_eq!(
+            find_turn(&connection, "s-1", "t-1"),
+            Some(row("v:s:1", "t-1"))
+        );
+        assert_eq!(
+            find_turn(&connection, "s-1", "t-2"),
+            Some(row("v:s:2", "t-2"))
+        );
+        assert_eq!(find_turn(&connection, "s-1", "t-3"), Some(fresh));
+    }
+
+    #[test]
+    fn the_same_turn_through_both_paths_writes_one_row() {
+        // The owner's defect, replayed: one `turn_id` recorded through both
+        // write paths, each choosing its cursor the way its call site does.
+        // The live path (`session/events.rs` `record_usage`) takes ONE cursor
+        // for a whole batch of deltas and stamps every finished turn with it;
+        // the backfill path (the `view/page` handler in the same file) walks
+        // events one at a time and uses each event's own cursor. For one turn
+        // those are genuinely different cursors — and still one row.
+        let connection = memory();
+        let live = row_from_finished(
+            "s-7",
+            "v:live:42",
+            "t-9",
+            1_700_000_000_000,
+            &TurnMeta {
+                tokens_in: 22_633,
+                ..meta()
+            },
+        );
+        let backfilled = row_from_finished(
+            "s-7",
+            "v:page:915",
+            "t-9",
+            1_700_000_001_000,
+            &TurnMeta {
+                tokens_in: 22_633,
+                ..meta()
+            },
+        );
+        assert_ne!(
+            live.view_cursor, backfilled.view_cursor,
+            "the two paths must genuinely disagree about the cursor"
+        );
+        assert_eq!(live.turn_id, backfilled.turn_id);
+        assert!(record_turn(&connection, &live).expect("live records"));
+        assert!(
+            !record_turn(&connection, &backfilled).expect("backfill records"),
+            "the backfilled copy of a live-recorded turn is a no-op"
+        );
+        assert_eq!(count_for_session(&connection, "s-7"), 1);
+        // The surviving row is the first write, named field by field: the
+        // live cursor won, and the backfill changed nothing.
+        let read = find_turn(&connection, "s-7", "t-9").expect("the row is there");
+        assert_eq!(read.session_id, "s-7");
+        assert_eq!(read.turn_id, "t-9");
+        assert_eq!(read.view_cursor, "v:live:42");
+        assert_eq!(read.finished_at_ms, 1_700_000_000_000);
+        assert_eq!(read.model, "muse-spark");
+        assert_eq!(read.duration_ms, 12_400);
+        assert_eq!(read.tokens_in, 22_633);
+        assert_eq!(read.tokens_out, 50);
+        assert_eq!(read.reasoning_tokens, 7);
+        assert_eq!(read.cache_read_tokens, Some(11));
+        assert_eq!(read.cache_write_tokens, Some(13));
+        assert_eq!(read.cached_tokens, 17);
+    }
+
+    #[test]
+    fn summing_a_lived_and_backfilled_session_counts_each_turn_once() {
+        // Three turns, each recorded live and then backfilled under a
+        // different cursor — the overlap the old key double-counted.
+        let connection = memory();
+        let turns = [("t-1", 100_i64), ("t-2", 200_i64), ("t-3", 300_i64)];
+        for (index, (turn, tokens_in)) in turns.iter().enumerate() {
+            let live = row_from_finished(
+                "s-9",
+                &format!("v:live:{index}"),
+                turn,
+                1_700_000_000_000,
+                &TurnMeta {
+                    tokens_in: *tokens_in as u64,
+                    ..meta()
+                },
+            );
+            let backfilled = row_from_finished(
+                "s-9",
+                &format!("v:page:{}", index + 900),
+                turn,
+                1_700_000_001_000,
+                &TurnMeta {
+                    tokens_in: *tokens_in as u64,
+                    ..meta()
+                },
+            );
+            assert_ne!(live.view_cursor, backfilled.view_cursor);
+            assert!(record_turn(&connection, &live).expect("live records"));
+            let _ = record_turn(&connection, &backfilled).expect("backfill records");
+        }
+        assert_eq!(count_for_session(&connection, "s-9"), 3);
+        let total: i64 = connection
+            .query_row(
+                "SELECT SUM(tokens_in) FROM usage_turns WHERE session_id = 's-9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sum reads");
+        assert_eq!(total, 600, "the sum counts each distinct turn exactly once");
+    }
+
+    #[test]
+    fn a_version_1_database_migrates_without_losing_history() {
+        // A ledger written by the old key: two cursors, two turns, plus one
+        // turn stored twice — the owner's shape.
+        let dir =
+            std::env::temp_dir().join(format!("baaz-usage-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("baaz.db");
+        {
+            let connection = Connection::open(&path).expect("v1 file opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                     INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+                     CREATE TABLE usage_turns(
+                        session_id TEXT NOT NULL,
+                        view_cursor TEXT NOT NULL,
+                        turn_id TEXT NOT NULL,
+                        finished_at_ms INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        tokens_in INTEGER NOT NULL,
+                        tokens_out INTEGER NOT NULL,
+                        reasoning_tokens INTEGER NOT NULL,
+                        cache_read_tokens INTEGER,
+                        cache_write_tokens INTEGER,
+                        cached_tokens INTEGER NOT NULL,
+                        cost_usd REAL NOT NULL,
+                        PRIMARY KEY (session_id, view_cursor)
+                     ) WITHOUT ROWID;",
+                )
+                .expect("v1 schema builds");
+            for (cursor, turn, tokens) in [
+                ("v:s:1", "t-1", 100),
+                ("v:s:2", "t-2", 200),
+                ("v:s:3", "t-2", 200),
+            ] {
+                let meta = TurnMeta {
+                    tokens_in: tokens,
+                    ..meta()
+                };
+                let row = row_from_finished("s-1", cursor, turn, 1_700_000_000_000, &meta);
+                connection
+                    .execute(
+                        "INSERT INTO usage_turns(
+                            session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+                            tokens_in, tokens_out, reasoning_tokens,
+                            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        params![
+                            row.session_id,
+                            row.view_cursor,
+                            row.turn_id,
+                            row.finished_at_ms,
+                            row.model,
+                            row.duration_ms,
+                            row.tokens_in,
+                            row.tokens_out,
+                            row.reasoning_tokens,
+                            row.cache_read_tokens,
+                            row.cache_write_tokens,
+                            row.cached_tokens,
+                            row.cost_usd,
+                        ],
+                    )
+                    .expect("v1 row writes");
+            }
+        }
+        let connection = open_at(&path).expect("migration opens");
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version is stamped");
+        assert_eq!(version, "2");
+        // The doubled turn collapsed to one row; the other history survived.
+        assert_eq!(count_for_session(&connection, "s-1"), 2);
+        let kept = find_turn(&connection, "s-1", "t-2").expect("t-2 survives");
+        assert_eq!(kept.view_cursor, "v:s:2");
+        assert_eq!(kept.tokens_in, 200);
+        assert_eq!(
+            find_turn(&connection, "s-1", "t-1"),
+            Some(row("v:s:1", "t-1"))
+        );
+        // And new writes keep working on the migrated file.
+        assert!(
+            record_turn(&connection, &row("v:s:9", "t-9"))
+                .expect("post-migration write records")
+        );
+        assert_eq!(count_for_session(&connection, "s-1"), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -451,8 +704,8 @@ mod tests {
         let zeros = row_from_finished("s-1", "v:s:2", "t-2", 1_700_000_000_000, &zeroed);
         assert!(record_turn(&connection, &nulls).expect("nulls record"));
         assert!(record_turn(&connection, &zeros).expect("zeros record"));
-        let read_nulls = find_turn(&connection, "s-1", "v:s:1").expect("nulls row");
-        let read_zeros = find_turn(&connection, "s-1", "v:s:2").expect("zeros row");
+        let read_nulls = find_turn(&connection, "s-1", "t-1").expect("nulls row");
+        let read_zeros = find_turn(&connection, "s-1", "t-2").expect("zeros row");
         assert_eq!(read_nulls.cache_read_tokens, None);
         assert_eq!(read_zeros.cache_read_tokens, Some(0));
         assert_ne!(read_nulls.cache_read_tokens, read_zeros.cache_read_tokens);
@@ -470,8 +723,8 @@ mod tests {
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, b"not a directory").expect("blocker file");
         let path = blocker.join("baaz.db");
-        record_at(&path, &[row("v:s:1")]);
-        record_at(&path, &[row("v:s:1"), row("v:s:2")]);
+        record_at(&path, &[row("v:s:1", "t-1")]);
+        record_at(&path, &[row("v:s:1", "t-1"), row("v:s:2", "t-2")]);
         assert!(!path.exists(), "no database was created where none can live");
         let _ = std::fs::remove_dir_all(&dir);
     }
