@@ -4393,6 +4393,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5744,6 +5752,17 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "crossbeam-channel",
+]
+
+[[package]]
+name = "provider-claude-code"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+ "provider",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

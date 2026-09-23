@@ -289,14 +289,57 @@ written when a turn's terminal event folds (and backfilled from `view/page`
 when a session is opened, so turns that ran while Baaz was closed are still
 recorded). This is the ledger; rendering it is a later stage.
 
-**The key is the view cursor.** Each row is keyed on
-`(session_id, view_cursor)` — the cursor of the turn's terminal event — and
-every insert is `ON CONFLICT DO NOTHING`. The cursor is opaque and strictly
-monotonic, and a `view/page` is contiguous and can never skip one, so the
-same events folded twice write the second time as a no-op. That idempotency
-is what makes the live write and the backfill safe to overlap: backfilling a
-session that was already recorded live adds only the new rows and changes
-none of the old.
+**The key is the turn.** Each row is keyed on
+`(session_id, turn_id)`, and every insert is `ON CONFLICT DO NOTHING`.
+
+An earlier schema keyed on `(session_id, view_cursor)` — the cursor of the
+turn's terminal event — and a real database proved that wrong: one session
+came back as 16 rows over 16 distinct cursors but only 15 distinct turns,
+because the two write paths disagree about which cursor keys a turn. The
+live path (`SessionView::record_usage`) takes one cursor for a whole batch
+of finished turns and stamps every one with it; the backfill path (the
+`view/page` handler) walks events one at a time and stamps each turn with
+its own event's cursor. Under the cursor key the `ON CONFLICT` clause never
+fired for that turn and both rows landed, over-counting every `SUM` over the
+ledger by one turn. `turn_id` is the identity both paths already agree on,
+so keying on it makes the live write and the backfill safe to overlap no
+matter which cursor each chose: backfilling a session that was already
+recorded live adds only the new rows and changes none of the old.
+
+**The cursor is still stored.** `view_cursor` remains a column on every row
+— it says where the turn sat in the view — but it is data now, not
+identity, and two rows never differ only by cursor.
+
+**Schema version 2, migrated in place.** The re-key bumped the ledger's
+`meta.schema_version` from 1 to 2. Opening a version-1 database rebuilds
+`usage_turns` under the new key and carries every existing row over, with
+one deliberate exception: a turn the old key stored twice under two cursors
+collapses to a single row (the smallest cursor wins). No other history is
+dropped.
+
+**The migration is all-or-nothing.** The rename, rebuild, copy, drop and the
+version stamp run inside a single SQLite transaction, so an interruption at
+any statement boundary leaves either the untouched version-1 database or the
+finished version-2 one — never a half-migrated file, and never an empty
+version-2 stamped over orphaned history. A `usage_turns_v1` left beside the
+live table by an interrupted attempt is finished on the next open rather than
+erroring: its rows merge into `usage_turns` (the live table wins key
+conflicts; the backup only fills gaps — nothing in either table is lost),
+the backup is dropped, and the stamp lands in the same transaction.
+
+**An unreadable `schema_version` is never taken for a fresh install.** When
+the stamp is missing or does not parse and a `usage_turns` table already
+exists, the table's real primary key decides: a version-1 key migrates, a
+version-2 key is re-stamped, and anything else fails loudly with the stamp
+untouched. Stamping a version-1 table as version-2 is what once left the
+ledger silently dead — every later write failing on the untouched v1 key
+while the file claimed health — and that outcome is now unreachable.
+
+Crash coverage is at statement boundaries on scratch copies only: the tests
+interrupt the migration after each of its four statements and reopen, which
+proves the all-or-nothing shape above — not a real mid-write process kill,
+and not two Baaz windows racing `open_at` on one file. Never exercised
+against a real `baaz.db`.
 
 **`NULL` is not zero.** `cache_read_tokens` and `cache_write_tokens` are
 nullable, and a `NULL` means "the provider never told us" — the whole reason
