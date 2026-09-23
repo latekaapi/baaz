@@ -90,9 +90,10 @@ impl SessionView {
         let was_running = self.running.is_some();
         let was_submitting = self.submitting;
         let completed_ours = matches!(&event, MuseEvent::Notification { method, .. } if method == "turn/completed");
-        // The cursor beside the event is the usage key: the fold consumes
-        // the event, so it is lifted first and the finished turns below are
-        // recorded under it.
+        // The cursor beside the event rides along on the usage rows below:
+        // the fold consumes the event, so it is lifted first. It is data,
+        // not identity — the ledger is keyed on the turn, so the backfill
+        // choosing a different cursor for the same turn still writes one row.
         let cursor = match &event {
             MuseEvent::Notification { cursor, .. } => cursor.clone(),
             MuseEvent::ServerRequest { .. } | MuseEvent::Closed(_) => None,
@@ -188,11 +189,13 @@ impl SessionView {
 
     /// One finished turn's usage row, into `baaz.db`.
     ///
-    /// The row is keyed on the terminal event's view cursor, so a replayed
-    /// event is a no-op insert rather than a duplicate. The write runs on the
-    /// background executor and swallows every failure, exactly as the search
-    /// recorder does: usage history is a ledger, not a feature anything
-    /// blocks on. An event with no cursor carries no key and records nothing.
+    /// The row is keyed on the turn, so a replayed event is a no-op insert
+    /// rather than a duplicate — even though this path stamps a whole batch
+    /// with one cursor while the backfill stamps each turn with its own.
+    /// The write runs on the background executor and swallows every failure,
+    /// exactly as the search recorder does: usage history is a ledger, not a
+    /// feature anything blocks on. An event with no cursor carries no cursor
+    /// to store and records nothing.
     fn record_usage(&mut self, deltas: &[Delta], cursor: Option<String>, cx: &mut Context<Self>) {
         let Some(cursor) = cursor else { return };
         let mut rows = Vec::new();
@@ -327,10 +330,11 @@ impl SessionView {
                         let n = events.len();
                         crate::log::trace_mark(&format!("page n={n}"));
                         // The page carries finished turns Baaz never saw live
-                        // (it was closed while they ran). Their terminal
-                        // cursors key the same no-op-on-replay insert as the
-                        // live write, so overlapping a live-recorded session
-                        // adds only the new rows and changes none of the old.
+                        // (it was closed while they ran). Their turn ids key
+                        // the same no-op-on-replay insert as the live write —
+                        // each event's own cursor is only stored, never the
+                        // key — so overlapping a live-recorded session adds
+                        // only the new rows and changes none of the old.
                         let mut rows = Vec::new();
                         for event in events {
                             let cursor = match &event {
