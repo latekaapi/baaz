@@ -44,16 +44,37 @@ because a shell stub stood in for the real CLI.
 ## The invariant, and where it is enforced
 
 A command whose capability is `Unavailable` must never return `Ok` — and
-that is not left to each adapter's good behaviour. `ProviderAdapter::send`
-is a **provided method** (`crates/provider/src/traits.rs`): it looks up the
-command's `required_capability` in `capabilities()` first and refuses there,
-before the adapter's real dispatch (`send_inner`, the required method)
-runs. An adapter that forgets to refuse still refuses, because its dispatch
-is unreachable except through `send`; the app calls only `send`. The
-deliberate hole — overriding the provided `send` itself — is out of
-contract, and no in-tree adapter does it. The gate is a floor, not a
-ceiling: adapters may still refuse anything further with `Unsupported`
-(e.g. partial support inside one capability).
+that is a mechanism, not a convention (`crates/provider/src/traits.rs`).
+The trait exposes only the raw dispatch (`dispatch`, a required method that
+cannot refuse on its own); the enforced `send` is an **inherent method on
+`Provider`**, the wrapper every caller holds instead of a bare
+`Box<dyn ProviderAdapter>`. `Provider::send` looks up the command's
+`required_capability` in `capabilities()` first and refuses there, before
+the adapter's dispatch runs. An adapter that forgets to refuse still
+refuses, because its dispatch is unreachable except through the gate.
+
+Why this shape holds where a provided `send` did not: a provided trait
+method is a name any `impl ProviderAdapter` block can shadow, and Rust then
+dispatches to the shadow without ever falling back to the default — the
+gate gone, silently, for that adapter. An inherent method on `Provider`
+cannot be shadowed that way: an adapter `impl` block has no `send` to
+override (the trait has none), and coherence forbids any adapter crate from
+adding methods to `Provider`. There is no accessor for the inner adapter,
+so no caller can obtain the bare trait object and reach `dispatch`
+directly. Sealing the trait was rejected as the fix: it narrows *who* can
+implement (a future second provider implements it from another crate)
+without stopping an implementor from overriding — the wrapper narrows
+*what any caller can reach*, which is the property that holds.
+
+The old override is now un-expressible, not merely untested: there is no
+`send` on the trait to override, so no test adapter can demonstrate the
+bypass — the closest attack, an adapter overriding everything the trait
+still exposes plus its own inherent `send`, is pinned in
+`crates/provider/tests/capabilities.rs` (`SneakyAdapter`) and still
+refuses through `Provider::send`.
+
+The gate is a floor, not a ceiling: adapters may still refuse anything
+further with `Unsupported` (e.g. partial support inside one capability).
 
 `Unverified` is attempted everywhere: only `Unavailable` refuses
 (`CapabilityState::allows_attempt`).
@@ -61,11 +82,20 @@ ceiling: adapters may still refuse anything further with `Unsupported`
 ## What muse declares, and on what evidence
 
 From live fixtures and the recording puppet: every command-backed
-capability is `Native`; the session shell is `Native` (`userShell`
-granted 1.0.3–1.3.0); client tools are `Native` at ≥ 1.3.0 and
-`Unavailable` below. From this brief, not from a probe: the 1.3.0
-`sessionMcp` grant and the 1.2.1 never-granted observation. `Unverified`:
-reasoning traces and sub-agent turns — no live probe in this task.
+capability except the shell is `Native`; client tools are `Native` at
+≥ 1.3.0 and `Unavailable` below. From this brief, not from a probe: the
+1.3.0 `sessionMcp` grant and the 1.2.1 never-granted observation.
+`Unverified`: reasoning traces and sub-agent turns — no live probe in this
+task — and the session shell. The shell's `userShell` grant *is* on record
+at 1.0.3, 1.1.1, and 1.2.1 (`grantedCapabilities:["userShell"]` in
+`fixtures/msp/transcript-echo.jsonl`, `transcript-account.jsonl`, and
+`transcript-1.2.1-shapes.jsonl`), but every recorded `session/userShell`
+execution there ends with the item in status `failed` — the sandbox was
+unavailable, so the command was never started. A grant without a single
+clean run is not the hard evidence `Native` needs, and 1.3.0+ was never
+probed for `userShell` at all. A guess stated as `Native` is worse than
+`Unverified`: the declaration stops guessing while `allows_attempt` keeps
+the shell sending.
 
 The gate proves the crates compile, clippy is clean, and the invariant
 holds for the adapters in the tests. It does **not** prove the declared
@@ -75,8 +105,15 @@ set yet — `baaz` is untouched by this task.
 
 ## Mutation check
 
-In a scratch copy, remove the refusal from the provided `send` (call
-`send_inner` directly) and run the refusal test
-(`crates/provider/tests/capabilities.rs`): it must FAIL — the forgetful
-adapter's `Ok` leaks through. Restore. If it still passes, the test is
-pinning the adapter's good behaviour rather than the guarantee.
+Two checks, both required before trusting the gate:
+
+1. In a scratch copy, neuter the refusal inside `Provider::send` (call
+   `dispatch` directly) and run the refusal test
+   (`crates/provider/tests/capabilities.rs`): it must FAIL — the forgetful
+   adapter's `Ok` leaks through. Restore. If it still passes, the test is
+   pinning the adapter's good behaviour rather than the guarantee.
+2. The `SneakyAdapter` test in the same file is the second mutation made
+   permanent: an adapter overriding everything the trait still exposes,
+   answering `Ok` for an `Unavailable` capability, still cannot reach the
+   caller's `send`. If that test ever fails, the wrapper has grown a path
+   around the gate and the task is not done.

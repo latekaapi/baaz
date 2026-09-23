@@ -3,9 +3,9 @@
 //! [`Capability`] names the thing, [`CapabilityState`] says how it stands,
 //! and [`CapabilitySet`] is the whole declaration — what
 //! [`crate::ProviderAdapter::capabilities`] returns. The UI reads the set to
-//! decide which buttons to offer; the enforced
-//! [`crate::ProviderAdapter::send`] reads it to refuse what is
-//! [`CapabilityState::Unavailable`] before any adapter code runs.
+//! decide which buttons to offer; the enforced [`crate::Provider::send`]
+//! reads it to refuse what is [`CapabilityState::Unavailable`] before any
+//! adapter code runs.
 
 use crate::Command;
 
@@ -124,8 +124,8 @@ impl Capability {
 /// - `Unavailable` — this provider cannot do it, by design or by version.
 ///   Carries the human reason: without one, whoever renders the missing
 ///   button cannot say why it is gone. A command whose capability is
-///   `Unavailable` never returns `Ok` — see
-///   [`crate::ProviderAdapter::send`].
+///   `Unavailable` never returns `Ok` — see [`crate::Provider::send`],
+///   whose gate enforces this before any adapter code runs.
 /// - `Unverified` — nobody has checked. Honest ignorance: it is attempted,
 ///   never refused. Not a synonym for `Unavailable`, and it must never be
 ///   quietly collapsed into one.
@@ -162,7 +162,7 @@ impl CapabilityState {
         }
     }
 
-    /// Whether [`crate::ProviderAdapter::send`] attempts the command.
+    /// Whether [`crate::Provider::send`] attempts the command.
     /// Everything but `Unavailable` proceeds — in particular `Unverified`
     /// is attempted, never refused.
     pub fn allows_attempt(&self) -> bool {
@@ -220,11 +220,11 @@ impl CapabilitySet {
 impl Command {
     /// The capability this command needs. Coarse on purpose: several
     /// commands share one UI question, and the seven the planned providers
-    /// differ on each have their own. The enforced
-    /// [`crate::ProviderAdapter::send`] refuses with
-    /// [`crate::ProviderError::Unsupported`] when this capability's state
-    /// is [`CapabilityState::Unavailable`]; the refusal itself names the
-    /// command via [`Command::capability`].
+    /// differ on each have their own. The enforced [`crate::Provider::send`]
+    /// refuses with [`crate::ProviderError::Unsupported`] when this
+    /// capability's state is [`CapabilityState::Unavailable`]; the refusal
+    /// itself names the command via [`Command::capability`]. The lookup
+    /// lives in the wrapper, not in any adapter.
     pub fn required_capability(&self) -> Capability {
         match self {
             Command::OpenSession { .. }

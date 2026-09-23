@@ -36,7 +36,7 @@ use muse_client::schema::{
     ViewSubscribeParams, ViewUnsubscribeParams,
 };
 use muse_client::{MuseClient, MuseConfig};
-use provider::{Ack, Command, ConnectInfo, ProviderAdapter, QuestionAnswer, SubmissionPart};
+use provider::{Ack, Command, ConnectInfo, Provider, QuestionAnswer, SubmissionPart};
 use provider_muse::MuseAdapter;
 use serde_json::Value;
 
@@ -139,7 +139,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
         ],
     })
     .expect("fake server spawns — is python3 on PATH?");
-    let mut adapter = MuseAdapter::new(client);
+    let mut adapter = Provider::new(MuseAdapter::new(client));
     let handshake = adapter.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
     assert_eq!(handshake.agent_name, "fake-muse");
 

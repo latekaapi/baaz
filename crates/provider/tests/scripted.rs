@@ -10,10 +10,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aui_protocol::{Block, Delta, Provider, Session, Turn, TurnMeta};
+use aui_protocol::{Block, Delta, Session, Turn, TurnMeta, Provider as Backend};
 use crossbeam_channel::{unbounded, Receiver};
 use provider::{
-    Ack, Capability, CapabilitySet, CapabilityState, Command, ConnectInfo, Handshake,
+    Ack, Capability, CapabilitySet, CapabilityState, Command, ConnectInfo, Handshake, Provider,
     ProviderAdapter, ProviderError, ProviderEvent, ProviderId, QuestionAnswer, SubmissionPart,
 };
 
@@ -36,7 +36,7 @@ struct State {
 }
 
 impl ScriptedProvider {
-    /// A disconnected scripted provider. It answers as [`Provider::Codex`] —
+    /// A disconnected scripted provider. It answers as [`Backend::Codex`] —
     /// deliberately not muse — so a test failure here means the trait leans
     /// on the vendor it was first written against.
     pub fn new() -> Self {
@@ -100,7 +100,7 @@ impl Default for ScriptedProvider {
 
 impl ProviderAdapter for ScriptedProvider {
     fn id(&self) -> ProviderId {
-        Provider::Codex
+        Backend::Codex
     }
 
     fn connect(&mut self, _client: &ConnectInfo) -> Result<Handshake, ProviderError> {
@@ -110,7 +110,7 @@ impl ProviderAdapter for ScriptedProvider {
         }
         state.connected = true;
         Ok(Handshake {
-            provider: Provider::Codex,
+            provider: Backend::Codex,
             agent_name: "scripted".into(),
             agent_version: "0.0.0".into(),
         })
@@ -121,7 +121,7 @@ impl ProviderAdapter for ScriptedProvider {
         // `Unavailable` with the reason the old hand-rolled refusal
         // carried. `Transcript` stays `Native` even though only following
         // is implemented — the gate is a floor, and the paging arms keep
-        // their own typed refusal inside `send_inner`.
+        // their own typed refusal inside `dispatch`.
         let off = || CapabilityState::Unavailable {
             reason: "scripted providers only open sessions, take input, and follow them".into(),
         };
@@ -145,7 +145,7 @@ impl ProviderAdapter for ScriptedProvider {
         ])
     }
 
-    fn send_inner(&self, command: Command) -> Result<Ack, ProviderError> {
+    fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         let state = self.inner.state.lock().expect("scripted mutex");
         if !state.connected {
             return Err(ProviderError::Unavailable { reason: "not connected".into() });
@@ -190,7 +190,7 @@ impl ProviderAdapter for ScriptedProvider {
 }
 
 /// Drain every event currently queued, without waiting for more.
-fn drain(provider: &ScriptedProvider) -> Vec<ProviderEvent> {
+fn drain(provider: &Provider) -> Vec<ProviderEvent> {
     let rx = provider.events();
     let mut out = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -208,11 +208,11 @@ fn drain(provider: &ScriptedProvider) -> Vec<ProviderEvent> {
 
 #[test]
 fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
-    let mut provider = ScriptedProvider::new();
-    assert_eq!(provider.id(), Provider::Codex);
+    let mut provider = Provider::new(ScriptedProvider::new());
+    assert_eq!(provider.id(), Backend::Codex);
 
     let handshake = provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
-    assert_eq!(handshake.provider, Provider::Codex);
+    assert_eq!(handshake.provider, Backend::Codex);
 
     let Ack::Session { session_id, .. } = provider
         .send(Command::OpenSession {
@@ -238,7 +238,7 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
         panic!("submit-input must ack a turn");
     };
 
-    let mut session = Session::new(&session_id, Provider::Codex, "scripted", "/tmp");
+    let mut session = Session::new(&session_id, Backend::Codex, "scripted", "/tmp");
     let mut applied = 0;
     for event in drain(&provider) {
         let ProviderEvent::Deltas { deltas, .. } = event else {
@@ -292,6 +292,10 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
 fn refused_commands() -> Vec<(Command, &'static str)> {
     /// Implemented commands pass through as `None`; every refused one comes
     /// back as `Some` with its capability name. Exhaustive — no wildcard.
+    ///
+    /// Implemented commands pass through as `None` and are handled in
+    /// `dispatch`; refused ones never reach it — the [`Provider`] gate
+    /// refuses them first.
     fn classify(command: Command) -> Option<(Command, &'static str)> {
         match command {
             Command::OpenSession { .. }
@@ -437,7 +441,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
 /// `Unsupported` naming the capability — never `Ok`.
 #[test]
 fn unimplemented_commands_are_typed_refusals_not_success() {
-    let mut provider = ScriptedProvider::new();
+    let mut provider = Provider::new(ScriptedProvider::new());
     provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
 
     for (command, expected) in &refused_commands() {

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use muse_client::{MuseClient, MuseConfig};
-use provider::{ConnectInfo, ProviderAdapter, ProviderEvent};
+use provider::{ConnectInfo, Provider, ProviderEvent};
 use provider_muse::MuseAdapter;
 
 fn puppet() -> PathBuf {
@@ -36,7 +36,7 @@ fn malformed_approval_tap_surfaces_a_visible_error() {
         extra_args: vec!["--emit-bad-tap".to_owned()],
     })
     .expect("fake server spawns — is python3 on PATH?");
-    let mut adapter = MuseAdapter::new(client);
+    let mut adapter = Provider::new(MuseAdapter::new(client));
     adapter.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
 
     // The unknown `frobnicate/request` must produce nothing at all — no tap,

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use muse_client::{MuseClient, MuseConfig};
-use provider::{Ack, Command, ConnectInfo, ProviderAdapter};
+use provider::{Ack, Command, ConnectInfo, Provider};
 use provider_muse::MuseAdapter;
 
 fn puppet() -> PathBuf {
@@ -26,7 +26,7 @@ fn muse_adapter_round_trips_list_models_to_the_model_list_call() {
         extra_args: Vec::new(),
     })
     .expect("fake server spawns — is python3 on PATH?");
-    let mut adapter = MuseAdapter::new(client);
+    let mut adapter = Provider::new(MuseAdapter::new(client));
     assert_eq!(adapter.id(), aui_protocol::Provider::Muse);
 
     let handshake = adapter.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
