@@ -315,9 +315,31 @@ identity, and two rows never differ only by cursor.
 `usage_turns` under the new key and carries every existing row over, with
 one deliberate exception: a turn the old key stored twice under two cursors
 collapses to a single row (the smallest cursor wins). No other history is
-dropped. That migration has been exercised only against scratch databases in
-tests — never against a real `baaz.db` — so treat it as untested against a
-real database.
+dropped.
+
+**The migration is all-or-nothing.** The rename, rebuild, copy, drop and the
+version stamp run inside a single SQLite transaction, so an interruption at
+any statement boundary leaves either the untouched version-1 database or the
+finished version-2 one — never a half-migrated file, and never an empty
+version-2 stamped over orphaned history. A `usage_turns_v1` left beside the
+live table by an interrupted attempt is finished on the next open rather than
+erroring: its rows merge into `usage_turns` (the live table wins key
+conflicts; the backup only fills gaps — nothing in either table is lost),
+the backup is dropped, and the stamp lands in the same transaction.
+
+**An unreadable `schema_version` is never taken for a fresh install.** When
+the stamp is missing or does not parse and a `usage_turns` table already
+exists, the table's real primary key decides: a version-1 key migrates, a
+version-2 key is re-stamped, and anything else fails loudly with the stamp
+untouched. Stamping a version-1 table as version-2 is what once left the
+ledger silently dead — every later write failing on the untouched v1 key
+while the file claimed health — and that outcome is now unreachable.
+
+Crash coverage is at statement boundaries on scratch copies only: the tests
+interrupt the migration after each of its four statements and reopen, which
+proves the all-or-nothing shape above — not a real mid-write process kill,
+and not two Baaz windows racing `open_at` on one file. Never exercised
+against a real `baaz.db`.
 
 **`NULL` is not zero.** `cache_read_tokens` and `cache_write_tokens` are
 nullable, and a `NULL` means "the provider never told us" — the whole reason
