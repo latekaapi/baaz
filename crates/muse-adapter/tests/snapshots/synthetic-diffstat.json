@@ -1,8 +1,8 @@
 [
   {
-    "sessionId": "synthetic-reminderchild",
+    "sessionId": "synthetic-diffstat",
     "session": {
-      "id": "synthetic-reminderchild",
+      "id": "synthetic-diffstat",
       "agent": "muse",
       "model": "muse-spark-test",
       "mode": "onRequest",
@@ -16,7 +16,7 @@
         {
           "kind": "user",
           "id": "i-syn-user-1",
-          "text": "What did the reminder say?",
+          "text": "Rename the helper and update its callers.",
           "attachments": [],
           "mentions": []
         },
@@ -25,21 +25,43 @@
           "id": "t-syn-1",
           "blocks": [
             {
+              "kind": "tool_call",
+              "id": "i-syn-edit-1",
+              "tool_kind": {
+                "kind": "edit"
+              },
+              "verb": "Edited",
+              "target": "/tmp/synthetic/notes.txt",
+              "status": "success",
+              "duration_ms": 90,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": false
+              },
+              "diff_stat": {
+                "added": 10,
+                "removed": 3,
+                "files": 2
+              }
+            },
+            {
               "kind": "text",
-              "text": "Nothing to show.",
+              "text": "Renamed across two files.",
               "streaming": false
             }
           ],
           "meta": {
             "model": "muse-spark-test",
-            "duration_ms": 0,
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "reasoning_tokens": 0,
+            "duration_ms": 2100,
+            "tokens_in": 1200,
+            "tokens_out": 115,
+            "reasoning_tokens": 12,
             "cost_usd": 0.0,
-            "cache_read_tokens": null,
-            "cache_write_tokens": null,
-            "cached_tokens": 0
+            "cache_read_tokens": 32,
+            "cache_write_tokens": 8,
+            "cached_tokens": 40
           }
         }
       ]
@@ -58,7 +80,7 @@
       "pending_inputs": {},
       "model": null,
       "approval_mode": "onRequest",
-      "last_cursor": "v:syn:7",
+      "last_cursor": "v:syn:8",
       "command_text": {},
       "restored_prompt": null,
       "model_route_unserved": null,

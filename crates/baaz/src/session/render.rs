@@ -1923,6 +1923,7 @@ mod tests {
             status,
             duration_ms: None,
             body: aui_protocol::ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
+            diff_stat: None,
         }
     }
 
