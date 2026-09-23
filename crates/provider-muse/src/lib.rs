@@ -3,14 +3,17 @@
 //! [`MuseAdapter`] implements [`ProviderAdapter`] over a [`MuseClient`]
 //! transport and a [`MuseFold`]. Every wire spelling lives here: this is
 //! the only crate in the seam allowed to depend on `muse-client`, and the
-//! per-command translation is in [`translate`]. Nothing is moved out of
-//! `baaz` — the app still talks to `muse-client` directly, and rewiring it
-//! onto this trait is a separate task.
+//! per-command translation is in [`translate`]. Spawning the child,
+//! `initialize`, and the schema-fingerprint warning live here too —
+//! [`establish`] is what `baaz`'s connection path calls — while the app's
+//! session views still ride the raw transport until they move onto the
+//! trait (see [`SharedTransport`] and [`MuseAdapter::legacy_events`]).
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod caps;
+pub mod errors;
 mod translate;
 
 use std::sync::{Arc, Mutex};
@@ -18,10 +21,8 @@ use std::thread::JoinHandle;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use muse_adapter::MuseFold;
-use muse_client::schema::{
-    ApprovalRequestParams, ClientCapabilities, UserInputRequestParams,
-};
-use muse_client::{MuseClient, MuseEvent};
+use muse_client::schema::{ApprovalRequestParams, ClientCapabilities, UserInputRequestParams};
+use muse_client::{MuseClient, MuseConfig, MuseEvent};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
     ProviderEvent, ProviderId,
@@ -32,48 +33,112 @@ pub use caps::{
 };
 pub use translate::{approval_headline, question_headline};
 
+/// The raw transport, shared between the adapter and the app's legacy
+/// session views. Transitional: session views still take an
+/// `Arc<MuseClient>` (they move onto [`Command`] one lane at a time), so
+/// one spawned child is held here and cloned out — never spawned twice.
+/// The follow-up that moves the last view removes this alias with them.
+pub type SharedTransport = Arc<MuseClient>;
+
 /// The muse implementation: neutral [`Command`]s in, MSP on the pipe,
 /// neutral [`Ack`]s and [`ProviderEvent`]s out.
 ///
-/// Owns one spawned client and the fold its events run through. A
-/// forwarding thread pumps the client's event channel into the fold and the
-/// provider channel; it ends when the child exits ([`MuseEvent::Closed`])
-/// or [`ProviderAdapter::shutdown`] runs.
+/// Owns one spawned client (shared with the app's legacy views — see
+/// [`SharedTransport`]) and the fold its events run through. A forwarding
+/// thread pumps the client's event channel into the fold, the provider
+/// channel, and the legacy channel; it ends when the child exits
+/// ([`MuseEvent::Closed`]) or the transport's sender is dropped. The pump
+/// is detached, never joined: legacy holders can outlive any one owner
+/// (a parked session view keeps its transport until it is re-seated), so a
+/// join could wait on a sender that is still legitimately alive — the same
+/// accepted design as the app's event bridge.
 pub struct MuseAdapter {
-    client: MuseClient,
+    client: SharedTransport,
     fold: Arc<Mutex<MuseFold>>,
     tx: Sender<ProviderEvent>,
     rx: Receiver<ProviderEvent>,
+    legacy_tx: Sender<MuseEvent>,
+    legacy_rx: Receiver<MuseEvent>,
     pump: Option<JoinHandle<()>>,
     /// The agent version the handshake negotiated, for the version-gated
     /// capabilities. `None` before [`ProviderAdapter::connect`] runs.
     negotiated: Mutex<Option<String>>,
+    /// Whether `initialize` granted `userShell`. Fixed for the connection
+    /// lifetime; read by the app to decide whether a session may run shell
+    /// commands. `None` before [`ProviderAdapter::connect`] runs.
+    granted_shell: Mutex<Option<bool>>,
+    /// The schema-fingerprint warning from `initialize`, pre-formatted.
+    /// A mismatch is additive evolution, never a failure: the app logs it
+    /// and carries on. `None` when the fingerprints agreed.
+    warning: Mutex<Option<String>>,
 }
 
 impl MuseAdapter {
     /// Wrap an already-spawned client. Spawning stays outside the seam:
     /// which binary, which flags, and whose policy are host decisions, not
     /// provider ones. [`ProviderAdapter::connect`] runs the handshake.
+    /// Use [`establish`] for the full spawn-and-handshake path.
     pub fn new(client: MuseClient) -> Self {
+        Self::shared(Arc::new(client))
+    }
+
+    /// Wrap an already-spawned client held in a shared transport, so the
+    /// adapter and the app's legacy views ride one child.
+    pub fn shared(client: SharedTransport) -> Self {
         let (tx, rx) = unbounded();
+        let (legacy_tx, legacy_rx) = unbounded();
         Self {
             client,
             fold: Arc::new(Mutex::new(MuseFold::new())),
             tx,
             rx,
+            legacy_tx,
+            legacy_rx,
             pump: None,
             negotiated: Mutex::new(None),
+            granted_shell: Mutex::new(None),
+            warning: Mutex::new(None),
         }
     }
 
-    /// Forward one transport event: fold it, emit its deltas, and raise the
-    /// tap on the shoulder a server request needs. Returns `false` when the
-    /// pump should stop.
+    /// The shared transport, for the app's legacy session views.
+    /// Transitional with [`SharedTransport`].
+    pub fn transport(&self) -> SharedTransport {
+        Arc::clone(&self.client)
+    }
+
+    /// The raw transport events, in wire order, for the app's legacy pump.
+    /// Cloned receivers are competing consumers: keep exactly one consumer
+    /// and fan out from there.
+    pub fn legacy_events(&self) -> Receiver<MuseEvent> {
+        self.legacy_rx.clone()
+    }
+
+    /// Whether the handshake granted `userShell`. `false` before
+    /// [`ProviderAdapter::connect`] runs.
+    pub fn user_shell_granted(&self) -> bool {
+        self.granted_shell.lock().expect("granted mutex").unwrap_or(false)
+    }
+
+    /// The schema-fingerprint warning from `initialize`, pre-formatted for
+    /// the log. `None` when the fingerprints agreed — the common case.
+    pub fn schema_warning(&self) -> Option<String> {
+        self.warning.lock().expect("warning mutex").clone()
+    }
+
+    /// Forward one transport event: fan it out to the legacy channel, fold
+    /// it, emit its deltas, and raise the tap on the shoulder a server
+    /// request needs. Returns `false` when the pump should stop.
     fn forward(
         fold: &Mutex<MuseFold>,
         tx: &Sender<ProviderEvent>,
+        legacy: &Sender<MuseEvent>,
         event: MuseEvent,
     ) -> bool {
+        // The legacy fan-out first: every transport event reaches the raw
+        // channel whole, whatever the fold makes of it. Best-effort — a
+        // gone consumer must not stall the provider channel.
+        let _ = legacy.send(event.clone());
         match event {
             MuseEvent::Closed(code) => {
                 let _ = tx.send(ProviderEvent::ConnectionLost {
@@ -189,13 +254,19 @@ impl ProviderAdapter for MuseAdapter {
         if self.pump.is_some() {
             return Err(ProviderError::Rejected { reason: "already connected".into() });
         }
-        let (result, _warning) = self
+        let (result, warning) = self
             .client
             .initialize(
                 &client.client_name,
                 &client.client_version,
                 ClientCapabilities {
-                    experimental_api: None,
+                    // Sign-in is on the wire now (D22): `account/*` is
+                    // experimental, so the opt-in is required — without it
+                    // every account method answers `-32601` /
+                    // `experimentalRequired`. `userShell` is the `!` escape
+                    // hatch, requested below through the neutral
+                    // `ConnectInfo::capabilities`.
+                    experimental_api: Some(true),
                     opt_out_notification_methods: None,
                     requested_capabilities: if client.capabilities.is_empty() {
                         None
@@ -209,11 +280,12 @@ impl ProviderAdapter for MuseAdapter {
         let live = self.client.events();
         let fold = Arc::clone(&self.fold);
         let tx = self.tx.clone();
+        let legacy = self.legacy_tx.clone();
         let pump = std::thread::Builder::new()
             .name("provider-muse-pump".into())
             .spawn(move || {
                 while let Ok(event) = live.recv() {
-                    if !Self::forward(&fold, &tx, event) {
+                    if !Self::forward(&fold, &tx, &legacy, event) {
                         break;
                     }
                 }
@@ -224,6 +296,9 @@ impl ProviderAdapter for MuseAdapter {
         self.pump = Some(pump);
         let version = result.server_info.version.clone();
         *self.negotiated.lock().expect("negotiated mutex") = Some(version.clone());
+        *self.granted_shell.lock().expect("granted mutex") =
+            Some(result.granted_capabilities.iter().any(|c| c.as_wire() == Some("userShell")));
+        *self.warning.lock().expect("warning mutex") = warning.map(|warning| format!("{warning:?}"));
         Ok(Handshake {
             provider: aui_protocol::Provider::Muse,
             agent_name: result.server_info.name,
@@ -258,10 +333,15 @@ impl ProviderAdapter for MuseAdapter {
     }
 
     fn shutdown(&mut self) {
-        self.client.shutdown();
-        if let Some(pump) = self.pump.take() {
-            let _ = pump.join();
+        // Best-effort early hang-up when this adapter holds the last
+        // transport clone; otherwise the drop chain cleans the child up
+        // when the legacy holders let go.
+        if let Some(client) = Arc::get_mut(&mut self.client) {
+            client.shutdown();
         }
+        // Detach, never join — see the struct docs. The pump ends when the
+        // transport's sender is dropped.
+        self.pump.take();
     }
 }
 
@@ -269,4 +349,55 @@ impl Drop for MuseAdapter {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Spawn `muse serve` and start its reader and writer threads.
+///
+/// **Durable, always.** `--no-session-log` accepts a turn and then emits no
+/// view events at all (`docs/01-transport.md` §4), so an app that wants a
+/// transcript may never set it.
+///
+/// Blocking: run it on the background executor.
+pub fn spawn(program: &str) -> Result<MuseClient, ProviderError> {
+    MuseClient::spawn(&MuseConfig {
+        program: program.into(),
+        trust_workspace: true,
+        no_session_log: false,
+        extra_args: Vec::new(),
+    })
+    .map_err(translate::transport_error)
+}
+
+/// What spawning and shaking hands produced: the adapter (which moves
+/// behind the [`Provider`](provider::Provider) gate), the shared transport
+/// and raw event stream the app's legacy views still ride, and the neutral
+/// handshake facts the app logs.
+pub struct Established {
+    /// The connected adapter. Move it into a [`Provider`](provider::Provider);
+    /// the raw dispatch is reachable only through its gate.
+    pub adapter: MuseAdapter,
+    /// The one spawned child, shared with the legacy views.
+    pub transport: SharedTransport,
+    /// The raw transport events, in wire order. Single consumer.
+    pub legacy: Receiver<MuseEvent>,
+    /// Who answered, neutrally.
+    pub handshake: Handshake,
+    /// The schema-fingerprint warning, pre-formatted for the log, or `None`
+    /// when the fingerprints agreed.
+    pub warning: Option<String>,
+    /// Whether `initialize` granted `userShell`.
+    pub user_shell: bool,
+}
+
+/// Spawn `muse serve` ([`spawn`]) and shake hands over it: identify the
+/// client (requesting its [`ConnectInfo::capabilities`]) and learn who
+/// answered. Blocking: run it on the background executor.
+pub fn establish(program: &str, client: &ConnectInfo) -> Result<Established, ProviderError> {
+    let transport = Arc::new(spawn(program)?);
+    let mut adapter = MuseAdapter::shared(Arc::clone(&transport));
+    let handshake = adapter.connect(client)?;
+    let legacy = adapter.legacy_events();
+    let warning = adapter.schema_warning();
+    let user_shell = adapter.user_shell_granted();
+    Ok(Established { adapter, transport, legacy, handshake, warning, user_shell })
 }

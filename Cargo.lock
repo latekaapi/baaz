@@ -695,6 +695,8 @@ dependencies = [
  "muse-adapter",
  "muse-client",
  "pdf-extract",
+ "provider",
+ "provider-muse",
  "rusqlite",
  "serde",
  "serde_json",

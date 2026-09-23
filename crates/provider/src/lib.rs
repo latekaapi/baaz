@@ -43,6 +43,7 @@ mod capability;
 mod command;
 mod error;
 mod event;
+pub mod scripted;
 mod traits;
 
 pub use ack::{Ack, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
