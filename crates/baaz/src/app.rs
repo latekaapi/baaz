@@ -267,9 +267,21 @@ const MAX_TITLE_READS: usize = 12;
 /// macOS reads each item's shortcut from the keymap.
 ///
 /// The bindings themselves live in one table, [`crate::keymap::KEYMAP`];
-/// this only installs what [`crate::keymap::build_bindings`] builds from it.
+/// this installs what [`crate::keymap::load`] returns: the table first, the
+/// person's `keymap.json` second, so a binding written in the file wins by
+/// gpui's existing depth-then-order rule.
+///
+/// The load is one best-effort file read, done once here at startup before
+/// any window opens: the event loop is not yet dispatching input or painting
+/// frames, so the blocking read cannot stall the UI. A refused user entry is
+/// never silent — every warning [`crate::keymap::load`] collects goes
+/// through `baaz_log!`, the app's diagnostics surface.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(crate::keymap::build_bindings());
+    let loaded = crate::keymap::load();
+    for warning in &loaded.warnings {
+        crate::baaz_log!("{warning}");
+    }
+    cx.bind_keys(loaded.bindings);
 }
 
 /// The native menu bar.
