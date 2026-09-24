@@ -285,3 +285,90 @@ Named so nobody reads a table cell as a promise:
 - Every probe ran on Haiku with a trivial prompt. Nothing here says anything
   about long transcripts, compaction, or a turn that exceeds the window.
 - No Baaz UI has ever rendered one of these frames.
+
+---
+
+# Addendum 2026-09-24 — how client tools get permission. SETTLED, by probe.
+
+The stage-3 handoff left this open with two options and told the next session to
+ask the owner. The owner asked for research instead. **The research found a third
+option that is strictly better than both, and it is proven live on this box**
+(`claude 2.1.276`, fixture `fixtures/claude-code/permission.jsonl`).
+
+## The answer
+
+    --permission-prompts host  --permission-prompt-tool stdio
+
+`stdio` is a **sentinel, not a tool name**. It routes every permission decision
+over the *same* `--input-format stream-json` control channel the adapter already
+reads and writes. No second MCP server, no blanket allowlist, no extra process.
+
+Captured exchange, both directions:
+
+    <- {"type":"control_request","request_id":"a2200299-…","request":{
+         "subtype":"can_use_tool",
+         "tool_name":"mcp__baaz__ping",
+         "display_name":"Ping",
+         "mcp_server":{"name":"baaz","source":"dynamic"},
+         "input":{},
+         "tool_use_id":"toolu_01HEpjaH…",
+         "permission_suggestions":[{"type":"addRules","behavior":"allow",
+             "rules":[{"toolName":"mcp__baaz__ping"}],"destination":"localSettings"}]}}
+    -> {"type":"control_response","response":{"subtype":"success",
+         "request_id":"a2200299-…",
+         "response":{"behavior":"allow","updatedInput":{}}}}
+    <- tool_result: [{"type":"text","text":"PONG"}]
+
+## Why this beats both options on the board
+
+- **vs. blanket `--allowedTools`:** nothing is silently pre-approved. An
+  auto-approved tool *never reaches the callback at all* — the SDK docs are
+  explicit that a bare allow entry bypasses every host-side check for that tool.
+  A harness whose whole point is showing the owner what the agent is doing should
+  not start by making its own tool calls invisible.
+- **vs. `--permission-prompt-tool mcp__baaz__<something>`:** that needs a second
+  MCP server whose tool handler must somehow reach the UI thread and block on a
+  human. The `stdio` route delivers the request on a channel Baaz's adapter
+  already owns, in the same reader loop, with the turn already suspended.
+- **It is not limited to Baaz's own tools.** The same channel carries `Bash`,
+  `Edit`, `Write` — *every* tool the child wants. So Baaz's approvals surface
+  becomes the approvals surface for the whole Claude Code session. That is the
+  actual prize, and neither board option reached it.
+- `permission_suggestions` hands us the "always allow" affordance already shaped:
+  `addRules` / `behavior:"allow"` / `destination:"localSettings"`. It is the
+  "Don't ask again" checkbox, provider-authored and persistable.
+- `display_name` ("Ping") is a human label. Free accessibility.
+
+## What had to be learned the hard way — three dead ends, all probed
+
+1. **`--permission-prompts host` alone does not open the channel.** It
+   auto-denies. The child emits `system/permission_denied` and a
+   `post_turn_summary` with `status_category:"blocked"`, and the tool_result is
+   `is_error:true`. This is exactly the failure the handoff recorded — it was
+   never a missing grant, it was a missing *answerer*.
+2. **Completing the `initialize` control handshake does not open it either.**
+   Sending `{"type":"control_request","request":{"subtype":"initialize","hooks":{}}}`
+   gets a correct `control_response` (it returns the slash-command list), and the
+   very next tool call still auto-denies. The control channel being *live* is not
+   the same as permissions being *routed* to it.
+3. Only adding `--permission-prompt-tool stdio` produced a `can_use_tool`
+   request. **Both flags are required together.**
+
+`--permission-prompt-tool` does not appear in `claude --help`; only
+`--permission-prompts` does, and its help text mentions it in passing
+("the SDK host or `--permission-prompt-tool`"). It is accepted and it works.
+
+## Consequences for the wiring (§3b of the stage-3 handoff)
+
+- The adapter's frame reader must handle a **third frame direction**: not just
+  child→host output frames, but `control_request` needing a `control_response`.
+  A reader that only folds `assistant`/`stream_event` will hang the turn forever
+  on the first permission request — the child waits silently, with no timeout
+  observed.
+- `result` frames carry `permission_denials: [{tool_name, tool_use_id, tool_input}]`,
+  a structured after-the-fact list. Useful for the transcript; not a substitute
+  for answering.
+- Unlike muse, Claude Code's `result` frame carries a **real** `total_cost_usd`
+  and a per-model `modelUsage` with `costUSD`. D3 was withdrawn for muse because
+  the field was a hardcoded `0.0`; **on this provider the number is real and must
+  not inherit muse's `0.0` literal.**
