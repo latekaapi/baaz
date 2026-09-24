@@ -194,3 +194,33 @@ either waving through a Claude Code prompt that always fires, or
 ignoring a Codex prompt that fires only when something actually
 escaped. The strip and the card always name which backend is asking,
 so the person learns two rhythms and trusts both.
+
+## S46fix — the switcher's layout contract
+
+Found by driving the app, not by any test: the switcher row was one
+centred flex unit (`Muse | Claude Code | Codex | <caption>`), so each
+provider's different-length caption re-centred the whole row — Codex
+sat 78px away from itself between picks, and a second click aimed at
+it landed on Claude Code. The same row hard-clipped the caption at
+the pane boundary in a ~520px centre column.
+
+The contract now, in `Harness::render_provider_picker`:
+
+- The caption lives on its own line below the buttons, never in the
+  buttons' flex row. The buttons row is a fixed unit whose geometry
+  depends only on the constant button labels, so no caption change
+  can move a control.
+- The caption line is full-width with a deliberate ellipsis
+  (`truncate` + `overflow_hidden`, the same idiom the header title
+  uses), never a hard clip — at any column width the layout permits.
+- The three capability strings are unchanged; the layout absorbs the
+  length difference instead of the controls.
+
+Pinned by `provider_buttons_hold_still_and_caption_stays_inside` in
+`crates/baaz/src/app.rs`: a `#[gpui::test]` that draws the whole app
+at a narrow 520px window and at 900px, one draw per provider pick,
+and asserts the measured button bounds are identical across picks
+and the caption stays inside the picker's box. The test first
+asserts the three captions differ in length — without that, a
+shared-row layout would hold still trivially and the pin would prove
+nothing.
