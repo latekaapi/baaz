@@ -89,6 +89,7 @@ use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
+use crate::providers::ProviderId;
 use crate::resize::{ResizeDrag, RightResizeDrag};
 use crate::right;
 use crate::shot::CaptureToken;
@@ -421,6 +422,10 @@ type SearchStatusKey = (bool, usize, usize, bool, String);
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
+    /// The switcher's pick: which registry entry a new session starts on.
+    /// Seeded from the command line, changed only by the picker — never by
+    /// a live session, which keeps the lane it was created on.
+    pub(crate) new_provider: String,
     /// The legacy transport session views still ride. Same child as the
     /// provider below — never a second spawn. Gone with the last legacy
     /// view.
@@ -813,6 +818,7 @@ impl Harness {
         // The right divider's last settled width, or the default.
         let right_restored = layout::right_width(&layout::read());
         let mut this = Self {
+            new_provider: args.provider.clone(),
             args,
             client: None,
             provider: None,
@@ -2507,6 +2513,53 @@ impl Harness {
     /// Projects palette. Otherwise the one thing to do is start one.
     /// The hero column also takes a drop: every dropped directory is
     /// adopted, the first becoming current.
+    /// The switcher's pick, changed only by the picker below — never by a
+    /// live session, which keeps the lane it was created on.
+    pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        self.new_provider = id.as_str().to_owned();
+        cx.notify();
+    }
+
+    /// The provider switcher: three entries, one per registry backend.
+    /// A new session starts on the pick; a live session never changes
+    /// lanes, so this names only what comes next. Every option carries
+    /// its role and human label in the same change.
+    fn render_provider_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = ProviderId::parse(&self.new_provider);
+        let p = cx.aui().colors;
+        h_flex()
+            .id("provider-picker")
+            .role(gpui::Role::Group)
+            .aria_label("Provider for new sessions")
+            .gap(px(scale::SP_2))
+            .children(ProviderId::all().into_iter().map(|id| {
+                let mut pick = button(format!("provider-pick-{}", id.as_str()), id.label());
+                if id == current {
+                    pick = pick.primary();
+                }
+                let pick = pick.on_click(
+                    cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.select_new_provider(id, cx);
+                    }),
+                );
+                // The wrapper carries the role and the human label (the
+                // button has no aria builder of its own), plus which entry
+                // is picked and what it means.
+                div()
+                    .id(format!("provider-pick-wrap-{}", id.as_str()))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!(
+                        "Start new sessions on {}: {}. {}",
+                        id.label(),
+                        id.blurb(),
+                        if id == current { "Currently picked." } else { "Not picked." }
+                    ))
+                    .child(pick)
+            }))
+            .child(div().text_color(p.ink_3).child(current.blurb().to_owned()))
+            .into_any_element()
+    }
+
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         if self.current_project().is_none() {
@@ -2543,6 +2596,7 @@ impl Harness {
                         .child(button("hero-new", "New session").primary().icon(IconName::Plus).on_click(start))
                         .child(button("hero-choose", "Add project").icon(IconName::Folder).on_click(choose)),
                 )
+                .child(self.render_provider_picker(cx))
                 .into_any_element();
         }
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
@@ -2561,6 +2615,7 @@ impl Harness {
                     .child("Pick a session on the left, or \u{2318}N to start one."),
             )
             .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new))
+            .child(self.render_provider_picker(cx))
             .into_any_element()
     }
 

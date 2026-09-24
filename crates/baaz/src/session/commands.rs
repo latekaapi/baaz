@@ -167,6 +167,21 @@ impl SessionView {
     }
 
     pub(crate) fn steer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        // The capability gate, before any wire: on a provider where
+        // steering is `Unavailable` the seam would refuse the command, so
+        // the control must not invite the press — the words stay and the
+        // banner carries the provider's own reason. `Unverified` stays
+        // attemptable (the seam never refuses it); the strip above the
+        // composer says it is unverified.
+        if !crate::providers::capability_state(self.provider_kind(), provider::Capability::SteerTurn)
+            .allows_attempt()
+        {
+            let reason = self.steer_gate().unwrap_or_else(|| "Steering is not available on this provider.".into());
+            self.banner = Some(reason);
+            self.banner_action = None;
+            self.restore_prompt(text, cx);
+            return;
+        }
         let Some(turn_id) = self.running.as_ref().map(|r| r.turn_id.clone()) else {
             // The turn ended while the reclaim was in flight: the steer has
             // nowhere to go, so the words go back where they came from — with
@@ -214,6 +229,17 @@ impl SessionView {
     /// output committed is durably retracted and its prompt comes back.
     pub fn interrupt(&mut self, cx: &mut Context<Self>) {
         if !self.busy() {
+            return;
+        }
+        // Same gate as steering: an `Unavailable` stop button must say why
+        // instead of sending a command the seam refuses.
+        if !crate::providers::capability_state(self.provider_kind(), provider::Capability::TurnControl)
+            .allows_attempt()
+        {
+            let reason = self.turn_gate().unwrap_or_else(|| "Stopping is not available on this provider.".into());
+            self.banner = Some(reason);
+            self.banner_action = None;
+            cx.notify();
             return;
         }
         let params = TurnInterruptParams {
