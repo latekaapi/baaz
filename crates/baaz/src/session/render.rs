@@ -235,7 +235,7 @@ impl SessionView {
         // replaced a small mascot perched on the composer: at 44 pt that read
         // as an ornament stuck to the chrome rather than part of the screen.
         let hero = Some(crate::mascot::hero_mascot(&self.session_id, window, cx));
-        transcript::empty_state(&display, hero, pick, cx)
+        transcript::empty_state(self.provider_kind(), &display, hero, pick, cx)
     }
 
     /// Every intent a card can raise, bound once per frame.
@@ -1367,7 +1367,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             this.list_state.scroll_to_end();
             cx.notify();
         });
-        let banner = needs_you_banner("needs-you", "Muse is waiting for you.", detail);
+        let banner = needs_you_banner("needs-you", self.provider_kind().waiting_headline(), detail);
         let banner = if crate::clock::deterministic() { banner.at_rest() } else { banner };
         Some(
             div()
@@ -1652,7 +1652,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         )
         .on_activate(move |id, window, cx| plus(id, window, cx));
         let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
-        let mut element = composer("composer", &self.composer, aui_icons::Provider::Muse, self.model())
+        // The chip wears the session's own provider mark: a Codex session
+        // never shows the Muse "M".
+        let mut element = composer("composer", &self.composer, self.provider_kind().icon(), self.model())
             .docked(true)
             .mode(self.mode_label())
             .effort(crate::overlays::effort_label(self.effort))
