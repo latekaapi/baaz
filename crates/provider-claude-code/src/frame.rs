@@ -138,7 +138,9 @@ pub enum Frame {
     /// A `control_request` whose subtype this decoder does not know.
     /// Surfaced, never dropped and never panicked on: the probe only ever
     /// saw `can_use_tool`, and the next subtype must be visible when it
-    /// arrives.
+    /// arrives. The fold queues these as answerable
+    /// ([`crate::fold::UnknownControlRequest`]), so visibility is not
+    /// where handling ends.
     ControlUnknown {
         /// The top-level `request_id`, for joining a later answer.
         request_id: String,
@@ -750,27 +752,31 @@ mod tests {
         assert_eq!(result.1.as_deref(), Some("claude-haiku-4-5-20251001"));
         assert!(result.2.is_empty(), "nothing was denied in the fixture");
         assert_eq!(result.3, "PONG");
-        // And a denial decodes when one is there.
-        match decode_line(
-            r#"{"type":"result","subtype":"success","session_id":"s","result":"no",
-               "total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":1},
-               "permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1",
-               "tool_input":{"command":"rm -rf /"}}]}"#,
-        )
-        .expect("decodes")
-        {
-            Frame::TurnResult { permission_denials, total_cost_usd, .. } => {
-                assert_eq!(permission_denials.len(), 1);
-                assert_eq!(permission_denials[0].tool_name, "Bash");
-                assert_eq!(permission_denials[0].tool_use_id, "toolu_1");
-                assert_eq!(
-                    permission_denials[0].tool_input,
-                    serde_json::json!({"command": "rm -rf /"})
-                );
-                assert!((total_cost_usd - 0.5).abs() < 1e-12);
-            }
-            other => panic!("result must decode, got {other:?}"),
-        }
+        // And a denial decodes against real bytes: the deny fixture's
+        // `result` frame carries the refusal the owner actually saw. A
+        // hand-written literal here would pass whether or not its field
+        // names match the wire, so it pins nothing.
+        let denied = fixture("permission-deny.jsonl")
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|line| line.get("_dir").is_none())
+            .map(|line| decode_line(&line.to_string()).expect("child line decodes"))
+            .find_map(|frame| match frame {
+                Frame::TurnResult { permission_denials, total_cost_usd, .. } => {
+                    Some((permission_denials, total_cost_usd))
+                }
+                _ => None,
+            })
+            .expect("one denial-carrying result in the deny fixture");
+        assert!((denied.1 - 0.0696295).abs() < 1e-9, "real cost, not 0.0: {}", denied.1);
+        assert_eq!(
+            denied.0,
+            vec![PermissionDenial {
+                tool_name: "mcp__baaz__ping".into(),
+                tool_use_id: "toolu_01XqHeZeKksDmhf4miPM8P5C".into(),
+                tool_input: serde_json::json!({}),
+            }]
+        );
     }
 
     #[test]

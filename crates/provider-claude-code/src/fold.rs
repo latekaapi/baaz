@@ -41,8 +41,10 @@
 //!   answers it — answering is an explicit `DecideApproval`, because the
 //!   child waits silently (no timeout was observed) and an auto-answer
 //!   would bypass the person.
-//! * unknown control subtypes: recorded and rendered as generic cards —
-//!   surfaced, never dropped and never panicked on.
+//! * unknown control subtypes: queued as answerable pending requests and
+//!   rendered as generic cards — surfaced, never dropped, never
+//!   auto-answered, and never left hanging: `DecideApproval` answers one
+//!   with an explicit `"deny"` refusal (or a deliberate `"allow"`).
 //! * `control_response` (child→host): host-initiated, so no deltas.
 //! * everything else: no deltas (`init` records identity; `rate_limit`
 //!   updates the account snapshot).
@@ -71,6 +73,19 @@ struct ToolSite {
     params: Vec<(String, String)>,
 }
 
+/// A `control_request` whose subtype this adapter does not know, held for
+/// an explicit human decision exactly like a `can_use_tool` request: a
+/// received request must always be answerable, or the child hangs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnknownControlRequest {
+    /// The top-level `request_id`: what the `control_response` echoes.
+    pub request_id: String,
+    /// The unrecognised `request.subtype`.
+    pub subtype: String,
+    /// The raw `request` object, kept for inspection.
+    pub raw: serde_json::Value,
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: message id → turn (many
@@ -97,6 +112,10 @@ pub struct ClaudeFold {
     /// `(request_id, subtype)` in arrival order. Surfaced in the transcript,
     /// never dropped.
     unknown_control: Vec<(String, String)>,
+    /// Unknown-subtype requests waiting on a human decision, oldest first.
+    /// Answered through `DecideApproval` with `"deny"` (a refusal) or
+    /// `"allow"`; never auto-answered, never unanswerable.
+    pending_unknown: Vec<UnknownControlRequest>,
 }
 
 impl ClaudeFold {
@@ -132,6 +151,35 @@ impl ClaudeFold {
     pub fn take_approval(&mut self, request_id: &str) -> Option<ApprovalRequest> {
         let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
         Some(self.pending.remove(position))
+    }
+
+    /// Unknown-subtype control requests waiting on a human decision, oldest
+    /// first.
+    pub fn pending_unknown(&self) -> &[UnknownControlRequest] {
+        &self.pending_unknown
+    }
+
+    /// Take an unknown-subtype request for deciding. Removes it, so a
+    /// second decision cannot answer the same request twice.
+    pub fn take_unknown(&mut self, request_id: &str) -> Option<UnknownControlRequest> {
+        let position =
+            self.pending_unknown.iter().position(|queued| queued.request_id == request_id)?;
+        Some(self.pending_unknown.remove(position))
+    }
+
+    /// Put a claimed request back after an undeliverable answer, without
+    /// duplicating ids.
+    pub fn requeue_approval(&mut self, request: ApprovalRequest) {
+        if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
+            self.pending.push(request);
+        }
+    }
+
+    /// Put a claimed unknown-subtype request back, without duplicating ids.
+    pub fn requeue_unknown(&mut self, request: UnknownControlRequest) {
+        if !self.pending_unknown.iter().any(|queued| queued.request_id == request.request_id) {
+            self.pending_unknown.push(request);
+        }
     }
 
     /// Fold one decoded frame into render-ready deltas.
@@ -174,20 +222,32 @@ impl ClaudeFold {
                 // finish: decoded, visible, and never a substitute for
                 // answering the request itself.
                 if !permission_denials.is_empty() {
-                    if let Some(turn_id) = self.open.last().cloned() {
-                        for denial in permission_denials {
-                            deltas.push(Delta::BlockAdded {
-                                turn_id: turn_id.clone(),
-                                block: Block::Generic {
-                                    kind: "permission-denial".into(),
-                                    status: "denied".into(),
-                                    text: format!(
-                                        "{} ({}) refused",
-                                        denial.tool_name, denial.tool_use_id
-                                    ),
-                                },
-                            });
+                    // The card rides the running turn; with no turn open (a
+                    // bare result carrying denials) a turn keyed by the
+                    // first denial opens so the card is never dangling —
+                    // the same mechanism control-channel cards use.
+                    let turn_id = match self.open.last().cloned() {
+                        Some(open) => open,
+                        None => {
+                            let key = permission_denials
+                                .first()
+                                .map(|denial| format!("denial-{}", denial.tool_use_id))
+                                .unwrap_or_else(|| "denial".to_owned());
+                            self.control_turn(&key, &mut deltas)
                         }
+                    };
+                    for denial in permission_denials {
+                        deltas.push(Delta::BlockAdded {
+                            turn_id: turn_id.clone(),
+                            block: Block::Generic {
+                                kind: "permission-denial".into(),
+                                status: "denied".into(),
+                                text: format!(
+                                    "{} ({}) refused",
+                                    denial.tool_name, denial.tool_use_id
+                                ),
+                            },
+                        });
                     }
                 }
                 let open = std::mem::take(&mut self.open);
@@ -329,8 +389,11 @@ impl ClaudeFold {
         deltas
     }
 
-    /// Record an unrecognised control subtype and card it. The card is the
-    /// surfacing: without it the decision would vanish inside the noise.
+    /// Record an unrecognised control subtype, queue it for an explicit
+    /// decision, and card it. The card is the surfacing: without it the
+    /// decision would vanish inside the noise. The queue is the handling:
+    /// without it no code path could answer the request and the child
+    /// would hang.
     fn apply_unknown_control(
         &mut self,
         request_id: &str,
@@ -339,6 +402,13 @@ impl ClaudeFold {
     ) -> Vec<Delta> {
         if !self.unknown_control.iter().any(|(known, _)| known == request_id) {
             self.unknown_control.push((request_id.to_owned(), subtype.to_owned()));
+        }
+        if !self.pending_unknown.iter().any(|queued| queued.request_id == request_id) {
+            self.pending_unknown.push(UnknownControlRequest {
+                request_id: request_id.to_owned(),
+                subtype: subtype.to_owned(),
+                raw: raw.clone(),
+            });
         }
         let mut deltas = Vec::new();
         let turn_id = self.control_turn(request_id, &mut deltas);
@@ -386,6 +456,31 @@ impl ClaudeFold {
 /// answer line at all.
 pub fn decide_approval(
     request: &ApprovalRequest,
+    choice: &str,
+    feedback: Option<&str>,
+) -> Result<String, ProviderError> {
+    match choice {
+        "allow" => Ok(crate::frame::encode_control_allow(&request.request_id)),
+        "deny" => Ok(crate::frame::encode_control_deny(
+            &request.request_id,
+            feedback.unwrap_or("denied by the operator"),
+        )),
+        other => Err(ProviderError::Rejected {
+            reason: format!(
+                "unknown approval choice {other:?} for {}: offer \"allow\" or \"deny\"",
+                request.request_id
+            ),
+        }),
+    }
+}
+
+/// Render one explicit human decision answering an unknown-subtype control
+/// request. Same wire shape as [`decide_approval`] — a refusal (`"deny"`
+/// with the human's reason) is the expected default, `"allow"` the
+/// deliberate override — because the child waits on a `control_response`
+/// naming the `request_id`, whatever the subtype was.
+pub fn decide_unknown_approval(
+    request: &UnknownControlRequest,
     choice: &str,
     feedback: Option<&str>,
 ) -> Result<String, ProviderError> {
@@ -984,5 +1079,124 @@ mod tests {
             })
             .count();
         assert_eq!(pongs, 1, "the allowed tool's PONG completes its card");
+    }
+
+    /// A `result` carrying denials with no turn open still cards them: the
+    /// card opens its own turn rather than vanishing. Pinned to the real
+    /// deny capture — the refusal the owner actually saw — never a
+    /// hand-written literal whose names could drift off the wire.
+    #[test]
+    fn result_denials_card_when_no_turn_open() {
+        let result_line = fixture_lines("permission-deny.jsonl")
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value.get("_dir").is_none())
+            .find(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            })
+            .expect("the deny fixture carries a child result frame")
+            .to_string();
+        let frame = decode_line(&result_line).expect("decodes");
+        match &frame {
+            crate::frame::Frame::TurnResult { permission_denials, total_cost_usd, .. } => {
+                assert!(
+                    (total_cost_usd - 0.0696295).abs() < 1e-9,
+                    "real cost, not 0.0: {total_cost_usd}"
+                );
+                assert_eq!(
+                    permission_denials,
+                    &vec![crate::frame::PermissionDenial {
+                        tool_name: "mcp__baaz__ping".into(),
+                        tool_use_id: "toolu_01XqHeZeKksDmhf4miPM8P5C".into(),
+                        tool_input: serde_json::json!({}),
+                    }]
+                );
+            }
+            other => panic!("result must decode, got {other:?}"),
+        }
+        // No turn open: a bare result, the path the old code dropped.
+        let mut fold = ClaudeFold::new();
+        let deltas = fold.apply(&frame);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, status, .. }, .. }
+                if kind == "permission-denial" && status == "denied"
+            )),
+            "the denial must card even with no turn open: {deltas:?}"
+        );
+        assert!(
+            deltas.iter().any(|delta| match delta {
+                Delta::BlockAdded {
+                    block: Block::Generic { text, .. },
+                    ..
+                } => text.contains("toolu_01XqHeZeKksDmhf4miPM8P5C"),
+                _ => false,
+            }),
+            "the card names the refused tool use: {deltas:?}"
+        );
+        assert!(
+            deltas.iter().any(|delta| matches!(delta, Delta::TurnStarted { .. })),
+            "a synthetic turn opens so the card is never dangling: {deltas:?}"
+        );
+        assert!(
+            deltas.iter().any(|delta| matches!(delta, Delta::TurnFinished { .. })),
+            "the synthetic turn still finishes with its costed meta: {deltas:?}"
+        );
+    }
+
+    /// An unknown control subtype is answerable: it queues for a decision,
+    /// the caller decides, a `control_response` line is minted, and the
+    /// claim runs exactly once.
+    #[test]
+    fn unknown_control_request_can_be_answered() {
+        let mut fold = ClaudeFold::new();
+        let frame = decode_line(
+            r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#,
+        )
+        .expect("decodes");
+        let deltas = fold.apply(&frame);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, .. }, .. }
+                if kind.contains("frobnicate")
+            )),
+            "the unknown subtype must appear on the transcript: {deltas:?}"
+        );
+        assert_eq!(fold.pending_unknown().len(), 1, "the request must queue, not just card");
+        assert_eq!(fold.pending_unknown()[0].request_id, "req-x");
+        assert_eq!(fold.pending_unknown()[0].subtype, "frobnicate");
+        let request = fold.take_unknown("req-x").expect("a received request is answerable");
+        let line =
+            decide_unknown_approval(&request, "deny", Some("no such tool")).expect("refusal mints");
+        let written: serde_json::Value = serde_json::from_str(&line).expect("encodes JSON");
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("request_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("req-x")
+        );
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("behavior"))
+                .and_then(serde_json::Value::as_str),
+            Some("deny")
+        );
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("message"))
+                .and_then(serde_json::Value::as_str),
+            Some("no such tool")
+        );
+        assert!(fold.take_unknown("req-x").is_none(), "claimed exactly once");
+        assert!(fold.pending_unknown().is_empty());
+        let error = decide_unknown_approval(&request, "maybe", None).expect_err("no third choice");
+        assert!(error.to_string().contains("allow"));
     }
 }
