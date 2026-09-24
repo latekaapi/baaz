@@ -414,8 +414,8 @@ pub struct SessionView {
     external_outbox: Vec<ProviderCommand>,
     /// The workspace the session runs in, for the header and the empty state.
     workspace: String,
-    /// The session's project display name for the empty state ("Muse runs
-    /// in …"): a rename changes it without touching the folder, so the
+    /// The session's project display name for the empty state ("<provider>
+    /// runs in …"): a rename changes it without touching the folder, so the
     /// folder name alone is not it. The window syncs it on every activation.
     project_name: Option<String>,
     composer: Entity<TextareaState>,
@@ -685,7 +685,11 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) -> Self {
         let SessionHost { provider_id, workspace, overlays, capture } = host;
-        let composer = cx.new(|cx| composer_state_rows("Ask Muse, or type / for commands", 1, 8, window, cx));
+        // The empty composer names the session's own provider: the person
+        // is asking whoever this session runs on, never a hardcoded Muse.
+        let composer_placeholder = ProviderId::parse(&provider_id).composer_placeholder();
+        let composer =
+            cx.new(|cx| composer_state_rows(composer_placeholder.clone(), 1, 8, window, cx));
         // Typing is what opens, filters and closes the caret popovers, and what
         // takes the composer off the history it was walking.
         let subscription = cx.subscribe(&composer, |this: &mut Self, _, event: &InputEvent, cx| {
@@ -693,8 +697,21 @@ impl SessionView {
                 this.on_draft_changed(cx);
             }
         });
-        let feedback = cx.new(|cx| composer_state_rows("Why not? Muse reads this.", 2, 4, window, cx));
-        let clarify = cx.new(|cx| composer_state_rows("Say what you would rather Muse did", 2, 4, window, cx));
+        // The feedback fields name the same provider: whoever reads the
+        // answer is whoever the session runs on.
+        let provider_label = ProviderId::parse(&provider_id).label();
+        let feedback = cx.new(|cx| {
+            composer_state_rows(format!("Why not? {provider_label} reads this."), 2, 4, window, cx)
+        });
+        let clarify = cx.new(|cx| {
+            composer_state_rows(
+                format!("Say what you would rather {provider_label} did"),
+                2,
+                4,
+                window,
+                cx,
+            )
+        });
         let workspace_key = workspace.clone();
         Self {
             session_id,
