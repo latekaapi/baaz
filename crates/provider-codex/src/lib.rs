@@ -35,7 +35,9 @@ pub use caps::{capabilities, codex_version_supported, CODEX_VERSION_FLOOR};
 use child::{
     default_model, initialize_request, initialized_notification, model_ids, thread_ids,
     thread_start_request, turn_id_from, turn_interrupt_request, turn_start_request,
-    turn_steer_request, ApprovalDecision, RunningChild,
+    turn_steer_request, ApprovalAnswer, ApprovalKind, CommandApprovalDecision,
+    FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
+    PermissionsApprovalAnswer, RunningChild,
 };
 use fold::CodexFold;
 
@@ -209,19 +211,150 @@ impl CodexAdapter {
         Ok(Ack::TurnAccepted { turn_id })
     }
 
-    fn decide(choice: &str) -> Result<ApprovalDecision, ProviderError> {
+    /// Parse a [`Command::DecideApproval`] choice against the lane the
+    /// approval arrived on. Plain tokens decide the four shared outcomes;
+    /// the two amendment variants travel as JSON decision objects (the same
+    /// shape the wire carries); a permissions approval takes only its JSON
+    /// `{permissions, scope, strictAutoReview}` answer. Anything else is
+    /// refused, never misdelivered — notably `approved`, the silent refusal.
+    fn decide(kind: ApprovalKind, choice: &str) -> Result<ApprovalAnswer, ProviderError> {
+        match kind {
+            ApprovalKind::Command => Self::decide_command(choice).map(ApprovalAnswer::Command),
+            ApprovalKind::FileChange => {
+                Self::decide_file_change(choice).map(ApprovalAnswer::FileChange)
+            }
+            ApprovalKind::Permissions => {
+                Self::decide_permissions(choice).map(ApprovalAnswer::Permissions)
+            }
+            ApprovalKind::Unknown => Err(ProviderError::Rejected {
+                reason: "this approval arrived on an unknown requestApproval lane; \
+                         not answered blind"
+                    .into(),
+            }),
+        }
+    }
+
+    fn decide_command(choice: &str) -> Result<CommandApprovalDecision, ProviderError> {
         match choice {
-            "accept" => Ok(ApprovalDecision::Accept),
-            "accept-for-session" => Ok(ApprovalDecision::AcceptForSession),
-            "decline" => Ok(ApprovalDecision::Decline),
-            "cancel" => Ok(ApprovalDecision::Cancel),
+            "accept" => Ok(CommandApprovalDecision::Accept),
+            "accept-for-session" => Ok(CommandApprovalDecision::AcceptForSession),
+            "decline" => Ok(CommandApprovalDecision::Decline),
+            "cancel" => Ok(CommandApprovalDecision::Cancel),
+            _ => Self::decide_command_json(choice),
+        }
+    }
+
+    /// The two amendment variants as JSON decision objects, exactly the
+    /// shape `CommandExecutionRequestApprovalResponse.json` admits (a JSON
+    /// string token recurses back through the plain tokens above).
+    fn decide_command_json(choice: &str) -> Result<CommandApprovalDecision, ProviderError> {
+        let value: serde_json::Value =
+            serde_json::from_str(choice).map_err(|_| Self::bad_command_choice(choice))?;
+        match &value {
+            serde_json::Value::String(token) => Self::decide_command(token),
+            serde_json::Value::Object(_) => {
+                if let Some(amendment) = value
+                    .get("acceptWithExecpolicyAmendment")
+                    .and_then(|inner| inner.get("execpolicy_amendment"))
+                {
+                    let rules = amendment
+                        .as_array()
+                        .ok_or_else(|| Self::bad_command_choice(choice))?
+                        .iter()
+                        .map(|rule| {
+                            rule.as_str().map(str::to_owned).ok_or_else(|| {
+                                Self::bad_command_choice(choice)
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(CommandApprovalDecision::AcceptWithExecpolicyAmendment {
+                        execpolicy_amendment: rules,
+                    });
+                }
+                if let Some(amendment) = value
+                    .get("applyNetworkPolicyAmendment")
+                    .and_then(|inner| inner.get("network_policy_amendment"))
+                {
+                    let host = amendment
+                        .get("host")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| Self::bad_command_choice(choice))?
+                        .to_owned();
+                    let action = amendment
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(NetworkPolicyAction::parse)
+                        .ok_or_else(|| Self::bad_command_choice(choice))?;
+                    return Ok(CommandApprovalDecision::ApplyNetworkPolicyAmendment {
+                        host,
+                        action,
+                    });
+                }
+                Err(Self::bad_command_choice(choice))
+            }
+            _ => Err(Self::bad_command_choice(choice)),
+        }
+    }
+
+    fn bad_command_choice(choice: &str) -> ProviderError {
+        ProviderError::Rejected {
+            reason: format!(
+                "unknown command approval choice {choice:?}: offer accept, accept-for-session, \
+                 decline, cancel, or a JSON acceptWithExecpolicyAmendment / \
+                 applyNetworkPolicyAmendment decision"
+            ),
+        }
+    }
+
+    /// File-change approvals take exactly the four tokens — an amendment
+    /// object here is refused outright, so the pairing the types forbid at
+    /// compile time is also refused at the string boundary.
+    fn decide_file_change(choice: &str) -> Result<FileChangeApprovalDecision, ProviderError> {
+        let token = choice
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(choice);
+        match token {
+            "accept" => Ok(FileChangeApprovalDecision::Accept),
+            "accept-for-session" => Ok(FileChangeApprovalDecision::AcceptForSession),
+            "decline" => Ok(FileChangeApprovalDecision::Decline),
+            "cancel" => Ok(FileChangeApprovalDecision::Cancel),
             _ => Err(ProviderError::Rejected {
                 reason: format!(
-                    "unknown approval choice {choice:?}: offer accept, accept-for-session, \
-                     decline, or cancel"
+                    "unknown file-change approval choice {choice:?}: offer accept, \
+                     accept-for-session, decline, or cancel — amendments only pair \
+                     with command execution approvals"
                 ),
             }),
         }
+    }
+
+    /// Permissions approvals take only their JSON answer shape — there is
+    /// no `decision` token for this lane, so plain tokens are refused.
+    fn decide_permissions(choice: &str) -> Result<PermissionsApprovalAnswer, ProviderError> {
+        let bad = || ProviderError::Rejected {
+            reason: format!(
+                "a permissions approval takes its JSON answer shape \
+                 {{\"permissions\": {{...}}, \"scope\": \"turn\"|\"session\", \
+                 \"strictAutoReview\": bool|null}}, not {choice:?}"
+            ),
+        };
+        let value: serde_json::Value = serde_json::from_str(choice).map_err(|_| bad())?;
+        let object = value.as_object().ok_or_else(bad)?;
+        let permissions = object.get("permissions").cloned().ok_or_else(bad)?;
+        let scope = match object.get("scope") {
+            None | Some(serde_json::Value::Null) => PermissionGrantScope::Turn,
+            Some(serde_json::Value::String(token)) => {
+                PermissionGrantScope::parse(token).ok_or_else(bad)?
+            }
+            Some(_) => return Err(bad()),
+        };
+        let strict_auto_review = match object.get("strictAutoReview") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Bool(strict)) => Some(*strict),
+            Some(_) => return Err(bad()),
+        };
+        Ok(PermissionsApprovalAnswer { permissions, scope, strict_auto_review })
     }
 }
 
@@ -396,9 +529,18 @@ impl ProviderAdapter for CodexAdapter {
             }
             Command::DecideApproval { session_id, approval, choice, .. } => {
                 self.check_session(&session_id)?;
-                let decision = Self::decide(&choice)?;
+                // The lane the request arrived on decides which answer
+                // shape is legal; the kind-tagged answer then routes to
+                // the per-kind writer, which refuses a mismatched pairing.
+                let kind = self.with_child(|running| running.approval_kind(&approval))?;
+                let Some(kind) = kind else {
+                    return Err(ProviderError::Rejected {
+                        reason: format!("no pending approval {approval:?}: it may have resolved"),
+                    });
+                };
+                let answer = Self::decide(kind, &choice)?;
                 let answered = self
-                    .with_child(|running| running.answer_approval(&approval, decision))?
+                    .with_child(|running| running.answer_approval(&approval, &answer))?
                     .map_err(|error| ProviderError::Unavailable {
                         reason: format!("the session child is unreachable: {error}"),
                     })?;
@@ -564,14 +706,37 @@ mod tests {
 
     #[test]
     fn unknown_approval_choices_are_rejected() {
-        // The `approved` trap at the dispatch edge: only the four typed
-        // tokens decide; anything else is refused, never misdelivered.
-        assert!(CodexAdapter::decide("accept").is_ok());
-        assert!(CodexAdapter::decide("accept-for-session").is_ok());
-        assert!(CodexAdapter::decide("decline").is_ok());
-        assert!(CodexAdapter::decide("cancel").is_ok());
-        assert!(CodexAdapter::decide("approved").is_err(), "`approved` is the silent refusal");
-        assert!(CodexAdapter::decide("yes").is_err());
+        // The `approved` trap at the dispatch edge: only the typed tokens
+        // decide; anything else is refused, never misdelivered.
+        use ApprovalKind as K;
+        for kind in [K::Command, K::FileChange] {
+            assert!(CodexAdapter::decide(kind, "accept").is_ok());
+            assert!(CodexAdapter::decide(kind, "accept-for-session").is_ok());
+            assert!(CodexAdapter::decide(kind, "decline").is_ok());
+            assert!(CodexAdapter::decide(kind, "cancel").is_ok());
+            assert!(
+                CodexAdapter::decide(kind, "approved").is_err(),
+                "`approved` is the silent refusal"
+            );
+            assert!(CodexAdapter::decide(kind, "yes").is_err());
+        }
+        // Amendments pair with command execution only: the file-change
+        // lane refuses the JSON the command lane accepts.
+        let amendment = r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/bin/zsh"]}}"#;
+        assert!(CodexAdapter::decide(K::Command, amendment).is_ok());
+        assert!(CodexAdapter::decide(K::FileChange, amendment).is_err());
+        let network = r#"{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"host":"example.com","action":"allow"}}}"#;
+        assert!(CodexAdapter::decide(K::Command, network).is_ok());
+        assert!(CodexAdapter::decide(K::FileChange, network).is_err());
+        // Permissions take only their JSON answer shape: plain tokens —
+        // even `accept` — are refused on this lane.
+        assert!(CodexAdapter::decide(K::Permissions, "accept").is_err());
+        assert!(CodexAdapter::decide(K::Permissions, "decline").is_err());
+        let grant = r#"{"permissions":{"network":{"enabled":true}},"scope":"session"}"#;
+        assert!(CodexAdapter::decide(K::Permissions, grant).is_ok());
+        assert!(CodexAdapter::decide(K::Permissions, r#"{"scope":"turn"}"#).is_err());
+        // An unknown lane is never answered blind.
+        assert!(CodexAdapter::decide(K::Unknown, "accept").is_err());
     }
 
     #[test]

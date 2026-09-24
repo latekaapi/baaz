@@ -55,8 +55,12 @@ pub fn capabilities() -> CapabilitySet {
         // model/list answers four rows under the `data` key.
         (Capability::ModelCatalog, CapabilityState::Native),
         // item/commandExecution/requestApproval answered `accept`, the
-        // command then ran. The decision travels as a typed enum, never a
-        // string literal: `approved` fails closed and looks like a denial.
+        // command then ran. The decision travels as a per-kind typed enum,
+        // never a string literal: `approved` fails closed and looks like a
+        // denial. The fileChange and permissions params shapes come from
+        // their schema files, not from a capture — no fixture ever
+        // recorded those two requests, and no permissions answer was ever
+        // executed live.
         (Capability::Approvals, CapabilityState::Native),
         // item/tool/requestUserInput exists; no probe ever settled one.
         (Capability::Questions, CapabilityState::Unverified),
