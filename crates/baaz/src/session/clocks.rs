@@ -105,9 +105,16 @@ impl SessionView {
     }
 
     /// Whether anything is waiting on the person, for the needs-you banner.
+    /// New-provider approvals live beside the fold's, not inside it, so
+    /// both counts join here — a Codex approval waiting below must light
+    /// the same banner a legacy one does.
     pub(super) fn waiting_on_you(&self) -> Option<(usize, usize)> {
-        let side = self.fold.side(&self.session_id)?;
-        let (approvals, questions) = (side.pending_approvals.len(), side.pending_inputs.len());
+        let (legacy_approvals, questions) = self
+            .fold
+            .side(&self.session_id)
+            .map(|side| (side.pending_approvals.len(), side.pending_inputs.len()))
+            .unwrap_or((0, 0));
+        let approvals = legacy_approvals + self.external_approvals.pending().len();
         (approvals + questions > 0).then_some((approvals, questions))
     }
 
