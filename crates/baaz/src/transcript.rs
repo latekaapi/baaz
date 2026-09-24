@@ -1220,8 +1220,10 @@ pub(crate) const EMPTY_STATE_MEASURE: f32 = 880.0;
 ///
 /// `display` is the project's display name — a rename changes it without
 /// touching the folder, so the caller resolves it rather than this function
-/// deriving a folder name.
+/// deriving a folder name. `provider` is the session's own provider: the
+/// subtitle names whoever the session runs on, never a hardcoded Muse.
 pub fn empty_state(
+    provider: crate::providers::ProviderId,
     display: &str,
     hero: Option<AnyElement>,
     on_pick: Option<PickSuggestion>,
@@ -1236,7 +1238,7 @@ pub fn empty_state(
         .gap(px(scale::SP_3))
         .children(hero)
         .child(div().text_role(aui_tokens::TextRole::Title).text_color(p.ink_2).child("New session"))
-        .child(div().ui(scale::FS_12).text_color(p.ink_3).child(format!("Muse runs in {display}.")));
+        .child(div().ui(scale::FS_12).text_color(p.ink_3).child(provider.hero_subtitle(display)));
     // Three ways in, for a person looking at a blank page. They are prompts
     // about the workspace itself, so none of them assumes a project this is
     // not — and picking one only fills the composer, it never sends.

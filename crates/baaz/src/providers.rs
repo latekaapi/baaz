@@ -87,6 +87,35 @@ impl ProviderId {
             ProviderId::Codex => "Native steering and interruption; approvals carry the model's reason.",
         }
     }
+
+    /// The composer placeholder for a session on this provider: the person
+    /// is asking this provider, so the empty composer names it.
+    pub fn composer_placeholder(self) -> String {
+        format!("Ask {}, or type / for commands", self.label())
+    }
+
+    /// The hero subtitle for a session on this provider in a workspace
+    /// called `display`: the session runs on this provider, so the empty
+    /// state names it rather than assuming Muse.
+    pub fn hero_subtitle(self, display: &str) -> String {
+        format!("{} runs in {display}.", self.label())
+    }
+
+    /// The mark beside the composer model chip: each provider's own badge,
+    /// so a Codex session never wears the Muse "M".
+    pub fn icon(self) -> aui_icons::Provider {
+        match self {
+            ProviderId::Muse => aui_icons::Provider::Muse,
+            ProviderId::ClaudeCode => aui_icons::Provider::Claude,
+            ProviderId::Codex => aui_icons::Provider::Codex,
+        }
+    }
+
+    /// The needs-you banner headline: whoever the session runs on is the
+    /// one waiting on the person.
+    pub fn waiting_headline(self) -> String {
+        format!("{} is waiting for you.", self.label())
+    }
 }
 
 /// The capability map for one registry entry, mirrored from the adapter
@@ -423,6 +452,31 @@ mod tests {
             assert!(!id.label().contains('-') || id == ProviderId::ClaudeCode);
             assert_ne!(id.label(), id.as_str());
         }
+    }
+
+    #[test]
+    fn session_chrome_names_the_session_provider() {
+        // The hero subtitle, composer placeholder, chip badge and
+        // needs-you headline all derive from the session's provider: a
+        // future hardcode of any one of them fails here, on every provider.
+        for id in ProviderId::all() {
+            let label = id.label();
+            assert_eq!(id.hero_subtitle("harness"), format!("{label} runs in harness."));
+            assert_eq!(
+                id.composer_placeholder(),
+                format!("Ask {label}, or type / for commands")
+            );
+            assert_eq!(id.waiting_headline(), format!("{label} is waiting for you."));
+        }
+        assert_eq!(ProviderId::Muse.icon(), aui_icons::Provider::Muse);
+        assert_eq!(ProviderId::ClaudeCode.icon(), aui_icons::Provider::Claude);
+        assert_eq!(ProviderId::Codex.icon(), aui_icons::Provider::Codex);
+        // No two providers share a badge: the chip mark always identifies
+        // the session's lane.
+        let icons: Vec<_> = ProviderId::all().iter().map(|p| p.icon()).collect();
+        assert_ne!(icons[0], icons[1]);
+        assert_ne!(icons[0], icons[2]);
+        assert_ne!(icons[1], icons[2]);
     }
 
     #[test]
