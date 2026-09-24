@@ -525,6 +525,174 @@ pub fn decode_envelope(line: &str) -> Result<(Direction, Frame), DecodeError> {
     Ok((direction, decode_value(frame)?))
 }
 
+impl Item {
+    /// The wire item id (`msg_…`, `exec-…`, …).
+    pub fn id(&self) -> &str {
+        match self {
+            Item::AgentMessage { id, .. }
+            | Item::UserMessage { id, .. }
+            | Item::Reasoning { id, .. }
+            | Item::CommandExecution { id, .. }
+            | Item::Other { id, .. } => id,
+        }
+    }
+
+    /// The wire `type` string (`agentMessage`, `userMessage`, …).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Item::AgentMessage { .. } => "agentMessage",
+            Item::UserMessage { .. } => "userMessage",
+            Item::Reasoning { .. } => "reasoning",
+            Item::CommandExecution { .. } => "commandExecution",
+            Item::Other { .. } => "other",
+        }
+    }
+
+    /// Renderable text: full `text` for agent messages, joined parts for
+    /// user messages, the trace for reasoning; empty for anything else.
+    pub fn text(&self) -> &str {
+        match self {
+            Item::AgentMessage { text, .. }
+            | Item::UserMessage { text, .. }
+            | Item::Reasoning { text, .. } => text,
+            Item::CommandExecution { .. } | Item::Other { .. } => "",
+        }
+    }
+
+    /// The exact command, for command executions; empty otherwise.
+    pub fn command(&self) -> &str {
+        match self {
+            Item::CommandExecution { command, .. } => command,
+            _ => "",
+        }
+    }
+
+    /// The wire `status` for command executions; empty otherwise.
+    pub fn status(&self) -> &str {
+        match self {
+            Item::CommandExecution { status, .. } => status,
+            _ => "",
+        }
+    }
+
+    /// The process exit code, when reported.
+    pub fn exit_code(&self) -> Option<i64> {
+        match self {
+            Item::CommandExecution { exit_code, .. } => *exit_code,
+            _ => None,
+        }
+    }
+}
+
+impl Notification {
+    /// The owning thread, when the notification names one.
+    pub fn thread_id(&self) -> Option<&str> {
+        match self {
+            Notification::ThreadStarted { thread_id, .. }
+            | Notification::ThreadStatus { thread_id, .. }
+            | Notification::TurnStarted { thread_id, .. }
+            | Notification::TurnCompleted { thread_id, .. }
+            | Notification::ItemStarted { thread_id, .. }
+            | Notification::ItemCompleted { thread_id, .. }
+            | Notification::AgentMessageDelta { thread_id, .. }
+            | Notification::TokenUsage { thread_id, .. } => Some(thread_id),
+            Notification::McpStatus { thread_id, .. }
+            | Notification::ServerRequestResolved { thread_id, .. } => thread_id.as_deref(),
+            Notification::RateLimitsUpdated { .. }
+            | Notification::ErrorNotice { .. }
+            | Notification::WarningNotice { .. }
+            | Notification::Unknown { .. } => None,
+        }
+    }
+
+    /// The owning turn, when the notification names one.
+    pub fn turn_id(&self) -> Option<&str> {
+        match self {
+            Notification::TurnStarted { turn_id, .. }
+            | Notification::TurnCompleted { turn_id, .. }
+            | Notification::ItemStarted { turn_id, .. }
+            | Notification::ItemCompleted { turn_id, .. }
+            | Notification::AgentMessageDelta { turn_id, .. }
+            | Notification::TokenUsage { turn_id, .. } => Some(turn_id),
+            _ => None,
+        }
+    }
+
+    /// The carried item, for `item/started` and `item/completed`.
+    pub fn item(&self) -> Option<&Item> {
+        match self {
+            Notification::ItemStarted { item, .. } | Notification::ItemCompleted { item, .. } => {
+                Some(item)
+            }
+            _ => None,
+        }
+    }
+
+    /// The token buckets, for `thread/tokenUsage/updated`.
+    pub fn usage(&self) -> Option<&TokenUsage> {
+        match self {
+            Notification::TokenUsage { usage, .. } => Some(usage),
+            _ => None,
+        }
+    }
+
+    /// The terminal status string, for `turn/completed`.
+    pub fn completed_status(&self) -> Option<&str> {
+        match self {
+            Notification::TurnCompleted { status, .. } => Some(status),
+            _ => None,
+        }
+    }
+
+    /// Wall-clock milliseconds, for `turn/completed`.
+    pub fn duration_ms(&self) -> Option<u64> {
+        match self {
+            Notification::TurnCompleted { duration_ms, .. } => Some(*duration_ms),
+            _ => None,
+        }
+    }
+
+    /// Human text, for `error` and `warning` notices.
+    pub fn notice_text(&self) -> Option<&str> {
+        match self {
+            Notification::ErrorNotice { message } | Notification::WarningNotice { message } => {
+                Some(message)
+            }
+            _ => None,
+        }
+    }
+
+    /// The minted session id, for `thread/started`.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Notification::ThreadStarted { session_id, .. } => Some(session_id),
+            _ => None,
+        }
+    }
+
+    /// The raw params, for `account/rateLimits/updated`.
+    pub fn rate_limit_params(&self) -> Option<&Value> {
+        match self {
+            Notification::RateLimitsUpdated { params } => Some(params),
+            _ => None,
+        }
+    }
+}
+
+impl Frame {
+    /// The method, for requests and notifications.
+    pub fn method(&self) -> Option<&str> {
+        match self {
+            Frame::Request { method, .. } => Some(method),
+            Frame::Notification(notification) => match notification {
+                Notification::Unknown { method, .. } => Some(method),
+                _ => None,
+            },
+            Frame::Response { .. } | Frame::ResponseError { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
