@@ -41,6 +41,38 @@ use crate::frame::{decode_line, Frame};
 /// would be worse.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Which approval lane a pending server request arrived on. The kind is
+/// fixed when the request arrives (from its method) and decides which answer
+/// shape is legal: an execpolicy amendment pairs with a command execution
+/// and nothing else, and a permissions request takes no `decision` at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalKind {
+    /// `item/commandExecution/requestApproval`.
+    Command,
+    /// `item/fileChange/requestApproval`.
+    FileChange,
+    /// `item/permissions/requestApproval`.
+    Permissions,
+    /// A future `*requestApproval` method this adapter does not know yet.
+    /// Surfaced, never answered blind.
+    Unknown,
+}
+
+impl ApprovalKind {
+    /// Classify a server→client method: the three known approval requests,
+    /// or `Unknown` for a future `*requestApproval` kind. `None` means the
+    /// method is not an approval request at all.
+    pub fn from_method(method: &str) -> Option<Self> {
+        match method {
+            "item/commandExecution/requestApproval" => Some(ApprovalKind::Command),
+            "item/fileChange/requestApproval" => Some(ApprovalKind::FileChange),
+            "item/permissions/requestApproval" => Some(ApprovalKind::Permissions),
+            _ if method.contains("requestApproval") => Some(ApprovalKind::Unknown),
+            _ => None,
+        }
+    }
+}
+
 /// A server approval request waiting for a decision: the JSON-RPC id to
 /// answer plus what the model said it wants, in its own words.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +86,8 @@ struct PendingApproval {
     item_id: String,
     /// The model's human sentence justifying the request.
     headline: String,
+    /// Which answer shape this request accepts, fixed at arrival.
+    kind: ApprovalKind,
 }
 
 /// One pending approval, pointed at — not the full card. Enough to find it
@@ -244,37 +278,288 @@ pub fn turn_id_from(result: &Value) -> Option<String> {
     result.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// An approval decision, typed so the wire token can never be a string
-/// literal. The token is `accept`: replying `approved` is silently treated
-/// as a refusal (`status:"declined"` in the log, no schema error), which is
-/// the safe direction but indistinguishable from a real denial.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    /// Run it, once.
+/// A command-execution approval decision, typed per approval kind so the
+/// wire token can never be a string literal — and an execpolicy or network
+/// amendment can never be offered to a file-change request: that variant
+/// simply does not exist on [`FileChangeApprovalDecision`], so the pairing
+/// fails to compile instead of failing closed at runtime.
+///
+/// The token is `accept`: replying `approved` is silently treated as a
+/// refusal (`status:"declined"` in the log, no schema error), which is the
+/// safe direction but indistinguishable from a real denial. Per
+/// `CommandExecutionRequestApprovalResponse.json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandApprovalDecision {
+    /// Run it, once (`accept`).
     Accept,
-    /// Run it and stop asking, session-scoped.
+    /// Run it and stop asking, session-scoped (`acceptForSession`).
     AcceptForSession,
-    /// Refuse; the turn continues.
+    /// Run it and persist the proposed execpolicy amendment, so future
+    /// matching commands run without prompting.
+    AcceptWithExecpolicyAmendment {
+        /// The amended execpolicy rules, echoed from the request's
+        /// `proposedExecpolicyAmendment`.
+        execpolicy_amendment: Vec<String>,
+    },
+    /// Persist a network policy rule for the host (the persistent
+    /// counterpart to `acceptForSession` for network access).
+    ApplyNetworkPolicyAmendment {
+        /// The host the rule covers.
+        host: String,
+        /// Whether the host is allowed or denied.
+        action: NetworkPolicyAction,
+    },
+    /// Refuse; the turn continues (`decline`).
     Decline,
-    /// Refuse; the turn is interrupted.
+    /// Refuse; the turn is interrupted (`cancel`).
     Cancel,
 }
 
-impl ApprovalDecision {
+/// The persistent network rule action in
+/// `applyNetworkPolicyAmendment.network_policy_amendment`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkPolicyAction {
+    /// Allow the host (`allow`).
+    Allow,
+    /// Deny the host (`deny`).
+    Deny,
+}
+
+impl NetworkPolicyAction {
     /// The wire token.
     pub fn wire(&self) -> &'static str {
         match self {
-            ApprovalDecision::Accept => "accept",
-            ApprovalDecision::AcceptForSession => "acceptForSession",
-            ApprovalDecision::Decline => "decline",
-            ApprovalDecision::Cancel => "cancel",
+            NetworkPolicyAction::Allow => "allow",
+            NetworkPolicyAction::Deny => "deny",
+        }
+    }
+
+    /// Parse the wire token; anything else is `None`, never a default.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "allow" => Some(NetworkPolicyAction::Allow),
+            "deny" => Some(NetworkPolicyAction::Deny),
+            _ => None,
         }
     }
 }
 
-/// The `result` answering an approval request: `{"decision": <token>}`.
-pub fn decision_result(decision: ApprovalDecision) -> Value {
-    json!({"decision": decision.wire()})
+/// A file-change approval decision. Deliberately narrower than
+/// [`CommandApprovalDecision`]: `FileChangeRequestApprovalResponse.json`
+/// admits exactly these four string tokens and no amendment object, so an
+/// amendment sent here would be a runtime rejection — the missing variants
+/// make it a compile error instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileChangeApprovalDecision {
+    /// Approve the file changes, once (`accept`).
+    Accept,
+    /// Approve and stop asking for the same files, session-scoped
+    /// (`acceptForSession`).
+    AcceptForSession,
+    /// Refuse; the turn continues (`decline`).
+    Decline,
+    /// Refuse; the turn is interrupted (`cancel`).
+    Cancel,
+}
+
+/// How long a permissions grant lasts. Per
+/// `PermissionsRequestApprovalResponse.json`; defaults to the turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PermissionGrantScope {
+    /// The grant lasts for this turn (the schema default).
+    #[default]
+    Turn,
+    /// The grant lasts for the session.
+    Session,
+}
+
+impl PermissionGrantScope {
+    /// The wire token.
+    pub fn wire(&self) -> &'static str {
+        match self {
+            PermissionGrantScope::Turn => "turn",
+            PermissionGrantScope::Session => "session",
+        }
+    }
+
+    /// Parse the wire token; anything else is `None`, never a default.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "turn" => Some(PermissionGrantScope::Turn),
+            "session" => Some(PermissionGrantScope::Session),
+            _ => None,
+        }
+    }
+}
+
+/// The answer to a `permissions/requestApproval`: a completely different
+/// shape from the other two kinds — no `decision` field at all, just the
+/// granted profile plus scope. Per
+/// `PermissionsRequestApprovalResponse.json`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionsApprovalAnswer {
+    /// The granted permission profile (`GrantedPermissionProfile` shape).
+    /// Carried as raw JSON: the profile is a wide overlay the adapter never
+    /// interprets, only echoes.
+    pub permissions: Value,
+    /// How long the grant lasts.
+    pub scope: PermissionGrantScope,
+    /// When set, every subsequent command in this turn is reviewed before
+    /// normal sandboxed execution. `None` omits the key (schema null).
+    pub strict_auto_review: Option<bool>,
+}
+
+/// Any approval answer, tagged by the kind it may satisfy. Constructing the
+/// wrong pairing (an amendment for a file change, a `decision` for a
+/// permissions request) is impossible at this layer: the per-kind answer
+/// fns take only their own decision type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApprovalAnswer {
+    /// Answer a command-execution approval.
+    Command(CommandApprovalDecision),
+    /// Answer a file-change approval.
+    FileChange(FileChangeApprovalDecision),
+    /// Answer a permissions approval.
+    Permissions(PermissionsApprovalAnswer),
+}
+
+/// The `result` answering a command-execution approval:
+/// `{"decision": <token or amendment object>}`.
+pub fn command_decision_result(decision: &CommandApprovalDecision) -> Value {
+    let decision_value = match decision {
+        CommandApprovalDecision::Accept => json!("accept"),
+        CommandApprovalDecision::AcceptForSession => json!("acceptForSession"),
+        CommandApprovalDecision::AcceptWithExecpolicyAmendment { execpolicy_amendment } => {
+            json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": execpolicy_amendment}})
+        }
+        CommandApprovalDecision::ApplyNetworkPolicyAmendment { host, action } => {
+            json!({"applyNetworkPolicyAmendment":
+                {"network_policy_amendment": {"host": host, "action": action.wire()}}})
+        }
+        CommandApprovalDecision::Decline => json!("decline"),
+        CommandApprovalDecision::Cancel => json!("cancel"),
+    };
+    json!({"decision": decision_value})
+}
+
+/// The `result` answering a file-change approval:
+/// `{"decision": <one of the four tokens>}`.
+pub fn file_change_decision_result(decision: FileChangeApprovalDecision) -> Value {
+    let token = match decision {
+        FileChangeApprovalDecision::Accept => "accept",
+        FileChangeApprovalDecision::AcceptForSession => "acceptForSession",
+        FileChangeApprovalDecision::Decline => "decline",
+        FileChangeApprovalDecision::Cancel => "cancel",
+    };
+    json!({"decision": token})
+}
+
+/// The `result` answering a permissions approval:
+/// `{permissions, scope, strictAutoReview}` — no `decision` field.
+pub fn permissions_answer_result(answer: &PermissionsApprovalAnswer) -> Value {
+    let mut result = serde_json::Map::with_capacity(3);
+    result.insert("permissions".to_owned(), answer.permissions.clone());
+    result.insert("scope".to_owned(), Value::String(answer.scope.wire().to_owned()));
+    if let Some(strict) = answer.strict_auto_review {
+        result.insert("strictAutoReview".to_owned(), Value::Bool(strict));
+    }
+    Value::Object(result)
+}
+
+/// The `result` for any approval answer, routed by kind.
+pub fn approval_answer_result(answer: &ApprovalAnswer) -> Value {
+    match answer {
+        ApprovalAnswer::Command(decision) => command_decision_result(decision),
+        ApprovalAnswer::FileChange(decision) => {
+            file_change_decision_result(*decision)
+        }
+        ApprovalAnswer::Permissions(answer) => permissions_answer_result(answer),
+    }
+}
+
+fn required_str(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn optional_str(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// A decoded `item/fileChange/requestApproval` params. The shape comes from
+/// `FileChangeRequestApprovalParams.json`: no live capture of this request
+/// exists, so this decoder is schema-read, never fixture-proven.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChangeApprovalParams {
+    /// The wire item id being approved.
+    pub item_id: String,
+    /// The owning thread.
+    pub thread_id: String,
+    /// The owning turn.
+    pub turn_id: String,
+    /// When the approval request started (unix millis).
+    pub started_at_ms: i64,
+    /// Unstable session write root the agent asks for, when present.
+    pub grant_root: Option<String>,
+    /// The model's human sentence, when present.
+    pub reason: Option<String>,
+}
+
+impl FileChangeApprovalParams {
+    /// Decode the request `params`. `None` when a required schema field
+    /// (`itemId`, `threadId`, `turnId`, `startedAtMs`) is missing — never a
+    /// defaulted guess.
+    pub fn decode(params: &Value) -> Option<Self> {
+        Some(Self {
+            item_id: required_str(params, "itemId")?,
+            thread_id: required_str(params, "threadId")?,
+            turn_id: required_str(params, "turnId")?,
+            started_at_ms: params.get("startedAtMs").and_then(Value::as_i64)?,
+            grant_root: optional_str(params, "grantRoot"),
+            reason: optional_str(params, "reason"),
+        })
+    }
+}
+
+/// A decoded `item/permissions/requestApproval` params. The shape comes
+/// from `PermissionsRequestApprovalParams.json`: no live capture of this
+/// request exists, so this decoder is schema-read, never fixture-proven.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionsApprovalParams {
+    /// The wire item id being approved.
+    pub item_id: String,
+    /// The owning thread.
+    pub thread_id: String,
+    /// The owning turn.
+    pub turn_id: String,
+    /// When the approval request started (unix millis).
+    pub started_at_ms: i64,
+    /// The working directory the grant applies to.
+    pub cwd: String,
+    /// The requested permission profile (`RequestPermissionProfile` shape).
+    /// Carried raw: the adapter never interprets it, only surfaces it.
+    pub permissions: Value,
+    /// The environment the grant applies to, when present.
+    pub environment_id: Option<String>,
+    /// The model's human sentence, when present.
+    pub reason: Option<String>,
+}
+
+impl PermissionsApprovalParams {
+    /// Decode the request `params`. `None` when a required schema field
+    /// (`itemId`, `threadId`, `turnId`, `startedAtMs`, `cwd`,
+    /// `permissions`) is missing — never a defaulted guess.
+    pub fn decode(params: &Value) -> Option<Self> {
+        Some(Self {
+            item_id: required_str(params, "itemId")?,
+            thread_id: required_str(params, "threadId")?,
+            turn_id: required_str(params, "turnId")?,
+            started_at_ms: params.get("startedAtMs").and_then(Value::as_i64)?,
+            cwd: required_str(params, "cwd")?,
+            permissions: params.get("permissions")?.clone(),
+            environment_id: optional_str(params, "environmentId"),
+            reason: optional_str(params, "reason"),
+        })
+    }
 }
 
 fn write_value(stdin: &Arc<Mutex<ChildStdin>>, value: &Value) -> std::io::Result<()> {
@@ -399,9 +684,10 @@ impl RunningChild {
         })
     }
 
-    /// Answer one server→client request. Approval requests are surfaced as
-    /// [`ProviderEvent::ApprovalRequested`] and answered later by
-    /// [`Self::answer_approval`]; question requests (`item/tool/requestUserInput`,
+    /// Answer one server→client request. Approval requests (all three
+    /// `*requestApproval` kinds) are surfaced as
+    /// [`ProviderEvent::ApprovalRequested`] and answered later by the
+    /// per-kind answer fns; question requests (`item/tool/requestUserInput`,
     /// `mcpServer/elicitation/request`) are surfaced as
     /// [`ProviderEvent::QuestionRaised`], recorded for
     /// [`Self::pending_questions`], and refused with the same "cannot serve"
@@ -420,7 +706,7 @@ impl RunningChild {
     ) {
         let thread_id =
             params.get("threadId").and_then(Value::as_str).unwrap_or_default().to_owned();
-        if method.contains("requestApproval") {
+        if let Some(kind) = ApprovalKind::from_method(method) {
             let item_id =
                 params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned();
             let headline = params
@@ -434,6 +720,7 @@ impl RunningChild {
                     thread_id: thread_id.clone(),
                     item_id: item_id.clone(),
                     headline: headline.clone(),
+                    kind,
                 });
             }
             let _ = events.send(ProviderEvent::ApprovalRequested {
@@ -545,14 +832,42 @@ impl RunningChild {
         write_value(&self.stdin, &json!({"method": method, "params": params}))
     }
 
-    /// Answer a pending approval request. True when the approval was known
-    /// (and is now answered and forgotten); false when the id is unknown —
-    /// never an error, a stale decision is refused, not misdelivered.
-    pub fn answer_approval(
+    /// Answer a pending command-execution approval. True when the approval
+    /// was known (and is now answered and forgotten); false when the id is
+    /// unknown — never an error, a stale decision is refused, not
+    /// misdelivered. Taking only [`CommandApprovalDecision`] is what makes
+    /// an amendment-to-file-change pairing a compile error.
+    pub fn answer_command_approval(
         &self,
         item_id: &str,
-        decision: ApprovalDecision,
+        decision: &CommandApprovalDecision,
     ) -> std::io::Result<bool> {
+        self.answer_result(item_id, &command_decision_result(decision))
+    }
+
+    /// Answer a pending file-change approval. The decision type admits
+    /// exactly the four schema tokens: there is no amendment variant to
+    /// send here, by construction.
+    pub fn answer_file_change_approval(
+        &self,
+        item_id: &str,
+        decision: FileChangeApprovalDecision,
+    ) -> std::io::Result<bool> {
+        self.answer_result(item_id, &file_change_decision_result(decision))
+    }
+
+    /// Answer a pending permissions approval with its real
+    /// `{permissions, scope, strictAutoReview}` shape — no `decision`
+    /// field.
+    pub fn answer_permissions_approval(
+        &self,
+        item_id: &str,
+        answer: &PermissionsApprovalAnswer,
+    ) -> std::io::Result<bool> {
+        self.answer_result(item_id, &permissions_answer_result(answer))
+    }
+
+    fn answer_result(&self, item_id: &str, result: &Value) -> std::io::Result<bool> {
         let pending = self
             .shared
             .lock()
@@ -560,11 +875,44 @@ impl RunningChild {
             .approvals
             .remove(item_id);
         let Some(pending) = pending else { return Ok(false) };
-        write_value(
-            &self.stdin,
-            &json!({"id": pending.request_id, "result": decision_result(decision)}),
-        )?;
+        write_value(&self.stdin, &json!({"id": pending.request_id, "result": result}))?;
         Ok(true)
+    }
+
+    /// Answer a pending approval request with a kind-tagged answer. True
+    /// when the approval was known and the answer's kind matches the lane
+    /// the request arrived on; false when the id is unknown. A kind
+    /// mismatch (a command answer for a file-change request) is an error,
+    /// never a misdelivery: the per-kind fns above make that pairing a
+    /// compile error, and this router refuses it at runtime too.
+    pub fn answer_approval(
+        &self,
+        item_id: &str,
+        answer: &ApprovalAnswer,
+    ) -> std::io::Result<bool> {
+        let expected = match answer {
+            ApprovalAnswer::Command(_) => ApprovalKind::Command,
+            ApprovalAnswer::FileChange(_) => ApprovalKind::FileChange,
+            ApprovalAnswer::Permissions(_) => ApprovalKind::Permissions,
+        };
+        let kind = self.approval_kind(item_id);
+        match kind {
+            Some(found) if found == expected => {
+                self.answer_result(item_id, &approval_answer_result(answer))
+            }
+            Some(_) => Err(std::io::Error::other(format!(
+                "approval {item_id:?} arrived as {kind:?} and cannot take a {expected:?} answer"
+            ))),
+            None => Ok(false),
+        }
+    }
+
+    /// Which lane a pending approval arrived on, if it is still pending.
+    pub fn approval_kind(&self, item_id: &str) -> Option<ApprovalKind> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|shared| shared.approvals.get(item_id).map(|pending| pending.kind))
     }
 
     /// The questions already refused with "cannot serve", so the UI can at
@@ -767,20 +1115,132 @@ mod tests {
         assert!(!thread_id.is_empty());
     }
 
-    #[test]
-    fn approval_decisions_are_typed_and_spell_accept() {
-        // The recorded wrong guess: `approved` is silently a refusal.
-        assert_eq!(decision_result(ApprovalDecision::Accept), json!({"decision": "accept"}));
-        assert_ne!(decision_result(ApprovalDecision::Accept), json!({"decision": "approved"}));
+    /// Pin one command decision's exact wire bytes against the schema's
+    /// literal: not a round trip through our own encoder and decoder
+    /// (which agrees with itself whatever it emits), but a comparison to
+    /// the string the schema names.
+    fn pin_decision(decision: &CommandApprovalDecision, wire: &str) {
+        let result = command_decision_result(decision);
         assert_eq!(
-            decision_result(ApprovalDecision::AcceptForSession),
-            json!({"decision": "acceptForSession"})
+            serde_json::to_string(&result).expect("serializes"),
+            format!("{{\"decision\":{wire}}}"),
+            "command decision pins its schema literal byte-for-byte"
         );
-        assert_eq!(decision_result(ApprovalDecision::Decline), json!({"decision": "decline"}));
-        assert_eq!(decision_result(ApprovalDecision::Cancel), json!({"decision": "cancel"}));
+    }
 
-        // The approval fixture's own round trip uses the typed token: the
-        // server asked, the client answered `accept`, the command then ran.
+    fn pin_file_change(decision: FileChangeApprovalDecision, token: &str) {
+        let result = file_change_decision_result(decision);
+        assert_eq!(
+            serde_json::to_string(&result).expect("serializes"),
+            format!("{{\"decision\":\"{token}\"}}"),
+            "file-change decision pins its schema literal byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn command_accept_pins_its_schema_literal() {
+        use CommandApprovalDecision as D;
+        pin_decision(&D::Accept, r#""accept""#);
+        // The recorded wrong guess: `approved` is silently a refusal.
+        assert_ne!(
+            serde_json::to_string(&command_decision_result(&D::Accept)).expect("serializes"),
+            r#"{"decision":"approved"}"#
+        );
+    }
+
+    #[test]
+    fn command_accept_for_session_pins_its_schema_literal() {
+        pin_decision(&CommandApprovalDecision::AcceptForSession, r#""acceptForSession""#);
+    }
+
+    #[test]
+    fn command_execpolicy_amendment_pins_its_schema_literal() {
+        // Per `CommandExecutionRequestApprovalResponse.json`: the decision
+        // is an object keyed `acceptWithExecpolicyAmendment`, carrying the
+        // amended rules under `execpolicy_amendment`.
+        pin_decision(
+            &CommandApprovalDecision::AcceptWithExecpolicyAmendment {
+                execpolicy_amendment: vec!["/bin/zsh".to_owned(), "-lc".to_owned()],
+            },
+            r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/bin/zsh","-lc"]}}"#,
+        );
+    }
+
+    #[test]
+    fn command_network_policy_amendment_pins_its_schema_literal() {
+        // Per `CommandExecutionRequestApprovalResponse.json`: the decision
+        // is an object keyed `applyNetworkPolicyAmendment`, carrying the
+        // host rule under `network_policy_amendment`.
+        for (action, token) in
+            [(NetworkPolicyAction::Allow, "allow"), (NetworkPolicyAction::Deny, "deny")]
+        {
+            pin_decision(
+                &CommandApprovalDecision::ApplyNetworkPolicyAmendment {
+                    host: "example.com".to_owned(),
+                    action,
+                },
+                &format!(
+                    r#"{{"applyNetworkPolicyAmendment":{{"network_policy_amendment":{{"host":"example.com","action":"{token}"}}}}}}"#
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn command_decline_pins_its_schema_literal() {
+        pin_decision(&CommandApprovalDecision::Decline, r#""decline""#);
+    }
+
+    #[test]
+    fn command_cancel_pins_its_schema_literal() {
+        pin_decision(&CommandApprovalDecision::Cancel, r#""cancel""#);
+    }
+
+    #[test]
+    fn file_change_decisions_pin_their_schema_literals() {
+        // Per `FileChangeRequestApprovalResponse.json`: exactly the four
+        // string tokens, no amendment objects.
+        use FileChangeApprovalDecision as D;
+        pin_file_change(D::Accept, "accept");
+        pin_file_change(D::AcceptForSession, "acceptForSession");
+        pin_file_change(D::Decline, "decline");
+        pin_file_change(D::Cancel, "cancel");
+    }
+
+    #[test]
+    fn permissions_answer_pins_its_schema_shape() {
+        // Per `PermissionsRequestApprovalResponse.json`: no `decision`
+        // field at all — `{permissions, scope, strictAutoReview}`.
+        let answer = PermissionsApprovalAnswer {
+            permissions: json!({"network": {"enabled": true}}),
+            scope: PermissionGrantScope::Session,
+            strict_auto_review: Some(true),
+        };
+        let result = permissions_answer_result(&answer);
+        assert!(result.get("decision").is_none(), "no decision field on this lane");
+        assert_eq!(
+            serde_json::to_string(&result).expect("serializes"),
+            r#"{"permissions":{"network":{"enabled":true}},"scope":"session","strictAutoReview":true}"#,
+            "permissions answer pins its schema shape byte-for-byte"
+        );
+        // Without the optional review flag the key is omitted (schema
+        // null), and the scope defaults to the turn.
+        let minimal = PermissionsApprovalAnswer {
+            permissions: json!({"fileSystem": null, "network": null}),
+            scope: PermissionGrantScope::Turn,
+            strict_auto_review: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&permissions_answer_result(&minimal)).expect("serializes"),
+            r#"{"permissions":{"fileSystem":null,"network":null},"scope":"turn"}"#
+        );
+    }
+
+    #[test]
+    fn captured_accept_answer_pins_byte_for_byte() {
+        // `fixtures/codex/approval.jsonl` holds the one real answer ever
+        // captured: `{"id":0,"result":{"decision":"accept"}}`. Pin it
+        // byte-for-byte — the full frame, not just the decision.
         let frames = envelopes("approval.jsonl");
         let (dir, frame) = frames
             .iter()
@@ -801,8 +1261,13 @@ mod tests {
             .map(|(_, f)| f.clone())
             .expect("client answer");
         assert_eq!(
+            serde_json::to_string(&answer).expect("serializes"),
+            r#"{"id":0,"result":{"decision":"accept"}}"#,
+            "the captured answer, byte-for-byte"
+        );
+        assert_eq!(
             answer.get("result"),
-            Some(&decision_result(ApprovalDecision::Accept)),
+            Some(&command_decision_result(&CommandApprovalDecision::Accept)),
             "the recorded answer is exactly what the typed Accept builds"
         );
         // And the request itself decodes as a request (id plus method), not a
@@ -819,6 +1284,87 @@ mod tests {
             }
             other => panic!("expected a server request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn approval_methods_classify_to_their_lane() {
+        use ApprovalKind as K;
+        assert_eq!(
+            ApprovalKind::from_method("item/commandExecution/requestApproval"),
+            Some(K::Command)
+        );
+        assert_eq!(
+            ApprovalKind::from_method("item/fileChange/requestApproval"),
+            Some(K::FileChange)
+        );
+        assert_eq!(
+            ApprovalKind::from_method("item/permissions/requestApproval"),
+            Some(K::Permissions)
+        );
+        // A future approval kind still surfaces (the generic
+        // `requestApproval` catch), but on the lane that is never answered
+        // blind.
+        assert_eq!(ApprovalKind::from_method("item/future/requestApproval"), Some(K::Unknown));
+        assert_eq!(ApprovalKind::from_method("turn/start"), None);
+        assert_eq!(ApprovalKind::from_method("item/tool/requestUserInput"), None);
+    }
+
+    #[test]
+    fn file_change_params_decode_from_their_schema_shape() {
+        // Schema-read, never captured: this JSON is shaped from
+        // `FileChangeRequestApprovalParams.json`, not from a fixture.
+        let params = json!({
+            "itemId": "fc-1",
+            "threadId": "t",
+            "turnId": "u",
+            "startedAtMs": 1790250968177_i64,
+            "grantRoot": null,
+            "reason": "Allow writing the edited files?",
+        });
+        assert_eq!(
+            FileChangeApprovalParams::decode(&params),
+            Some(FileChangeApprovalParams {
+                item_id: "fc-1".to_owned(),
+                thread_id: "t".to_owned(),
+                turn_id: "u".to_owned(),
+                started_at_ms: 1790250968177,
+                grant_root: None,
+                reason: Some("Allow writing the edited files?".to_owned()),
+            })
+        );
+        // A missing required field decodes to nothing, never a default.
+        assert_eq!(FileChangeApprovalParams::decode(&json!({"itemId": "fc-1"})), None);
+    }
+
+    #[test]
+    fn permissions_params_decode_from_their_schema_shape() {
+        // Schema-read, never captured: this JSON is shaped from
+        // `PermissionsRequestApprovalParams.json`, not from a fixture.
+        let params = json!({
+            "itemId": "perm-1",
+            "threadId": "t",
+            "turnId": "u",
+            "startedAtMs": 1790250968177_i64,
+            "cwd": "/Users/owner/Projects/harness",
+            "environmentId": null,
+            "permissions": {"network": {"enabled": true}},
+            "reason": "Allow network access for this turn?",
+        });
+        assert_eq!(
+            PermissionsApprovalParams::decode(&params),
+            Some(PermissionsApprovalParams {
+                item_id: "perm-1".to_owned(),
+                thread_id: "t".to_owned(),
+                turn_id: "u".to_owned(),
+                started_at_ms: 1790250968177,
+                cwd: "/Users/owner/Projects/harness".to_owned(),
+                permissions: json!({"network": {"enabled": true}}),
+                environment_id: None,
+                reason: Some("Allow network access for this turn?".to_owned()),
+            })
+        );
+        // A missing required field decodes to nothing, never a default.
+        assert_eq!(PermissionsApprovalParams::decode(&json!({"itemId": "perm-1"})), None);
     }
 
     /// Feed one server question request through `serve_server_request` with a
