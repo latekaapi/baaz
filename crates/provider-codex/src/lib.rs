@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ModelSummary, PendingApproval,
-    ProviderAdapter, ProviderError, ProviderEvent, ProviderId, SubmissionPart,
+    PendingQuestion, ProviderAdapter, ProviderError, ProviderEvent, ProviderId, SubmissionPart,
 };
 use serde_json::json;
 
@@ -411,9 +411,11 @@ impl ProviderAdapter for CodexAdapter {
             }
             Command::ListPending { session_id } => {
                 self.check_session(&session_id)?;
-                let pending = self.with_child(|running| running.pending_approvals())?;
+                let (approvals, questions) = self.with_child(|running| {
+                    (running.pending_approvals(), running.pending_questions())
+                })?;
                 Ok(Ack::PendingWork {
-                    approvals: pending
+                    approvals: approvals
                         .into_iter()
                         .map(|view| PendingApproval {
                             id: view.item_id,
@@ -422,7 +424,14 @@ impl ProviderAdapter for CodexAdapter {
                             stage_token: None,
                         })
                         .collect(),
-                    questions: Vec::new(),
+                    questions: questions
+                        .into_iter()
+                        .map(|view| PendingQuestion {
+                            id: view.question_id,
+                            session_id: view.thread_id,
+                            headline: view.headline,
+                        })
+                        .collect(),
                 })
             }
             Command::AnswerQuestion { .. }

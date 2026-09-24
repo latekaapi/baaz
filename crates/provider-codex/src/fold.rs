@@ -1,24 +1,33 @@
-//! Decoded frames into render-ready deltas: one lane, and the reason.
+//! Decoded frames into render-ready deltas: one primary lane plus a fallback,
+//! and the reason.
 //!
-//! RENDERING LANE: **`item/completed` frames only.** `item/agentMessage/delta`
-//! frames are decoded (so a shape change still parses) and then ignored for
-//! transcript purposes; they emit no deltas. `item/started` is likewise
-//! carried, not rendered.
+//! RENDERING LANES: **`item/completed` frames are the primary lane.**
+//! `item/agentMessage/delta` frames are decoded and accumulated per
+//! `(turn_id, item_id)` as a fallback lane; they emit no deltas on arrival.
+//! When an `item/completed` closes an item, its buffered deltas are dropped
+//! (the completed text renders whole). When a turn ends with buffered deltas
+//! still open — the interrupted path, where `item/completed` never arrives
+//! for the streamed message — `turn/completed` flushes them so the streamed
+//! text survives. `item/started` is likewise carried, not rendered.
 //!
-//! Why the `item/completed` lane won:
+//! Why `item/completed` stays primary:
 //!
 //! * `basic.jsonl` — a turn whose single `READY` arrives as one delta plus
 //!   one completed item — renders its whole message through `item/completed`
-//!   alone. The completed lane is present for every message in every fixture.
+//!   alone. The completed lane closes every message on the normal path; the
+//!   interrupted path (`interrupt.jsonl`) never sends `item/completed` for
+//!   the streamed message, so the delta fallback is what renders it there.
 //! * `item/completed` carries whole `item.text`, so the fold needs no
-//!   cross-frame assembly state: no chunk bookkeeping, nothing to disagree
-//!   about.
+//!   cross-frame assembly state on the normal path: no chunk bookkeeping,
+//!   nothing to disagree about.
 //! * The trap this task exists to avoid is folding both lanes and
-//!   double-rendering every message. Ignoring the delta lane entirely —
-//!   rather than "deduplicating" two lanes with a heuristic — leaves no seam
-//!   where the two paths can disagree. The agreement test proves it: folding
-//!   any fixture with its `item/agentMessage/delta` lines stripped yields
-//!   deltas identical to folding it whole.
+//!   double-rendering every message. The fallback renders only text no
+//!   completed item ever closed — rather than "deduplicating" two lanes with
+//!   a heuristic — so there is no seam where the two paths can disagree on
+//!   the normal path. The agreement test proves it: folding `basic.jsonl` or
+//!   `approval.jsonl` with its `item/agentMessage/delta` lines stripped
+//!   yields deltas identical to folding it whole, and a dedicated test proves
+//!   the interrupted turn's streamed text still survives.
 //!
 //! What the fold emits, per frame:
 //!
@@ -29,8 +38,10 @@
 //!   [`Turn::User`] per unseen item id.
 //! * `item/completed` with `reasoning` (non-empty): a [`Block::Thinking`].
 //! * `item/completed` with `commandExecution`: a [`Block::ToolCall`] shell
-//!   card (`Success` on `completed` plus exit 0, `Error` on any other
-//!   completion, `Running` while still `inProgress`).
+//!   card (`Success` on `completed` plus exit 0, `Error` on `completed`
+//!   otherwise or on `failed`, `Cancelled` on `declined`, `Running` while
+//!   `inProgress`; an unknown future status fails closed to `Error`, never
+//!   back to a spinner).
 //! * `item/completed` with anything else: a [`Block::Generic`] carrying the
 //!   wire kind, status, and text — carried, never dropped.
 //! * `turn/completed`: one [`Delta::TurnFinished`] per started turn, keyed on
@@ -122,6 +133,12 @@ pub struct CodexFold {
     thread_id: Option<String>,
     model: Option<String>,
     assistant_started: HashSet<String>,
+    /// The fallback lane: streamed `item/agentMessage/delta` text per
+    /// `(turn_id, item_id)`, in first-seen order. Dropped when an
+    /// `item/completed` closes the item; flushed at `turn/completed` when
+    /// the turn was interrupted before any completed frame arrived.
+    delta_text: HashMap<(String, String), String>,
+    delta_order: Vec<(String, String)>,
     user_started: HashSet<String>,
     usage: HashMap<(String, String), TokenCounts>,
     account: AccountSnapshot,
@@ -204,8 +221,11 @@ impl CodexFold {
                 Vec::new()
             }
             Notification::ItemCompleted { .. } => self.apply_item(notification),
+            Notification::AgentMessageDelta { turn_id, item_id, delta, .. } => {
+                self.push_delta(turn_id, item_id, delta);
+                Vec::new()
+            }
             Notification::TurnCompleted { .. } => self.finish_turn(notification),
-            // The other lane, by choice (see module docs): parsed, ignored.
             // Status, MCP, error, warning, resolved, and unknown kinds move
             // no transcript.
             _ => Vec::new(),
@@ -225,6 +245,48 @@ impl CodexFold {
         }
     }
 
+    /// Accumulate one streamed chunk on the fallback lane. Nothing renders
+    /// here: the text only survives if `turn/completed` finds it still open.
+    fn push_delta(&mut self, turn_id: &str, item_id: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let key = (turn_id.to_owned(), item_id.to_owned());
+        if !self.delta_text.contains_key(&key) {
+            self.delta_order.push(key.clone());
+        }
+        self.delta_text.entry(key).or_default().push_str(delta);
+    }
+
+    /// Forget one item's buffered deltas: an `item/completed` closed it, so
+    /// the completed text renders whole and the fallback must not repeat it.
+    fn drop_delta(&mut self, turn_id: &str, item_id: &str) {
+        self.delta_text.remove(&(turn_id.to_owned(), item_id.to_owned()));
+        self.delta_order
+            .retain(|key| !(key.0 == turn_id && key.1 == item_id));
+    }
+
+    /// Drain every still-open buffer for `turn_id`, oldest item first. Items
+    /// a completed frame already closed were dropped, so this is exactly the
+    /// text no completed frame ever carried.
+    fn take_pending_delta_text(&mut self, turn_id: &str) -> Vec<String> {
+        let mut pending = Vec::new();
+        let mut kept = Vec::new();
+        for key in std::mem::take(&mut self.delta_order) {
+            if key.0 == turn_id {
+                if let Some(text) = self.delta_text.remove(&key) {
+                    if !text.is_empty() {
+                        pending.push(text);
+                    }
+                }
+            } else {
+                kept.push(key);
+            }
+        }
+        self.delta_order = kept;
+        pending
+    }
+
     fn apply_item(&mut self, notification: &Notification) -> Vec<Delta> {
         let mut deltas = Vec::new();
         let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else {
@@ -232,6 +294,7 @@ impl CodexFold {
         };
         match item.kind() {
             "agentMessage" => {
+                self.drop_delta(turn_id, item.id());
                 if item.text().is_empty() {
                     return deltas;
                 }
@@ -271,10 +334,17 @@ impl CodexFold {
             }
             "commandExecution" => {
                 self.ensure_assistant(turn_id, &mut deltas);
+                // Every `CommandExecutionStatus` in the schema, named: the
+                // wire status is a plain string, so a future CLI version can
+                // send a fifth value no arm names — that unknown fails closed
+                // to `Error`, never back to a spinner that never stops.
                 let status = match (item.status(), item.exit_code()) {
+                    ("inProgress", _) => ToolStatus::Running,
                     ("completed", Some(0)) => ToolStatus::Success,
                     ("completed", _) => ToolStatus::Error,
-                    _ => ToolStatus::Running,
+                    ("failed", _) => ToolStatus::Error,
+                    ("declined", _) => ToolStatus::Cancelled,
+                    (_unknown, _) => ToolStatus::Error,
                 };
                 let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
                 deltas.push(Delta::BlockAdded {
@@ -312,11 +382,24 @@ impl CodexFold {
 
     fn finish_turn(&mut self, notification: &Notification) -> Vec<Delta> {
         let Some(turn_id) = notification.turn_id() else { return Vec::new() };
+        let mut deltas = Vec::new();
+        // The interrupted path never sends `item/completed` for the streamed
+        // message, so flush whatever the delta lane still holds: without this
+        // the whole turn folds to zero deltas — not even a `TurnFinished`.
+        // Items a completed frame already closed were dropped from the
+        // buffer, so this cannot double-render the normal path.
+        for text in self.take_pending_delta_text(turn_id) {
+            self.ensure_assistant(turn_id, &mut deltas);
+            deltas.push(Delta::BlockAdded {
+                turn_id: turn_id.to_owned(),
+                block: Block::Text { text, streaming: false },
+            });
+        }
         if !self.assistant_started.contains(turn_id) {
-            // No content lane ever opened this turn (a turn of deltas alone
-            // renders nothing by the lane choice): finishing it would mint an
-            // empty turn the transcript never had.
-            return Vec::new();
+            // No content lane ever opened this turn and no deltas survived
+            // it: finishing it would mint an empty turn the transcript never
+            // had.
+            return deltas;
         }
         let thread_id = notification.thread_id().unwrap_or_default();
         let last = notification
@@ -337,7 +420,8 @@ impl CodexFold {
             cache_write_tokens: None,
             cached_tokens: last.cached_input_tokens,
         };
-        vec![Delta::TurnFinished { turn_id: turn_id.to_owned(), meta }]
+        deltas.push(Delta::TurnFinished { turn_id: turn_id.to_owned(), meta });
+        deltas
     }
 }
 
@@ -444,15 +528,20 @@ mod tests {
         assert_eq!(meta.duration_ms, 6048);
     }
 
-    /// THE AGREEMENT TEST. Every fixture carries both lanes (incremental
-    /// deltas plus completed repeats); folding a fixture with its
+    /// THE AGREEMENT TEST. The normal-path fixtures carry both lanes
+    /// (incremental deltas plus completed repeats); folding one with its
     /// `item/agentMessage/delta` lines stripped must yield deltas identical
-    /// to folding it whole — the ignored lane changes nothing. That is
+    /// to folding it whole — the fallback lane changes nothing there. That is
     /// "agree modulo streaming granularity": the two lanes describe the same
     /// content, and the fold renders it once.
+    ///
+    /// `interrupt.jsonl` is deliberately NOT in this loop: its streamed text
+    /// exists ONLY on the delta lane (no `item/completed` ever closes the
+    /// message), so stripping the deltas provably changes its transcript.
+    /// The next test pins that survival instead.
     #[test]
     fn delta_and_completed_lanes_agree() {
-        for name in ["basic.jsonl", "approval.jsonl", "interrupt.jsonl"] {
+        for name in ["basic.jsonl", "approval.jsonl"] {
             let lines = fixture_lines(name);
             let (_, whole) = replay(name);
             let stripped: Vec<String> =
@@ -481,6 +570,52 @@ mod tests {
         let (_, deltas) = replay("basic.jsonl");
         let readies = texts(&deltas).iter().filter(|text| **text == "READY").count();
         assert_eq!(readies, 1, "READY renders exactly once");
+    }
+
+    /// THE INTERRUPTION TEST. `interrupt.jsonl` streams 374 delta chunks of
+    /// real text and then ends at `turn/completed` with `status:"interrupted"`
+    /// — no `item/completed` ever closes the assistant message. The turn must
+    /// still render what it produced: without the fallback lane this replay
+    /// folds to a lone user turn, not even a `TurnFinished`.
+    #[test]
+    fn interrupted_turn_renders_streamed_text() {
+        let (_, deltas) = replay("interrupt.jsonl");
+        let rendered: String = texts(&deltas).join("");
+        assert!(
+            rendered.contains("1 — Starting gently."),
+            "the first streamed chunk survives: {rendered:.120}…"
+        );
+        assert!(
+            rendered.contains("69 — One"),
+            "the last streamed chunk survives: …{tail}",
+            tail = rendered.chars().rev().take(120).collect::<String>()
+        );
+        let finished =
+            deltas.iter().filter(|d| matches!(d, Delta::TurnFinished { .. })).count();
+        assert_eq!(finished, 1, "the interrupted turn still finishes once");
+        let started =
+            deltas.iter().filter(|d| matches!(d, Delta::TurnStarted { .. })).count();
+        assert_eq!(started, 2, "one user turn plus one assistant turn");
+    }
+
+    /// Stripping the delta lane from the interrupted turn provably loses its
+    /// only content — the mirror of the agreement test above.
+    #[test]
+    fn interrupted_turn_without_deltas_renders_nothing() {
+        let lines = fixture_lines("interrupt.jsonl");
+        let stripped: Vec<String> =
+            lines.iter().filter(|line| !is_agent_delta(line)).cloned().collect();
+        assert!(stripped.len() < lines.len(), "the fixture must carry delta lines");
+        let mut fold = CodexFold::new();
+        let mut without_deltas = Vec::new();
+        for line in &stripped {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            without_deltas.extend(fold.apply(&frame));
+        }
+        assert!(
+            texts(&without_deltas).is_empty(),
+            "no completed lane, no content — the delta lane was the only copy"
+        );
     }
 
     #[test]
@@ -524,19 +659,64 @@ mod tests {
 
     #[test]
     fn rate_limit_pushes_feed_the_account_snapshot() {
-        let (_, _) = replay("basic.jsonl");
-        let mut snapshot = AccountSnapshot::default();
-        assert!(snapshot.label().is_none(), "no reading seen, no login claimed");
-        for line in fixture_lines("basic.jsonl") {
-            let (_, frame) = decode_envelope(&line).expect("fixture decodes");
-            if let Frame::Notification(notification) = &frame {
-                if let Some(params) = notification.rate_limit_params() {
-                    snapshot.observe(params);
-                }
-            }
-        }
-        let label = snapshot.label().expect("a push was seen");
+        // Through the real fold: `CodexFold::apply_notification`'s
+        // `RateLimitsUpdated` arm is what feeds the snapshot. Calling
+        // `AccountSnapshot::observe` directly would pass even with that arm
+        // deleted.
+        assert!(
+            CodexFold::new().account().label().is_none(),
+            "no reading seen, no login claimed"
+        );
+        let (fold, _) = replay("basic.jsonl");
+        let label = fold.account().label().expect("a push was seen");
         assert!(label.contains("19%"), "live meter label: {label}");
+    }
+
+    /// Every `CommandExecutionStatus` in the schema maps off the spinner:
+    /// `failed` and `declined` must never render as still-executing.
+    #[test]
+    fn failed_and_declined_commands_do_not_spin() {
+        fn fold_status(status: &str) -> ToolStatus {
+            let line = format!(
+                r#"{{"method":"item/completed","params":{{"threadId":"t","turnId":"u","item":{{"type":"commandExecution","id":"exec-1","command":"ls","status":"{status}","exitCode":1}}}}}}"#
+            );
+            let frame = crate::frame::decode_line(&line).expect("synthetic line decodes");
+            let mut fold = CodexFold::new();
+            let deltas = fold.apply(&frame);
+            deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    Delta::BlockAdded { block: Block::ToolCall { status, .. }, .. } => {
+                        Some(*status)
+                    }
+                    _ => None,
+                })
+                .expect("a command execution folds to a shell card")
+        }
+        assert_eq!(fold_status("failed"), ToolStatus::Error);
+        assert_eq!(fold_status("declined"), ToolStatus::Cancelled);
+        assert_eq!(fold_status("inProgress"), ToolStatus::Running);
+        assert_eq!(fold_status("completed"), ToolStatus::Error, "exit 1 is not success");
+    }
+
+    /// Reasoning items in the schema's object shape fold to thinking blocks:
+    /// with the extractor fixed, the reasoning arm is reachable again.
+    #[test]
+    fn reasoning_items_fold_to_thinking_blocks() {
+        let line = r#"{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"planned"}],"content":[{"type":"reasoning_text","text":"trace"}]}}}"#;
+        let frame = crate::frame::decode_line(line).expect("synthetic line decodes");
+        let mut fold = CodexFold::new();
+        let deltas = fold.apply(&frame);
+        let thinking: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Thinking { text, .. }, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, ["plannedtrace"], "summary plus content, joined");
     }
 
     /// Approval fixture command executions fold to one shell card, completed

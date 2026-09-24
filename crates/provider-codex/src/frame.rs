@@ -324,9 +324,17 @@ fn text_parts(content: &Value) -> String {
 
 fn strings_joined(value: &Value) -> String {
     match value {
+        // Per the schema (`ReasoningItemContent`, `ReasoningItemReasoningSummary`)
+        // every element is an object carrying its text under `"text"` — never
+        // a bare string. `Value::as_str` on an object is `None`, so filtering
+        // by it drops every element unconditionally and reasoning always
+        // decodes to `""`. Extract `.text` from each object instead.
         Value::Array(items) => items
             .iter()
-            .filter_map(Value::as_str)
+            .map(|item| match item {
+                Value::String(text) => text.clone(),
+                _ => item.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            })
             .collect::<Vec<_>>()
             .concat(),
         Value::String(text) => text.clone(),
@@ -773,5 +781,22 @@ mod tests {
     #[test]
     fn non_json_is_the_only_error() {
         assert!(decode_line("not json at all").is_err());
+    }
+
+    #[test]
+    fn reasoning_text_extracts_from_schema_object_shape() {
+        // `ReasoningItemContent` / `ReasoningItemReasoningSummary` are arrays
+        // of objects (`{"type":…, "text":…}`), never bare strings: decoding
+        // must read `.text` out of each object, not drop every element.
+        let frame = decode_line(
+            r#"{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"planned"}],"content":[{"type":"reasoning_text","text":"trace"},{"type":"text","text":"!"}]}}}"#,
+        )
+        .expect("schema-shaped reasoning decodes");
+        match frame {
+            Frame::Notification(Notification::ItemCompleted { item: Item::Reasoning { text, .. }, .. }) => {
+                assert_eq!(text, "plannedtrace!", "summary plus content, joined");
+            }
+            other => panic!("expected a reasoning item, got {other:?}"),
+        }
     }
 }

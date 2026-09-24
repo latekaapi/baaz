@@ -68,6 +68,30 @@ pub struct PendingApprovalView {
     pub headline: String,
 }
 
+/// A server question request Baaz refused to settle blind: the JSON-RPC id
+/// already answered with "cannot serve", kept so the UI can at least see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingQuestion {
+    /// The prompt's id (`itemId`, `callId`, or the request id fallback).
+    question_id: String,
+    /// The owning thread, for event attribution.
+    thread_id: String,
+    /// One-line human summary of what is being asked.
+    headline: String,
+}
+
+/// One pending question, pointed at — not the full prompt. Enough to surface
+/// it in [`RunningChild::pending_questions`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingQuestionView {
+    /// The prompt's id.
+    pub question_id: String,
+    /// The owning thread.
+    pub thread_id: String,
+    /// One-line human summary of what is being asked.
+    pub headline: String,
+}
+
 /// The answer lane for one in-flight request: the `result`, or the wire
 /// error message.
 type Answer = Result<Value, String>;
@@ -79,6 +103,23 @@ struct Shared {
     waiters: HashMap<String, Sender<Answer>>,
     /// Approval requests waiting for a decision, by wire item id.
     approvals: HashMap<String, PendingApproval>,
+    /// Question requests already refused with "cannot serve", by prompt id.
+    /// Kept so [`RunningChild::pending_questions`] can surface them.
+    questions: HashMap<String, PendingQuestion>,
+}
+
+/// Fail every in-flight request waiter: the child's stdout ended, so no
+/// answer is coming. Without this a caller blocked in `recv_timeout` waits
+/// the whole 120s and then reports a misleading timeout for a process that
+/// already exited.
+fn fail_waiters(shared: &Arc<Mutex<Shared>>, reason: &str) {
+    let waiters: Vec<Sender<Answer>> = shared
+        .lock()
+        .map(|mut shared| shared.waiters.drain().map(|(_, waiter)| waiter).collect())
+        .unwrap_or_default();
+    for waiter in waiters {
+        let _ = waiter.send(Err(reason.to_owned()));
+    }
 }
 
 /// A request that never got its answer.
@@ -315,8 +356,11 @@ impl RunningChild {
                             }
                         }
                         Frame::Request { id, method, params } => {
+                            let write = |value: Value| {
+                                let _ = write_value(&pump_stdin, &value);
+                            };
                             Self::serve_server_request(
-                                &pump_stdin,
+                                &write,
                                 &pump_shared,
                                 &events,
                                 &id,
@@ -332,6 +376,11 @@ impl RunningChild {
                         }
                     }
                 }
+                // The child's stdout ended: wake every in-flight caller with an
+                // error naming the exit, then report the loss. Waiters left
+                // alone would sit out the full 120s `recv_timeout` and fail
+                // with a misleading "{method} timed out".
+                fail_waiters(&pump_shared, "the agent process exited before answering");
                 let _ = events.send(ProviderEvent::ConnectionLost {
                     reason: "the agent process exited".into(),
                 });
@@ -340,15 +389,29 @@ impl RunningChild {
         Ok(Self { child, stdin, next_id: Mutex::new(1), shared, pump: Some(pump) })
     }
 
+    /// The JSON-RPC refusal for a server request Baaz cannot serve: an
+    /// answer, not silence (silence would stall the server, which has no
+    /// timeout on these) and never a faked success.
+    fn cannot_serve_error(id: &Value, method: &str) -> Value {
+        json!({
+            "id": id,
+            "error": {"code": -32601, "message": format!("baaz cannot serve {method}")}
+        })
+    }
+
     /// Answer one server→client request. Approval requests are surfaced as
     /// [`ProviderEvent::ApprovalRequested`] and answered later by
-    /// [`Self::answer_approval`]; question requests as
-    /// [`ProviderEvent::QuestionRaised`]. Anything Baaz cannot serve —
+    /// [`Self::answer_approval`]; question requests (`item/tool/requestUserInput`,
+    /// `mcpServer/elicitation/request`) are surfaced as
+    /// [`ProviderEvent::QuestionRaised`], recorded for
+    /// [`Self::pending_questions`], and refused with the same "cannot serve"
+    /// error — answering their shapes blind would be guessing, but hanging
+    /// the turn forever is worse. Anything else Baaz cannot serve —
     /// notably `item/tool/call`, which needs a registered client tool nobody
-    /// has probed — gets a JSON-RPC "cannot serve" error, never silence
-    /// (which would stall the server) and never a faked success.
+    /// has probed — gets the same JSON-RPC error, never silence and never a
+    /// faked success.
     fn serve_server_request(
-        stdin: &Arc<Mutex<ChildStdin>>,
+        write: &impl Fn(Value),
         shared: &Arc<Mutex<Shared>>,
         events: &Sender<ProviderEvent>,
         id: &Value,
@@ -379,28 +442,37 @@ impl RunningChild {
                 headline,
             });
         } else if method.contains("requestUserInput") || method.contains("elicitation/request") {
+            let id_string = id.to_string();
             let question_id = params
                 .get("itemId")
                 .or_else(|| params.get("callId"))
                 .and_then(Value::as_str)
-                .unwrap_or(&id.to_string())
+                .unwrap_or(&id_string)
                 .to_owned();
             let headline = params
                 .get("question")
                 .or_else(|| params.get("prompt"))
+                .or_else(|| params.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or(method)
                 .to_owned();
+            if let Ok(mut shared) = shared.lock() {
+                shared.questions.insert(question_id.clone(), PendingQuestion {
+                    question_id: question_id.clone(),
+                    thread_id: thread_id.clone(),
+                    headline: headline.clone(),
+                });
+            }
             let _ = events.send(ProviderEvent::QuestionRaised {
                 session_id: thread_id,
                 question_id,
                 headline,
             });
+            // Refused, not hung: the server has no timeout on these, so a
+            // turn with no answer here blocks permanently.
+            write(Self::cannot_serve_error(id, method));
         } else {
-            let _ = write_value(stdin, &json!({
-                "id": id,
-                "error": {"code": -32601, "message": format!("baaz cannot serve {method}")}
-            }));
+            write(Self::cannot_serve_error(id, method));
         }
     }
 
@@ -493,6 +565,25 @@ impl RunningChild {
             &json!({"id": pending.request_id, "result": decision_result(decision)}),
         )?;
         Ok(true)
+    }
+
+    /// The questions already refused with "cannot serve", so the UI can at
+    /// least see what the server asked. Unordered, like [`Self::pending_approvals`].
+    pub fn pending_questions(&self) -> Vec<PendingQuestionView> {
+        self.shared
+            .lock()
+            .map(|shared| {
+                shared
+                    .questions
+                    .values()
+                    .map(|pending| PendingQuestionView {
+                        question_id: pending.question_id.clone(),
+                        thread_id: pending.thread_id.clone(),
+                        headline: pending.headline.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The approvals still waiting for a decision, oldest first is the
@@ -728,5 +819,102 @@ mod tests {
             }
             other => panic!("expected a server request, got {other:?}"),
         }
+    }
+
+    /// Feed one server question request through `serve_server_request` with a
+    /// capturing writer (no process is spawned): the branch must write a
+    /// response line, raise the event, and record the question.
+    fn serve_question(method: &str, params: Value) -> (Vec<Value>, Vec<ProviderEvent>, Shared) {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (events, events_rx) = unbounded();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let written_in = Arc::clone(&written);
+        RunningChild::serve_server_request(
+            &|value: Value| {
+                written_in.lock().expect("written mutex").push(value);
+            },
+            &shared,
+            &events,
+            &json!(7),
+            method,
+            &params,
+        );
+        drop(events);
+        drop(written_in);
+        let seen: Vec<ProviderEvent> = events_rx.try_iter().collect();
+        let shared = Arc::try_unwrap(shared).expect("no other owner").into_inner().expect("mutex");
+        let written = Arc::try_unwrap(written).expect("no other owner").into_inner().expect("mutex");
+        (written, seen, shared)
+    }
+
+    #[test]
+    fn request_user_input_gets_a_response_line() {
+        // `item/tool/requestUserInput` is a real server request (see
+        // `schemas/codex/ServerRequest.json`): leaving its JSON-RPC id
+        // unanswered would stall the turn permanently.
+        let (written, seen, shared) = serve_question(
+            "item/tool/requestUserInput",
+            json!({"threadId": "t", "turnId": "u", "itemId": "q-1", "question": "Pick one"}),
+        );
+        assert_eq!(written.len(), 1, "a response line is written, never silence");
+        assert_eq!(written[0].get("id"), Some(&json!(7)), "the answer echoes the request id");
+        assert_eq!(
+            written[0].get("error").and_then(|error| error.get("code")),
+            Some(&json!(-32601)),
+            "refused with cannot-serve, never a faked success"
+        );
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ProviderEvent::QuestionRaised { question_id, headline, .. }]
+                if question_id == "q-1" && headline == "Pick one"
+            ),
+            "the question is still raised: {seen:?}"
+        );
+        assert!(
+            shared.questions.contains_key("q-1"),
+            "the refused question is recorded for ListPending"
+        );
+    }
+
+    #[test]
+    fn elicitation_request_gets_a_response_line() {
+        let (written, seen, shared) = serve_question(
+            "mcpServer/elicitation/request",
+            json!({"threadId": "t", "serverName": "s", "message": "Fill the form", "mode": "form", "requestedSchema": {}}),
+        );
+        assert_eq!(written.len(), 1, "a response line is written, never silence");
+        assert_eq!(written[0].get("id"), Some(&json!(7)), "the answer echoes the request id");
+        assert_eq!(
+            written[0].get("error").and_then(|error| error.get("code")),
+            Some(&json!(-32601)),
+            "refused with cannot-serve, never a faked success"
+        );
+        assert!(
+            matches!(seen.as_slice(), [ProviderEvent::QuestionRaised { .. }]),
+            "the elicitation is still raised: {seen:?}"
+        );
+        assert_eq!(shared.questions.len(), 1, "the refused elicitation is recorded");
+    }
+
+    #[test]
+    fn exited_child_fails_waiters_with_the_exit_not_a_timeout() {
+        // No process is spawned: a waiter is registered directly, then the
+        // exit path fails it — the same call the pump makes when stdout ends.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (tx, rx) = unbounded();
+        shared.lock().expect("mutex").waiters.insert("3".into(), tx);
+        fail_waiters(&shared, "the agent process exited before answering");
+        match rx.try_recv() {
+            Ok(Err(message)) => assert!(
+                message.contains("exited"),
+                "the error names the exit, not a timeout: {message}"
+            ),
+            other => panic!("expected an exit error for the waiter, got {other:?}"),
+        }
+        assert!(
+            shared.lock().expect("mutex").waiters.is_empty(),
+            "failed waiters are forgotten, never re-failed"
+        );
     }
 }
