@@ -117,3 +117,110 @@ Two checks, both required before trusting the gate:
    answering `Ok` for an `Unavailable` capability, still cannot reach the
    caller's `send`. If that test ever fails, the wrapper has grown a path
    around the gate and the task is not done.
+
+## S46 — the wiring: a second provider in the switcher, approvals that reach it
+
+`baaz` is no longer untouched: `crates/baaz/src/providers.rs` is the
+registry, and the session view reads it every frame.
+
+### The registry
+
+Three entries — `muse`, `claude-code`, `codex` — each exposing its
+capability map, mirrored cell-for-cell from the adapter crate that owns
+the evidence (`provider-muse`, `provider-claude-code`, `provider-codex`
+`caps.rs`). The registry never re-probes; it repeats what those files
+declare, so a fixture that upgrades a cell upgrades the mirror with it.
+One deliberate deviation is recorded, not hidden: `docs/19-codex.md` §5
+proposes `Questions: Native` for Codex, but `provider-codex/src/caps.rs`
+declares `Unverified` (the request shape was read, never executed), and
+the registry mirrors the crate, not the proposal. The proposal is a
+sentence; the crate is the evidence.
+
+Selecting a provider for a **new** session is enough: the hero's
+provider switcher (`Harness::render_provider_picker`) seeds from the
+command line and every `session/start` path reads the pick. There is no
+way to switch a live session's provider — the view reads its lane off
+the one `provider_id` field the host fixed at construction, with no
+setter. That is the structural answer to the two-writers danger; where
+structure runs out, `check_single_lane` is the loud detector: both
+lanes claiming one session returns a violation as text (logged and
+bannered) instead of corrupting the screen silently.
+
+### The gate, visible
+
+`providers::gate` is what the screen reads. `Unavailable` refuses, so
+the control is disabled with the provider's own reason (`steer_text`
+and `interrupt` banner and keep the words rather than send a command
+the seam would refuse). `Unverified` is attempted everywhere — the seam
+never refuses it — so it stays offered but visibly marked. The
+capability strip above the composer is the same screen rendering
+differently per provider: Claude Code shows steering and interruption
+as unverified and questions as unavailable-in-prose; Codex shows
+steering as native; muse shows no strip at all. If the strip ever reads
+the same for two providers, the spec is decoration and the task is not
+done.
+
+### Approvals on the existing surface
+
+Both new providers' approval requests park in `session/approvals.rs`
+beside the fold's, under the surface's one rule: **the card is never
+ahead of the server**. A press records exactly one `DecideApproval`
+onto the outbox the provider lane drains, shows "sent, waiting for the
+server", and offers no second press; only the server's notification
+(`resolve_external_approval`) settles the card. Claude Code's
+`can_use_tool` carries its `permission_suggestions` as the card's
+"don't ask again" note; Codex's five request kinds each carry the
+model-written `reason` sentence. `decline` ("Deny": no, do something
+else — the turn continues) and `cancel` ("Deny and stop": no, stop —
+the turn is interrupted) ride as visibly different buttons, because
+they are different answers and the old surface did not draw the
+distinction.
+
+### The disagreement, not papered over
+
+`docs/19-codex.md` §3, proven live: Codex auto-approves inside its
+sandbox profile and only asks when an action escapes it (`echo` ran
+unprompted under `:read-only`; a write to `/tmp` prompted). Claude
+Code asks about everything not pre-allowed. These are genuinely
+different models, and Baaz does **not** average them: each session
+presents its own backend's behaviour, labelled as such. A Codex
+session's approvals arrive rarely and each carries the model's reason
+for why *this* action escaped the profile; a Claude Code session's
+arrive for everything unallowed, each with the "don't ask again"
+affordance that shrinks future asking. The choice is per-session
+honesty over one averaged fiction, for one reason: an averaged
+approvals model would teach the person exactly the wrong rhythm —
+either waving through a Claude Code prompt that always fires, or
+ignoring a Codex prompt that fires only when something actually
+escaped. The strip and the card always name which backend is asking,
+so the person learns two rhythms and trusts both.
+
+## S46fix — the switcher's layout contract
+
+Found by driving the app, not by any test: the switcher row was one
+centred flex unit (`Muse | Claude Code | Codex | <caption>`), so each
+provider's different-length caption re-centred the whole row — Codex
+sat 78px away from itself between picks, and a second click aimed at
+it landed on Claude Code. The same row hard-clipped the caption at
+the pane boundary in a ~520px centre column.
+
+The contract now, in `Harness::render_provider_picker`:
+
+- The caption lives on its own line below the buttons, never in the
+  buttons' flex row. The buttons row is a fixed unit whose geometry
+  depends only on the constant button labels, so no caption change
+  can move a control.
+- The caption line is full-width with a deliberate ellipsis
+  (`truncate` + `overflow_hidden`, the same idiom the header title
+  uses), never a hard clip — at any column width the layout permits.
+- The three capability strings are unchanged; the layout absorbs the
+  length difference instead of the controls.
+
+Pinned by `provider_buttons_hold_still_and_caption_stays_inside` in
+`crates/baaz/src/app.rs`: a `#[gpui::test]` that draws the whole app
+at a narrow 520px window and at 900px, one draw per provider pick,
+and asserts the measured button bounds are identical across picks
+and the caption stays inside the picker's box. The test first
+asserts the three captions differ in length — without that, a
+shared-row layout would hold still trivially and the pin would prove
+nothing.

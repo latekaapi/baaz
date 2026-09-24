@@ -5766,6 +5766,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider-codex"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "crossbeam-channel",
+ "provider",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "provider-muse"
 version = "0.1.0"
 dependencies = [

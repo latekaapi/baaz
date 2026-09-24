@@ -1065,7 +1065,7 @@ impl Harness {
         }
     }
 
-    /// `session/start` in the current project, on the configured provider.
+    /// `session/start` in the current project, on the switcher's provider.
     ///
     /// A new session is also the moment to re-walk the workspace: files come
     /// and go while the window is open, and the `@` picker should not offer a
@@ -1132,7 +1132,7 @@ impl Harness {
         // `promptUnmatched`. The params carry the project's root and its
         // defaults, with the command line's approval mode winning.
         let Some(params) =
-            projects::start_params(&self.projects, current.as_deref(), &self.args.provider, self.args.approval_mode.clone())
+            projects::start_params(&self.projects, current.as_deref(), &self.new_provider, self.args.approval_mode.clone())
         else {
             if current.is_none() {
                 // No project to start in, which is an ordinary state and not
@@ -1262,7 +1262,7 @@ impl Harness {
             self.open_local_draft(window, cx);
             return;
         };
-        let params = projects::start_params_for_root(&root, &self.args.provider, self.args.approval_mode.clone());
+        let params = projects::start_params_for_root(&root, &self.new_provider, self.args.approval_mode.clone());
         // Walked eagerly, like `new_session_in` does for a project's root:
         // the `@` picker for the session about to open should not wait on
         // the sessions list to learn where it lives.
@@ -1399,7 +1399,7 @@ impl Harness {
         if projects::start_params(
             &self.projects,
             Some(id.as_str()),
-            &self.args.provider,
+            &self.new_provider,
             self.args.approval_mode.clone(),
         )
         .is_none()
@@ -1413,7 +1413,7 @@ impl Harness {
         let workspace = self.workspace();
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let host = SessionHost {
-            provider_id: self.args.provider.clone(),
+            provider_id: self.new_provider.clone(),
             workspace,
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
@@ -1669,7 +1669,7 @@ impl Harness {
         // (`--no-connect` / `--replay`) opens the row as a local view with
         // none, which is what lets a capture drive drafts and switching.
         let client = self.client.clone();
-        let (provider, workspace) = (self.args.provider.clone(), self.session_workspace(&session_id));
+        let (provider, workspace) = (self.new_provider.clone(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };

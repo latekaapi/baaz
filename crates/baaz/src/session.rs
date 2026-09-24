@@ -78,8 +78,10 @@ use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use crate::conn::{self, Severity};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
+use crate::providers::{ExternalApprovalStore, ProviderId};
 use crate::shot::CaptureToken;
 use crate::wire::WireCall;
+use provider::Command as ProviderCommand;
 use crate::{attachments, files, full_output, history, images, plan, search, skills};
 
 /// How often the "Working… 12 s" row re-reads the clock: 1 Hz, the finest
@@ -402,6 +404,14 @@ pub struct SessionView {
     replay: bool,
     /// `meta`, or `echo` under `BAAZ_PROVIDER=echo`.
     provider_id: String,
+    /// Approvals from a new provider (Claude Code / Codex) waiting on the
+    /// person. The legacy lane has no room for them, so they live here and
+    /// render on the same approvals surface.
+    external_approvals: ExternalApprovalStore,
+    /// Decisions the press sent that the server has not answered yet: the
+    /// `DecideApproval` commands the provider lane drains, oldest first.
+    /// The card waits on them; it never settles on the press.
+    external_outbox: Vec<ProviderCommand>,
     /// The workspace the session runs in, for the header and the empty state.
     workspace: String,
     /// The session's project display name for the empty state ("Muse runs
@@ -692,6 +702,8 @@ impl SessionView {
             client,
             replay: false,
             provider_id,
+            external_approvals: ExternalApprovalStore::empty(),
+            external_outbox: Vec::new(),
             workspace,
             project_name: None,
             composer,
@@ -798,6 +810,42 @@ impl SessionView {
     /// `session/resume` needs.
     pub fn last_cursor(&self) -> Option<String> {
         self.fold.side(&self.session_id).map(|s| s.last_cursor.clone()).filter(|c| !c.is_empty())
+    }
+
+    /// Which registry entry this session was created on, read off the id
+    /// the host fixed at construction. One field, one truth: there is no
+    /// second copy to disagree with and no setter to change lanes live —
+    /// a session is served by exactly one lane (see `crate::providers`).
+    pub fn provider_kind(&self) -> ProviderId {
+        ProviderId::parse(&self.provider_id)
+    }
+
+    /// The steer-into-a-running-turn control's gate: `Some(reason)` means
+    /// the control shows disabled with that reason, never present-and-broken.
+    pub fn steer_gate(&self) -> Option<String> {
+        crate::providers::gate(self.provider_kind(), provider::Capability::SteerTurn)
+    }
+
+    /// The stop/cancel control's gate, same contract as [`Self::steer_gate`].
+    pub fn turn_gate(&self) -> Option<String> {
+        crate::providers::gate(self.provider_kind(), provider::Capability::TurnControl)
+    }
+
+    /// The question-answer control's gate, same contract as [`Self::steer_gate`].
+    pub fn questions_gate(&self) -> Option<String> {
+        crate::providers::gate(self.provider_kind(), provider::Capability::Questions)
+    }
+
+    /// Decisions the press sent that the server has not answered yet, for
+    /// the provider lane to drain. The card waits on these; it never
+    /// settles on the press.
+    ///
+    /// No production caller yet: the lane drains this the moment it
+    /// lands, the way [`WireCall`](crate::wire::WireCall) sites drain
+    /// their own completions today.
+    #[allow(dead_code)]
+    pub fn take_external_outbox(&mut self) -> Vec<ProviderCommand> {
+        std::mem::take(&mut self.external_outbox)
     }
 
     /// The model id the session is actually on, for the composer chip.

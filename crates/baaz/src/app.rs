@@ -89,6 +89,7 @@ use crate::conn::{self, Severity};
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
+use crate::providers::ProviderId;
 use crate::resize::{ResizeDrag, RightResizeDrag};
 use crate::right;
 use crate::shot::CaptureToken;
@@ -421,6 +422,10 @@ type SearchStatusKey = (bool, usize, usize, bool, String);
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
+    /// The switcher's pick: which registry entry a new session starts on.
+    /// Seeded from the command line, changed only by the picker — never by
+    /// a live session, which keeps the lane it was created on.
+    pub(crate) new_provider: String,
     /// The legacy transport session views still ride. Same child as the
     /// provider below — never a second spawn. Gone with the last legacy
     /// view.
@@ -813,6 +818,7 @@ impl Harness {
         // The right divider's last settled width, or the default.
         let right_restored = layout::right_width(&layout::read());
         let mut this = Self {
+            new_provider: args.provider.clone(),
             args,
             client: None,
             provider: None,
@@ -2507,6 +2513,88 @@ impl Harness {
     /// Projects palette. Otherwise the one thing to do is start one.
     /// The hero column also takes a drop: every dropped directory is
     /// adopted, the first becoming current.
+    /// The switcher's pick, changed only by the picker below — never by a
+    /// live session, which keeps the lane it was created on.
+    pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        self.new_provider = id.as_str().to_owned();
+        cx.notify();
+    }
+
+    /// The provider switcher: three entries, one per registry backend.
+    /// A new session starts on the pick; a live session never changes
+    /// lanes, so this names only what comes next. Every option carries
+    /// its role and human label in the same change.
+    ///
+    /// Layout contract (S46fix, found by driving the app): the caption
+    /// lives on its own line below the buttons, never in the buttons'
+    /// flex row. The old single centred row (`Muse | Claude Code | Codex
+    /// | <caption>`) re-centred as one unit whenever the caption changed
+    /// length — Codex jumped 78px between picks, so a second click aimed
+    /// at a button landed on its neighbour — and the caption hard-clipped
+    /// at the pane boundary in a ~520px centre column. The buttons row is
+    /// now a fixed unit whose geometry depends only on the constant
+    /// button labels, and the caption's own line is full-width with a
+    /// deliberate ellipsis (`truncate`), so the caption absorbs every
+    /// width change instead of pushing the controls around.
+    fn render_provider_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = ProviderId::parse(&self.new_provider);
+        let p = cx.aui().colors;
+        v_flex()
+            .id("provider-picker")
+            .role(gpui::Role::Group)
+            .aria_label("Provider for new sessions")
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_2))
+            .debug_selector(|| "provider-picker".into())
+            .child(
+                h_flex()
+                    .id("provider-picker-row")
+                    .flex_none()
+                    .justify_center()
+                    .gap(px(scale::SP_2))
+                    .debug_selector(|| "provider-picker-row".into())
+                    .children(ProviderId::all().into_iter().map(|id| {
+                        let mut pick = button(format!("provider-pick-{}", id.as_str()), id.label());
+                        if id == current {
+                            pick = pick.primary();
+                        }
+                        let pick = pick.on_click(
+                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                                this.select_new_provider(id, cx);
+                            }),
+                        );
+                        // The wrapper carries the role and the human label (the
+                        // button has no aria builder of its own), plus which entry
+                        // is picked and what it means.
+                        div()
+                            .id(format!("provider-pick-wrap-{}", id.as_str()))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!(
+                                "Start new sessions on {}: {}. {}",
+                                id.label(),
+                                id.blurb(),
+                                if id == current { "Currently picked." } else { "Not picked." }
+                            ))
+                            .debug_selector(|| format!("provider-pick-wrap-{}", id.as_str()))
+                            .child(pick)
+                    })),
+            )
+            .child(
+                div()
+                    .id("provider-picker-caption")
+                    .flex_none()
+                    .w_full()
+                    .overflow_hidden()
+                    .truncate()
+                    .text_center()
+                    .text_color(p.ink_3)
+                    .debug_selector(|| "provider-picker-caption".into())
+                    .child(current.blurb().to_owned()),
+            )
+            .into_any_element()
+    }
+
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         if self.current_project().is_none() {
@@ -2543,6 +2631,7 @@ impl Harness {
                         .child(button("hero-new", "New session").primary().icon(IconName::Plus).on_click(start))
                         .child(button("hero-choose", "Add project").icon(IconName::Folder).on_click(choose)),
                 )
+                .child(self.render_provider_picker(cx))
                 .into_any_element();
         }
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
@@ -2561,6 +2650,7 @@ impl Harness {
                     .child("Pick a session on the left, or \u{2318}N to start one."),
             )
             .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new))
+            .child(self.render_provider_picker(cx))
             .into_any_element()
     }
 
@@ -3391,6 +3481,92 @@ mod tests {
             start,
             "two toggles return to the start"
         );
+        restore_state(state);
+    }
+
+    /// One settled frame of the provider picker: which provider was
+    /// picked, the three button boxes, the caption box and the picker
+    /// box. Named fields instead of a tuple so the test reads — and
+    /// clippy stays quiet.
+    struct PickerFrame {
+        pick: crate::providers::ProviderId,
+        muse: gpui::Bounds<gpui::Pixels>,
+        claude_code: gpui::Bounds<gpui::Pixels>,
+        codex: gpui::Bounds<gpui::Pixels>,
+        caption: gpui::Bounds<gpui::Pixels>,
+        root: gpui::Bounds<gpui::Pixels>,
+    }
+
+    /// S46fix: the provider buttons hold still when the caption changes,
+    /// and the caption never leaves the picker's box. Opens the real
+    /// app window at a narrow 520px width and at 900px, picks each
+    /// provider in turn, and compares the picker's measured frame
+    /// bounds after the frames settle. The old single centred row
+    /// hard-clipped the caption and let Codex jump 78px between picks;
+    /// the blurb-length assert below is what makes this pin real rather
+    /// than vacuous — the three captions differ in length, so any layout
+    /// that centres the buttons and the caption as one unit must move
+    /// the buttons.
+    #[gpui::test]
+    fn provider_buttons_hold_still_and_caption_stays_inside(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("provider-picker-geometry");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let lens: Vec<usize> =
+            crate::providers::ProviderId::all().iter().map(|id| id.blurb().len()).collect();
+        assert!(
+            lens[0] != lens[1] && lens[1] != lens[2] && lens[0] != lens[2],
+            "the three captions must differ in length ({lens:?}), or a shared-row layout would hold still trivially"
+        );
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        // The boot lands on the login screen; the picker only renders in
+        // the signed-in shell, so step past it with the sample identity
+        // (no child runs behind it — the chrome draws, the wire idles).
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        vc.run_until_parked();
+        for width in [520f32, 900.] {
+            vc.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.)));
+            vc.run_until_parked();
+            let mut seen: Vec<PickerFrame> = Vec::new();
+            for id in crate::providers::ProviderId::all() {
+                vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_new_provider(id, cx)));
+                vc.run_until_parked();
+                let mut bounds = |sel: &'static str| {
+                    vc.debug_bounds(sel).unwrap_or_else(|| panic!("no measured bounds for {sel}"))
+                };
+                seen.push(PickerFrame {
+                    pick: id,
+                    muse: bounds("provider-pick-wrap-muse"),
+                    claude_code: bounds("provider-pick-wrap-claude-code"),
+                    codex: bounds("provider-pick-wrap-codex"),
+                    caption: bounds("provider-picker-caption"),
+                    root: bounds("provider-picker"),
+                });
+            }
+            for entry in &seen {
+                assert_eq!(entry.muse, seen[0].muse, "Muse button moved at {width}px when the pick changed");
+                assert_eq!(
+                    entry.claude_code, seen[0].claude_code,
+                    "Claude Code button moved at {width}px when the pick changed"
+                );
+                assert_eq!(entry.codex, seen[0].codex, "Codex button moved at {width}px when the pick changed");
+                assert!(
+                    entry.caption.origin.x >= entry.root.origin.x
+                        && entry.caption.origin.x + entry.caption.size.width
+                            <= entry.root.origin.x + entry.root.size.width,
+                    "caption {:?} leaves the picker {:?} at {width}px with {:?} picked",
+                    entry.caption,
+                    entry.root,
+                    entry.pick.as_str(),
+                );
+            }
+        }
         restore_state(state);
     }
 

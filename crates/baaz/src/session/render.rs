@@ -6,7 +6,9 @@
 
 use super::*;
 use std::path::Path;
+use aui::data::button;
 use aui_tokens::ActiveAui;
+use crate::providers::{ApprovalChoice, ExternalApproval};
 
 /// The transcript column as its own cached entity:
 /// the root embeds the active [`SessionView`] through gpui's `.cached`, so
@@ -51,8 +53,12 @@ impl SessionView {
         // is where the capture learns that it arrived (finding F9). After the
         // transcript, because that is what refreshes the render cache the
         // pending-approval answer is now read from (finding `performance-2`).
-        self.capture.set_pending_approval(self.newest_pending_approval().is_some());
+        self.capture.set_pending_approval(
+            self.newest_pending_approval().is_some() || self.external_approvals.has_pending(),
+        );
         let status = self.render_status();
+        let capabilities = self.render_capability_strip(cx);
+        let external = self.render_external_approvals(window, cx);
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
         let tier_banner = self.render_tier_banner(cx);
@@ -62,6 +68,8 @@ impl SessionView {
             .size_full()
             .child(transcript)
             .children(status)
+            .children(capabilities)
+            .children(external)
             .children(needs_you)
             .children(banner)
             .children(tier_banner)
@@ -1867,6 +1875,177 @@ fn wheel_capture(cx: &mut Context<SessionView>) -> gpui::AnyElement {
     .absolute()
     .size_full()
     .into_any_element()
+}
+
+impl SessionView {
+    /// The capability strip: what this session's provider cannot do (or
+    /// has not proven), with the typed reason beside each gated control.
+    ///
+    /// This is the point of the seam made visible: the same screen
+    /// renders differently per provider — Claude Code shows steering and
+    /// interruption as unverified and questions as unavailable-in-prose,
+    /// Codex shows steering as native, and muse shows no strip at all.
+    /// `None` is the muse answer: nothing gated, nothing shown.
+    pub(super) fn render_capability_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let kind = self.provider_kind();
+        let rows: Vec<(String, String)> = [
+            ("Steer into the running turn", self.steer_gate()),
+            ("Stop the running turn", self.turn_gate()),
+            ("Answer questions", self.questions_gate()),
+        ]
+        .into_iter()
+        .filter_map(|(label, gate)| gate.map(|reason| (label.to_owned(), reason)))
+        .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        Some(
+            div()
+                .w_full()
+                .px(px(TRANSCRIPT_PAD_X))
+                .pb(px(scale::SP_3))
+                .child(centred(
+                    v_flex()
+                        .id("capability-strip")
+                        .role(gpui::Role::Group)
+                        .aria_label(format!("Provider capabilities for {}", kind.label()))
+                        .gap(px(scale::SP_1))
+                        .child(
+                            div()
+                                .text_color(p.ink_3)
+                                .child(format!("On {} in this session:", kind.label())),
+                        )
+                        .children(rows.into_iter().enumerate().map(|(index, (label, reason))| {
+                            div()
+                                .id(format!("capability-row-{index}"))
+                                .role(gpui::Role::Label)
+                                .aria_label(format!("{label} unavailable: {reason}"))
+                                .text_color(p.ink_2)
+                                .child(format!("{label} — {reason}"))
+                        })),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    /// The external approval cards: one per new-provider approval the
+    /// server has not resolved yet, on the same surface as the legacy
+    /// cards and under the same rule — the card changes only on the
+    /// server's notification, never on the press.
+    ///
+    /// Awaiting cards offer all four answers, with `decline` ("Deny":
+    /// no, do something else) and `cancel` ("Deny and stop": no, stop)
+    /// as visibly different buttons. A sent card offers no second press:
+    /// it reads "sent, waiting for the server".
+    pub(super) fn render_external_approvals(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let approvals: Vec<ExternalApproval> =
+            self.external_approvals.outstanding().into_iter().cloned().collect();
+        if approvals.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let cards: Vec<AnyElement> = approvals
+            .into_iter()
+            .map(|approval| self.render_external_card(&approval, p.ink_2, p.ink_3, cx))
+            .collect();
+        Some(
+            div()
+                .w_full()
+                .px(px(TRANSCRIPT_PAD_X))
+                .pb(px(scale::SP_3))
+                .child(centred(
+                    v_flex()
+                        .id("external-approvals")
+                        .role(gpui::Role::Group)
+                        .aria_label("Provider approvals waiting")
+                        .gap(px(scale::SP_2))
+                        .children(cards),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    /// One external approval card. Every button carries its accessibility
+    /// role and human label on the wrapper in the same change (the button
+    /// itself has no aria builder, so the wrapper names it).
+    fn render_external_card(
+        &self,
+        approval: &ExternalApproval,
+        ink: gpui::Hsla,
+        dim: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut card = v_flex()
+            .id(format!("ext-appr-{}", approval.id))
+            .role(gpui::Role::Group)
+            .aria_label(format!("Approval: {}", approval.headline))
+            .gap(px(scale::SP_1))
+            .child(div().text_color(dim).child(approval.kind.tag().to_owned()))
+            .child(div().text_color(ink).child(approval.headline.clone()))
+            .child(div().text_color(dim).child(approval.reason.clone()));
+        if let Some(note) = approval.dont_ask_again.clone() {
+            card = card.child(
+                div()
+                    .id(format!("ext-rule-{}", approval.id))
+                    .role(gpui::Role::Label)
+                    .aria_label(format!("Do not ask again option: {note}"))
+                    .text_color(dim)
+                    .child(format!("Don't ask again: {note}")),
+            );
+        }
+        match approval.decision_sent.clone() {
+            // Sent and waiting: no second press, no ahead-of-server change.
+            Some(sent) => card.child(
+                div()
+                    .id(format!("ext-sent-{}", approval.id))
+                    .role(gpui::Role::Label)
+                    .aria_label(format!("Decision {sent} sent, waiting for the server"))
+                    .text_color(dim)
+                    .child(format!("Sent {sent} — waiting for the server.")),
+            ),
+            None => card.child(
+                h_flex()
+                    .gap(px(scale::SP_2))
+                    .children(ApprovalChoice::all().into_iter().map(|choice| {
+                        let approval_id = approval.id.clone();
+                        let headline = approval.headline.clone();
+                        let mut press = button(
+                            format!("ext-{}-{}", approval.id, choice.choice_id()),
+                            choice.label(),
+                        );
+                        press = match choice {
+                            ApprovalChoice::Accept | ApprovalChoice::AcceptForSession => {
+                                press.primary()
+                            }
+                            ApprovalChoice::Decline | ApprovalChoice::Cancel => press.danger(),
+                        };
+                        let press = press.on_click(cx.listener(
+                            move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                                this.decide_external_approval(
+                                    approval_id.clone(),
+                                    choice,
+                                    None,
+                                    cx,
+                                );
+                            },
+                        ));
+                        // The wrapper carries the role and the human label;
+                        // decline and cancel never share one.
+                        div()
+                            .id(format!("ext-wrap-{}-{}", approval.id, choice.choice_id()))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("{}: {}", choice.label(), headline))
+                            .child(press)
+                    })),
+            ),
+        }
+        .into_any_element()
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,13 @@
 //! User turns go to stdin as NDJSON ([`user_input_line`]); the prompt is
 //! never passed positionally (a variadic flag would eat it — doc §1).
 
+/// How permission decisions reach the child (addendum 2026-09-24):
+/// `--permission-prompts host` routes every tool approval to the host, and
+/// `--permission-prompt-tool stdio` — a sentinel, not a tool name — delivers
+/// each `can_use_tool` request over the same stream-json control channel the
+/// adapter already reads, answered with a `control_response`. Both flags are
+/// required together: `host` alone auto-denies without ever asking.
+///
 /// How to start one child: its argv, its working directory, and the session
 /// id both sides agree on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +45,13 @@ pub fn base_argv() -> Vec<String> {
         "--output-format",
         "stream-json",
         "--verbose",
+        // Permission routing (addendum 2026-09-24). Each flag takes exactly
+        // one value — no variadic trap here — but they stay in this fixed
+        // order with the rest of the lane so probes and argv agree.
+        "--permission-prompts",
+        "host",
+        "--permission-prompt-tool",
+        "stdio",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -193,6 +207,21 @@ mod tests {
         ] {
             assert!(argv.contains(&flag.to_owned()), "missing {flag}");
         }
+        // Permission routing (addendum 2026-09-24): both flags, each with
+        // exactly one value, in lane order. `host` alone auto-denies, so a
+        // missing `stdio` sentinel is a silent tool refusal, not a parse
+        // error — assert the pair, not one half.
+        let prompts = argv.iter().position(|arg| arg == "--permission-prompts");
+        let tool = argv.iter().position(|arg| arg == "--permission-prompt-tool");
+        let (prompts, tool) = (prompts.expect("host flag"), tool.expect("stdio flag"));
+        assert_eq!(argv.get(prompts + 1).map(String::as_str), Some("host"));
+        assert_eq!(argv.get(tool + 1).map(String::as_str), Some("stdio"));
+        assert!(prompts < tool, "ordering discipline: prompts before prompt-tool");
+        // Every launcher shares the lane, so open/resume/fork all route
+        // permissions to the host.
+        assert!(argv_for_open("req-1", None, None, None).argv.contains(&"stdio".to_owned()));
+        assert!(argv_for_resume("sess-9", None, None).argv.contains(&"stdio".to_owned()));
+        assert!(argv_for_fork("branch-2", "sess-9", None, None).argv.contains(&"stdio".to_owned()));
     }
 
     #[test]
