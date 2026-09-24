@@ -585,6 +585,192 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{name}:{index}: {error}"));
             }
         }
+        // permission.jsonl is bidirectional: host->cli lines carry an
+        // envelope, so the inner frame is what decodes.
+        for (index, line) in fixture("permission.jsonl").iter().enumerate() {
+            let value: Value = serde_json::from_str(line).expect("fixture is JSON");
+            let owned;
+            let frame_line = match value.get("_dir").and_then(Value::as_str) {
+                Some("host->cli") => {
+                    owned = value.get("frame").expect("envelope carries a frame").to_string();
+                    owned.as_str()
+                }
+                _ => line.as_str(),
+            };
+            decode_line(frame_line)
+                .unwrap_or_else(|error| panic!("permission.jsonl:{index}: {error}"));
+        }
+    }
+
+    fn permission_fixture() -> Vec<Value> {
+        fixture("permission.jsonl")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("fixture is JSON"))
+            .collect()
+    }
+
+    /// The probe's payoff: the `can_use_tool` request decodes with every
+    /// field the seam needs — tool, label, input, tool-use id, suggestions.
+    #[test]
+    fn can_use_tool_decodes_with_the_whole_request() {
+        let lines = permission_fixture();
+        let request = lines
+            .iter()
+            .filter(|line| line.get("_dir").is_none())
+            .map(|line| decode_line(&line.to_string()).expect("child line decodes"))
+            .find_map(|frame| match frame {
+                Frame::ControlRequest(request) => Some(request),
+                _ => None,
+            })
+            .expect("one can_use_tool request in the fixture");
+        assert_eq!(request.request_id, "b4554ab2-30c2-4271-8451-dd9d6f5e226d");
+        assert_eq!(request.tool_name, "mcp__baaz__ping");
+        assert_eq!(request.display_name, "Ping");
+        assert_eq!(request.input, serde_json::json!({}));
+        assert_eq!(request.tool_use_id, "toolu_01CPKoR3sS6ZvHfqgQtJWZU5");
+        assert_eq!(request.mcp_server.as_deref(), Some("baaz"));
+        assert_eq!(request.suggestions.len(), 1);
+        let suggestion = &request.suggestions[0];
+        assert_eq!(suggestion.suggestion_type, "addRules");
+        assert_eq!(suggestion.behavior, "allow");
+        assert_eq!(suggestion.tool_names, ["mcp__baaz__ping"]);
+        assert_eq!(suggestion.destination, "localSettings");
+        assert_eq!(approval_headline(&request), "Ping (mcp__baaz__ping)");
+    }
+
+    /// The allow answer the test's explicit decision produces must match the
+    /// human's answer on the wire: same request id, same behavior.
+    #[test]
+    fn allow_answer_matches_the_fixture_host_line() {
+        let lines = permission_fixture();
+        let host_answer = lines
+            .iter()
+            .filter_map(|line| line.get("frame"))
+            .find(|frame| {
+                frame
+                    .get("response")
+                    .and_then(|response| response.get("request_id"))
+                    .and_then(Value::as_str)
+                    == Some("b4554ab2-30c2-4271-8451-dd9d6f5e226d")
+            })
+            .expect("the human answered the request in the fixture");
+        let written: Value =
+            serde_json::from_str(&encode_control_allow("b4554ab2-30c2-4271-8451-dd9d6f5e226d"))
+                .expect("encodes JSON");
+        assert_eq!(&written, host_answer);
+    }
+
+    #[test]
+    fn deny_answer_carries_the_human_reason() {
+        let value: Value =
+            serde_json::from_str(&encode_control_deny("req-7", "not now")).expect("encodes JSON");
+        assert_eq!(
+            value
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("behavior"))
+                .and_then(Value::as_str),
+            Some("deny")
+        );
+        assert_eq!(
+            value
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("message"))
+                .and_then(Value::as_str),
+            Some("not now")
+        );
+        assert_eq!(
+            value
+                .get("response")
+                .and_then(|response| response.get("request_id"))
+                .and_then(Value::as_str),
+            Some("req-7")
+        );
+    }
+
+    /// `can_use_tool` is the one subtype handled; anything else is carried,
+    /// not dropped and never panicked on — including the host's own
+    /// `initialize` handshake in the fixture.
+    #[test]
+    fn unknown_control_subtypes_are_surfaced() {
+        let lines = permission_fixture();
+        let host_init = lines
+            .iter()
+            .filter_map(|line| line.get("frame"))
+            .find(|frame| {
+                frame
+                    .get("request")
+                    .and_then(|request| request.get("subtype"))
+                    .and_then(Value::as_str)
+                    == Some("initialize")
+            })
+            .expect("the initialize handshake is in the fixture");
+        match decode_line(&host_init.to_string()).expect("decodes") {
+            Frame::ControlUnknown { request_id, subtype, .. } => {
+                assert_eq!(request_id, "req_init_1");
+                assert_eq!(subtype, "initialize");
+            }
+            other => panic!("initialize must surface as unknown, got {other:?}"),
+        }
+        match decode_line(
+            r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#,
+        )
+        .expect("decodes")
+        {
+            Frame::ControlUnknown { request_id, subtype, .. } => {
+                assert_eq!(request_id, "req-x");
+                assert_eq!(subtype, "frobnicate");
+            }
+            other => panic!("future subtypes must surface, got {other:?}"),
+        }
+    }
+
+    /// Unlike muse, this provider's `result` frame carries a real cost and a
+    /// structured denial list: read both, never the `0.0` literal.
+    #[test]
+    fn result_carries_real_cost_and_denials() {
+        let lines = permission_fixture();
+        let result = lines
+            .iter()
+            .filter(|line| line.get("_dir").is_none())
+            .map(|line| decode_line(&line.to_string()).expect("child line decodes"))
+            .find_map(|frame| match frame {
+                Frame::TurnResult {
+                    total_cost_usd,
+                    model,
+                    permission_denials,
+                    text,
+                    ..
+                } => Some((total_cost_usd, model, permission_denials, text)),
+                _ => None,
+            })
+            .expect("one result frame in the fixture");
+        assert!((result.0 - 0.0188967).abs() < 1e-9, "real cost, not 0.0: {}", result.0);
+        assert_eq!(result.1.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert!(result.2.is_empty(), "nothing was denied in the fixture");
+        assert_eq!(result.3, "PONG");
+        // And a denial decodes when one is there.
+        match decode_line(
+            r#"{"type":"result","subtype":"success","session_id":"s","result":"no",
+               "total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":1},
+               "permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1",
+               "tool_input":{"command":"rm -rf /"}}]}"#,
+        )
+        .expect("decodes")
+        {
+            Frame::TurnResult { permission_denials, total_cost_usd, .. } => {
+                assert_eq!(permission_denials.len(), 1);
+                assert_eq!(permission_denials[0].tool_name, "Bash");
+                assert_eq!(permission_denials[0].tool_use_id, "toolu_1");
+                assert_eq!(
+                    permission_denials[0].tool_input,
+                    serde_json::json!({"command": "rm -rf /"})
+                );
+                assert!((total_cost_usd - 0.5).abs() < 1e-12);
+            }
+            other => panic!("result must decode, got {other:?}"),
+        }
     }
 
     #[test]

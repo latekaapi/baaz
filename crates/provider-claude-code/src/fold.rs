@@ -31,18 +31,33 @@
 //! * `user` (tool results): one [`Delta::BlockUpdated`] per answered tool
 //!   call, completing its card (`Success`/`Error` plus output).
 //! * `result`: one [`Delta::TurnFinished`] per open turn, with usage and
-//!   cost in the footer meta.
+//!   cost in the footer meta, preceded by one generic card per
+//!   `permission_denials` entry (useful for the transcript; never a
+//!   substitute for answering the request).
+//! * `control_request/can_use_tool`: the request is queued as pending (see
+//!   [`ClaudeFold::pending_approvals`]) and rendered as a pending approval
+//!   card; the tap on the shoulder rides
+//!   [`ProviderEvent::ApprovalRequested`] (see [`step_line`]). Nothing here
+//!   answers it — answering is an explicit `DecideApproval`, because the
+//!   child waits silently (no timeout was observed) and an auto-answer
+//!   would bypass the person.
+//! * unknown control subtypes: recorded and rendered as generic cards —
+//!   surfaced, never dropped and never panicked on.
+//! * `control_response` (child→host): host-initiated, so no deltas.
 //! * everything else: no deltas (`init` records identity; `rate_limit`
 //!   updates the account snapshot).
 
 use std::collections::HashMap;
 use std::io::BufRead;
 
-use aui_protocol::{Block, Delta, ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta};
-use provider::ProviderEvent;
+use aui_protocol::{
+    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Block, Delta,
+    ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+};
+use provider::{ProviderError, ProviderEvent};
 
 use crate::account::AccountSnapshot;
-use crate::frame::{ContentBlock, Frame};
+use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame};
 
 /// Where a tool call lives, and what it was, so its result can complete it.
 #[derive(Clone, Debug)]
@@ -73,6 +88,15 @@ pub struct ClaudeFold {
     model: Option<String>,
     session_id: Option<String>,
     account: AccountSnapshot,
+    /// `can_use_tool` requests waiting on a human decision, oldest first. A
+    /// request stays here until `DecideApproval` answers it: nothing in the
+    /// adapter answers on its own, because an unanswered child waits
+    /// silently and an auto-answered one would bypass the person.
+    pending: Vec<ApprovalRequest>,
+    /// Unknown `control_request` subtypes seen so far, as
+    /// `(request_id, subtype)` in arrival order. Surfaced in the transcript,
+    /// never dropped.
+    unknown_control: Vec<(String, String)>,
 }
 
 impl ClaudeFold {
@@ -89,6 +113,25 @@ impl ClaudeFold {
     /// The session id from the last `init` frame, when seen.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// `can_use_tool` requests waiting on a human decision, oldest first.
+    pub fn pending_approvals(&self) -> &[ApprovalRequest] {
+        &self.pending
+    }
+
+    /// Unknown `control_request` subtypes seen so far, as
+    /// `(request_id, subtype)` in arrival order.
+    pub fn unknown_control(&self) -> &[(String, String)] {
+        &self.unknown_control
+    }
+
+    /// Take a pending request for deciding. Removes it, so a second decision
+    /// cannot answer the same request twice. `None` means nobody asked for
+    /// that id — an unknown approval decides nothing.
+    pub fn take_approval(&mut self, request_id: &str) -> Option<ApprovalRequest> {
+        let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
+        Some(self.pending.remove(position))
     }
 
     /// Fold one decoded frame into render-ready deltas.
@@ -112,6 +155,7 @@ impl ClaudeFold {
                 total_cost_usd,
                 duration_ms,
                 model,
+                permission_denials,
                 ..
             } => {
                 let meta = TurnMeta {
@@ -125,15 +169,52 @@ impl ClaudeFold {
                     cache_write_tokens: *cache_write_tokens,
                     cached_tokens: 0,
                 };
+                let mut deltas = Vec::new();
+                // After-the-fact refusals, on the transcript before the
+                // finish: decoded, visible, and never a substitute for
+                // answering the request itself.
+                if !permission_denials.is_empty() {
+                    if let Some(turn_id) = self.open.last().cloned() {
+                        for denial in permission_denials {
+                            deltas.push(Delta::BlockAdded {
+                                turn_id: turn_id.clone(),
+                                block: Block::Generic {
+                                    kind: "permission-denial".into(),
+                                    status: "denied".into(),
+                                    text: format!(
+                                        "{} ({}) refused",
+                                        denial.tool_name, denial.tool_use_id
+                                    ),
+                                },
+                            });
+                        }
+                    }
+                }
                 let open = std::mem::take(&mut self.open);
-                open.into_iter()
-                    .map(|turn_id| Delta::TurnFinished { turn_id, meta: meta.clone() })
-                    .collect()
+                deltas.extend(
+                    open.into_iter()
+                        .map(|turn_id| Delta::TurnFinished { turn_id, meta: meta.clone() }),
+                );
+                deltas
             }
             Frame::RateLimit(info) => {
                 self.account.observe(info.clone());
                 Vec::new()
             }
+            // A permission decision the child is suspended on. Queued as
+            // pending and carded — never folded away, or the turn hangs
+            // forever with no timeout to save it.
+            Frame::ControlRequest(request) => self.apply_approval(request),
+            // An unrecognised control subtype: recorded and carded, never
+            // dropped and never panicked on. The next subtype must be
+            // visible when it arrives.
+            Frame::ControlUnknown { request_id, subtype, raw } => {
+                self.apply_unknown_control(request_id, subtype, raw)
+            }
+            // A child→host `control_response` (e.g. the answer to our
+            // `initialize` handshake). Host-initiated, so nothing about it
+            // needs answering.
+            Frame::ControlResponse { .. } => Vec::new(),
             // The other lane, by choice (see module docs): parsed, ignored.
             Frame::Stream { .. } | Frame::Ignored { .. } => Vec::new(),
         }
@@ -233,6 +314,157 @@ impl ClaudeFold {
             },
         };
         Some(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block })
+    }
+
+    /// Queue a `can_use_tool` request as pending and card it. The card rides
+    /// the running turn; with no turn open (a bare control exchange) a turn
+    /// keyed by the request itself opens so the card is never dangling.
+    fn apply_approval(&mut self, request: &ApprovalRequest) -> Vec<Delta> {
+        if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
+            self.pending.push(request.clone());
+        }
+        let mut deltas = Vec::new();
+        let turn_id = self.control_turn(&request.request_id, &mut deltas);
+        deltas.push(Delta::BlockAdded { turn_id, block: approval_card(request) });
+        deltas
+    }
+
+    /// Record an unrecognised control subtype and card it. The card is the
+    /// surfacing: without it the decision would vanish inside the noise.
+    fn apply_unknown_control(
+        &mut self,
+        request_id: &str,
+        subtype: &str,
+        raw: &serde_json::Value,
+    ) -> Vec<Delta> {
+        if !self.unknown_control.iter().any(|(known, _)| known == request_id) {
+            self.unknown_control.push((request_id.to_owned(), subtype.to_owned()));
+        }
+        let mut deltas = Vec::new();
+        let turn_id = self.control_turn(request_id, &mut deltas);
+        deltas.push(Delta::BlockAdded {
+            turn_id,
+            block: Block::Generic {
+                kind: format!("control-request:{subtype}"),
+                status: "pending".into(),
+                text: format!("control_request {request_id} subtype {subtype:?}: {raw}"),
+            },
+        });
+        deltas
+    }
+
+    /// The turn hosting a control-channel card: the running turn when one is
+    /// open, else a fresh turn keyed by `key` (announced in `deltas`) so the
+    /// card lands somewhere the transcript owns.
+    fn control_turn(&mut self, key: &str, deltas: &mut Vec<Delta>) -> String {
+        if let Some(open) = self.open.last().cloned() {
+            return open;
+        }
+        self.started.insert(key.to_owned(), ());
+        self.open.push(key.to_owned());
+        deltas.push(Delta::TurnStarted {
+            turn: Turn::Assistant {
+                id: key.to_owned(),
+                blocks: Vec::new(),
+                meta: TurnMeta::default(),
+                timestamp: None,
+            },
+        });
+        key.to_owned()
+    }
+}
+
+/// Render one explicit human decision as the `control_response` line
+/// answering `request`. Pure: the caller writes the line to the child's
+/// stdin.
+///
+/// Only the card's own choices decide: `"allow"` answers
+/// `{"behavior":"allow","updatedInput":{}}`, `"deny"` answers
+/// `{"behavior":"deny","message":…}` with `feedback` as the reason (or a
+/// default when none was given). Anything else is rejected with the offered
+/// choices named. There is no default — a decision nobody made produces no
+/// answer line at all.
+pub fn decide_approval(
+    request: &ApprovalRequest,
+    choice: &str,
+    feedback: Option<&str>,
+) -> Result<String, ProviderError> {
+    match choice {
+        "allow" => Ok(crate::frame::encode_control_allow(&request.request_id)),
+        "deny" => Ok(crate::frame::encode_control_deny(
+            &request.request_id,
+            feedback.unwrap_or("denied by the operator"),
+        )),
+        other => Err(ProviderError::Rejected {
+            reason: format!(
+                "unknown approval choice {other:?} for {}: offer \"allow\" or \"deny\"",
+                request.request_id
+            ),
+        }),
+    }
+}
+
+/// The transcript card for a `can_use_tool` request: a pending approval the
+/// person resolves through `DecideApproval` with the card's `"allow"` /
+/// `"deny"` choices.
+fn approval_card(request: &ApprovalRequest) -> Block {
+    let input = match &request.input {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(map) if map.is_empty() => String::new(),
+        other => other.to_string(),
+    };
+    let command = if input.is_empty() {
+        request.tool_name.clone()
+    } else {
+        format!("{} {input}", request.tool_name)
+    };
+    let mut reason =
+        format!("tool_use {} requests {}", request.tool_use_id, approval_headline(request));
+    if let Some(server) = &request.mcp_server {
+        reason.push_str(&format!(" via MCP server {server}"));
+    }
+    let mut capabilities = Vec::new();
+    for suggestion in &request.suggestions {
+        for name in &suggestion.tool_names {
+            if !capabilities.contains(name) {
+                capabilities.push(name.clone());
+            }
+        }
+    }
+    let rule = capabilities.first().cloned();
+    Block::Approval {
+        id: request.request_id.clone(),
+        tool: request.tool_name.clone(),
+        command,
+        reason,
+        cwd: String::new(),
+        capabilities,
+        scope: ApprovalScope::ThisCommand,
+        state: ApprovalState::Pending,
+        rule,
+        choices: vec![
+            ApprovalChoice {
+                id: "allow".into(),
+                label: "Allow".into(),
+                decision: ApprovalDecision::Once,
+                scope: ApprovalScope::ThisCommand,
+                rule_preview: None,
+                accepts_feedback: false,
+            },
+            ApprovalChoice {
+                id: "deny".into(),
+                label: "Deny".into(),
+                decision: ApprovalDecision::Deny,
+                scope: ApprovalScope::ThisCommand,
+                rule_preview: None,
+                accepts_feedback: true,
+            },
+        ],
+        stages: Vec::new(),
+        current_stage: None,
+        badges: ApprovalBadges::default(),
+        feedback: None,
+        resolved_by: None,
     }
 }
 
@@ -343,9 +575,24 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     let Ok(frame) = crate::frame::decode_line(line) else { return };
     let session_id =
         frame.session_id().map(str::to_owned).or_else(|| fold.session_id().map(str::to_owned));
+    // A permission request the child waits on: the transcript card arrives
+    // through the fold below, and this tap tells the app a human decision is
+    // owed. Nothing here answers it — answering is an explicit
+    // `DecideApproval` carrying one of the card's own choices.
+    let tap = match &frame {
+        Frame::ControlRequest(request) => Some(ProviderEvent::ApprovalRequested {
+            session_id: session_id.clone().unwrap_or_default(),
+            approval_id: request.request_id.clone(),
+            headline: approval_headline(request),
+        }),
+        _ => None,
+    };
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
-        emit(ProviderEvent::Deltas { session_id, deltas });
+        emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
+    }
+    if let Some(tap) = tap {
+        emit(tap);
     }
 }
 
@@ -592,5 +839,150 @@ mod tests {
                 assert_eq!(session_id.as_deref(), Some("96b540fe-c0a9-4347-9106-d1eb0e88ac49"));
             }
         });
+    }
+
+    fn permission_child_lines() -> Vec<String> {
+        let path = format!(
+            "{}/../../fixtures/claude-code/permission.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path)
+            .expect("fixture reads")
+            .lines()
+            .filter_map(|line| {
+                let value: serde_json::Value =
+                    serde_json::from_str(line).expect("fixture is JSON");
+                // Host-sent envelope lines are answers, not child output.
+                if value.get("_dir").is_some() { None } else { Some(line.to_owned()) }
+            })
+            .collect()
+    }
+
+    /// THE HANG TEST, fold half. Replaying the child's side of the fixture
+    /// must leave the permission request pending with a card on the
+    /// transcript: a reader that only folded `assistant`/`stream_event`
+    /// would leave nothing pending, and the child would wait forever.
+    #[test]
+    fn permission_request_stays_pending_until_decided() {
+        let (mut fold, _) = fold_lines(&permission_child_lines());
+        let request_id = {
+            let pending = fold.pending_approvals();
+            assert_eq!(pending.len(), 1, "the can_use_tool request must surface, not fold away");
+            let request = &pending[0];
+            assert_eq!(request.tool_name, "mcp__baaz__ping");
+            assert_eq!(request.tool_use_id, "toolu_01CPKoR3sS6ZvHfqgQtJWZU5");
+            request.request_id.clone()
+        };
+        // The card is on the transcript too: a pending approval, not prose.
+        let (_, deltas) = fold_lines(&permission_child_lines());
+        let cards = deltas
+            .iter()
+            .filter(|delta| {
+                matches!(
+                    delta,
+                    Delta::BlockAdded {
+                        block: Block::Approval { state: aui_protocol::ApprovalState::Pending, .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(cards, 1, "one pending approval card on the transcript");
+        // Deciding takes it off the pending set exactly once.
+        let taken = fold.take_approval(&request_id);
+        assert!(taken.is_some());
+        assert!(fold.pending_approvals().is_empty());
+        assert!(fold.take_approval(&request_id).is_none());
+    }
+
+    /// Decisions are explicit and typed: allow and deny render their wire
+    /// lines, anything else is rejected with the offered choices named.
+    #[test]
+    fn decisions_are_explicit_allow_or_deny() {
+        let (fold, _) = fold_lines(&permission_child_lines());
+        let request = fold.pending_approvals()[0].clone();
+        let allow = decide_approval(&request, "allow", None).expect("allow decides");
+        let written: serde_json::Value = serde_json::from_str(&allow).expect("encodes JSON");
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("behavior"))
+                .and_then(serde_json::Value::as_str),
+            Some("allow")
+        );
+        let deny = decide_approval(&request, "deny", Some("too risky")).expect("deny decides");
+        let written: serde_json::Value = serde_json::from_str(&deny).expect("encodes JSON");
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("message"))
+                .and_then(serde_json::Value::as_str),
+            Some("too risky")
+        );
+        let error = decide_approval(&request, "maybe", None).expect_err("no third choice");
+        assert!(error.to_string().contains("allow"));
+    }
+
+    /// An unrecognised control subtype is recorded and carded — surfaced in
+    /// the transcript, never dropped, never panicked on.
+    #[test]
+    fn unknown_control_subtype_is_surfaced_not_dropped() {
+        let mut fold = ClaudeFold::new();
+        let frame = decode_line(
+            r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#,
+        )
+        .expect("decodes");
+        let deltas = fold.apply(&frame);
+        assert_eq!(fold.unknown_control(), &[("req-x".to_owned(), "frobnicate".to_owned())]);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, .. }, .. }
+                if kind.contains("frobnicate")
+            )),
+            "the unknown subtype must appear on the transcript: {deltas:?}"
+        );
+        // …and it never lands in the pending set: nothing known to decide.
+        assert!(fold.pending_approvals().is_empty());
+    }
+
+    /// The permission turn's `result` frame finishes with the provider's
+    /// real cost in the footer meta — never the muse `0.0` literal.
+    #[test]
+    fn permission_turn_finishes_with_real_cost() {
+        let (_, deltas) = fold_lines(&permission_child_lines());
+        let metas: Vec<&TurnMeta> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnFinished { meta, .. } => Some(meta),
+                _ => None,
+            })
+            .collect();
+        assert!(!metas.is_empty(), "the result frame finishes turns");
+        let last = metas.last().expect("a finish");
+        assert!(
+            (last.cost_usd - 0.0188967).abs() < 1e-9,
+            "real total_cost_usd in the meta: {}",
+            last.cost_usd
+        );
+        // The PONG tool result still completes its MCP card.
+        let pongs = deltas
+            .iter()
+            .filter(|delta| match delta {
+                Delta::BlockUpdated {
+                    block:
+                        Block::ToolCall {
+                            body: ToolBody::Mcp { result_json, .. },
+                            status: ToolStatus::Success,
+                            ..
+                        },
+                    ..
+                } => result_json.contains("PONG"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(pongs, 1, "the allowed tool's PONG completes its card");
     }
 }

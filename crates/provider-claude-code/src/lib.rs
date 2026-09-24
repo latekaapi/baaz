@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 use aui_protocol::Delta;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
-    Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
-    ProviderEvent, ProviderId, SessionSummary,
+    Ack, CapabilitySet, Command, ConnectInfo, Handshake, PendingApproval, ProviderAdapter,
+    ProviderError, ProviderEvent, ProviderId, SessionSummary,
 };
 
 pub use caps::{capabilities, claude_version_supported, CLAUDE_VERSION_FLOOR};
@@ -144,6 +144,47 @@ impl ClaudeCodeAdapter {
             }),
             None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
         }
+    }
+
+    /// Answer one pending `can_use_tool` request with an explicit human
+    /// decision. The pending lookup comes first: an unknown approval id is
+    /// rejected even with no child running, and no path here invents an
+    /// allow — without a live child the decision cannot be delivered, so the
+    /// request stays pending rather than answered.
+    fn decide_approval(
+        &self,
+        session_id: &str,
+        approval: &str,
+        choice: &str,
+        feedback: Option<&str>,
+    ) -> Result<Ack, ProviderError> {
+        let request = self
+            .fold
+            .lock()
+            .expect("fold mutex")
+            .pending_approvals()
+            .iter()
+            .find(|queued| queued.request_id == approval)
+            .cloned()
+            .ok_or_else(|| ProviderError::Rejected {
+                reason: format!("unknown approval {approval:?}: no pending request carries that id"),
+            })?;
+        self.check_session(session_id)?;
+        let line = fold::decide_approval(&request, choice, feedback)?;
+        match self.child.lock().expect("child mutex").as_mut() {
+            Some(running) => running.send_line(&line).map_err(|error| {
+                ProviderError::Unavailable {
+                    reason: format!("the session child is unreachable: {error}"),
+                }
+            })?,
+            None => {
+                return Err(ProviderError::Unavailable {
+                    reason: "no session child is running".into(),
+                })
+            }
+        }
+        self.fold.lock().expect("fold mutex").take_approval(approval);
+        Ok(Ack::Accepted)
     }
 
     fn submit_text(&self, session_id: &str, text: &str, turn_id: String) -> Result<Ack, ProviderError> {
@@ -384,16 +425,31 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "list-models",
                 "no model-catalog surface was probed; Baaz supplies the list",
             )),
-            Command::DecideApproval { .. } => Err(ProviderError::Rejected {
-                reason: "no approval prompt surface was captured from the CLI; every approval id \
-                         is unknown"
-                    .into(),
-            }),
-            Command::ListPending { .. } => {
+            // The control channel answers here: a pending `can_use_tool`
+            // request is decided with one of its card's own choices
+            // (`"allow"`/`"deny"`), written to the child as a
+            // `control_response`. Unknown ids and unknown choices are
+            // rejected; nothing is ever auto-allowed.
+            Command::DecideApproval { session_id, approval, choice, feedback, .. } => {
+                self.decide_approval(&session_id, &approval, &choice, feedback.as_deref())
+            }
+            Command::ListPending { session_id } => {
                 self.require_child()?;
-                // No prompt surface was captured, so the only honest
-                // non-empty answer is impossible: report none.
-                Ok(Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                self.check_session(&session_id)?;
+                let fold = self.fold.lock().expect("fold mutex");
+                Ok(Ack::PendingWork {
+                    approvals: fold
+                        .pending_approvals()
+                        .iter()
+                        .map(|request| PendingApproval {
+                            id: request.request_id.clone(),
+                            session_id: session_id.clone(),
+                            headline: frame::approval_headline(request),
+                            stage_token: None,
+                        })
+                        .collect(),
+                    questions: Vec::new(),
+                })
             }
             // Unreachable through the gate (Questions is Unavailable);
             // refused here too, so the raw dispatch can never spell it Ok.
