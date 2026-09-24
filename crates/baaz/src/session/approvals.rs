@@ -6,6 +6,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use crate::providers::{ApprovalChoice, ExternalApproval};
 
 impl SessionView {
     /// A server-minted choice was pressed: `approval/decide`.
@@ -236,5 +237,97 @@ impl SessionView {
         self.banner = Some(message.to_owned());
         self.banner_action = action;
         cx.notify();
+    }
+}
+
+impl SessionView {
+    // --------------------------------------- external approvals (S46)
+
+    /// Park a new provider's approval request on this surface: Claude
+    /// Code's `can_use_tool` control request, or one of Codex's five
+    /// server->client approval requests.
+    ///
+    /// The card this renders is never ahead of the server: it shows
+    /// pending until [`Self::resolve_external_approval`] runs on the
+    /// server's notification.
+    /// Park a new provider's approval request on this surface.
+    ///
+    /// No production caller yet: the provider lane decoders call this the
+    /// moment they land, the way the legacy pump calls the fold today.
+    /// It ships as dead code until then rather than as a second copy
+    /// typed at each future call site.
+    #[allow(dead_code)]
+    pub fn inject_external_approval(&mut self, approval: ExternalApproval, cx: &mut Context<Self>) {
+        let id = approval.id.clone();
+        // Loud, not silent: an external approval on a legacy-pump session
+        // means both lanes claim this session, which must never happen
+        // quietly (see `crate::providers`). Park it anyway — dropping a
+        // security decision is worse than a banner — and say so.
+        if crate::providers::check_single_lane(
+            crate::providers::uses_legacy_pump(self.provider_kind()),
+            true,
+            &self.session_id,
+        )
+        .is_some()
+        {
+            crate::baaz_log!("external approval {id} arrived on a legacy-pump session; parking it on the approvals surface");
+            self.banner = Some(format!(
+                "An approval arrived on the wrong lane for this session ({id}); it is parked below and still decides nothing by itself."
+            ));
+            self.banner_action = None;
+        }
+        self.external_approvals.inject(approval);
+        self.follow = true;
+        cx.notify();
+    }
+
+    /// Decide an external approval: `decline` ("no, do something else",
+    /// the turn continues) and `cancel` ("no, stop", the turn is
+    /// interrupted) ride as the different answers they are.
+    ///
+    /// The press sends exactly one `DecideApproval` onto the outbox the
+    /// provider lane drains, then waits: the card shows "sent, waiting"
+    /// and changes only when the server's notification resolves it. A
+    /// repeat press while one is in flight sends nothing twice.
+    pub fn decide_external_approval(
+        &mut self,
+        approval_id: String,
+        choice: ApprovalChoice,
+        feedback: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let headline =
+            self.external_approvals.get(&approval_id).map(|a| a.headline.clone()).unwrap_or_default();
+        let Some((choice_id, stage_token)) = self.external_approvals.decide(&approval_id, choice) else {
+            crate::baaz_log!("external approval {approval_id}: nothing pending under that id, or a decision is already in flight; sending nothing twice");
+            return;
+        };
+        crate::baaz_log!("external approval {approval_id} ({headline}): deciding {choice_id}");
+        self.external_outbox.push(ProviderCommand::DecideApproval {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            session_id: self.session_id.clone(),
+            approval: approval_id,
+            choice: choice_id,
+            stage_token,
+            feedback,
+        });
+        cx.notify();
+    }
+
+    /// Settle an external approval from the server's notification: the
+    /// only thing that ever moves the card after the press. Returns
+    /// whether anything was waiting under that id.
+    ///
+    /// No production caller yet, for the same reason as
+    /// [`Self::inject_external_approval`]: the notification path calls
+    /// this when the provider lane lands.
+    #[allow(dead_code)]
+    pub fn resolve_external_approval(&mut self, approval_id: &str, cx: &mut Context<Self>) -> bool {
+        let settled = self.external_approvals.resolve(approval_id);
+        if settled {
+            self.follow = true;
+            cx.notify();
+        }
+        settled
     }
 }

@@ -51,7 +51,8 @@ pub fn db_path() -> PathBuf {
 /// re-keys it on `(session_id, turn_id)` (Task D1). A version-1 database is
 /// migrated in place (see [`migrate_v1_to_v2`]): no history is dropped —
 /// rows already there are carried over, except that a turn stored twice
-/// under two cursors collapses to one row (the smallest cursor wins). The
+/// under two cursors collapses to one row (the copy with real token data
+/// wins, then the later write; see [`COPY_V1_TO_V2`]). The
 /// migration is all-or-nothing — rename, rebuild, copy, drop and the version
 /// stamp run inside a single transaction — and a `usage_turns_v1` left over
 /// from an interrupted attempt is finished on the next open rather than
@@ -344,10 +345,35 @@ const LEDGER_DDL_V2: &str = "CREATE TABLE IF NOT EXISTS usage_turns(
  CREATE INDEX IF NOT EXISTS usage_turns_finished_at ON usage_turns(finished_at_ms);";
 
 /// The copy half of the migration: every row of the version-1 backup lands
-/// in the version-2 table, smallest cursor first so a turn the old key
-/// stored twice collapses to one row, and rows already in the live table
-/// keep their seats (`INSERT OR IGNORE` into it). Idempotent: re-running it
-/// over an already-copied backup changes nothing.
+/// in the version-2 table, and rows already in the live table keep their
+/// seats (`INSERT OR IGNORE` into it). Idempotent: re-running it over an
+/// already-copied backup changes nothing.
+///
+/// A turn the old key stored twice under two cursors cannot survive twice
+/// under the new one, so it collapses to a single row. **Which copy
+/// survives is decided here, and it is decided on the data, not on the
+/// cursor.** `INSERT OR IGNORE` keeps whichever row arrives first, so the
+/// `ORDER BY` states the preference, best first:
+///
+/// 1. **A row with non-zero `tokens_in` beats a zero one.** A zero-token
+///    row is a write that never learned the real figure; the other copy is
+///    strictly better data. In SQLite `tokens_in = 0` is 1 when true, so
+///    ordering that column ascending puts the non-zero row first.
+/// 2. **Then the later `finished_at_ms`.** If both copies carry real but
+///    different figures, the later write saw more. This is chronology,
+///    which is the thing the cursor is not.
+/// 3. **Then `view_cursor`,** only so the result stays deterministic when
+///    the first two cannot separate the rows. It decides nothing on its own.
+///
+/// This replaces an ordering on `view_cursor` alone, which was unsafe. The
+/// cursor is an opaque, server-issued string: lexicographic order tracks
+/// something meaningful only while both cursors share a digit width — `:9`
+/// sorts *after* `:10` — and it is unrelated both to chronology and to
+/// which write was live rather than backfill. On the owner's real database
+/// it happened to pick correctly, keeping a 92,278-token row over a
+/// 0-token one; had it gone the other way the ledger would have lost
+/// 114,911 tokens instead of 22,633. That was luck, and luck is not a
+/// tie-break. The four `tests` below pin both orientations of that pair.
 const COPY_V1_TO_V2: &str = "INSERT OR IGNORE INTO usage_turns(
     session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
     tokens_in, tokens_out, reasoning_tokens,
@@ -356,16 +382,18 @@ const COPY_V1_TO_V2: &str = "INSERT OR IGNORE INTO usage_turns(
     session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
     tokens_in, tokens_out, reasoning_tokens,
     cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
- FROM usage_turns_v1 ORDER BY session_id, view_cursor";
+ FROM usage_turns_v1
+ ORDER BY session_id, turn_id, (tokens_in = 0) ASC, finished_at_ms DESC, view_cursor ASC";
 
 /// Re-key a version-1 ledger from `(session_id, view_cursor)` to
 /// `(session_id, turn_id)`.
 ///
 /// Nothing already there is dropped, with one deliberate exception: a turn
 /// the old key stored twice under two cursors cannot survive twice under
-/// the new one, so it collapses to a single row — the copy with the
-/// smallest `view_cursor` wins (`INSERT OR IGNORE` over cursor order keeps
-/// the first). Every other row is carried over byte-identical.
+/// the new one, so it collapses to a single row — the copy carrying real
+/// token data wins, then the later write; see [`COPY_V1_TO_V2`] for why the
+/// cursor no longer decides this. Every other row is carried over
+/// byte-identical.
 ///
 /// The whole swap — rename, rebuild, copy, drop — plus the version stamp
 /// runs inside a single transaction, so an interruption at any statement
@@ -994,6 +1022,173 @@ mod tests {
                 )
                 .expect("v1 row writes");
         }
+    }
+
+    /// Seed a version-1 ledger with exactly the rows given, as
+    /// `(cursor, turn, tokens_in, finished_at_ms)`. The tie-break tests need
+    /// to vary token counts and write times per row, which `build_v1_db`'s
+    /// fixed shape cannot express.
+    fn build_v1_rows(path: &std::path::Path, rows: &[(&str, &str, u64, i64)]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("temp dir");
+        }
+        let connection = Connection::open(path).expect("v1 file opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+                 CREATE TABLE usage_turns(
+                    session_id TEXT NOT NULL,
+                    view_cursor TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    finished_at_ms INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    tokens_in INTEGER NOT NULL,
+                    tokens_out INTEGER NOT NULL,
+                    reasoning_tokens INTEGER NOT NULL,
+                    cache_read_tokens INTEGER,
+                    cache_write_tokens INTEGER,
+                    cached_tokens INTEGER NOT NULL,
+                    cost_usd REAL NOT NULL,
+                    PRIMARY KEY (session_id, view_cursor)
+                 ) WITHOUT ROWID;",
+            )
+            .expect("v1 schema builds");
+        for (cursor, turn, tokens, finished) in rows {
+            let meta = TurnMeta {
+                tokens_in: *tokens,
+                ..meta()
+            };
+            let row = row_from_finished("s-1", cursor, turn, *finished, &meta);
+            connection
+                .execute(
+                    "INSERT INTO usage_turns(
+                        session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+                        tokens_in, tokens_out, reasoning_tokens,
+                        cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        row.session_id,
+                        row.view_cursor,
+                        row.turn_id,
+                        row.finished_at_ms,
+                        row.model,
+                        row.duration_ms,
+                        row.tokens_in,
+                        row.tokens_out,
+                        row.reasoning_tokens,
+                        row.cache_read_tokens,
+                        row.cache_write_tokens,
+                        row.cached_tokens,
+                        row.cost_usd,
+                    ],
+                )
+                .expect("v1 row writes");
+        }
+    }
+
+    /// Migrate a one-off v1 ledger built from `rows` and return the surviving
+    /// row for `turn`.
+    fn migrate_and_take(label: &str, rows: &[(&str, &str, u64, i64)], turn: &str) -> UsageRow {
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-usage-tiebreak-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("baaz.db");
+        build_v1_rows(&path, rows);
+        let connection = open_at(&path).expect("migration opens");
+        let kept = find_turn(&connection, "s-1", turn).expect("the turn survives");
+        assert_eq!(
+            count_for_session(&connection, "s-1"),
+            1,
+            "the duplicate pair must collapse to exactly one row"
+        );
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+        kept
+    }
+
+    /// The owner's real pair, in the orientation their database actually held.
+    ///
+    /// Cursor `:69` carried 92,278 tokens and `:76` carried 0. The old
+    /// ordering on `view_cursor` alone happened to keep `:69`, so the ledger
+    /// lost 22,633 tokens rather than 114,911. This test passed before the
+    /// tie-break changed and must keep passing after it — it is the
+    /// regression half of the pair, and the only one of these four that the
+    /// old ordering also satisfied.
+    #[test]
+    fn the_real_duplicate_pair_keeps_the_row_that_has_the_tokens() {
+        let kept = migrate_and_take(
+            "real",
+            &[
+                ("v:s:69", "t-dup", 92_278, 1_700_000_000_000),
+                ("v:s:76", "t-dup", 0, 1_700_000_000_000),
+            ],
+            "t-dup",
+        );
+        assert_eq!(kept.tokens_in, 92_278);
+        assert_eq!(kept.view_cursor, "v:s:69");
+    }
+
+    /// The same pair the other way round — and this is the one that matters.
+    ///
+    /// Nothing about `view_cursor` says which copy has the data, so the pair
+    /// could equally have landed with the zero-token row on the smaller
+    /// cursor. Against the old `ORDER BY session_id, view_cursor` this test
+    /// FAILS: it keeps `:69`, the empty copy, and silently discards 92,278
+    /// tokens. Confirmed by reverting the ordering and watching it fail.
+    #[test]
+    fn the_real_pair_reversed_still_keeps_the_row_that_has_the_tokens() {
+        let kept = migrate_and_take(
+            "mirror",
+            &[
+                ("v:s:69", "t-dup", 0, 1_700_000_000_000),
+                ("v:s:76", "t-dup", 92_278, 1_700_000_000_000),
+            ],
+            "t-dup",
+        );
+        assert_eq!(
+            kept.tokens_in, 92_278,
+            "the copy carrying real tokens must win regardless of its cursor"
+        );
+        assert_eq!(kept.view_cursor, "v:s:76");
+    }
+
+    /// Why the cursor was never a safe ordering, in one line: it is a string,
+    /// so `:9` sorts *after* `:10`. Two copies of the same turn written nine
+    /// and ten turns into a session compare backwards, and under the old rule
+    /// the empty one would have won on a coin-flip of digit width.
+    #[test]
+    fn a_cursor_digit_width_no_longer_decides_which_copy_survives() {
+        assert!("v:s:9" > "v:s:10", "the premise: string order, not numeric");
+        let kept = migrate_and_take(
+            "width",
+            &[
+                ("v:s:9", "t-dup", 4_242, 1_700_000_000_000),
+                ("v:s:10", "t-dup", 0, 1_700_000_000_000),
+            ],
+            "t-dup",
+        );
+        assert_eq!(kept.tokens_in, 4_242);
+        assert_eq!(kept.view_cursor, "v:s:9");
+    }
+
+    /// When both copies carry real figures the cursor still decides nothing:
+    /// the later write saw more, so chronology breaks the tie.
+    #[test]
+    fn two_real_copies_of_one_turn_keep_the_later_write() {
+        let kept = migrate_and_take(
+            "chrono",
+            &[
+                ("v:s:1", "t-dup", 100, 1_700_000_000_000),
+                ("v:s:2", "t-dup", 900, 1_700_000_009_000),
+            ],
+            "t-dup",
+        );
+        assert_eq!(kept.tokens_in, 900);
+        assert_eq!(kept.view_cursor, "v:s:2");
     }
 
     fn schema_version(connection: &Connection) -> Option<String> {

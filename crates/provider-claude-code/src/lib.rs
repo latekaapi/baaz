@@ -28,15 +28,37 @@ use std::sync::{Arc, Mutex};
 use aui_protocol::Delta;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
-    Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
-    ProviderEvent, ProviderId, SessionSummary,
+    Ack, CapabilitySet, Command, ConnectInfo, Handshake, PendingApproval, ProviderAdapter,
+    ProviderError, ProviderEvent, ProviderId, SessionSummary,
 };
 
 pub use caps::{capabilities, claude_version_supported, CLAUDE_VERSION_FLOOR};
 
 use argv::SessionLaunch;
 use child::RunningChild;
-use fold::ClaudeFold;
+use fold::{ClaudeFold, UnknownControlRequest};
+use frame::ApprovalRequest;
+
+/// One claimed answer: the request is already out of its queue, so this
+/// value is the only right to answer it. Exactly one claimant can hold
+/// it, which is what keeps two concurrent decisions from writing two
+/// `control_response` lines for one `request_id`.
+#[derive(Debug)]
+enum ClaimedApproval {
+    /// A `can_use_tool` request plus its minted answer line.
+    Known(ApprovalRequest, String),
+    /// An unknown-subtype request plus its minted answer line.
+    Unknown(UnknownControlRequest, String),
+}
+
+impl ClaimedApproval {
+    /// The minted `control_response` line to write to the child.
+    fn line(&self) -> &str {
+        match self {
+            ClaimedApproval::Known(_, line) | ClaimedApproval::Unknown(_, line) => line,
+        }
+    }
+}
 
 /// The Claude Code implementation: neutral commands in, one long-lived
 /// `claude` child per session, neutral acks and events out.
@@ -143,6 +165,99 @@ impl ClaudeCodeAdapter {
                 reason: format!("this adapter holds session {held}, not {session_id}"),
             }),
             None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
+        }
+    }
+
+    /// Answer one pending `can_use_tool` — or unknown-subtype — request
+    /// with an explicit human decision. The pending lookup comes first: an
+    /// unknown approval id is rejected even with no child running, and no
+    /// path here invents an allow — without a live child the decision
+    /// cannot be delivered, so the request goes back on its queue rather
+    /// than being answered.
+    fn decide_approval(
+        &self,
+        session_id: &str,
+        approval: &str,
+        choice: &str,
+        feedback: Option<&str>,
+    ) -> Result<Ack, ProviderError> {
+        if !self.has_pending(approval) {
+            return Err(ProviderError::Rejected {
+                reason: format!("unknown approval {approval:?}: no pending request carries that id"),
+            });
+        }
+        self.check_session(session_id)?;
+        // Take-then-send: the removal is what claims the right to answer,
+        // so two concurrent decisions for one id cannot both pass the
+        // "is it pending" check — the loser finds nothing and fails
+        // cleanly instead of writing a second `control_response`.
+        let claimed = self.claim_approval(approval, choice, feedback)?;
+        let delivered = match self.child.lock().expect("child mutex").as_mut() {
+            Some(running) => running.send_line(claimed.line()).map_err(|error| {
+                ProviderError::Unavailable {
+                    reason: format!("the session child is unreachable: {error}"),
+                }
+            }),
+            None => Err(ProviderError::Unavailable {
+                reason: "no session child is running".into(),
+            }),
+        };
+        match delivered {
+            Ok(()) => Ok(Ack::Accepted),
+            Err(error) => {
+                // Undeliverable, so unanswered: put the claim back rather
+                // than dropping a decision the child never saw.
+                let mut fold = self.fold.lock().expect("fold mutex");
+                match claimed {
+                    ClaimedApproval::Known(request, _) => fold.requeue_approval(request),
+                    ClaimedApproval::Unknown(request, _) => fold.requeue_unknown(request),
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether any queue holds `approval`: known or unknown-subtype.
+    fn has_pending(&self, approval: &str) -> bool {
+        let fold = self.fold.lock().expect("fold mutex");
+        fold.pending_approvals().iter().any(|queued| queued.request_id == approval)
+            || fold.pending_unknown().iter().any(|queued| queued.request_id == approval)
+    }
+
+    /// Claim the single right to answer `approval` and mint its
+    /// `control_response` line, in one lock hold: the removal is the
+    /// claim. A second caller finds nothing pending and gets a clean
+    /// rejection. Unknown ids and unknown choices are rejected without
+    /// consuming any claim, so a typo never eats the request.
+    fn claim_approval(
+        &self,
+        approval: &str,
+        choice: &str,
+        feedback: Option<&str>,
+    ) -> Result<ClaimedApproval, ProviderError> {
+        let mut fold = self.fold.lock().expect("fold mutex");
+        let known = fold.pending_approvals().iter().any(|queued| queued.request_id == approval);
+        let unknown = fold.pending_unknown().iter().any(|queued| queued.request_id == approval);
+        if !known && !unknown {
+            return Err(ProviderError::Rejected {
+                reason: format!("unknown approval {approval:?}: no pending request carries that id"),
+            });
+        }
+        if choice != "allow" && choice != "deny" {
+            return Err(ProviderError::Rejected {
+                reason: format!(
+                    "unknown approval choice {choice:?} for {approval}: offer \"allow\" or \"deny\""
+                ),
+            });
+        }
+        if known {
+            let request = fold.take_approval(approval).expect("presence checked above");
+            let line = fold::decide_approval(&request, choice, feedback)?;
+            Ok(ClaimedApproval::Known(request, line))
+        } else {
+            let request = fold.take_unknown(approval).expect("presence checked above");
+            let line = fold::decide_unknown_approval(&request, choice, feedback)?;
+            Ok(ClaimedApproval::Unknown(request, line))
         }
     }
 
@@ -384,16 +499,31 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "list-models",
                 "no model-catalog surface was probed; Baaz supplies the list",
             )),
-            Command::DecideApproval { .. } => Err(ProviderError::Rejected {
-                reason: "no approval prompt surface was captured from the CLI; every approval id \
-                         is unknown"
-                    .into(),
-            }),
-            Command::ListPending { .. } => {
+            // The control channel answers here: a pending `can_use_tool`
+            // — or unknown-subtype — request is decided with one of its
+            // card's own choices (`"allow"`/`"deny"`), written to the
+            // child as a `control_response`. Unseen ids and unknown
+            // choices are rejected; nothing is ever auto-allowed.
+            Command::DecideApproval { session_id, approval, choice, feedback, .. } => {
+                self.decide_approval(&session_id, &approval, &choice, feedback.as_deref())
+            }
+            Command::ListPending { session_id } => {
                 self.require_child()?;
-                // No prompt surface was captured, so the only honest
-                // non-empty answer is impossible: report none.
-                Ok(Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                self.check_session(&session_id)?;
+                let fold = self.fold.lock().expect("fold mutex");
+                Ok(Ack::PendingWork {
+                    approvals: fold
+                        .pending_approvals()
+                        .iter()
+                        .map(|request| PendingApproval {
+                            id: request.request_id.clone(),
+                            session_id: session_id.clone(),
+                            headline: frame::approval_headline(request),
+                            stage_token: None,
+                        })
+                        .collect(),
+                    questions: Vec::new(),
+                })
             }
             // Unreachable through the gate (Questions is Unavailable);
             // refused here too, so the raw dispatch can never spell it Ok.
@@ -529,5 +659,118 @@ mod tests {
             }
             other => panic!("expected signed-in account with a label, got {other:?}"),
         }
+    }
+
+    fn race_adapter_with_pending() -> std::sync::Arc<ClaudeCodeAdapter> {
+        // Pure decode-and-fold: no `claude` process is ever spawned (the
+        // binary name does not exist, so a stray spawn would fail loudly).
+        let adapter = std::sync::Arc::new(ClaudeCodeAdapter::new("claude-must-never-spawn"));
+        let frame = frame::decode_line(
+            r#"{"type":"control_request","request_id":"req-race","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{}}}"#,
+        )
+        .expect("decodes");
+        adapter.fold.lock().expect("fold mutex").apply(&frame);
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").pending_approvals().len(),
+            1,
+            "one pending request to fight over"
+        );
+        adapter
+    }
+
+    /// THE SINGLE-DECISION TEST. Eight threads decide one id: the claim is
+    /// the removal, so exactly one mints the answer line and the rest get
+    /// a clean rejection — never a second `control_response` with the
+    /// same `request_id`. The claim is the whole race: `decide_approval`
+    /// writes exactly the line its claim minted.
+    #[test]
+    fn concurrent_decisions_for_one_id_claim_exactly_one_line() {
+        let adapter = race_adapter_with_pending();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let adapter = std::sync::Arc::clone(&adapter);
+            handles.push(std::thread::spawn(move || {
+                adapter.claim_approval("req-race", "deny", None).map(|claimed| claimed.line().to_owned())
+            }));
+        }
+        let mut lines = Vec::new();
+        let mut rejected = 0;
+        for handle in handles {
+            match handle.join().expect("thread joins") {
+                Ok(line) => lines.push(line),
+                Err(error) => {
+                    assert!(
+                        matches!(error, ProviderError::Rejected { .. }),
+                        "losers get a clean rejection, never a second line: {error}"
+                    );
+                    rejected += 1;
+                }
+            }
+        }
+        assert_eq!(lines.len(), 1, "exactly one decision claims the right to answer");
+        assert_eq!(rejected, 7);
+        let written: serde_json::Value = serde_json::from_str(&lines[0]).expect("encodes JSON");
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("request_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("req-race")
+        );
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("behavior"))
+                .and_then(serde_json::Value::as_str),
+            Some("deny")
+        );
+        assert!(adapter.fold.lock().expect("fold mutex").pending_approvals().is_empty());
+        // …and a retry afterwards still finds nothing: claimed exactly once.
+        let error =
+            adapter.claim_approval("req-race", "deny", None).expect_err("nothing left to claim");
+        assert!(matches!(error, ProviderError::Rejected { .. }));
+    }
+
+    /// An unknown control subtype arrives, the caller answers, a response
+    /// line is minted: no received request is ever unanswerable.
+    #[test]
+    fn unknown_control_subtype_can_be_answered() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let frame = frame::decode_line(
+            r#"{"type":"control_request","request_id":"req-x","request":{"subtype":"frobnicate"}}"#,
+        )
+        .expect("decodes");
+        adapter.fold.lock().expect("fold mutex").apply(&frame);
+        let claimed =
+            adapter.claim_approval("req-x", "deny", Some("no such tool")).expect("answerable");
+        let written: serde_json::Value =
+            serde_json::from_str(claimed.line()).expect("encodes JSON");
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("request_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("req-x")
+        );
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("behavior"))
+                .and_then(serde_json::Value::as_str),
+            Some("deny")
+        );
+        assert_eq!(
+            written
+                .get("response")
+                .and_then(|response| response.get("response"))
+                .and_then(|response| response.get("message"))
+                .and_then(serde_json::Value::as_str),
+            Some("no such tool")
+        );
+        let error =
+            adapter.claim_approval("req-x", "deny", None).expect_err("claimed exactly once");
+        assert!(matches!(error, ProviderError::Rejected { .. }));
     }
 }
