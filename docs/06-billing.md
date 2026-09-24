@@ -356,3 +356,36 @@ The one index is on `finished_at_ms`, which is what a "last N days" query
 ranges over. Backfilled rows carry the time they were recorded, not the time
 the turn ran — a page carries a turn's duration but no wall-clock for its
 terminal, so the recording time is the honest stamp.
+
+---
+
+## The migration tie-break (2026-09-24)
+
+When the ledger was re-keyed from `(session_id, view_cursor)` to
+`(session_id, turn_id)`, a turn the old key had stored twice had to collapse to
+one row. The original rule was `ORDER BY session_id, view_cursor` — **the
+lexicographically smallest cursor won.**
+
+That was unsafe, and it is now replaced by an ordering on the data:
+
+    ORDER BY session_id, turn_id, (tokens_in = 0) ASC, finished_at_ms DESC, view_cursor ASC
+
+1. a row with non-zero `tokens_in` beats a zero one — a zero row is a write that
+   never learned the figure;
+2. then the later `finished_at_ms` — chronology, if both carry real figures;
+3. then `view_cursor`, only for determinism. It decides nothing on its own.
+
+**Why the old rule was unsafe.** `view_cursor` is an opaque, server-issued
+string. Lexicographic order means something only while both cursors share a
+digit width — `:9` sorts *after* `:10`. It is also unrelated to chronology and
+unrelated to which write was live rather than backfill.
+
+**And it mattered.** The owner's real database held two duplicate pairs, and the
+second was not a harmless twin: **92,278 tokens at cursor `:69` against 0 at
+`:76`.** Which copy survived decided whether the ledger lost 22,633 tokens or
+114,911. It kept `:69` and went the right way — by luck, not by design.
+
+Four tests in `usage.rs` pin this, built from that exact pair. Three of them
+fail against the old ordering; the fourth is the real orientation, which the old
+rule also satisfied and which must keep passing.
+
