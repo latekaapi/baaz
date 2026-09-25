@@ -132,6 +132,10 @@ pub struct Args {
     pub workspace_explicit: bool,
     /// `meta`, or `echo` under `BAAZ_PROVIDER=echo`.
     pub provider: String,
+    /// Whether `--provider` or `BAAZ_PROVIDER` named the backend, as opposed
+    /// to the default above. An explicit backend wins over the remembered
+    /// pick for the run it names; a defaulted one defers to it.
+    pub provider_explicit: bool,
     /// The `muse` binary to drive.
     pub program: String,
     /// Which theme to open in.
@@ -270,6 +274,8 @@ fn parse_args() -> Args {
         // take, so a run that forgot to name a provider lands here rather than
         // on `meta` with its longer, costlier answers.
         provider: std::env::var("BAAZ_PROVIDER").unwrap_or_else(|_| "meta".into()),
+        // Overwritten from the parsed flag and env at the end of parsing.
+        provider_explicit: false,
         program: std::env::var("BAAZ_MUSE").unwrap_or_else(|_| "muse".into()),
         theme: ThemeKind::Dark,
         screenshot: None,
@@ -457,6 +463,7 @@ fn parse_args() -> Args {
         );
         out.provider = "echo".into();
     }
+    out.provider_explicit = provider_explicit;
     out
 }
 

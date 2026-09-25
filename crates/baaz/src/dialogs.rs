@@ -1225,6 +1225,7 @@ mod tests {
             workspace: dir.to_path_buf(),
             workspace_explicit: true,
             provider: "echo".into(),
+            provider_explicit: false,
             program: "muse".into(),
             theme: aui_tokens::ThemeKind::Dark,
             screenshot: None,
