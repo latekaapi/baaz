@@ -58,6 +58,19 @@ ENTRIES = {
     # that never scrolls to its selection went unseen: nothing ever drew it.
     "palette":              {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "palette"]},
+    # The composer's three pickers, each open over a fresh session. `new`
+    # heads every script: offline no boot session opens, so a bare session
+    # verb never becomes ready — and the head is what makes these start.
+    # Each run boots with every picker closed, so the toggle lands open on
+    # every capture; the verbs persist nothing, so the second run agrees
+    # with the first (unlike the old toggling `right:<kind>` verb, which
+    # wrote `layout.json` and flapped).
+    "composer-provider":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;provider"]},
+    "composer-model":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;model"]},
+    "composer-effort":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;effort"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
