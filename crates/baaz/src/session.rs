@@ -76,7 +76,7 @@ use muse_client::schema::{
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 
 use crate::conn::{self, Severity};
-use crate::overlays::{Command, Menu, MenuKind, Overlays, EFFORTS, MODES};
+use crate::overlays::{Command, Menu, MenuKind, Overlays, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
 use crate::providers::{ExternalApprovalStore, ProviderId};
 use crate::shot::CaptureToken;
@@ -627,6 +627,11 @@ pub struct SessionView {
     /// never sets this — its chip moves only on `session/modelChanged` —
     /// and no lane ever changes provider, which has no setter by design.
     pending_model: Option<String>,
+    /// The Codex catalog's per-model reasoning levels, folded from a
+    /// `model/list` answer: model id → its `supportedReasoningEfforts`, in
+    /// provider order. A snapshot like [`SessionView::models`], keyed because
+    /// the effort menu follows the *selected* model, not the provider.
+    codex_efforts: HashMap<String, Vec<provider_codex::child::SupportedEffort>>,
     /// The session's reasoning effort. `None` is "Default", which omits the
     /// field; client-side, because nothing on the wire reflects it back.
     effort: Option<ReasoningEffort>,
@@ -821,6 +826,7 @@ impl SessionView {
             models: Vec::new(),
             models_error: None,
             pending_model: None,
+            codex_efforts: HashMap::new(),
             effort: None,
             plan: false,
             plan_previous_mode: None,

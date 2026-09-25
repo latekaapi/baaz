@@ -288,6 +288,53 @@ pub fn model_ids(result: &Value) -> Vec<String> {
     model_catalog(result).into_iter().map(|row| row.id).collect()
 }
 
+/// One `supportedReasoningEfforts` entry on a `model/list` row: a level the
+/// named model — and only that model — accepts, with the provider's own
+/// description of it. The list is per-model, not per-provider: two rows in
+/// the same response can and do differ (`gpt-5.6-sol` carries `ultra`,
+/// `gpt-5.5` stops at `xhigh` in `fixtures/codex/basic.jsonl`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupportedEffort {
+    /// The level id, e.g. `"low"`: what the effort picker shows and what a
+    /// per-model effort channel would carry.
+    pub id: String,
+    /// The provider's own description of the level, when it sends one.
+    /// The picker reads this before anything Baaz would write.
+    pub description: Option<String>,
+}
+
+/// The reasoning levels one catalog model supports, in provider order: the
+/// `supportedReasoningEfforts[]` of the `data[]` row naming `model_id`.
+/// A model with no row, or a row with no such key, supports nothing here —
+/// an empty answer, never a guessed menu. Entries without a
+/// `reasoningEffort` id are skipped, not fabricated.
+pub fn supported_efforts(result: &Value, model_id: &str) -> Vec<SupportedEffort> {
+    result
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|data| {
+            data.iter().find(|row| row.get("id").and_then(Value::as_str) == Some(model_id))
+        })
+        .and_then(|row| row.get("supportedReasoningEfforts"))
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    let id = level.get("reasoningEffort").and_then(Value::as_str)?;
+                    Some(SupportedEffort {
+                        id: id.to_owned(),
+                        description: level
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The default model out of a `model/list` response: the row flagged
 /// `isDefault`, else the first row, else none.
 pub fn default_model(result: &Value) -> Option<String> {
@@ -1164,6 +1211,40 @@ mod tests {
             rows.iter().all(|row| row.label != row.id),
             "no raw slug where a display name exists: {rows:?}"
         );
+    }
+
+    #[test]
+    fn reasoning_levels_come_from_the_catalog_per_model() {
+        // `supportedReasoningEfforts` is per model row, not per provider:
+        // `basic.jsonl` gives `gpt-5.6-sol` six levels and `gpt-5.5` four,
+        // each with the provider's own description. A parser that returns
+        // one fixed list for every model must fail this test — the
+        // differing lengths are the per-model proof.
+        let frames = envelopes("basic.jsonl");
+        let response = frames
+            .iter()
+            .find(|(dir, frame)| {
+                *dir == Direction::ServerToClient && frame.get("id") == Some(&json!(10))
+            })
+            .map(|(_, frame)| frame.get("result").cloned().expect("result"))
+            .expect("model/list response");
+        let sol = supported_efforts(&response, "gpt-5.6-sol");
+        let ids: Vec<&str> = sol.iter().map(|level| level.id.as_str()).collect();
+        assert_eq!(ids, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert!(
+            sol.iter().all(|level| level.description.as_ref().is_some_and(|d| !d.is_empty())),
+            "every level carries the provider's own description: {sol:?}"
+        );
+        assert_eq!(
+            sol.first().and_then(|level| level.description.as_deref()),
+            Some("Fast responses with lighter reasoning"),
+            "the picker's detail line is the provider's text, not ours"
+        );
+        let legacy = supported_efforts(&response, "gpt-5.5");
+        let legacy_ids: Vec<&str> = legacy.iter().map(|level| level.id.as_str()).collect();
+        assert_eq!(legacy_ids, ["low", "medium", "high", "xhigh"]);
+        assert_ne!(ids.len(), legacy_ids.len(), "two models, two lists");
+        assert!(supported_efforts(&response, "no-such-model").is_empty());
     }
 
     #[test]

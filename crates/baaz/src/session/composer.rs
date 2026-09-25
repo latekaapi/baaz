@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use crate::overlays::{EffortOption, EffortOptions, effort_detail, muse_efforts};
 
 impl SessionView {
     // ------------------------------------------------------------ the menus
@@ -72,7 +73,12 @@ impl SessionView {
                 self.load_models(cx);
                 self.models.iter().position(|m| m.is_active).unwrap_or(0)
             }
-            MenuKind::Effort => EFFORTS.iter().position(|e| *e == self.effort).unwrap_or(0),
+            MenuKind::Effort => match self.effort_options() {
+                EffortOptions::Available(options) => {
+                    options.iter().position(|option| option.effort == self.effort).unwrap_or(0)
+                }
+                EffortOptions::Unavailable(_) => 0,
+            },
             MenuKind::Mode => MODES.iter().position(|m| *m == self.mode()).unwrap_or(0),
             MenuKind::Provider => {
                 ProviderId::all().iter().position(|id| *id == self.provider_kind()).unwrap_or(0)
@@ -91,7 +97,12 @@ impl SessionView {
         match overlays.menu.as_ref().map(|m| m.kind) {
             Some(MenuKind::Model) if self.models.is_empty() && self.models_error.is_some() => 1,
             Some(MenuKind::Model) => self.models.len(),
-            Some(MenuKind::Effort) => EFFORTS.len(),
+            Some(MenuKind::Effort) => match self.effort_options() {
+                EffortOptions::Available(options) => options.len(),
+                // The reason row, like the model picker's: zero rows is a
+                // failure, not an empty state.
+                EffortOptions::Unavailable(_) => 1,
+            },
             Some(MenuKind::Mode) => MODES.len(),
             Some(MenuKind::Provider) => ProviderId::all().len(),
             Some(MenuKind::Command) => {
@@ -132,11 +143,19 @@ impl SessionView {
                     self.close_menu(cx);
                 }
             }
-            MenuKind::Effort => {
-                if let Some(effort) = EFFORTS.get(selected).copied() {
-                    self.pick_effort(effort, cx);
+            MenuKind::Effort => match self.effort_options() {
+                EffortOptions::Available(options) => {
+                    if let Some(option) = options.get(selected) {
+                        self.pick_effort(option.effort, cx);
+                    }
                 }
-            }
+                EffortOptions::Unavailable(reason) => {
+                    // The reason row: restates why there is no control,
+                    // then closes. Every row acts on click; none goes dead.
+                    self.toast("Effort unavailable", reason, cx);
+                    self.close_menu(cx);
+                }
+            },
             MenuKind::Mode => {
                 if let Some(mode) = MODES.get(selected).copied() {
                     self.pick_mode(mode, cx);
@@ -191,6 +210,69 @@ impl SessionView {
         self.close_menu(cx);
     }
 
+    /// The effort menu's answer for this session: the current provider's
+    /// levels for the currently selected model, or the typed reason there
+    /// is no control. muse offers the whole closed enum, unchanged; Codex
+    /// reads the selected model's `supportedReasoningEfforts` with the
+    /// provider's own descriptions; Claude Code has no control and says so.
+    /// Nothing here is a constant shared across providers: changing the
+    /// model re-derives the list, so the chooser follows the selection.
+    pub(super) fn effort_options(&self) -> EffortOptions {
+        match self.provider_kind() {
+            ProviderId::Muse => EffortOptions::Available(muse_efforts()),
+            ProviderId::ClaudeCode => EffortOptions::Unavailable(
+                provider_claude_code::argv::reasoning_effort_unavailable_reason().to_owned(),
+            ),
+            ProviderId::Codex => self.codex_effort_options(),
+        }
+    }
+
+    /// The Codex arm of [`SessionView::effort_options`]: the selected
+    /// model's levels out of the folded catalog, `Default` first. A level
+    /// the closed enum cannot spell is skipped, never fabricated; a model
+    /// with no row, or no levels left, explains itself instead of opening
+    /// an empty menu.
+    fn codex_effort_options(&self) -> EffortOptions {
+        let current = self
+            .models
+            .iter()
+            .find(|m| m.is_active)
+            .map(|m| m.model_id.as_str())
+            .or(self.pending_model.as_deref());
+        let Some(model) = current else {
+            return EffortOptions::Unavailable(
+                "No model is selected, so there is no catalog row to read reasoning levels from."
+                    .to_owned(),
+            );
+        };
+        let Some(levels) = self.codex_efforts.get(model) else {
+            return EffortOptions::Unavailable(format!(
+                "Codex lists models — and their reasoning levels — from its own session child, \
+                 and this view holds no catalog for {model}: reopen the session on its lane to list them"
+            ));
+        };
+        let mut options = vec![EffortOption { effort: None, detail: effort_detail(None).to_owned() }];
+        options.extend(levels.iter().filter_map(|level| {
+            let effort = crate::projects::parse_effort(&level.id)?;
+            Some(EffortOption {
+                effort: Some(effort),
+                detail: level
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| effort_detail(Some(effort)).to_owned()),
+            })
+        }));
+        if options.len() == 1 {
+            return EffortOptions::Unavailable(format!(
+                "{model} advertises no reasoning levels in its catalog row."
+            ));
+        }
+        EffortOptions::Available(options)
+    }
+
+    /// Pick a reasoning effort. Applies to a session with turns exactly as
+    /// to a fresh one — effort, like model, is switchable mid-session and
+    /// rides the next turn — and the chip reads the pick at once.
     pub(super) fn pick_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
         self.effort = effort;
         cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
