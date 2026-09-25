@@ -485,19 +485,60 @@ impl Command {
     }
 }
 
-/// The effort tiers the picker offers: MSP's whole closed enum, including the
-/// `max` tier muse 1.1.1 added between `xhigh` and `ultra`.
-pub const EFFORTS: [Option<ReasoningEffort>; 9] = [
-    None,
-    Some(ReasoningEffort::None),
-    Some(ReasoningEffort::Minimal),
-    Some(ReasoningEffort::Low),
-    Some(ReasoningEffort::Medium),
-    Some(ReasoningEffort::High),
-    Some(ReasoningEffort::Xhigh),
-    Some(ReasoningEffort::Max),
-    Some(ReasoningEffort::Ultra),
-];
+/// The effort picker's answer for one session: either the levels the current
+/// provider and model offer, or the typed reason there is no control — the
+/// same shape the model picker uses for an empty catalog. Never an empty
+/// menu and never a dead click: the reason row acts (restate, close) like
+/// every other row.
+pub enum EffortOptions {
+    /// The levels to list, `Default` first. Details are the provider's own
+    /// text where it sends any, else [`effort_detail`].
+    Available(Vec<EffortOption>),
+    /// No reasoning control here, and why.
+    Unavailable(String),
+}
+
+/// One row of an available effort menu: the level and its detail line.
+pub struct EffortOption {
+    /// The level; `None` is "Default", which omits the field.
+    pub effort: Option<ReasoningEffort>,
+    /// The detail line under the row: the provider's description, or the
+    /// static [`effort_detail`] fallback when it sends none.
+    pub detail: String,
+}
+
+/// The reason row's id in the effort menu, mirroring the model picker's
+/// unavailable row: clicking it restates the reason and closes.
+pub const EFFORT_UNAVAILABLE_ROW: &str = "__effort_unavailable";
+
+/// The row id an effort level lists under: `"default"`, else the variant
+/// name. The menu writes these ids and reads them back on pick, so both
+/// sides go through this one function.
+pub fn effort_row_id(effort: Option<ReasoningEffort>) -> String {
+    effort.map(|e| format!("{e:?}")).unwrap_or_else(|| "default".to_owned())
+}
+
+/// The full closed enum as a menu — what the muse lane offers, unchanged:
+/// MSP accepts every tier including the `max` tier muse 1.1.1 added
+/// between `xhigh` and `ultra`. Other lanes never read this; they derive
+/// their list from their own catalog (Codex, per model) or offer no
+/// control at all (Claude Code, with its reason).
+pub fn muse_efforts() -> Vec<EffortOption> {
+    [
+        None,
+        Some(ReasoningEffort::None),
+        Some(ReasoningEffort::Minimal),
+        Some(ReasoningEffort::Low),
+        Some(ReasoningEffort::Medium),
+        Some(ReasoningEffort::High),
+        Some(ReasoningEffort::Xhigh),
+        Some(ReasoningEffort::Max),
+        Some(ReasoningEffort::Ultra),
+    ]
+    .into_iter()
+    .map(|effort| EffortOption { effort, detail: effort_detail(effort).to_owned() })
+    .collect()
+}
 
 /// The label for an effort slot; `None` is "Default", which omits the field.
 pub fn effort_label(effort: Option<ReasoningEffort>) -> &'static str {
