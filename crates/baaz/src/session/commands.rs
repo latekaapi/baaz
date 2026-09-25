@@ -394,6 +394,27 @@ impl SessionView {
         cx.notify();
     }
 
+    /// Fold a Codex `model/list` answer into the per-model effort map: each
+    /// catalog row's `supportedReasoningEfforts`, parsed by the adapter
+    /// that owns the shape. The effort menu reads the selected model's
+    /// entry, so changing the model changes the levels with no second
+    /// fetch — a snapshot, like [`SessionView::models`].
+    ///
+    /// No production caller yet: the lane feeds this the moment it lands,
+    /// the way the model lane drains its outbox today.
+    #[allow(dead_code)]
+    pub(super) fn apply_codex_catalog(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
+        let mut efforts = std::collections::HashMap::new();
+        for row in provider_codex::child::model_catalog(result) {
+            efforts.insert(
+                row.id.clone(),
+                provider_codex::child::supported_efforts(result, &row.id),
+            );
+        }
+        self.codex_efforts = efforts;
+        cx.notify();
+    }
+
     /// `session/setApprovalMode`. The chip and the marker both come from
     /// `session/approvalModeChanged`.
     pub(super) fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
@@ -917,6 +938,173 @@ mod tests {
                     ),
                     "the pick travels as SelectModel: {outbox:?}"
                 );
+            });
+        });
+    }
+
+    /// The raw `model/list` answer behind [`codex_fixture_catalog`]: the
+    /// `result` of the id-10 frame in `fixtures/codex/basic.jsonl`, so the
+    /// effort fold below reads the same bytes the adapter parses.
+    fn codex_fixture_result() -> serde_json::Value {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/codex/basic.jsonl"
+        ))
+        .expect("codex fixture reads");
+        let mut result = None;
+        for line in text.lines() {
+            let frame: serde_json::Value = serde_json::from_str(line).expect("fixture decodes");
+            let is_answer = frame.get("_dir").and_then(serde_json::Value::as_str)
+                == Some("server->client")
+                && frame.get("frame").and_then(|frame| frame.get("id"))
+                    == Some(&serde_json::json!(10));
+            if is_answer {
+                result = frame.get("frame").and_then(|frame| frame.get("result")).cloned();
+            }
+        }
+        result.expect("model/list response id 10")
+    }
+
+    /// P4, codex: the effort list for `gpt-5.6-sol` comes from the fixture's
+    /// `supportedReasoningEfforts` — with the provider's own descriptions —
+    /// and selecting a different model changes the list. That second half
+    /// is the per-model proof: a hardcoded menu cannot pass it.
+    #[gpui::test]
+    fn codex_effort_list_comes_from_the_fixture_and_follows_the_model(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_label, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-effort");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+                view.apply_codex_catalog(&codex_fixture_result(), cx);
+            });
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("sol names a catalog row with levels");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max", "Ultra"]);
+                let low = options.iter().find(|o| effort_row_id(o.effort) == "Low").expect("low");
+                assert_eq!(
+                    low.detail, "Fast responses with lighter reasoning",
+                    "the detail line is the provider's text, not ours"
+                );
+                assert_eq!(effort_label(low.effort), "Low");
+            });
+            // Selecting a different model changes the list: gpt-5.5 stops
+            // at xhigh, where sol reaches ultra.
+            view.update(cx, |view, cx| view.set_model("gpt-5.5", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("gpt-5.5 names a catalog row with levels");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh"]);
+                assert!(
+                    !ids.iter().any(|id| id == "Ultra" || id == "Max"),
+                    "the old model's levels are gone: {ids:?}"
+                );
+            });
+            // The open menu counts the new list, not the old constant.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
+            let rows = view.read(cx).menu_rows(cx);
+            assert_eq!(rows, 5, "the menu follows the new model, not the old constant");
+        });
+    }
+
+    /// P4, claude-code: no reasoning control is evidenced anywhere on the
+    /// lane, so the picker renders the adapter's reason — never an empty
+    /// menu, never a dead click.
+    #[gpui::test]
+    fn a_provider_without_reasoning_support_renders_a_reason(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::EffortOptions;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "claude-code", "s-noeffort");
+        vc.update(|window, cx| {
+            view.update(cx, |view, _| {
+                let EffortOptions::Unavailable(reason) = view.effort_options() else {
+                    panic!("claude-code evidences no effort control");
+                };
+                assert!(!reason.is_empty(), "a stated reason, not silence");
+            });
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
+            let rows = view.read(cx).menu_rows(cx);
+            assert_eq!(rows, 1, "the reason row, never zero rows");
+            view.update(cx, |view, cx| view.confirm_menu(window, cx));
+            view.update(cx, |view, cx| {
+                assert!(view.overlays.read(cx).menu.is_none(), "the row acted and closed");
+            });
+        });
+    }
+
+    /// P4, existing session: a session with turns in it changes effort —
+    /// the pick applies and the chip reads it at once, exactly as on a
+    /// fresh session.
+    #[gpui::test]
+    fn an_existing_session_changes_effort_and_the_chip_updates(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::effort_label;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-effort-turns");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                // A transcript already in the session, not a fresh one.
+                view.fold.append_client_block(
+                    "s-effort-turns",
+                    "t-seed",
+                    Block::Text { text: "earlier work".into(), streaming: false },
+                );
+                assert!(view.has_turns(), "the session has turns in it");
+                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+                view.apply_codex_catalog(&codex_fixture_result(), cx);
+            });
+            view.update(cx, |view, cx| {
+                view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx)
+            });
+            view.update(cx, |view, _| {
+                assert_eq!(view.effort, Some(aui_protocol::ReasoningEffort::High));
+                assert_eq!(effort_label(view.effort), "High", "the chip follows the pick");
+            });
+            // The open menu highlights the picked row.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
+            view.update(cx, |view, cx| {
+                use crate::overlays::EffortOptions;
+                let selected = view.overlays.read(cx).menu.as_ref().map(|m| m.selected);
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("the picked row lists while turns are in");
+                };
+                let position = options.iter().position(|o| o.effort == view.effort);
+                assert_eq!(selected, position, "the highlight sits on the pick");
+            });
+        });
+    }
+
+    /// P4, muse: the lane that always worked keeps its full menu —
+    /// `Default` plus the whole closed enum, with today's detail lines.
+    #[gpui::test]
+    fn muse_keeps_the_full_menu(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "muse", "s-muse-effort");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("the muse lane always offers effort");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(
+                    ids,
+                    [
+                        "default", "None", "Minimal", "Low", "Medium", "High", "Xhigh", "Max",
+                        "Ultra"
+                    ]
+                );
+                let ultra = options.iter().find(|o| effort_row_id(o.effort) == "Ultra").expect("ultra");
+                assert_eq!(ultra.detail, "The largest budget MSP accepts.");
             });
         });
     }

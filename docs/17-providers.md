@@ -270,3 +270,35 @@ reason and closes. Never a dead click and never a silently empty menu —
 an empty catalog answer is itself recorded as a failure with its
 reason. Today that row is reachable on a Codex view with no live lane
 attached; the Claude Code lane always answers from the supplied list.
+
+## P4 — reasoning effort follows the selected model
+
+The effort picker used to offer one hardcoded nine-row constant on every
+provider for every model, so it listed levels a provider may not support
+and hid ones it does. Now the list is supplied by the provider for the
+currently selected model (`SessionView::effort_options`, re-derived on
+every open — changing the model changes the levels), and the constant
+is gone.
+
+| provider | effort source | select path |
+|---|---|---|
+| muse | the whole closed enum, unchanged (`overlays::muse_efforts`) | the existing `turn/start` `reasoningEffort`, read off the pick on the next turn |
+| codex | the selected model's `supportedReasoningEfforts` from its `model/list` row (`provider-codex/src/child.rs`), with the provider's own `description` on each level | the stored pick, like model: client-side until the lane migration carries it further, and applied to a session with turns exactly as to a fresh one |
+| claude-code | none evidenced — the launch argv carries `--model` but no effort flag, and no captured transcript shows an effort surface (`provider-claude-code/src/argv.rs`) | no control: the picker renders the adapter's reason instead of a guessed menu |
+
+The per-model point is load-bearing on Codex: two models on the same
+provider differ (`gpt-5.6-sol` reaches `ultra`, `gpt-5.5` stops at
+`xhigh` in `fixtures/codex/basic.jsonl`), and the chooser follows the
+*selected* model, not the provider. A provider or model with no control
+renders the typed-reason row (`EFFORT_UNAVAILABLE_ROW`) the way the
+model picker does for an empty catalog: the detail line states why, and
+picking it restates the reason and closes. A model naming no catalog
+row, or a row with no levels, explains itself the same way.
+
+What P4 verified is the menu's derivation and application on all three
+providers — the fixture lists `gpt-5.6-sol`'s six levels with the
+provider's text and a model change re-lists to four — including the
+existing-session case: a session with turns changes effort and the chip
+follows at once. The mutation check that holds it: serving the old
+hardcoded list from the Codex arm must fail the per-model test, because
+`gpt-5.5` would wrongly keep `max` and `ultra`.
