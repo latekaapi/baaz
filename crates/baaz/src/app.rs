@@ -3426,9 +3426,20 @@ mod tests {
     /// composer's action row now (the hero switcher was an accident of an
     /// underspecified brief, never the design). Draws both empty states (a
     /// project with no session open, and no project at all) and asserts the
-    /// picker left no measured bounds in either. The hero-button assert in
-    /// each arm is what makes the absence real rather than vacuous: a frame
-    /// that drew nothing would miss the picker trivially.
+    /// picker left no measured bounds in either.
+    ///
+    /// The absence assert reads `debug_bounds("provider-picker")`, which only
+    /// ever holds entries for elements with an explicit `.debug_selector()`.
+    /// The deleted picker had one, so a reintroduction in this file's house
+    /// style would trip it. The hero buttons cannot serve as the "something
+    /// drew" guard the same way: aui's `button()` sets an element id, which
+    /// gpui does not record bounds for, so probing either hero button id
+    /// always misses even when the hero draws perfectly. The guard below
+    /// instead pins the live state to the signed-in empty state (where
+    /// `render` deterministically takes the `render_no_session` branch),
+    /// proves a frame painted, and proves the shell's own frame logic ran
+    /// against that state via the window title — a run that rendered nothing
+    /// at all fails here rather than passing the picker assert vacuously.
     #[gpui::test]
     fn hero_has_no_provider_picker(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("hero-no-provider-picker");
@@ -3453,15 +3464,31 @@ mod tests {
             // bounds below would miss the picker trivially.
             vc.simulate_resize(gpui::size(gpui::px(900.), gpui::px(800.)));
             vc.run_until_parked();
-            // Either empty state is a real frame: which hero variant draws
-            // depends on whether a project actually loaded, not on
-            // `args.no_project` alone, and a hermetic state carries none.
-            // The guard only has to prove a frame settled — if neither
-            // button is there, nothing drew and the absence below is vacuous.
-            let drew = vc.debug_bounds("new-session").is_some() || vc.debug_bounds("hero-new").is_some();
-            assert!(
-                drew,
-                "the hero drew nothing (no_project={no_project}): the picker's absence below proves nothing"
+            // Which hero variant drew is decided by the live project state:
+            // `--no-project` boots with nothing adopted (`hero-new`), while
+            // the explicit workspace is adopted at boot (`new-session`).
+            // Pin the mapping so both arms provably cover their variant.
+            let (signed_in, no_session, has_project, expected_title) = vc.update(|_, cx| {
+                let h = baaz.read(cx);
+                (matches!(h.auth, super::Auth::SignedIn(_)), h.active.is_none(), h.current_project().is_some(), h.window_title(cx))
+            });
+            assert!(signed_in, "the shell never signed in (no_project={no_project})");
+            assert!(no_session, "a session opened on its own (no_project={no_project})");
+            assert_eq!(
+                has_project, !no_project,
+                "expected the {no_project} arm to land on the other hero variant"
+            );
+            // A frame painted since the resize: an empty quad list means the
+            // window never drew and the picker assert below would be vacuous.
+            let painted = vc.update(|window, _| window.painted_quads().len());
+            assert!(painted > 0, "the window painted nothing (no_project={no_project})");
+            // The shell's own frame logic ran against the live state: the
+            // title is only written from `on_frame`, so a matching title
+            // proves a frame settled after the boot above.
+            assert_eq!(
+                vc.window_title().as_deref(),
+                Some(expected_title.as_str()),
+                "no frame settled on the signed-in empty state (no_project={no_project})"
             );
             assert!(
                 vc.debug_bounds("provider-picker").is_none(),
