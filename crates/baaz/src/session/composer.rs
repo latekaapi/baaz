@@ -84,9 +84,12 @@ impl SessionView {
     }
 
     /// How many rows the open menu has, which is what the arrow keys wrap on.
+    /// An unanswerable catalog still counts its reason row: zero rows is a
+    /// failure, not an empty state, and Enter must land somewhere that acts.
     pub fn menu_rows(&self, cx: &gpui::App) -> usize {
         let overlays = self.overlays.read(cx);
         match overlays.menu.as_ref().map(|m| m.kind) {
+            Some(MenuKind::Model) if self.models.is_empty() && self.models_error.is_some() => 1,
             Some(MenuKind::Model) => self.models.len(),
             Some(MenuKind::Effort) => EFFORTS.len(),
             Some(MenuKind::Mode) => MODES.len(),
@@ -122,6 +125,11 @@ impl SessionView {
             MenuKind::Model => {
                 if let Some(model) = self.models.get(selected).map(|m| m.model_id.clone()) {
                     self.pick_model(&model, cx);
+                } else if let Some(reason) = self.models_error.clone() {
+                    // The reason row: restates why there is no catalog,
+                    // then closes. Every row acts on click; none goes dead.
+                    self.toast("Models unavailable", reason, cx);
+                    self.close_menu(cx);
                 }
             }
             MenuKind::Effort => {

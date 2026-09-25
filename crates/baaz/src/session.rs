@@ -409,6 +409,12 @@ struct PendingUnqueue {
     text: String,
 }
 
+/// The model picker's stand-in row when the catalog could not be answered:
+/// its detail line carries the typed reason, and picking it re-states that
+/// reason rather than going dead. Never a real model id, so it can never
+/// collide with a catalog row.
+const MODEL_UNAVAILABLE_ROW: &str = "__models_unavailable";
+
 /// One open Muse session.
 pub struct SessionView {
     /// The Muse session id this view follows.
@@ -612,6 +618,15 @@ pub struct SessionView {
     /// The model catalog, fetched when the picker opens. A snapshot: MSP has no
     /// catalog subscription.
     models: Vec<ModelCatalogEntry>,
+    /// Why the catalog is missing, when it is: the typed reason the picker
+    /// shows instead of a silently empty menu. `None` means the last fetch
+    /// succeeded (or none ran yet).
+    models_error: Option<String>,
+    /// The model the person picked on the provider lane (Claude Code /
+    /// Codex): what the chip reads until the server echoes. The muse lane
+    /// never sets this — its chip moves only on `session/modelChanged` —
+    /// and no lane ever changes provider, which has no setter by design.
+    pending_model: Option<String>,
     /// The session's reasoning effort. `None` is "Default", which omits the
     /// field; client-side, because nothing on the wire reflects it back.
     effort: Option<ReasoningEffort>,
@@ -804,6 +819,8 @@ impl SessionView {
             capture,
             pending_prompt: None,
             models: Vec::new(),
+            models_error: None,
+            pending_model: None,
             effort: None,
             plan: false,
             plan_previous_mode: None,
@@ -894,8 +911,14 @@ impl SessionView {
         std::mem::take(&mut self.external_outbox)
     }
 
-    /// The model id the session is actually on, for the composer chip.
+    /// The model id the session is actually on, for the composer chip. The
+    /// provider lane's pick wins while it stands: no server echo flows
+    /// back into this fold for those sessions, so the chip reads the
+    /// recorded pick rather than going stale.
     pub fn model(&self) -> SharedString {
+        if let Some(pending) = self.pending_model.as_deref() {
+            return SharedString::from(pending.to_owned());
+        }
         self.fold
             .side(&self.session_id)
             .and_then(|s| s.model.as_ref().map(|m| m.model_id.clone()))

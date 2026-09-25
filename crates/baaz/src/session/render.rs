@@ -1717,7 +1717,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_menu(cx));
         match kind {
             MenuKind::Model => {
-                let rows: Vec<PickerRow> = self
+                let mut rows: Vec<PickerRow> = self
                     .models
                     .iter()
                     .map(|m| {
@@ -1740,7 +1740,26 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         row
                     })
                     .collect();
+                // No catalog and a reason why: the row carries the typed
+                // reason in its detail line, the way an `Unavailable`
+                // capability explains itself. Never an empty menu.
+                if rows.is_empty() {
+                    if let Some(reason) = self.models_error.clone() {
+                        rows.push(PickerRow::new(
+                            MODEL_UNAVAILABLE_ROW.to_owned(),
+                            "Models unavailable".to_owned(),
+                            reason,
+                        ));
+                    }
+                }
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+                    if id.as_ref() == MODEL_UNAVAILABLE_ROW {
+                        if let Some(reason) = this.models_error.clone() {
+                            this.toast("Models unavailable", reason, cx);
+                        }
+                        this.close_menu(cx);
+                        return;
+                    }
                     let id = id.to_string();
                     this.pick_model(&id, cx);
                 });
