@@ -217,6 +217,59 @@ pub fn uses_legacy_pump(id: ProviderId) -> bool {
     matches!(id, ProviderId::Muse)
 }
 
+// ------------------------------------------------- the supplied model lists
+
+/// One row of Baaz's supplied Claude Code model list: the `ModelCatalog:
+/// Emulated` cell made concrete. `--model` takes aliases and ids but no
+/// fixture enumerates them, so Baaz owns this list — and it stays owned
+/// here, never upgraded into a probed `Native`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuppliedModel {
+    /// What `--model` carries: an alias, never a dated full id.
+    pub id: &'static str,
+    /// The human label the picker shows; the raw alias never renders.
+    pub label: &'static str,
+    /// One honest line: what the alias asks for.
+    pub detail: &'static str,
+}
+
+/// The Claude Code models Baaz offers: aliases `--model` accepts, in
+/// picker order. No default is marked — no probe established one — so the
+/// current session model marks the active row instead.
+pub fn claude_code_models() -> [SuppliedModel; 3] {
+    [
+        SuppliedModel {
+            id: "sonnet",
+            label: "Claude Sonnet",
+            detail: "The everyday model (--model sonnet; full ids work too)",
+        },
+        SuppliedModel {
+            id: "opus",
+            label: "Claude Opus",
+            detail: "The largest model (--model opus; full ids work too)",
+        },
+        SuppliedModel {
+            id: "haiku",
+            label: "Claude Haiku",
+            detail: "The fast model (--model haiku; full ids work too)",
+        },
+    ]
+}
+
+/// Baaz's supplied Claude Code catalog in the seam's neutral shape, with
+/// the row matching `current` flagged active. A full dated id still
+/// selects (aliases travel) without flagging a row it does not name.
+pub fn claude_code_catalog(current: Option<&str>) -> Vec<provider::ModelSummary> {
+    claude_code_models()
+        .into_iter()
+        .map(|row| provider::ModelSummary {
+            id: row.id.to_owned(),
+            label: row.label.to_owned(),
+            active: Some(row.id) == current,
+        })
+        .collect()
+}
+
 // ------------------------------------------------- the last-chosen provider
 
 /// What the store remembers: the backend new sessions start on.

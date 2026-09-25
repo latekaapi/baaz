@@ -298,19 +298,31 @@ impl SessionView {
         cx.notify();
     }
 
-    /// `session/setModel`. The chip changes on `session/modelChanged`, never
-    /// here.
+    /// Switch the session's model. On the muse lane that is the existing
+    /// `session/setModel` path, and the chip moves only on
+    /// `session/modelChanged`, never here. On the provider lane (Claude
+    /// Code / Codex) the pick travels as a neutral `SelectModel` on the
+    /// outbox the lane drains — never past the seam to the muse wire —
+    /// and the chip reads the recorded pick at once, since no echo flows
+    /// back into this fold for those sessions. Both lanes apply to a
+    /// session with turns in it exactly as to a fresh one: model is
+    /// switchable, provider is not, and nothing here counts turns.
     pub(crate) fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
-        let row = self.models.iter().find(|m| m.model_id == model_id);
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+            self.external_outbox.push(ProviderCommand::SelectModel {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                model: model_id.to_owned(),
+                model_provider: None,
+            });
+            self.apply_model_selected(model_id, cx);
+            return;
+        }
+        let model = self.model_selection_for(model_id);
         let params = SessionSetModelParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
-            model: ModelSelection {
-                display_label: row.map(|r| r.display_label.clone()),
-                model_id: model_id.to_owned(),
-                profile_id: row.and_then(|r| r.profile_id.clone()),
-                provider_id: row.map(|r| r.provider_id.clone()),
-            },
+            model,
         };
         let Some(client) = self.wire_client(cx) else { return };
         self.wire_call(cx, move || client.session_set_model(&params), |this, result, cx| {
@@ -320,6 +332,66 @@ impl SessionView {
                 this.report(&error, cx);
             }
         });
+    }
+
+    /// The `session/setModel` selection for `model_id`, from the catalog
+    /// row when one names it. A bare id still selects (aliases travel);
+    /// only the presentation comes from the row.
+    fn model_selection_for(&self, model_id: &str) -> ModelSelection {
+        let row = self.models.iter().find(|m| m.model_id == model_id);
+        ModelSelection {
+            display_label: row.map(|r| r.display_label.clone()),
+            model_id: model_id.to_owned(),
+            profile_id: row.and_then(|r| r.profile_id.clone()),
+            provider_id: row.map(|r| r.provider_id.clone()),
+        }
+    }
+
+    /// Fold a neutral model catalog into the picker: human labels shown,
+    /// wire ids kept, the current model marked. An empty answer is a
+    /// failure with its reason, never an empty menu: the picker renders
+    /// the reason row instead of nothing.
+    pub(super) fn apply_model_catalog(
+        &mut self,
+        rows: Vec<provider::ModelSummary>,
+        provider_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if rows.is_empty() {
+            self.models = Vec::new();
+            self.models_error = Some("the model catalog answered with no usable model".to_owned());
+            cx.notify();
+            return;
+        }
+        self.models = rows
+            .into_iter()
+            .map(|row| ModelCatalogEntry {
+                context_limit: None,
+                cost: None,
+                description: None,
+                display_label: row.label,
+                is_active: row.active,
+                is_default: false,
+                model_id: row.id,
+                output_limit: None,
+                profile_id: None,
+                provider_id: provider_id.to_owned(),
+                release_date: None,
+            })
+            .collect();
+        self.models_error = None;
+        cx.notify();
+    }
+
+    /// Record a model pick on the provider lane: the matching row marks
+    /// active and the chip reads the pick at once. A bare id still
+    /// applies (aliases travel) without marking a row it does not name.
+    pub(super) fn apply_model_selected(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        for row in &mut self.models {
+            row.is_active = row.model_id == model_id;
+        }
+        self.pending_model = Some(model_id.to_owned());
+        cx.notify();
     }
 
     /// `session/setApprovalMode`. The chip and the marker both come from
@@ -358,15 +430,50 @@ impl SessionView {
 
     /// Fetch the catalog for this session. A snapshot, on every open: MSP has
     /// no catalog subscription, so a stale list would be worse than a wait.
+    ///
+    /// Per lane: muse lists over its own wire; Claude Code folds Baaz's
+    /// supplied alias list (the `Emulated` cell — no fixture enumerates
+    /// them, so Baaz owns them); Codex answers `model/list` from its
+    /// session child, which this view does not hold, so the picker says
+    /// why instead of opening empty. Whatever cannot answer explains
+    /// itself in the picker's typed-reason row — never a dead click and
+    /// never a silently empty menu.
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.wire_client(cx) else { return };
-        let params = ModelListParams { session_id: Some(self.session_id.clone()) };
-        self.wire_call(cx, move || client.model_list(&params), |this, result, cx| {
-            if let Ok(list) = result {
-                this.models = list.models;
+        match self.provider_kind() {
+            ProviderId::ClaudeCode => {
+                let current = self.model().to_string();
+                let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
+                let provider = self.provider_id.clone();
+                self.apply_model_catalog(rows, &provider, cx);
             }
-            cx.notify();
-        });
+            ProviderId::Codex => {
+                self.models_error = Some(
+                    "Codex lists models from its own session child, and this view holds none: \
+                     reopen the session on its lane to list them"
+                        .to_owned(),
+                );
+                cx.notify();
+            }
+            ProviderId::Muse => {
+                let Some(client) = self.wire_client(cx) else { return };
+                let params = ModelListParams { session_id: Some(self.session_id.clone()) };
+                self.wire_call(
+                    cx,
+                    move || client.model_list(&params),
+                    |this, result, cx| match result {
+                        Ok(list) => {
+                            this.models = list.models;
+                            this.models_error = None;
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            this.models_error = Some(error.to_string());
+                            this.report(&error, cx);
+                        }
+                    },
+                );
+            }
+        }
     }
 
     /// Route a failed command to its banner or its dialog (spec §3.8).
@@ -588,6 +695,259 @@ pub(crate) fn interrupt_found_turn_over(error: &MuseError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Open a view on one provider lane: no child, no wire — the catalog
+    /// and the pick are what these tests drive, offline throughout.
+    fn lane_view(
+        vc: &mut gpui::VisualTestContext,
+        provider_id: &str,
+        session_id: &str,
+    ) -> Entity<SessionView> {
+        let provider_id = provider_id.to_owned();
+        let session_id = session_id.to_owned();
+        vc.update(|window, cx| {
+            let host = SessionHost {
+                provider_id,
+                workspace: "/tmp/p3-model-picker".to_owned(),
+                overlays: cx.new(|_| Overlays::default()),
+                capture: CaptureToken::default(),
+            };
+            cx.new(|cx| SessionView::new(session_id, None, host, window, cx))
+        })
+    }
+
+    /// The real `model/list` response out of `fixtures/codex/basic.jsonl`,
+    /// mapped the way provider-codex's `ListModels` maps it: `displayName`
+    /// into the seam's `label`, the id kept for the wire.
+    fn codex_fixture_catalog() -> Vec<provider::ModelSummary> {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/codex/basic.jsonl"
+        ))
+        .expect("codex fixture reads");
+        let mut result = None;
+        for line in text.lines() {
+            let frame: serde_json::Value = serde_json::from_str(line).expect("fixture decodes");
+            let is_answer = frame.get("_dir").and_then(serde_json::Value::as_str)
+                == Some("server->client")
+                && frame.get("frame").and_then(|frame| frame.get("id"))
+                    == Some(&serde_json::json!(10));
+            if is_answer {
+                result = frame.get("frame").and_then(|frame| frame.get("result")).cloned();
+            }
+        }
+        let result = result.expect("model/list response id 10");
+        result
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .expect("the key is data, not models")
+            .iter()
+            .map(|row| {
+                let id = row.get("id").and_then(serde_json::Value::as_str).expect("row id");
+                provider::ModelSummary {
+                    id: id.to_owned(),
+                    label: row
+                        .get("displayName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    active: id == "gpt-5.6-sol",
+                }
+            })
+            .collect()
+    }
+
+    /// P3, codex: the catalog folds into `self.models` from the real
+    /// fixture, human labels shown, wire ids kept, the current one marked.
+    #[gpui::test]
+    fn codex_catalog_from_the_fixture_folds_with_display_names(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let rows = codex_fixture_catalog();
+        assert_eq!(rows.len(), 4, "the fixture lists four models");
+        let view = lane_view(vc, "codex", "s-codex");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.apply_model_catalog(rows, "openai", cx));
+            view.update(cx, |view, _| {
+                assert!(view.models_error.is_none());
+                let ids: Vec<&str> =
+                    view.models.iter().map(|m| m.model_id.as_str()).collect();
+                assert_eq!(ids, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]);
+                let labels: Vec<&str> =
+                    view.models.iter().map(|m| m.display_label.as_str()).collect();
+                assert_eq!(labels, ["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "GPT-5.5"]);
+                assert!(
+                    view.models.iter().all(|m| m.display_label != m.model_id),
+                    "no raw slug where a display name exists"
+                );
+                let active: Vec<&str> = view
+                    .models
+                    .iter()
+                    .filter(|m| m.is_active)
+                    .map(|m| m.model_id.as_str())
+                    .collect();
+                assert_eq!(active, ["gpt-5.6-sol"], "the current one is marked");
+            });
+        });
+    }
+
+    /// P3, claude-code: the picker lists Baaz's supplied aliases with
+    /// human labels, and the chip follows the pick on the lane.
+    #[gpui::test]
+    fn claude_code_supplied_list_folds_with_current_marked(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let supplied = crate::providers::claude_code_models();
+        assert_eq!(
+            supplied.map(|row| row.id),
+            ["sonnet", "opus", "haiku"],
+            "Baaz owns this list: aliases --model accepts"
+        );
+        assert!(
+            supplied.iter().all(|row| row.label != row.id),
+            "the raw alias never renders"
+        );
+        let view = lane_view(vc, "claude-code", "s-claude");
+        vc.update(|_, cx| {
+            // Opening the chip folds the supplied list; nothing marks yet
+            // because the session names no supplied alias.
+            view.update(cx, |view, cx| view.load_models(cx));
+            view.update(cx, |view, _| {
+                assert_eq!(view.models.len(), 3);
+                assert!(view.models_error.is_none());
+                assert!(view.models.iter().all(|m| !m.is_active));
+            });
+            // The pick routes through the seam (outbox `SelectModel`) and
+            // the chip updates at once.
+            view.update(cx, |view, cx| view.set_model("opus", cx));
+            view.update(cx, |view, cx| {
+                assert_eq!(view.model().as_ref(), "opus");
+                assert!(view.take_external_outbox().iter().any(|command| matches!(
+                    command,
+                    ProviderCommand::SelectModel { model, .. } if model == "opus"
+                )));
+                // Reopening the chip marks the pick.
+                view.load_models(cx);
+            });
+            view.update(cx, |view, _| {
+                let active: Vec<&str> = view
+                    .models
+                    .iter()
+                    .filter(|m| m.is_active)
+                    .map(|m| m.model_id.as_str())
+                    .collect();
+                assert_eq!(active, ["opus"]);
+            });
+        });
+    }
+
+    /// P3, muse: the `session/setModel` selection still carries the
+    /// catalog row's presentation, and a bare id still selects.
+    #[gpui::test]
+    fn muse_selection_carries_the_catalog_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "muse", "s-muse");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models = vec![ModelCatalogEntry {
+                    context_limit: None,
+                    cost: None,
+                    description: Some("The everyday model".into()),
+                    display_label: "Muse Everyday".into(),
+                    is_active: true,
+                    is_default: true,
+                    model_id: "muse-everyday".into(),
+                    output_limit: None,
+                    profile_id: Some("p-1".into()),
+                    provider_id: "meta".into(),
+                    release_date: None,
+                }];
+                let selection = view.model_selection_for("muse-everyday");
+                assert_eq!(selection.model_id, "muse-everyday");
+                assert_eq!(selection.display_label.as_deref(), Some("Muse Everyday"));
+                assert_eq!(selection.profile_id.as_deref(), Some("p-1"));
+                assert_eq!(selection.provider_id.as_deref(), Some("meta"));
+                // A bare id still selects; only the presentation is absent.
+                let bare = view.model_selection_for("unlisted-alias");
+                assert_eq!(bare.model_id, "unlisted-alias");
+                assert_eq!(bare.display_label, None);
+            });
+        });
+    }
+
+    /// P3, existing session: a session with turns in it changes model —
+    /// the pick applies, the chip updates, and the lane never moves.
+    #[gpui::test]
+    fn a_session_with_turns_changes_model_and_the_chip_updates(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-turns");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                // A transcript already in the session, not a fresh one.
+                view.fold.append_client_block(
+                    "s-turns",
+                    "t-seed",
+                    Block::Text { text: "earlier work".into(), streaming: false },
+                );
+                assert!(view.has_turns(), "the session has turns in it");
+                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+            });
+            // The pick routes through the seam and the chip updates, with
+            // turns in the session exactly as without.
+            view.update(cx, |view, cx| view.set_model("gpt-5.6-terra", cx));
+            view.update(cx, |view, _| {
+                assert_eq!(view.model().as_ref(), "gpt-5.6-terra");
+                let active: Vec<&str> = view
+                    .models
+                    .iter()
+                    .filter(|m| m.is_active)
+                    .map(|m| m.model_id.as_str())
+                    .collect();
+                assert_eq!(active, ["gpt-5.6-terra"]);
+                assert_eq!(view.provider_kind(), ProviderId::Codex, "the lane never moves");
+                let outbox = view.take_external_outbox();
+                assert_eq!(outbox.len(), 1, "one seam command, never past it");
+                assert!(
+                    matches!(
+                        &outbox[0],
+                        ProviderCommand::SelectModel { session_id, model, .. }
+                        if session_id == "s-turns" && model == "gpt-5.6-terra"
+                    ),
+                    "the pick travels as SelectModel: {outbox:?}"
+                );
+            });
+        });
+    }
+
+    /// P3, unavailable catalog: the chip's menu explains itself in the
+    /// typed-reason row — never a dead click, never a silent empty menu.
+    #[gpui::test]
+    fn an_unanswered_catalog_explains_itself(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-nolane");
+        vc.update(|window, cx| {
+            // Opening the chip cannot list: no live lane, so a reason.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
+            view.update(cx, |view, _| {
+                assert!(view.models.is_empty());
+                assert!(
+                    view.models_error.as_ref().is_some_and(|reason| !reason.is_empty()),
+                    "the chip says why"
+                );
+            });
+            // The menu still counts one row — the reason — and Enter on it
+            // restates the reason and closes, rather than going dead.
+            let rows = view.read(cx).menu_rows(cx);
+            assert_eq!(rows, 1, "the reason row, never zero rows");
+            view.update(cx, |view, cx| view.confirm_menu(window, cx));
+            view.update(cx, |view, cx| {
+                assert!(view.overlays.read(cx).menu.is_none(), "the row acted and closed");
+            });
+        });
+    }
 
     fn rpc(code: i64, message: &str, data: serde_json::Value) -> MuseError {
         let object: muse_client::schema::ErrorObject =

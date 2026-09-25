@@ -73,6 +73,7 @@ pub struct ClaudeCodeAdapter {
     fold: Arc<Mutex<ClaudeFold>>,
     child: Mutex<Option<RunningChild>>,
     session_id: Mutex<Option<String>>,
+    model: Mutex<Option<String>>,
     workspace: Mutex<Option<PathBuf>>,
     home_override: Option<PathBuf>,
     connected: Mutex<bool>,
@@ -92,6 +93,7 @@ impl ClaudeCodeAdapter {
             fold: Arc::new(Mutex::new(ClaudeFold::new())),
             child: Mutex::new(None),
             session_id: Mutex::new(None),
+            model: Mutex::new(None),
             workspace: Mutex::new(None),
             home_override: None,
             connected: Mutex::new(false),
@@ -140,6 +142,12 @@ impl ClaudeCodeAdapter {
         })?;
         *child = Some(running);
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
+        // The launch's `--model`, when one was requested: the fold learns
+        // the rest from the `init` frame, but an alias never appears there
+        // under its own spelling, so the request is remembered as stated.
+        if let Some(model) = &launch.model {
+            *self.model.lock().expect("model mutex") = Some(model.clone());
+        }
         // Remember the session's own workspace cwd for stored-history
         // lookup. Only a stated cwd counts: resume/fork launches carry
         // none, and an unknown cwd stays unknown (honest unavailable)
@@ -166,6 +174,15 @@ impl ClaudeCodeAdapter {
             }),
             None => Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
         }
+    }
+
+    /// Claim `session_id` without spawning: the offline stand-in for the
+    /// `spawn_launch` claim, so tests can drive session-scoped commands
+    /// (notably `SelectModel`) against a folded fixture transcript. Never
+    /// spawns — the program name in tests does not exist on purpose.
+    #[cfg(test)]
+    fn attach_session_for_tests(&self, session_id: &str) {
+        *self.session_id.lock().expect("session mutex") = Some(session_id.to_owned());
     }
 
     /// Answer one pending `can_use_tool` — or unknown-subtype — request
@@ -424,10 +441,21 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "no compact-now command exists over --print; compaction happens when the \
                  --autocompact window fills, not when asked",
             )),
-            Command::SelectModel { .. } => Err(ProviderError::unsupported(
-                "select-model",
-                "session config is spawn-time (--model); reopen the session to change it",
-            )),
+            Command::SelectModel { session_id, model, .. } => {
+                self.check_session(&session_id)?;
+                // Admission, like Codex: the running turn keeps its model
+                // and the recorded one is the session's effective model
+                // from here on — the chip, the next footers, and the next
+                // resume's `--model`. The live child keeps its spawn-time
+                // flag until that reopen; there is no per-turn model
+                // channel over stream-json stdin, and spelling one would
+                // be the lie this seam exists to prevent. Applies to a
+                // session with turns in it exactly as to a fresh one:
+                // nothing here counts turns.
+                *self.model.lock().expect("model mutex") = Some(model.clone());
+                self.fold.lock().expect("fold mutex").set_model(&model);
+                Ok(Ack::Accepted)
+            }
             Command::SelectApprovalMode { .. } => Err(ProviderError::unsupported(
                 "select-approval-mode",
                 "session config is spawn-time (--permission-mode); reopen the session to change it",
@@ -643,6 +671,57 @@ mod tests {
             matches!(ack, Ack::Account { signed_in: false, label: None }),
             "no reading seen, no login claimed: {ack:?}"
         );
+    }
+
+    #[test]
+    fn select_model_applies_on_a_session_with_turns() {
+        // Offline throughout: the program name does not exist, so a stray
+        // spawn would fail loudly, and the transcript below is
+        // `basic.jsonl` folded through the shared stream path — a session
+        // with a finished turn in it, not a fresh one. Model is
+        // switchable; provider is not.
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let path =
+            format!("{}/../../fixtures/claude-code/basic.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(path).expect("fixture reads");
+        {
+            let mut fold = adapter.fold.lock().expect("fold mutex");
+            for line in text.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                crate::fold::step_line(&mut fold, line, &mut |_| {});
+            }
+        }
+        let session =
+            adapter.fold.lock().expect("fold mutex").session_id().expect("init seen").to_owned();
+        adapter.attach_session_for_tests(&session);
+        let ack = adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: session.clone(),
+                model: "sonnet".into(),
+                model_provider: None,
+            })
+            .expect("a session with turns changes model");
+        assert_eq!(ack, Ack::Accepted);
+        assert_eq!(adapter.fold.lock().expect("fold mutex").model(), Some("sonnet"));
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("sonnet"),
+            "the recorded model rides the next resume's --model"
+        );
+        // Another session's id is refused and changes nothing.
+        let refused = adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-2".into(),
+                session_id: "someone-else".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect_err("a foreign session is refused");
+        assert!(matches!(refused, ProviderError::Rejected { .. }), "got {refused:?}");
+        assert_eq!(adapter.fold.lock().expect("fold mutex").model(), Some("sonnet"));
     }
 
     #[test]

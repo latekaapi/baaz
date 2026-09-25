@@ -244,3 +244,29 @@ says the hero carries no provider control at all. The history is kept
 here because the 78px jump is still the reason no one rebuilds a
 caption-carrying switcher on the hero: a control that moves when its own
 label changes is a misclick waiting for a second press.
+
+## P3 — the model picker on all three providers
+
+The menu renders from `SessionView::models`, filled by a catalog ack and
+applied through the seam per lane — never past it. What P3 verified is
+that the picker is populated and applied for the two new providers, on a
+new session and on one with turns already in it.
+
+| provider | catalog source | select path |
+|---|---|---|
+| muse | `model/list` over its own wire (`load_models`, unchanged) | `session/setModel`; the chip moves only on `session/modelChanged` |
+| codex | `model/list` (`result.data[]`, never `result.models`) via `Command::ListModels`; `displayName` rides the seam's `label`, the id stays for the wire | `Command::SelectModel` admission: the running turn keeps its model, the next `turn/start` carries the new one |
+| claude-code | Baaz's supplied alias list (`providers::claude_code_models`: sonnet, opus, haiku with human labels) — the `Emulated` cell made concrete, never upgraded to `Native` | `Command::SelectModel` admission: recorded as the session's effective model (chip, footers, the next resume's `--model`); the live child keeps its spawn-time flag until that reopen, because no per-turn model channel was ever probed over stream-json stdin |
+
+Model is switchable; provider is not. There is deliberately no setter
+for a live session's provider id, and nothing in this task adds one —
+`set_model` branches on the lane but never moves it, and a session with
+turns changes model exactly like a fresh one.
+
+An unanswerable catalog explains itself in the picker's typed-reason
+row (`MODEL_UNAVAILABLE_ROW`): the detail line carries the reason the
+way an `Unavailable` capability does, and picking it restates the
+reason and closes. Never a dead click and never a silently empty menu —
+an empty catalog answer is itself recorded as a failure with its
+reason. Today that row is reachable on a Codex view with no live lane
+attached; the Claude Code lane always answers from the supplied list.
