@@ -41,6 +41,8 @@
 //! | `name:<name>` | `/name`, the session rename command |
 //! | `hide` | `/hide` the open session |
 //! | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
+//! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
+//! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
 //! | `meter` | pin the context meter's breakdown open |
 //! | `context:<used>/<window>/<level>` | a synthetic `session/contextUsage` |
@@ -214,7 +216,14 @@ fn is_known_step(step: &str) -> bool {
     WINDOW_VERBS.iter().any(|v| v.verb == head) || SESSION_VERBS.iter().any(|v| v.verb == head)
 }
 
-fn record_step_failure(step: &str) {
+/// A known step that cannot run counts a failure too, named for the
+/// summary. Session verbs call this when their payload names nothing
+/// they can do (unknown provider, unknown effort, a swap a session
+/// with turns refuses in place): a script that silently does nothing
+/// reports success, and P5 ended that.
+/// Counted in `STEP_FAILURES` and named in `FAILED_STEP_NAMES`, like
+/// every other failure.
+pub(crate) fn record_step_failure(step: &str) {
     STEP_FAILURES.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut names) = FAILED_STEP_NAMES.lock() {
         names.push(step.to_owned());
@@ -402,6 +411,8 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "hide", run: |_, _, _, cx| cx.emit(SessionEvent::Hide) },
     SessionVerb { verb: "resume", run: |_, _, _, cx| cx.emit(SessionEvent::Resume) },
     SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.set_model(rest, cx) },
+    SessionVerb { verb: "setprovider", run: |v, rest, _, cx| v.step_setprovider(rest, cx) },
+    SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
     SessionVerb { verb: "compact", run: |v, _, _, cx| v.compact(cx) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },
     SessionVerb { verb: "context", run: |v, rest, _, cx| v.step_context(rest, cx) },
