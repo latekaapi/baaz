@@ -1493,7 +1493,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             }
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
-            MenuKind::Model | MenuKind::Effort | MenuKind::Mode => return None,
+            MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider => return None,
             MenuKind::Overflow | MenuKind::ViewOptions | MenuKind::Account | MenuKind::Project => return None,
         };
         Some(
@@ -1621,6 +1621,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             ComposerIntent::Model => this.toggle_picker(MenuKind::Model, cx),
             ComposerIntent::Effort => this.toggle_picker(MenuKind::Effort, cx),
             ComposerIntent::Mode => this.toggle_picker(MenuKind::Mode, cx),
+            ComposerIntent::Provider => this.toggle_picker(MenuKind::Provider, cx),
             ComposerIntent::TogglePlus => {
                 this.plus_open = !this.plus_open;
                 cx.notify();
@@ -1701,7 +1702,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         element.into_any_element()
     }
 
-    /// The three chip pickers, each anchored to the chip that opens it.
+    /// The chip pickers, each anchored to the chip that opens it.
     ///
     /// None of them is given an `on_hover`, on purpose: the component already
     /// lets the pointer win the highlight for as long as it is over a row, so an
@@ -1791,6 +1792,20 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Mode, menu.into_any_element())]
             }
+            MenuKind::Provider => {
+                let rows = provider_picker_rows(self.provider_kind(), self.has_turns());
+                let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+                    this.pick_provider(id.as_ref(), cx);
+                });
+                // The same picker component the model menu uses, retitled:
+                // one mechanism for every chip menu, not one per chip.
+                let menu = model_menu("provider-menu", rows, selected, true)
+                    .title("Provider")
+                    .on_pick(move |id, window, cx| pick(id, window, cx))
+                    .on_close(move |window, cx| close(&(), window, cx));
+                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                vec![(ComposerChipAnchor::Provider, menu.into_any_element())]
+            }
             MenuKind::Command
             | MenuKind::Mention
             | MenuKind::Overflow
@@ -1799,6 +1814,34 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Project => Vec::new(),
         }
     }
+}
+
+/// The provider menu's rows for a session on `current`. A fresh session offers
+/// the three backends as a swap; a session with turns keeps its lane, so the
+/// other two read as "New session on X" with the reason in the detail line —
+/// the picker component has no disabled state, so the typed reason rides as
+/// prose (the way an `Unavailable` capability explains itself) and every row
+/// still acts on click. Row ids are always the wire ids the pick handler
+/// parses back; only the labels differ.
+fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
+    ProviderId::all()
+        .into_iter()
+        .map(|id| {
+            if has_turns && id != current {
+                PickerRow::new(
+                    id.as_str(),
+                    format!("New session on {}", id.label()),
+                    format!(
+                        "This session already has turns on {}, so its provider cannot be switched. Starts a new session on {}.",
+                        current.label(),
+                        id.label()
+                    ),
+                )
+            } else {
+                PickerRow::new(id.as_str(), id.label(), id.blurb())
+            }
+        })
+        .collect()
 }
 
 /// Resolve a markdown link target to a filesystem path, without touching the
@@ -2289,5 +2332,43 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fresh_session_offers_every_provider_as_a_swap() {
+        // No turns: every backend is a plain row — picking one swaps the
+        // empty session. Ids stay the wire ids the pick handler parses
+        // back; only the labels differ per menu state.
+        for current in ProviderId::all() {
+            let rows = provider_picker_rows(current, false);
+            assert_eq!(rows.len(), 3);
+            for (row, id) in rows.iter().zip(ProviderId::all()) {
+                assert_eq!(row.id.as_ref(), id.as_str());
+                assert_eq!(row.label.as_ref(), id.label());
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_with_turns_offers_new_sessions_with_the_reason() {
+        let rows = provider_picker_rows(ProviderId::Muse, true);
+        assert_eq!(rows.len(), 3);
+        // The session's own provider stays a plain row: clicking it just
+        // closes the menu.
+        assert_eq!(rows[0].label.as_ref(), "Muse");
+        // The others are new sessions, never switches — each carries why,
+        // in the detail line the menu component can draw.
+        assert_eq!(rows[1].label.as_ref(), "New session on Claude Code");
+        assert_eq!(rows[2].label.as_ref(), "New session on Codex");
+        assert_eq!(
+            rows[1].detail.as_ref(),
+            "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Claude Code."
+        );
+        assert_eq!(
+            rows[2].detail.as_ref(),
+            "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Codex."
+        );
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
+        assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
     }
 }

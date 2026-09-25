@@ -74,6 +74,9 @@ impl SessionView {
             }
             MenuKind::Effort => EFFORTS.iter().position(|e| *e == self.effort).unwrap_or(0),
             MenuKind::Mode => MODES.iter().position(|m| *m == self.mode()).unwrap_or(0),
+            MenuKind::Provider => {
+                ProviderId::all().iter().position(|id| *id == self.provider_kind()).unwrap_or(0)
+            }
             _ => 0,
         };
         self.overlays.update(cx, |overlays, _| overlays.open(Menu::picker(kind, selected)));
@@ -87,6 +90,7 @@ impl SessionView {
             Some(MenuKind::Model) => self.models.len(),
             Some(MenuKind::Effort) => EFFORTS.len(),
             Some(MenuKind::Mode) => MODES.len(),
+            Some(MenuKind::Provider) => ProviderId::all().len(),
             Some(MenuKind::Command) => {
                 let filter = overlays.menu.as_ref().map(|m| m.filter.clone()).unwrap_or_default();
                 let (commands, skill_rows) = self.command_rows(&filter, cx);
@@ -128,6 +132,11 @@ impl SessionView {
             MenuKind::Mode => {
                 if let Some(mode) = MODES.get(selected).copied() {
                     self.pick_mode(mode, cx);
+                }
+            }
+            MenuKind::Provider => {
+                if let Some(id) = ProviderId::all().get(selected).copied() {
+                    self.pick_provider(id.as_str(), cx);
                 }
             }
             MenuKind::Command => {
@@ -197,6 +206,26 @@ impl SessionView {
     pub(super) fn pick_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         self.set_mode(mode, cx);
         cx.emit(SessionEvent::ModeSelected { mode: wire_mode(mode) });
+        self.close_menu(cx);
+    }
+
+    /// A click (or Enter) on a provider menu row, which names the backend's
+    /// wire id. Picking the session's own provider just closes the menu —
+    /// reopening the lane it already rides is not a swap. A fresh session
+    /// swaps through the application (nothing sent, nothing to keep); a
+    /// session with turns keeps its lane and the pick starts a new session
+    /// on the other backend instead.
+    pub(super) fn pick_provider(&mut self, id: &str, cx: &mut Context<Self>) {
+        let picked = ProviderId::parse(id);
+        if picked == self.provider_kind() {
+            self.close_menu(cx);
+            return;
+        }
+        if self.has_turns() {
+            cx.emit(SessionEvent::NewSessionOnProvider { provider: picked });
+        } else {
+            cx.emit(SessionEvent::SwitchProvider { provider: picked });
+        }
         self.close_menu(cx);
     }
 

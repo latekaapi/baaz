@@ -303,6 +303,23 @@ pub enum SessionEvent {
         /// The picked mode, as the wire spells it.
         mode: ApprovalMode,
     },
+    /// The person picked another provider from the composer chip in a
+    /// session that has never sent: nothing has been written and no lane
+    /// has produced events, so the application retires this empty session
+    /// and starts a new one on the pick. The pick also becomes the default
+    /// for new sessions.
+    SwitchProvider {
+        /// The picked backend.
+        provider: ProviderId,
+    },
+    /// The person picked "New session on X" from the composer chip in a
+    /// session that already has turns: a live session never changes lanes,
+    /// so this session keeps running where it is and a new one starts on
+    /// the pick. The pick also becomes the default for new sessions.
+    NewSessionOnProvider {
+        /// The backend the new session starts on.
+        provider: ProviderId,
+    },
     /// `/name` with nothing after it: open the sidebar row's inline field.
     RenameStart,
     /// `/hide`: take this session out of the list.
@@ -835,6 +852,18 @@ impl SessionView {
     /// a session is served by exactly one lane (see `crate::providers`).
     pub fn provider_kind(&self) -> ProviderId {
         ProviderId::parse(&self.provider_id)
+    }
+
+    /// Whether this session has sent anything yet: folded turns, or a turn
+    /// in flight (submitted with no `turn/started` yet, or the server says
+    /// it runs). A turn in flight counts as turns — the lane is already
+    /// committed — so the provider menu offers "New session on X" rather
+    /// than a swap from the moment of send.
+    pub fn has_turns(&self) -> bool {
+        if self.is_sending() {
+            return true;
+        }
+        self.session().is_some_and(|session| !session.turns.is_empty())
     }
 
     /// The steer-into-a-running-turn control's gate: `Some(reason)` means
