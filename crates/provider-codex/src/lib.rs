@@ -33,7 +33,7 @@ use serde_json::json;
 pub use caps::{capabilities, codex_version_supported, CODEX_VERSION_FLOOR};
 
 use child::{
-    default_model, initialize_request, initialized_notification, model_ids, thread_ids,
+    default_model, initialize_request, initialized_notification, model_catalog, thread_ids,
     thread_start_request, turn_id_from, turn_interrupt_request, turn_start_request,
     turn_steer_request, ApprovalAnswer, ApprovalKind, CommandApprovalDecision,
     FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
@@ -506,7 +506,10 @@ impl ProviderAdapter for CodexAdapter {
                 let catalog = self
                     .with_child(|running| running.send_request("model/list", json!({})))?
                     .map_err(Self::unavailable)?;
-                let ids = model_ids(&catalog);
+                // Human labels ride `label`; the wire id stays in `id`.
+                // A row without a `displayName` falls back to its id rather
+                // than vanishing: an empty menu is a failure, not a state.
+                let rows = model_catalog(&catalog);
                 let active = session
                     .as_deref()
                     .and_then(|session| {
@@ -516,12 +519,12 @@ impl ProviderAdapter for CodexAdapter {
                     })
                     .unwrap_or_default();
                 Ok(Ack::ModelCatalog {
-                    models: ids
+                    models: rows
                         .into_iter()
-                        .map(|id| ModelSummary {
-                            active: id == active,
-                            label: id.clone(),
-                            id,
+                        .map(|row| ModelSummary {
+                            active: row.id == active,
+                            label: row.label,
+                            id: row.id,
                         })
                         .collect(),
                     provider: "openai".into(),

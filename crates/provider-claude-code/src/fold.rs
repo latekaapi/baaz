@@ -134,6 +134,18 @@ impl ClaudeFold {
         self.session_id.as_deref()
     }
 
+    /// The session's effective model: the last `init` frame's, or the last
+    /// `SelectModel` admission.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Remember the effective model from a `SelectModel` admission: the next
+    /// turn's footer reads it, the way `init`'s model lands in the first.
+    pub fn set_model(&mut self, model: &str) {
+        self.model = Some(model.to_owned());
+    }
+
     /// `can_use_tool` requests waiting on a human decision, oldest first.
     pub fn pending_approvals(&self) -> &[ApprovalRequest] {
         &self.pending
