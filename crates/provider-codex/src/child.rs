@@ -238,18 +238,54 @@ pub fn turn_interrupt_request(id: u64, thread_id: &str, turn_id: &str) -> Value 
     })
 }
 
-/// The model catalog out of a `model/list` response. The key is `data`, not
-/// `models`: `result.data[].id`, in provider order.
-pub fn model_ids(result: &Value) -> Vec<String> {
+/// One row of the `model/list` catalog: the wire id plus the human
+/// presentation the picker shows. The key is `data`, not `models`:
+/// `result.data[]`, in provider order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelInfo {
+    /// The catalog model id: what `thread/start` and `turn/start` carry.
+    pub id: String,
+    /// The human label (`displayName`), falling back to the id when the
+    /// server sends none. The picker reads this; the wire never does.
+    pub label: String,
+    /// The server's one-line description, when it sends one.
+    pub description: Option<String>,
+}
+
+/// The model catalog out of a `model/list` response: ids, human labels
+/// and descriptions, in provider order. See [`ModelInfo`] for the key.
+pub fn model_catalog(result: &Value) -> Vec<ModelInfo> {
     result
         .get("data")
         .and_then(Value::as_array)
         .map(|data| {
             data.iter()
-                .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(Value::as_str)?;
+                    let label = row
+                        .get("displayName")
+                        .and_then(Value::as_str)
+                        .filter(|label| !label.is_empty())
+                        .unwrap_or(id);
+                    Some(ModelInfo {
+                        id: id.to_owned(),
+                        label: label.to_owned(),
+                        description: row
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The model ids out of a `model/list` response, in provider order: the
+/// [`model_catalog`] ids without their labels. One parse, so the `data`
+/// (not `models`) key lives in exactly one place.
+pub fn model_ids(result: &Value) -> Vec<String> {
+    model_catalog(result).into_iter().map(|row| row.id).collect()
 }
 
 /// The default model out of a `model/list` response: the row flagged
@@ -1098,6 +1134,36 @@ mod tests {
         let ids = model_ids(&response);
         assert!(ids.contains(&"gpt-5.6-sol".to_owned()), "catalog: {ids:?}");
         assert_eq!(default_model(&response), Some("gpt-5.6-sol".to_owned()));
+    }
+
+    #[test]
+    fn model_catalog_carries_display_names_in_provider_order() {
+        // The picker reads `label`, never the raw slug: `basic.jsonl`
+        // ships a `displayName` per row and the catalog keeps it, with the
+        // id kept alongside for the wire. A parser that reads
+        // `result.models` instead of `result.data` returns nothing here —
+        // that mutation must fail this test, not slide through.
+        let frames = envelopes("basic.jsonl");
+        let response = frames
+            .iter()
+            .find(|(dir, frame)| {
+                *dir == Direction::ServerToClient && frame.get("id") == Some(&json!(10))
+            })
+            .map(|(_, frame)| frame.get("result").cloned().expect("result"))
+            .expect("model/list response");
+        let rows = model_catalog(&response);
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]);
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, ["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "GPT-5.5"]);
+        assert!(
+            rows.iter().all(|row| row.description.as_ref().is_some_and(|d| !d.is_empty())),
+            "every fixture row describes itself: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.label != row.id),
+            "no raw slug where a display name exists: {rows:?}"
+        );
     }
 
     #[test]
