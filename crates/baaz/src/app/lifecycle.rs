@@ -113,6 +113,14 @@ pub(crate) fn boot_decision(state: BootState<'_>) -> BootDecision {
 /// and an open session; a `--replay` or `--no-connect` run has no wire, so
 /// an open session alone is enough. Never the session list (see
 /// [`Harness::steps_ready`]).
+///
+/// `window_only` covers two cases: a script that only touches the window,
+/// and a mixed script whose head runs without a session (see
+/// [`crate::steps::head_runs_without_session`]). Offline with `--login
+/// signed-in` never opens a boot session, so requiring a session before the
+/// head runs meant `new;effort` could never start: the `new` that would have
+/// created the session never ran, and the capture drained an unrun list as
+/// `ran=2 failed=0` over the empty state.
 pub(crate) fn steps_ready_for(
     steps_pending: bool,
     replay: bool,
@@ -130,6 +138,9 @@ pub(crate) fn steps_ready_for(
     // silently never ran: the capture came out clean and the run still exited
     // 0. That is how five right-pane entries were written, gated green, and
     // produced five byte-identical screenshots of a shell with no pane in it.
+    // The mixed-script head folds in here through the caller's `window_only`
+    // for the same reason: holding `new;effort` for a session its own head
+    // would create deadlocks the script before it starts.
     if window_only {
         return true;
     }
@@ -580,7 +591,13 @@ impl Harness {
             self.args.offline,
             self.client.is_some(),
             self.active.is_some(),
-            crate::steps::all_window_steps(&self.args.steps),
+            // A mixed script headed by a window verb can start: `new`
+            // opens the session the later verbs need, so holding the whole
+            // list for a session the head would create deadlocks
+            // `new;effort` offline into "never became ready" (see
+            // [`crate::steps::head_runs_without_session`]).
+            crate::steps::all_window_steps(&self.args.steps)
+                || crate::steps::head_runs_without_session(&self.args.steps),
         )
     }
 
