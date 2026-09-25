@@ -35,6 +35,7 @@
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
 //! | `model` | open the model picker |
 //! | `effort` | open the reasoning-effort picker |
+//! | `provider` | open the provider picker |
 //! | `mode` | open the approval-mode picker |
 //! | `confirm` | activate the open menu's selected row |
 //! | `name:<name>` | `/name`, the session rename command |
@@ -154,12 +155,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Scripted-step accounting: a flow script that names a renamed verb used to
 /// pass silently (a stderr line, exit 0), so the script rotted into a no-op
 /// unnoticed. Every unknown step now counts one failure, and the scripted-run
-/// exit fails the process when the count is non-zero. This closes exactly
-/// that hole; a known step that silently does nothing is still not detected.
+/// exit fails the process when the count is non-zero. A known step that
+/// cannot run counts one failure too: a session verb with no open session,
+/// or any step in a list readiness never released, is recorded and named
+/// rather than reported as a success that did nothing.
 static STEP_FAILURES: AtomicU64 = AtomicU64::new(0);
-/// Every scripted item seen: drained items counted by the runners below, plus
-/// any list the capture finds still undrained because the run never became
-/// able to execute it (see `record_unrun_steps`).
+/// Every scripted item actually executed: counted by the runners below as
+/// each step runs. A skipped step is not a run step — a session verb that
+/// finds no session, and any list the capture finds still undrained because
+/// the run never became able to execute it (see `record_unrun_steps`),
+/// count failures only, never runs.
 static STEPS_RAN: AtomicU64 = AtomicU64::new(0);
 /// The unknown step names behind `STEP_FAILURES`, in order, for the
 /// one-line-per-failure report before exit.
@@ -180,19 +185,27 @@ pub(crate) fn step_failure_names() -> Vec<String> {
     FAILED_STEP_NAMES.lock().map(|names| names.clone()).unwrap_or_default()
 }
 
-/// Count one scripted item, failing it when it names no known verb. Free:
-/// table lookups only, nothing reaches the wire.
+/// Classify a scripted list the capture finds still undrained because the
+/// run never became able to execute it (see `steps_ready_for`): none of
+/// these ran, so `ran` stays untouched — a skipped step is not a run step —
+/// and every one of them failed, because the script did not do what it
+/// said. The only exception is `wait:`, which touches nothing: an unrun
+/// sleep is not a failure. Free: table lookups only, nothing reaches the
+/// wire.
 pub(crate) fn record_unrun_steps(steps: &[String]) {
     for step in steps {
-        STEPS_RAN.fetch_add(1, Ordering::Relaxed);
-        if !is_known_step(step) {
-            record_step_failure(step);
+        if step.strip_prefix("wait:").is_some() {
+            continue;
         }
+        record_step_failure(step);
     }
 }
 
 /// Whether a `--steps` item names a known verb, window or session. `wait:`
-/// never reaches a table; it is the runners' own.
+/// never reaches a table; it is the runners' own. Test-only: the runners
+/// classify by what a step needs (see `is_session_step`), not by whether
+/// its name exists, so an unrun or unrunnable step fails whatever it names.
+#[cfg(test)]
 fn is_known_step(step: &str) -> bool {
     if step.strip_prefix("wait:").is_some() {
         return true;
@@ -377,6 +390,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "steer", run: |v, rest, _, cx| v.steer_text(rest.to_owned(), cx) },
     SessionVerb { verb: "model", run: |v, _, _, cx| v.toggle_picker(MenuKind::Model, cx) },
     SessionVerb { verb: "effort", run: |v, _, _, cx| v.toggle_picker(MenuKind::Effort, cx) },
+    SessionVerb { verb: "provider", run: |v, _, _, cx| v.toggle_picker(MenuKind::Provider, cx) },
     SessionVerb { verb: "mode", run: |v, _, _, cx| v.toggle_picker(MenuKind::Mode, cx) },
     SessionVerb { verb: "confirm", run: |v, _, window, cx| v.confirm_menu(window, cx) },
     // The session operations, so their screenshots come from a command
@@ -508,6 +522,24 @@ fn is_session_step(step: &str) -> bool {
     WINDOW_VERBS.iter().all(|v| v.verb != head)
 }
 
+/// Whether the script's head can run with no session open: a window verb
+/// or `wait:`, neither of which touches the session. This is what lets a
+/// mixed script start — `new;effort` begins with `new`, which opens the
+/// session the later verbs need — where [`all_window_steps`] alone would
+/// hold the whole list for a session its own head would create.
+pub(crate) fn head_runs_without_session(steps: &[String]) -> bool {
+    match steps.first() {
+        None => false,
+        Some(step) => {
+            if step.strip_prefix("wait:").is_some() {
+                return true;
+            }
+            let (head, _) = split(step);
+            WINDOW_VERBS.iter().any(|v| v.verb == head)
+        }
+    }
+}
+
 /// How long session verbs wait for a `new:` switch: the `session/start`
 /// round-trip is usually far under a second; the bound only fires when the
 /// switch never comes, and then the step runs against whatever is open
@@ -545,8 +577,8 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     capture.set_steps_running(true);
     let task = cx.spawn(async move |this, cx| {
         for step in steps {
-            STEPS_RAN.fetch_add(1, Ordering::Relaxed);
             if let Some(ms) = step.strip_prefix("wait:") {
+                STEPS_RAN.fetch_add(1, Ordering::Relaxed);
                 let ms: u64 = ms.parse().unwrap_or(0);
                 cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
                 continue;
@@ -580,19 +612,19 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                     );
                 }
                 // A session verb with no open session has nowhere to go:
-                // say so and skip it rather than vanishing into
-                // `with_session`'s silent no-op below.
+                // fail it loudly rather than vanishing into
+                // `with_session`'s silent no-op below. Not counted in
+                // `ran`: a skipped step is not a run step.
                 let has_session = this
                     .read_with(cx, |this, cx| this.active_id(cx).is_some())
                     .unwrap_or(false);
                 if !has_session {
-                    crate::baaz_log!("`{step}`: no open session; skipped");
-                    if !is_known_step(&step) {
-                        record_step_failure(&step);
-                    }
+                    crate::baaz_log!("`{step}`: no open session; step failed");
+                    record_step_failure(&step);
                     continue;
                 }
             }
+            STEPS_RAN.fetch_add(1, Ordering::Relaxed);
             let ran = this.update_in(cx, |this, window, cx| {
                 if !window_step(this, &step, window, cx) {
                     this.with_session(cx, |view, cx| session_step(view, &step, window, cx));
@@ -772,6 +804,56 @@ mod tests {
         assert!(super::is_session_step("send:hi"));
         assert!(super::is_session_step("wait:3000"));
         assert!(super::is_session_step("bogusverb"));
+    }
+
+    #[test]
+    fn a_mixed_script_headed_by_a_window_verb_can_start() {
+        // `new;effort` must start with no session open: `new` opens the
+        // session the later verbs need. A session verb up front cannot.
+        assert!(super::head_runs_without_session(&["new".into(), "effort".into()]));
+        assert!(super::head_runs_without_session(&["new".into(), "model".into()]));
+        assert!(super::head_runs_without_session(&["right:browser".into(), "draft:hi".into()]));
+        assert!(super::head_runs_without_session(&["wait:100".into(), "effort".into()]));
+        assert!(super::head_runs_without_session(&["new".into()]));
+        assert!(!super::head_runs_without_session(&["effort".into(), "new".into()]));
+        assert!(!super::head_runs_without_session(&["model".into()]));
+        assert!(!super::head_runs_without_session(&["provider".into()]));
+        assert!(!super::head_runs_without_session(&["bogusverb".into()]));
+        assert!(!super::head_runs_without_session(&[]));
+    }
+
+    #[test]
+    fn unrun_steps_fail_without_counting_as_ran() {
+        // The capture drains this only when readiness never held, so none
+        // of these executed: every one fails — a session verb that never
+        // found a session most of all — and `ran` does not move. A skipped
+        // step is not a run step. `wait:` touches nothing, so an unrun
+        // sleep is neither.
+        let ran_before = super::steps_ran();
+        super::record_unrun_steps(&[
+            "effort".into(),
+            "right:browser".into(),
+            "totally-bogus-verb".into(),
+            "wait:50".into(),
+        ]);
+        assert_eq!(super::steps_ran(), ran_before, "unrun steps are not run steps");
+        let names = super::step_failure_names();
+        for failed in ["effort", "right:browser", "totally-bogus-verb"] {
+            assert!(
+                names.iter().any(|name| name == failed),
+                "`{failed}` is recorded as a step failure"
+            );
+        }
+        assert!(
+            !names.iter().any(|name| name == "wait:50"),
+            "an unrun `wait:` is not a failure"
+        );
+    }
+
+    #[test]
+    fn the_provider_picker_is_a_known_session_verb() {
+        assert!(super::is_known_step("provider"));
+        assert!(super::is_session_step("provider"));
     }
 
     use std::path::PathBuf;
