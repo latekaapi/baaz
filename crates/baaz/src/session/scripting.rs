@@ -60,6 +60,57 @@ impl SessionView {
         }
     }
 
+    /// `setprovider:<id>`: the provider picker's menu row as a verb —
+    /// the same [`SessionView::pick_provider`] the click and Enter
+    /// paths call, so the no-live-switch invariant holds here too: a
+    /// fresh session swaps lanes through the application, and a
+    /// session with turns starts a new session on the pick instead.
+    /// That second case records a step failure saying so rather than
+    /// reading as an in-place swap. An unknown id records a step
+    /// failure and changes nothing — never a silent no-op, and never
+    /// the registry fallback (which would open Muse for a typo).
+    /// A setter, not a toggle: repeating the pick is a no-op success.
+    pub(crate) fn step_setprovider(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let id = rest.trim();
+        let Some(picked) = ProviderId::all().iter().find(|p| p.as_str() == id).copied() else {
+            crate::steps::record_step_failure(&format!("setprovider:{rest}"));
+            crate::baaz_log!("unknown provider `{rest}`; known providers are muse, claude-code, codex");
+            return;
+        };
+        if self.has_turns() && picked != self.provider_kind() {
+            self.pick_provider(picked.as_str(), cx);
+            crate::steps::record_step_failure(&format!("setprovider:{rest}"));
+            crate::baaz_log!(
+                "`setprovider:{id}` on a session with turns starts a new session on {} instead of swapping this one",
+                picked.label()
+            );
+            return;
+        }
+        self.pick_provider(picked.as_str(), cx);
+    }
+
+    /// `seteffort:<level>`: the effort picker's menu row as a verb —
+    /// the same [`SessionView::pick_effort`] Enter calls, so the chip
+    /// reads the pick at once. `default` (or empty) clears to the
+    /// Default row. An unknown spelling records a step failure and
+    /// changes nothing.
+    pub(crate) fn step_seteffort(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let level = rest.trim();
+        if level.is_empty() || level.eq_ignore_ascii_case("default") {
+            self.pick_effort(None, cx);
+            return;
+        }
+        let effort =
+            crate::projects::parse_effort(level).or_else(|| crate::projects::parse_effort(&level.to_lowercase()));
+        match effort {
+            Some(effort) => self.pick_effort(Some(effort), cx),
+            None => {
+                crate::steps::record_step_failure(&format!("seteffort:{rest}"));
+                crate::baaz_log!("unknown reasoning effort `{rest}`");
+            }
+        }
+    }
+
     /// `choose:<n>`: the n-th choice of the newest pending approval, 1-based,
     /// exactly as the digits on the card are.
     pub(crate) fn step_choose(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
