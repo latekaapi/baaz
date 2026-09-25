@@ -217,6 +217,46 @@ pub fn uses_legacy_pump(id: ProviderId) -> bool {
     matches!(id, ProviderId::Muse)
 }
 
+// ------------------------------------------------- the last-chosen provider
+
+/// What the store remembers: the backend new sessions start on.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct LastProvider {
+    /// The wire id (`muse`, `claude-code`, `codex`).
+    #[serde(default)]
+    provider: String,
+}
+
+/// Where the last-chosen provider lives: one small JSON file in Baaz's own
+/// store, beside the projects file rather than inside it. Every read is
+/// best-effort like every other store read; every write is atomic.
+fn last_provider_path() -> std::path::PathBuf {
+    crate::store::support_dir().join("provider.json")
+}
+
+/// The backend new sessions start on, as last chosen. `None` when nothing
+/// was ever chosen or the file names no backend — the caller falls back to
+/// the command line.
+pub fn read_last_provider() -> Option<ProviderId> {
+    let stored: LastProvider = crate::store::read_json(&last_provider_path());
+    match stored.provider.as_str() {
+        "muse" => Some(ProviderId::Muse),
+        "claude-code" => Some(ProviderId::ClaudeCode),
+        "codex" => Some(ProviderId::Codex),
+        _ => None,
+    }
+}
+
+/// Remember the backend new sessions start on. Best-effort: a store that
+/// cannot be written leaves the in-memory pick, which still names every
+/// session this run starts.
+pub fn write_last_provider(id: ProviderId) {
+    let text = serde_json::to_string(&LastProvider { provider: id.as_str().to_owned() });
+    if let Ok(text) = text {
+        let _ = crate::store::write_atomic(&last_provider_path(), text.as_bytes());
+    }
+}
+
 /// The loud detector for the two-writers bug: when both lanes claim the
 /// same session, return the violation as text (logged and bannered)
 /// instead of letting two state machines drive one screen silently.
@@ -485,6 +525,34 @@ mod tests {
         assert_eq!(ProviderId::parse("echo"), ProviderId::Muse);
         assert_eq!(ProviderId::parse("claude-code"), ProviderId::ClaudeCode);
         assert_eq!(ProviderId::parse("codex"), ProviderId::Codex);
+    }
+
+    #[test]
+    fn the_last_chosen_provider_survives_a_relaunch() {
+        // Serialized against every other test that points the store at a
+        // temp dir: two tests pointing it at two dirs at once would read
+        // each other's state.
+        let guard = crate::store::test_env_lock();
+        let dir = std::env::temp_dir().join(format!("baaz-provider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        // Nothing chosen yet: no pick, so the boot falls back to the
+        // command line rather than inventing one.
+        assert_eq!(read_last_provider(), None);
+        write_last_provider(ProviderId::Codex);
+        assert_eq!(read_last_provider(), Some(ProviderId::Codex));
+        write_last_provider(ProviderId::Muse);
+        assert_eq!(read_last_provider(), Some(ProviderId::Muse));
+        // A file this build cannot parse is ordinary, not a pick.
+        std::fs::write(dir.join("provider.json"), b"not json").expect("seed bad json");
+        assert_eq!(read_last_provider(), None);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -136,15 +136,42 @@ declares `Unverified` (the request shape was read, never executed), and
 the registry mirrors the crate, not the proposal. The proposal is a
 sentence; the crate is the evidence.
 
-Selecting a provider for a **new** session is enough: the hero's
-provider switcher (`Harness::render_provider_picker`) seeds from the
-command line and every `session/start` path reads the pick. There is no
-way to switch a live session's provider — the view reads its lane off
-the one `provider_id` field the host fixed at construction, with no
-setter. That is the structural answer to the two-writers danger; where
-structure runs out, `check_single_lane` is the loud detector: both
-lanes claiming one session returns a violation as text (logged and
-bannered) instead of corrupting the screen silently.
+Selecting a provider for a **new** session is enough: the composer's
+provider chip seeds from the command line and every `session/start`
+path reads the pick. The control belongs in the composer action row,
+immediately left of the model chip (`ComposerChipAnchor::Provider`,
+`ComposerIntent::Provider`) — that is where `aui` always put it
+(`composer(id, state, provider, model)` takes the provider as a required
+argument), and the chip shows the session's own provider, derived from
+the session like every other piece of session chrome.
+
+An earlier revision of this section recorded a provider switcher on the
+empty-state hero (`Harness::render_provider_picker`) as though it were
+the design. It was not: the S46 brief said "selecting a provider for a
+new session is enough" and never said *where* the control belonged, so
+the lane invented a hero picker and this doc wrote the invention down.
+The hero control is gone — the empty state is hero, project name, hint,
+**New session**, nothing else — and this paragraph is corrected so the
+accident stops surviving review as an intention.
+
+The chip's menu behaves by whether the session has run anything, because
+there is still no way to switch a live session's provider — the view
+reads its lane off the one `provider_id` field the host fixed at
+construction, with no setter. That is the structural answer to the
+two-writers danger; where structure runs out, `check_single_lane` is
+the loud detector: both lanes claiming one session returns a violation
+as text (logged and bannered) instead of corrupting the screen silently.
+So: a session with no turns yet swaps to the pick (nothing written, no
+lane committed — the empty session is retired and a new one starts on
+the pick), while a session with turns offers the others as **"New
+session on \<Provider\>"**, each row carrying the reason in its detail
+line the way an `Unavailable` capability explains itself. A turn in
+flight counts as turns. Every row acts on click; none goes dead.
+
+The pick is remembered in Baaz's own store (`provider.json` beside the
+projects file): a new session starts on the last provider chosen, across
+relaunches. An explicit `--provider` / `BAAZ_PROVIDER` still wins for
+the run it names.
 
 ### The gate, visible
 
@@ -195,32 +222,25 @@ ignoring a Codex prompt that fires only when something actually
 escaped. The strip and the card always name which backend is asking,
 so the person learns two rhythms and trusts both.
 
-## S46fix — the switcher's layout contract
+## S46fix — retired with the hero switcher
 
-Found by driving the app, not by any test: the switcher row was one
-centred flex unit (`Muse | Claude Code | Codex | <caption>`), so each
-provider's different-length caption re-centred the whole row — Codex
-sat 78px away from itself between picks, and a second click aimed at
-it landed on Claude Code. The same row hard-clipped the caption at
-the pane boundary in a ~520px centre column.
+S46fix once pinned the hero switcher's layout contract in
+`Harness::render_provider_picker`: found by driving the app, the
+switcher row was one centred flex unit
+(`Muse | Claude Code | Codex | <caption>`), so each provider's
+different-length caption re-centred the whole row — Codex sat 78px away
+from itself between picks, and a second click aimed at it landed on
+Claude Code — and the same row hard-clipped the caption at the pane
+boundary in a ~520px centre column. The fix put the caption on its own
+ellipsised line below a fixed button row, pinned by
+`provider_buttons_hold_still_and_caption_stays_inside`.
 
-The contract now, in `Harness::render_provider_picker`:
-
-- The caption lives on its own line below the buttons, never in the
-  buttons' flex row. The buttons row is a fixed unit whose geometry
-  depends only on the constant button labels, so no caption change
-  can move a control.
-- The caption line is full-width with a deliberate ellipsis
-  (`truncate` + `overflow_hidden`, the same idiom the header title
-  uses), never a hard clip — at any column width the layout permits.
-- The three capability strings are unchanged; the layout absorbs the
-  length difference instead of the controls.
-
-Pinned by `provider_buttons_hold_still_and_caption_stays_inside` in
-`crates/baaz/src/app.rs`: a `#[gpui::test]` that draws the whole app
-at a narrow 520px window and at 900px, one draw per provider pick,
-and asserts the measured button bounds are identical across picks
-and the caption stays inside the picker's box. The test first
-asserts the three captions differ in length — without that, a
-shared-row layout would hold still trivially and the pin would prove
-nothing.
+P2 removed the hero switcher outright (see §S46 above), and the contract
+died with the control: the function, its call sites and the geometry pin
+are all gone. What remains is `hero_has_no_provider_picker` in
+`crates/baaz/src/app.rs`: a `#[gpui::test]` that draws both empty states
+and asserts the picker left no measured bounds in either — the pin now
+says the hero carries no provider control at all. The history is kept
+here because the 78px jump is still the reason no one rebuilds a
+caption-carrying switcher on the hero: a control that moves when its own
+label changes is a misclick waiting for a second press.
