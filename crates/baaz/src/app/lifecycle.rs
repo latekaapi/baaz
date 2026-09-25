@@ -2024,6 +2024,29 @@ impl Harness {
                     defaults.approval_mode = Some(mode.clone());
                 });
             }
+            // A fresh session's composer chip picked another provider:
+            // nothing was ever sent, so the pick becomes the default and a
+            // new session starts on it. The abandoned session stays an
+            // empty session (hidden unless empty sessions are shown), but
+            // it stops being this project's draft — without that, the
+            // start below would reopen the very view the person just left.
+            SessionEvent::SwitchProvider { provider } => {
+                let old = view.read(cx).session_id.clone();
+                self.select_new_provider(*provider, cx);
+                self.drafts.retain(|_, id| *id != old);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
+                }));
+            }
+            // A session with turns picked "New session on X": this session
+            // keeps the lane it was created on, and a new one starts on the
+            // pick, which also becomes the default for later sessions.
+            SessionEvent::NewSessionOnProvider { provider } => {
+                self.select_new_provider(*provider, cx);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
+                }));
+            }
             SessionEvent::RenameStart => {
                 if let Some(view) = self.active.clone() {
                     let session_id = view.read(cx).session_id.clone();

@@ -69,6 +69,8 @@ pub enum MenuKind {
     Effort,
     /// The approval-mode picker, anchored to the mode chip.
     Mode,
+    /// The provider picker, anchored to the composer's provider chip.
+    Provider,
     /// The `/` command menu, above the composer.
     Command,
     /// The `@` mention picker, above the composer.

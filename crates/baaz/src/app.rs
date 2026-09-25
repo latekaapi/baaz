@@ -817,8 +817,19 @@ impl Harness {
         let restored = layout::sidebar_width(&layout::read());
         // The right divider's last settled width, or the default.
         let right_restored = layout::right_width(&layout::read());
+        // The backend new sessions start on: an explicit `--provider` or
+        // `BAAZ_PROVIDER` names this run; otherwise the last pick the
+        // person made, kept in the store across relaunches; otherwise the
+        // command-line default.
+        let new_provider = if args.provider_explicit {
+            args.provider.clone()
+        } else {
+            crate::providers::read_last_provider()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| args.provider.clone())
+        };
         let mut this = Self {
-            new_provider: args.provider.clone(),
+            new_provider,
             args,
             client: None,
             provider: None,
@@ -2513,86 +2524,14 @@ impl Harness {
     /// Projects palette. Otherwise the one thing to do is start one.
     /// The hero column also takes a drop: every dropped directory is
     /// adopted, the first becoming current.
-    /// The switcher's pick, changed only by the picker below — never by a
-    /// live session, which keeps the lane it was created on.
+    /// The pick for new sessions, changed only by the composer's provider
+    /// chip — never by a live session, which keeps the lane it was created
+    /// on. Remembered in the store, so the next launch starts where the
+    /// person last chose.
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         self.new_provider = id.as_str().to_owned();
+        crate::providers::write_last_provider(id);
         cx.notify();
-    }
-
-    /// The provider switcher: three entries, one per registry backend.
-    /// A new session starts on the pick; a live session never changes
-    /// lanes, so this names only what comes next. Every option carries
-    /// its role and human label in the same change.
-    ///
-    /// Layout contract (S46fix, found by driving the app): the caption
-    /// lives on its own line below the buttons, never in the buttons'
-    /// flex row. The old single centred row (`Muse | Claude Code | Codex
-    /// | <caption>`) re-centred as one unit whenever the caption changed
-    /// length — Codex jumped 78px between picks, so a second click aimed
-    /// at a button landed on its neighbour — and the caption hard-clipped
-    /// at the pane boundary in a ~520px centre column. The buttons row is
-    /// now a fixed unit whose geometry depends only on the constant
-    /// button labels, and the caption's own line is full-width with a
-    /// deliberate ellipsis (`truncate`), so the caption absorbs every
-    /// width change instead of pushing the controls around.
-    fn render_provider_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = ProviderId::parse(&self.new_provider);
-        let p = cx.aui().colors;
-        v_flex()
-            .id("provider-picker")
-            .role(gpui::Role::Group)
-            .aria_label("Provider for new sessions")
-            .w_full()
-            .items_center()
-            .gap(px(scale::SP_2))
-            .debug_selector(|| "provider-picker".into())
-            .child(
-                h_flex()
-                    .id("provider-picker-row")
-                    .flex_none()
-                    .justify_center()
-                    .gap(px(scale::SP_2))
-                    .debug_selector(|| "provider-picker-row".into())
-                    .children(ProviderId::all().into_iter().map(|id| {
-                        let mut pick = button(format!("provider-pick-{}", id.as_str()), id.label());
-                        if id == current {
-                            pick = pick.primary();
-                        }
-                        let pick = pick.on_click(
-                            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                                this.select_new_provider(id, cx);
-                            }),
-                        );
-                        // The wrapper carries the role and the human label (the
-                        // button has no aria builder of its own), plus which entry
-                        // is picked and what it means.
-                        div()
-                            .id(format!("provider-pick-wrap-{}", id.as_str()))
-                            .role(gpui::Role::Button)
-                            .aria_label(format!(
-                                "Start new sessions on {}: {}. {}",
-                                id.label(),
-                                id.blurb(),
-                                if id == current { "Currently picked." } else { "Not picked." }
-                            ))
-                            .debug_selector(|| format!("provider-pick-wrap-{}", id.as_str()))
-                            .child(pick)
-                    })),
-            )
-            .child(
-                div()
-                    .id("provider-picker-caption")
-                    .flex_none()
-                    .w_full()
-                    .overflow_hidden()
-                    .truncate()
-                    .text_center()
-                    .text_color(p.ink_3)
-                    .debug_selector(|| "provider-picker-caption".into())
-                    .child(current.blurb().to_owned()),
-            )
-            .into_any_element()
     }
 
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2631,7 +2570,6 @@ impl Harness {
                         .child(button("hero-new", "New session").primary().icon(IconName::Plus).on_click(start))
                         .child(button("hero-choose", "Add project").icon(IconName::Folder).on_click(choose)),
                 )
-                .child(self.render_provider_picker(cx))
                 .into_any_element();
         }
         let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
@@ -2650,7 +2588,6 @@ impl Harness {
                     .child("Pick a session on the left, or \u{2318}N to start one."),
             )
             .child(button("new-session", "New session").primary().icon(IconName::Plus).on_click(new))
-            .child(self.render_provider_picker(cx))
             .into_any_element()
     }
 
@@ -3370,6 +3307,7 @@ mod tests {
             workspace: dir.to_path_buf(),
             workspace_explicit: true,
             provider: "echo".into(),
+            provider_explicit: false,
             program: "muse".into(),
             theme: aui_tokens::ThemeKind::Dark,
             screenshot: None,
@@ -3484,88 +3422,78 @@ mod tests {
         restore_state(state);
     }
 
-    /// One settled frame of the provider picker: which provider was
-    /// picked, the three button boxes, the caption box and the picker
-    /// box. Named fields instead of a tuple so the test reads — and
-    /// clippy stays quiet.
-    struct PickerFrame {
-        pick: crate::providers::ProviderId,
-        muse: gpui::Bounds<gpui::Pixels>,
-        claude_code: gpui::Bounds<gpui::Pixels>,
-        codex: gpui::Bounds<gpui::Pixels>,
-        caption: gpui::Bounds<gpui::Pixels>,
-        root: gpui::Bounds<gpui::Pixels>,
-    }
-
-    /// S46fix: the provider buttons hold still when the caption changes,
-    /// and the caption never leaves the picker's box. Opens the real
-    /// app window at a narrow 520px width and at 900px, picks each
-    /// provider in turn, and compares the picker's measured frame
-    /// bounds after the frames settle. The old single centred row
-    /// hard-clipped the caption and let Codex jump 78px between picks;
-    /// the blurb-length assert below is what makes this pin real rather
-    /// than vacuous — the three captions differ in length, so any layout
-    /// that centres the buttons and the caption as one unit must move
-    /// the buttons.
+    /// P2: the hero carries no provider control — the picker lives in the
+    /// composer's action row now (the hero switcher was an accident of an
+    /// underspecified brief, never the design). Draws both empty states (a
+    /// project with no session open, and no project at all) and asserts the
+    /// picker left no measured bounds in either.
+    ///
+    /// The absence assert reads `debug_bounds("provider-picker")`, which only
+    /// ever holds entries for elements with an explicit `.debug_selector()`.
+    /// The deleted picker had one, so a reintroduction in this file's house
+    /// style would trip it. The hero buttons cannot serve as the "something
+    /// drew" guard the same way: aui's `button()` sets an element id, which
+    /// gpui does not record bounds for, so probing either hero button id
+    /// always misses even when the hero draws perfectly. The guard below
+    /// instead pins the live state to the signed-in empty state (where
+    /// `render` deterministically takes the `render_no_session` branch),
+    /// proves a frame painted, and proves the shell's own frame logic ran
+    /// against that state via the window title — a run that rendered nothing
+    /// at all fails here rather than passing the picker assert vacuously.
     #[gpui::test]
-    fn provider_buttons_hold_still_and_caption_stays_inside(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("provider-picker-geometry");
+    fn hero_has_no_provider_picker(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("hero-no-provider-picker");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let lens: Vec<usize> =
-            crate::providers::ProviderId::all().iter().map(|id| id.blurb().len()).collect();
-        assert!(
-            lens[0] != lens[1] && lens[1] != lens[2] && lens[0] != lens[2],
-            "the three captions must differ in length ({lens:?}), or a shared-row layout would hold still trivially"
-        );
-        let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
-        });
-        // The boot lands on the login screen; the picker only renders in
-        // the signed-in shell, so step past it with the sample identity
-        // (no child runs behind it — the chrome draws, the wire idles).
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                h.args.login = crate::LoginSample::SignedIn;
-                h.apply_login_sample(window, cx);
-            })
-        });
-        vc.run_until_parked();
-        for width in [520f32, 900.] {
-            vc.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.)));
+        for no_project in [false, true] {
+            let (baaz, vc) = cx.add_window_view(|window, cx| {
+                let mut args = test_args(&state.2);
+                args.no_project = no_project;
+                Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+            });
+            // The boot lands on the login screen; the hero only renders in
+            // the signed-in shell, so step past it with the sample identity
+            // (no child runs behind it — the chrome draws, the wire idles).
+            vc.update(|window, cx| {
+                baaz.update(cx, |h, cx| {
+                    h.args.login = crate::LoginSample::SignedIn;
+                    h.apply_login_sample(window, cx);
+                })
+            });
             vc.run_until_parked();
-            let mut seen: Vec<PickerFrame> = Vec::new();
-            for id in crate::providers::ProviderId::all() {
-                vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_new_provider(id, cx)));
-                vc.run_until_parked();
-                let mut bounds = |sel: &'static str| {
-                    vc.debug_bounds(sel).unwrap_or_else(|| panic!("no measured bounds for {sel}"))
-                };
-                seen.push(PickerFrame {
-                    pick: id,
-                    muse: bounds("provider-pick-wrap-muse"),
-                    claude_code: bounds("provider-pick-wrap-claude-code"),
-                    codex: bounds("provider-pick-wrap-codex"),
-                    caption: bounds("provider-picker-caption"),
-                    root: bounds("provider-picker"),
-                });
-            }
-            for entry in &seen {
-                assert_eq!(entry.muse, seen[0].muse, "Muse button moved at {width}px when the pick changed");
-                assert_eq!(
-                    entry.claude_code, seen[0].claude_code,
-                    "Claude Code button moved at {width}px when the pick changed"
-                );
-                assert_eq!(entry.codex, seen[0].codex, "Codex button moved at {width}px when the pick changed");
-                assert!(
-                    entry.caption.origin.x >= entry.root.origin.x
-                        && entry.caption.origin.x + entry.caption.size.width
-                            <= entry.root.origin.x + entry.root.size.width,
-                    "caption {:?} leaves the picker {:?} at {width}px with {:?} picked",
-                    entry.caption,
-                    entry.root,
-                    entry.pick.as_str(),
-                );
-            }
+            // A resize forces a draw; without one no frame settles and the
+            // bounds below would miss the picker trivially.
+            vc.simulate_resize(gpui::size(gpui::px(900.), gpui::px(800.)));
+            vc.run_until_parked();
+            // Which hero variant drew is decided by the live project state:
+            // `--no-project` boots with nothing adopted (`hero-new`), while
+            // the explicit workspace is adopted at boot (`new-session`).
+            // Pin the mapping so both arms provably cover their variant.
+            let (signed_in, no_session, has_project, expected_title) = vc.update(|_, cx| {
+                let h = baaz.read(cx);
+                (matches!(h.auth, super::Auth::SignedIn(_)), h.active.is_none(), h.current_project().is_some(), h.window_title(cx))
+            });
+            assert!(signed_in, "the shell never signed in (no_project={no_project})");
+            assert!(no_session, "a session opened on its own (no_project={no_project})");
+            assert_eq!(
+                has_project, !no_project,
+                "expected the {no_project} arm to land on the other hero variant"
+            );
+            // A frame painted since the resize: an empty quad list means the
+            // window never drew and the picker assert below would be vacuous.
+            let painted = vc.update(|window, _| window.painted_quads().len());
+            assert!(painted > 0, "the window painted nothing (no_project={no_project})");
+            // The shell's own frame logic ran against the live state: the
+            // title is only written from `on_frame`, so a matching title
+            // proves a frame settled after the boot above.
+            assert_eq!(
+                vc.window_title().as_deref(),
+                Some(expected_title.as_str()),
+                "no frame settled on the signed-in empty state (no_project={no_project})"
+            );
+            assert!(
+                vc.debug_bounds("provider-picker").is_none(),
+                "the hero still draws a provider picker (no_project={no_project})"
+            );
         }
         restore_state(state);
     }
