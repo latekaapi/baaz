@@ -1144,6 +1144,107 @@ mod tests {
         MuseError::Rpc(Box::new(object))
     }
 
+    /// P6: `setprovider:<id>` is the provider picker's menu row as a
+    /// verb — the same `pick_provider` the click and Enter paths call.
+    /// A fresh session emits the swap; a session with turns keeps its
+    /// lane (the verb still routes through the menu, so a new session
+    /// starts on the pick) and fails loudly saying so; an unknown id
+    /// fails loudly and changes nothing. No child spawns anywhere:
+    /// the pick and the failure accounting are what this drives,
+    /// offline throughout.
+    #[gpui::test]
+    fn setprovider_verbs_route_through_the_menu_path(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "muse", "s-setprovider");
+        // The picks the verb asks for, as the application would see
+        // them. gpui activates the listener on defer, so subscribe in
+        // one update and emit in the next.
+        let swaps: Rc<RefCell<Vec<ProviderId>>> = Rc::default();
+        let new_on: Rc<RefCell<Vec<ProviderId>>> = Rc::default();
+        let sub = vc.update(|_, cx| {
+            let (swaps, new_on) = (swaps.clone(), new_on.clone());
+            cx.subscribe(&view, move |_, event: &SessionEvent, _| match event {
+                SessionEvent::SwitchProvider { provider } => swaps.borrow_mut().push(*provider),
+                SessionEvent::NewSessionOnProvider { provider } => new_on.borrow_mut().push(*provider),
+                _ => {}
+            })
+        });
+        // A fresh session on Muse moves to Claude Code.
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                crate::steps::session_step(view, "setprovider:claude-code", window, cx)
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(*swaps.borrow(), [ProviderId::ClaudeCode]);
+            assert!(new_on.borrow().is_empty(), "no new-session detour on a fresh session");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse, "the view never swaps lanes live");
+        });
+        // Picking the session's own lane is a no-op success, like its
+        // menu row — a setter, not a toggle — and an unknown id fails
+        // loudly instead of falling back to Muse for a typo.
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                crate::steps::session_step(view, "setprovider:muse", window, cx);
+                crate::steps::session_step(view, "setprovider:not-a-lane", window, cx)
+            });
+        });
+        assert!(
+            crate::steps::step_failure_names().iter().any(|name| name == "setprovider:not-a-lane"),
+            "an unknown provider id is a named failure, not a silent no-op"
+        );
+        vc.update(|_, cx| {
+            assert_eq!(swaps.borrow().len(), 1, "the unknown id emitted nothing");
+            assert!(new_on.borrow().is_empty());
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse);
+        });
+        // A session with turns keeps its lane: the verb behaves exactly
+        // as the menu does (a new session starts on the pick) and says
+        // so as a failure rather than reading as an in-place swap.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _cx| {
+                view.fold.append_client_block(
+                    "s-setprovider",
+                    "t-seed",
+                    Block::Text { text: "earlier work".into(), streaming: false },
+                );
+            });
+            assert!(view.read(cx).has_turns(), "the session has turns in it");
+        });
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                crate::steps::session_step(view, "setprovider:codex", window, cx)
+            });
+        });
+        assert_eq!(*new_on.borrow(), [ProviderId::Codex], "the menu's new-session path, verbatim");
+        assert!(
+            crate::steps::step_failure_names().iter().any(|name| name == "setprovider:codex"),
+            "the detour is a named failure, never a silent non-swap"
+        );
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse, "the live session never changes lanes");
+        });
+        // `seteffort:` rides the same shape: a known level applies
+        // through the menu's own pick, an unknown spelling fails loudly.
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                crate::steps::session_step(view, "seteffort:high", window, cx);
+                crate::steps::session_step(view, "seteffort:sideways", window, cx);
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).effort, Some(aui_protocol::ReasoningEffort::High));
+            assert!(
+                crate::steps::step_failure_names().iter().any(|name| name == "seteffort:sideways"),
+                "an unknown effort level is a named failure"
+            );
+        });
+        drop(sub);
+    }
+
     /// The case that stranded a session for twelve hours: Stop is the only
     /// way out of a turn the window thinks is running, and the server
     /// answers that there is nothing to stop.

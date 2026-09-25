@@ -71,6 +71,15 @@ ENTRIES = {
                                       "--steps", "new;model"]},
     "composer-effort":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;effort"]},
+    # One composer per non-muse lane, reached by the scripted provider
+    # pick. `setprovider:` is a setter through the picker's own path —
+    # not a toggle — so both runs land on the lane's composer and
+    # agree. Like the menu, the pick is remembered in the store as the
+    # default for new sessions, so running these moves `provider.json`.
+    "composer-claude-code":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:claude-code"]},
+    "composer-codex":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:codex"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
