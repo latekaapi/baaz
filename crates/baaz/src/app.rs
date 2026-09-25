@@ -3453,9 +3453,14 @@ mod tests {
             // bounds below would miss the picker trivially.
             vc.simulate_resize(gpui::size(gpui::px(900.), gpui::px(800.)));
             vc.run_until_parked();
-            let hero_button = if no_project { "hero-new" } else { "new-session" };
+            // Either empty state is a real frame: which hero variant draws
+            // depends on whether a project actually loaded, not on
+            // `args.no_project` alone, and a hermetic state carries none.
+            // The guard only has to prove a frame settled — if neither
+            // button is there, nothing drew and the absence below is vacuous.
+            let drew = vc.debug_bounds("new-session").is_some() || vc.debug_bounds("hero-new").is_some();
             assert!(
-                vc.debug_bounds(hero_button).is_some(),
+                drew,
                 "the hero drew nothing (no_project={no_project}): the picker's absence below proves nothing"
             );
             assert!(
