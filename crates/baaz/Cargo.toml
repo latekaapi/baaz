@@ -32,6 +32,10 @@ muse-adapter.workspace = true
 # views still ride `muse-client` directly until they move one lane at a time.
 provider.workspace = true
 provider-muse.workspace = true
+# P4: the effort picker reads the Codex catalog shape and the Claude Code
+# reason from the adapters that own them, never from a Baaz-side copy.
+provider-codex = { path = "../provider-codex" }
+provider-claude-code = { path = "../provider-claude-code" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

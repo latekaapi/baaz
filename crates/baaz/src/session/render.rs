@@ -1770,23 +1770,45 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 vec![(ComposerChipAnchor::Model, menu.into_any_element())]
             }
             MenuKind::Effort => {
-                let rows: Vec<PickerRow> = EFFORTS
-                    .iter()
-                    .map(|effort| {
-                        PickerRow::new(
-                            effort.map(|e| format!("{e:?}")).unwrap_or_else(|| "default".to_owned()),
-                            crate::overlays::effort_label(*effort),
-                            crate::overlays::effort_detail(*effort),
-                        )
-                    })
-                    .collect();
-                let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
-                    let effort = EFFORTS
+                // The rows come from the provider for the selected model,
+                // never from a constant: a model change re-derives them.
+                // With no control the menu carries the typed reason row,
+                // the way the model picker does for an empty catalog.
+                let rows: Vec<PickerRow> = match self.effort_options() {
+                    crate::overlays::EffortOptions::Available(options) => options
                         .iter()
-                        .copied()
-                        .find(|e| e.map(|e| format!("{e:?}")).unwrap_or_else(|| "default".to_owned()) == id.as_ref());
-                    if let Some(effort) = effort {
-                        this.pick_effort(effort, cx);
+                        .map(|option| {
+                            PickerRow::new(
+                                crate::overlays::effort_row_id(option.effort),
+                                crate::overlays::effort_label(option.effort),
+                                option.detail.clone(),
+                            )
+                        })
+                        .collect(),
+                    crate::overlays::EffortOptions::Unavailable(reason) => vec![PickerRow::new(
+                        crate::overlays::EFFORT_UNAVAILABLE_ROW.to_owned(),
+                        "Effort unavailable".to_owned(),
+                        reason,
+                    )],
+                };
+                let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+                    if id.as_ref() == crate::overlays::EFFORT_UNAVAILABLE_ROW {
+                        if let crate::overlays::EffortOptions::Unavailable(reason) =
+                            this.effort_options()
+                        {
+                            this.toast("Effort unavailable", reason, cx);
+                        }
+                        this.close_menu(cx);
+                        return;
+                    }
+                    if let crate::overlays::EffortOptions::Available(options) = this.effort_options()
+                    {
+                        if let Some(option) = options
+                            .iter()
+                            .find(|o| crate::overlays::effort_row_id(o.effort) == id.as_ref())
+                        {
+                            this.pick_effort(option.effort, cx);
+                        }
                     }
                 });
                 let menu = effort_menu("effort-menu", rows, selected, true)

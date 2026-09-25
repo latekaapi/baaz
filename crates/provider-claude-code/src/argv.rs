@@ -66,6 +66,18 @@ fn with_model(mut argv: Vec<String>, model: Option<&str>) -> Vec<String> {
     argv
 }
 
+/// Why a Claude Code session offers no reasoning-effort picker: the launch
+/// argv carries `--model` but no effort flag, no per-turn channel was ever
+/// probed over stream-json stdin, and no captured transcript
+/// (`fixtures/claude-code/*.jsonl`) shows an effort surface — the one
+/// `effort` string on record is a slash-command name in the init payload,
+/// not a level list. Guessing a menu from that would invent support, so
+/// the picker renders this reason instead.
+pub fn reasoning_effort_unavailable_reason() -> &'static str {
+    "Claude Code sessions expose no reasoning-effort control: the launch argv carries \
+     `--model` but no effort flag, and no captured transcript shows an effort surface"
+}
+
 fn with_mcp(mut argv: Vec<String>, mcp_config: Option<&str>) -> Vec<String> {
     if let Some(path) = mcp_config {
         argv.push("--mcp-config".into());
@@ -171,6 +183,26 @@ mod tests {
         assert!(!launch.argv.iter().any(|arg| arg == "--resume"));
         assert_eq!(launch.session_id, "req-1");
         assert_eq!(launch.cwd.as_deref(), Some("/work"));
+    }
+
+    #[test]
+    fn no_effort_flag_anywhere_on_the_lane() {
+        // The evidence behind `reasoning_effort_unavailable_reason`: every
+        // launch shape carries `--model` and none carries an effort flag,
+        // so Baaz must not offer effort levels it cannot send.
+        for argv in [
+            argv_for_open("req-1", Some("/work"), Some("haiku"), None).argv,
+            argv_for_resume("sess-9", None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None).argv,
+            base_argv(),
+        ] {
+            assert!(argv.contains(&"--model".to_owned()) || !argv.contains(&"haiku".to_owned()));
+            assert!(
+                !argv.iter().any(|arg| arg.contains("effort")),
+                "no effort flag on this lane: {argv:?}"
+            );
+        }
+        assert!(!reasoning_effort_unavailable_reason().is_empty());
     }
 
     #[test]
