@@ -737,6 +737,131 @@ mod tests {
         assert_eq!(count_for_session(&connection, "s-p"), 1, "one row per settled turn");
     }
 
+    /// The W8 ledger arm: a multi-message Claude Code turn (`edit.jsonl`:
+    /// Write, Edit, DONE) records exactly one row — keyed by the turn,
+    /// never the message — and replaying the same session's history adds
+    /// none. Folding one turn per message records three rows with the
+    /// whole turn's totals copied into each.
+    #[test]
+    fn a_claude_code_turn_writes_one_row_and_history_replay_adds_none() {
+        let dir = std::env::temp_dir().join(format!("baaz-usage-w8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let connection = open_at(&dir.join("baaz.db")).expect("temp ledger opens");
+        let fixture = std::fs::read_to_string(format!(
+            "{}/../../fixtures/claude-code/edit.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture reads");
+        // The result frame's own totals, read off the raw JSON — the
+        // oracle the fold must match exactly once.
+        let (want_in, want_out, want_reasoning) = fixture
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            })
+            .map(|value| {
+                let usage = value.get("usage").cloned().unwrap_or(serde_json::Value::Null);
+                let uint =
+                    |key: &str| usage.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                (
+                    uint("input_tokens")
+                        + uint("cache_read_input_tokens")
+                        + uint("cache_creation_input_tokens"),
+                    uint("output_tokens"),
+                    usage
+                        .get("output_tokens_details")
+                        .and_then(|details| details.get("thinking_tokens"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                )
+            })
+            .expect("the fixture carries a result frame");
+        // The live path: every line through one fold, as the child stream
+        // arrives.
+        let mut fold = provider_claude_code::fold::ClaudeFold::new();
+        let mut live = Vec::new();
+        for line in fixture.lines() {
+            let frame = provider_claude_code::frame::decode_line(line).expect("decodes");
+            live.extend(fold.apply(&frame));
+        }
+        let mut finished: Vec<(String, TurnMeta)> = live
+            .iter()
+            .filter_map(|delta| match delta {
+                aui_protocol::Delta::TurnFinished { turn_id, meta } => {
+                    Some((turn_id.clone(), meta.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 1, "one user turn finishes once, not per message");
+        let (turn_id, meta) = finished.remove(0);
+        let row = crate::provider_sessions::ledger_row(
+            "sess-w8",
+            "claude-code",
+            "cursor-live",
+            &turn_id,
+            &meta,
+        );
+        assert!(record_turn(&connection, &row).expect("live turn records"));
+        // One row with the result frame's totals, once — never tripled.
+        let read = find_turn(&connection, "sess-w8", &turn_id).expect("row is there");
+        assert_eq!(read.provider, "claude-code");
+        assert_eq!(read.model, "claude-haiku-4-5-20251001");
+        assert_eq!(read.tokens_in, want_in as i64);
+        assert_eq!(read.tokens_out, want_out as i64);
+        assert_eq!(read.reasoning_tokens, want_reasoning as i64);
+        assert_eq!(count_for_session(&connection, "sess-w8"), 1);
+        // The reopen path: the history lines (no `result` frame) on a
+        // fresh fold, closed with stored footers and stamped with another
+        // cursor — the same turn id, so the insert is a no-op.
+        let mut replay_fold = provider_claude_code::fold::ClaudeFold::new();
+        let mut replayed = Vec::new();
+        for line in fixture.lines() {
+            let is_result = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value.get("type").and_then(serde_json::Value::as_str).map(str::to_owned)
+                })
+                .as_deref()
+                == Some("result");
+            if is_result {
+                continue;
+            }
+            let frame = provider_claude_code::frame::decode_line(line).expect("decodes");
+            replayed.extend(replay_fold.apply(&frame));
+        }
+        replayed.extend(replay_fold.finish_stored_turns());
+        let replayed_finished: Vec<(String, TurnMeta)> = replayed
+            .iter()
+            .filter_map(|delta| match delta {
+                aui_protocol::Delta::TurnFinished { turn_id, meta } => {
+                    Some((turn_id.clone(), meta.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed_finished.len(), 1, "the replayed turn closes once");
+        assert_eq!(
+            replayed_finished[0].0, turn_id,
+            "replay reuses the live turn id or the ledger doubles"
+        );
+        let replay_row = crate::provider_sessions::ledger_row(
+            "sess-w8",
+            "claude-code",
+            "cursor-replay",
+            &replayed_finished[0].0,
+            &replayed_finished[0].1,
+        );
+        assert!(
+            !record_turn(&connection, &replay_row).expect("replay records"),
+            "a replayed turn changes nothing"
+        );
+        assert_eq!(count_for_session(&connection, "sess-w8"), 1, "one row per turn");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Muse rows keep today's untagged shape: the tag column exists, but
     /// the muse lane never sets it.
     #[test]

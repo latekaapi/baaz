@@ -23,14 +23,22 @@
 //!
 //! What the fold emits, per frame:
 //!
-//! * `assistant`: one [`Delta::TurnStarted`] per unseen message id (turn id
-//!   IS the message id), then one [`Delta::BlockAdded`] per content block:
-//!   `text` → [`Block::Text`] (complete, `streaming: false`), `thinking` →
+//! * `assistant`: blocks join the turn's ONE assistant turn — opened on the
+//!   turn's first message (turn id IS that message's id, so the live fold
+//!   and the history replay agree on the key) and closed by the `result`
+//!   frame — then one [`Delta::BlockAdded`] per content block: `text` →
+//!   [`Block::Text`] (complete, `streaming: false`), `thinking` →
 //!   [`Block::Thinking`], `tool_use` → [`Block::ToolCall`] (`Bash` is shell,
 //!   `mcp__<server>__<tool>` is MCP, anything else is [`Block::Generic`]).
+//!   A turn's several messages share the turn (W8: folding one per message
+//!   rendered one meta row, one token count and one ledger row per message
+//!   instead of per turn).
 //! * `user` (tool results): one [`Delta::BlockUpdated`] per answered tool
 //!   call, completing its card (`Success`/`Error` plus output).
-//! * `result`: one [`Delta::TurnFinished`] per open turn, with usage and
+//! * `user` (prompt echo): the person's bubble, then the previous turn's
+//!   close when one is still open (stored history carries no `result`
+//!   frame, so the echo is the only boundary between two replayed turns).
+//! * `result`: one [`Delta::TurnFinished`] for the turn, with usage and
 //!   cost in the footer meta, preceded by one generic card per
 //!   `permission_denials` entry (useful for the transcript; never a
 //!   substitute for answering the request).
@@ -499,13 +507,17 @@ struct AgentCard {
 
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
-/// Stateful only where the wire is relational: message id → turn (many
-/// `assistant` frames share one message), tool-use id → card (results
-/// arrive on later `user` frames), open turns → finished by `result`.
+/// Stateful only where the wire is relational: one assistant turn per CLI
+/// turn (many `assistant` messages share it; the `result` frame closes
+/// it), tool-use id → card (results arrive on later `user` frames).
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeFold {
     started: HashMap<String, ()>,
     open: Vec<String>,
+    /// The turn this CLI turn's assistant messages share: `Some` from the
+    /// first message's `TurnStarted` until the `result` frame (or the next
+    /// prompt echo) finishes it. `None` between turns.
+    assistant_turn: Option<String>,
     tools: HashMap<String, ToolSite>,
     /// Echo uuids already rendered as user turns, so a replayed fixture
     /// never mints the same bubble twice.
@@ -526,10 +538,11 @@ pub struct ClaudeFold {
     /// the same message id continues the index sequence (and a later
     /// `BlockUpdated` for a tool result addresses the right card).
     emitted: HashMap<String, usize>,
-    /// Footer facts per message from stored `assistant` lines
-    /// (`message.model`, `message.usage`): what closes a replayed turn,
-    /// since the stored transcript carries no `result` frame. Stream
-    /// lines carry neither and record nothing here.
+    /// Footer facts per turn from `assistant` lines (`message.model`,
+    /// `message.usage`): what closes a replayed turn, since the stored
+    /// transcript carries no `result` frame. Every line carries them, so
+    /// the last line of the turn wins; the `result` frame's usage stays
+    /// authoritative on the live path and this is only ever a fallback.
     stored_meta: HashMap<String, TurnMeta>,
     /// The last stored line's model, in file order: the session's model
     /// when history exists, `None` on a stream-only fold.
@@ -663,14 +676,26 @@ impl ClaudeFold {
                 Vec::new()
             }
             Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, .. } => {
-                // Stored lines carry the turn's footer facts on the
-                // message itself (the stored transcript has no `result`
-                // frame): remembered per message so the history path can
-                // close the turn. Stream lines carry neither and record
-                // nothing, so live sessions gain no state here.
+                // Nested (sub-agent) blocks buffer into their `Agent` card,
+                // never the turn: they open nothing and footer nothing (as
+                // before — their usage is the sub-agent's request, not the
+                // turn's).
+                if !parent_tool_use_id.is_empty() {
+                    return self.apply_subagent_blocks(parent_tool_use_id, blocks);
+                }
+                // The turn this message belongs to: opened on the turn's
+                // first message, shared by the rest.
+                let mut deltas = Vec::new();
+                let turn_id = self.assistant_turn_id(message_id, &mut deltas);
+                // Each line carries footer facts on the message itself:
+                // remembered per turn so the history path can close it
+                // (the stored transcript has no `result` frame). The
+                // per-message usage is one API request, not the turn, so
+                // the last line wins and the `result` frame stays
+                // authoritative wherever one arrives.
                 if model.is_some() || usage.is_some() {
                     let usage = usage.clone().unwrap_or_default();
-                    self.stored_meta.insert(message_id.clone(), TurnMeta {
+                    self.stored_meta.insert(turn_id.clone(), TurnMeta {
                         model: model.clone().unwrap_or_default(),
                         duration_ms: 0,
                         tokens_in: usage.input_tokens.saturating_add(
@@ -693,11 +718,8 @@ impl ClaudeFold {
                         }
                     }
                 }
-                if parent_tool_use_id.is_empty() {
-                    self.apply_blocks(message_id, blocks)
-                } else {
-                    self.apply_subagent_blocks(parent_tool_use_id, blocks)
-                }
+                deltas.extend(self.apply_blocks(&turn_id, blocks));
+                deltas
             }
             Frame::UserResult { results, parent_tool_use_id, .. } => {
                 if parent_tool_use_id.is_empty() {
@@ -802,11 +824,28 @@ impl ClaudeFold {
                         }
                     }
                 }
-                let open = std::mem::take(&mut self.open);
-                deltas.extend(
-                    open.into_iter()
-                        .map(|turn_id| Delta::TurnFinished { turn_id, meta: meta.clone() }),
-                );
+                // One user turn, one finished turn: the assistant turn owns
+                // the `result` frame's totals, so the footer, the token
+                // chip and the ledger each count them once (W8: finishing
+                // every open message turn copied the whole turn's totals
+                // into each). A stale control-channel turn with no
+                // assistant behind it still closes, with a default meta —
+                // never the turn's totals twice. A bare denial turn opened
+                // above owns the frame the same way.
+                let finishing = std::mem::take(&mut self.open);
+                let owner = self
+                    .assistant_turn
+                    .take()
+                    .or_else(|| finishing.last().cloned());
+                for turn_id in finishing {
+                    self.stored_meta.remove(&turn_id);
+                    let finished = if Some(&turn_id) == owner.as_ref() {
+                        meta.clone()
+                    } else {
+                        TurnMeta::default()
+                    };
+                    deltas.push(Delta::TurnFinished { turn_id, meta: finished });
+                }
                 deltas
             }
             Frame::RateLimit(info) => {
@@ -832,22 +871,41 @@ impl ClaudeFold {
         }
     }
 
-    fn apply_blocks(&mut self, message_id: &str, blocks: &[ContentBlock]) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        if !self.started.contains_key(message_id) {
-            self.started.insert(message_id.to_owned(), ());
-            self.open.push(message_id.to_owned());
-            deltas.push(Delta::TurnStarted {
-                turn: Turn::Assistant {
-                    id: message_id.to_owned(),
-                    blocks: Vec::new(),
-                    meta: TurnMeta::default(),
-                    timestamp: None,
-                },
-            });
+    /// The turn a main-thread `assistant` message belongs to: the open one
+    /// when a turn is running, else a fresh turn keyed by this first
+    /// message's id (announced in `deltas`). The id is content, not
+    /// timing — the same first message opens the same turn on the live
+    /// fold and on the history replay, so the ledger key agrees and a
+    /// reopen adds no rows.
+    ///
+    /// A message seen before with no turn open is a repeat after its turn
+    /// closed: it addresses its old turn without announcing a second one,
+    /// exactly as the per-message fold did.
+    fn assistant_turn_id(&mut self, message_id: &str, deltas: &mut Vec<Delta>) -> String {
+        if let Some(open) = self.assistant_turn.clone() {
+            return open;
         }
+        if self.started.contains_key(message_id) {
+            return message_id.to_owned();
+        }
+        self.started.insert(message_id.to_owned(), ());
+        self.open.push(message_id.to_owned());
+        self.assistant_turn = Some(message_id.to_owned());
+        deltas.push(Delta::TurnStarted {
+            turn: Turn::Assistant {
+                id: message_id.to_owned(),
+                blocks: Vec::new(),
+                meta: TurnMeta::default(),
+                timestamp: None,
+            },
+        });
+        message_id.to_owned()
+    }
+
+    fn apply_blocks(&mut self, turn_id: &str, blocks: &[ContentBlock]) -> Vec<Delta> {
+        let mut deltas = Vec::new();
         for block in blocks.iter() {
-            let block_index = self.emitted.get(message_id).copied().unwrap_or(0);
+            let block_index = self.emitted.get(turn_id).copied().unwrap_or(0);
             let emitted = match block {
                 // An empty thinking block is the redacted kind: the child
                 // billed the thought (its signature) without uttering it.
@@ -873,10 +931,10 @@ impl ClaudeFold {
                     // cards around the hole keep their addresses.
                     if let Some(block) = emitted {
                         deltas.push(Delta::BlockAdded {
-                            turn_id: message_id.to_owned(),
+                            turn_id: turn_id.to_owned(),
                             block,
                         });
-                        self.emitted.insert(message_id.to_owned(), block_index + 1);
+                        self.emitted.insert(turn_id.to_owned(), block_index + 1);
                     }
                 }
                 ContentBlock::ToolUse { id, name, input } => {
@@ -886,12 +944,12 @@ impl ClaudeFold {
                         // `apply_todo_call`). Never a `ToolSite`, so its
                         // result routes to the card, not to a card update.
                         self.todo_tool_ids.insert(id.clone());
-                        self.apply_todo_call(message_id, block_index, id, name, input, &mut deltas);
+                        self.apply_todo_call(turn_id, block_index, id, name, input, &mut deltas);
                     } else {
                         let site = tool_card(id, name, input);
                         if site.kind == ToolKind::SubAgent {
                             self.agents.insert(id.clone(), AgentCard {
-                                turn_id: message_id.to_owned(),
+                                turn_id: turn_id.to_owned(),
                                 block_index,
                                 status: ToolStatus::Running,
                                 blocks: Vec::new(),
@@ -900,7 +958,7 @@ impl ClaudeFold {
                             });
                         }
                         self.tools.insert(id.clone(), ToolSite {
-                            turn_id: message_id.to_owned(),
+                            turn_id: turn_id.to_owned(),
                             block_index,
                             kind: site.kind.clone(),
                             verb: site.verb.clone(),
@@ -909,10 +967,10 @@ impl ClaudeFold {
                             params: site.params.clone(),
                         });
                         deltas.push(Delta::BlockAdded {
-                            turn_id: message_id.to_owned(),
+                            turn_id: turn_id.to_owned(),
                             block: site.block,
                         });
-                        self.emitted.insert(message_id.to_owned(), block_index + 1);
+                        self.emitted.insert(turn_id.to_owned(), block_index + 1);
                     }
                 }
                 ContentBlock::Other { .. } => {}
@@ -939,6 +997,7 @@ impl ClaudeFold {
     pub fn finish_stored_turns(&mut self) -> Vec<Delta> {
         let mut deltas = Vec::new();
         self.flush_agents(&mut deltas);
+        self.assistant_turn = None;
         let open = std::mem::take(&mut self.open);
         deltas.extend(open.into_iter().map(|turn_id| {
             let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
@@ -972,6 +1031,19 @@ impl ClaudeFold {
         if uuid.is_empty() || !self.user_echoes.insert(uuid.to_owned()) {
             return Vec::new();
         }
+        let mut deltas = Vec::new();
+        // A fresh prompt ends the previous turn when one is still open.
+        // Live that turn already closed on its `result` frame, so this is
+        // a no-op; stored history carries no `result` frame, so the echo
+        // is the only boundary between two replayed turns — without it a
+        // reopen stacks the whole session into one turn (one footer, one
+        // ledger row for many turns, keyed wrong). The stored footer
+        // closes it, so a reopened view settles instead of hanging.
+        if let Some(turn_id) = self.assistant_turn.take() {
+            self.open.retain(|open| open != &turn_id);
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            deltas.push(Delta::TurnFinished { turn_id, meta });
+        }
         let attachments = images
             .iter()
             .enumerate()
@@ -983,7 +1055,7 @@ impl ClaudeFold {
                 state: UploadState::Ready,
             })
             .collect();
-        vec![Delta::TurnStarted {
+        deltas.push(Delta::TurnStarted {
             turn: Turn::User {
                 id: uuid.to_owned(),
                 text: text.to_owned(),
@@ -991,7 +1063,8 @@ impl ClaudeFold {
                 mentions: Vec::new(),
                 timestamp: None,
             },
-        }]
+        });
+        deltas
     }
 
     /// Complete one tool card from its result, settling the linked approval
@@ -1040,26 +1113,26 @@ impl ClaudeFold {
     /// wholesale. Only the opening call consumes a block index — updates
     /// address the recorded one.
     ///
-    /// The card spans the CLI turn's many assistant messages: a call
-    /// refines this message's card when one exists, else any card on a
-    /// still-open turn (a `BlockUpdated` to an earlier turn is exactly how
-    /// tool results already address older cards). A new CLI turn has no
-    /// open turns left — its first call always opens a fresh card.
+    /// The card spans the CLI turn's many assistant messages: one card per
+    /// turn, refined by every call (a `BlockUpdated` to an earlier turn is
+    /// exactly how tool results already address older cards). A new CLI
+    /// turn has no open turns left — its first call always opens a fresh
+    /// card.
     fn apply_todo_call(
         &mut self,
-        message_id: &str,
+        turn_id: &str,
         block_index: usize,
         tool_id: &str,
         name: &str,
         input: &serde_json::Value,
         deltas: &mut Vec<Delta>,
     ) {
-        // The card to refine: this message's own, else any card on a
+        // The card to refine: this turn's own, else any card on a
         // still-open turn (a `BlockUpdated` to an earlier turn is exactly
         // how tool results already address older cards). `None` means no
         // card is open anywhere — this call opens one.
-        let key = if self.todos.contains_key(message_id) {
-            Some(message_id.to_owned())
+        let key = if self.todos.contains_key(turn_id) {
+            Some(turn_id.to_owned())
         } else {
             self.todos
                 .iter()
@@ -1069,12 +1142,12 @@ impl ClaudeFold {
         let (key, is_new) = match key {
             Some(key) => (key, false),
             None => {
-                self.todos.insert(message_id.to_owned(), TodoCard {
-                    turn_id: message_id.to_owned(),
+                self.todos.insert(turn_id.to_owned(), TodoCard {
+                    turn_id: turn_id.to_owned(),
                     block_index,
                     items: Vec::new(),
                 });
-                (message_id.to_owned(), true)
+                (turn_id.to_owned(), true)
             }
         };
         if let Some(card) = self.todos.get_mut(&key) {
@@ -1094,7 +1167,7 @@ impl ClaudeFold {
         };
         if is_new {
             deltas.push(Delta::BlockAdded { turn_id: card.turn_id.clone(), block });
-            self.emitted.insert(message_id.to_owned(), block_index + 1);
+            self.emitted.insert(turn_id.to_owned(), block_index + 1);
         } else {
             deltas.push(Delta::BlockUpdated {
                 turn_id: card.turn_id.clone(),
@@ -1416,11 +1489,11 @@ impl ClaudeFold {
         deltas
     }
 
-    /// The turn hosting a control-channel card: the running turn when one is
-    /// open, else a fresh turn keyed by `key` (announced in `deltas`) so the
-    /// card lands somewhere the transcript owns.
+    /// The turn hosting a control-channel card: the running assistant turn
+    /// when one is open, else a fresh turn keyed by `key` (announced in
+    /// `deltas`) so the card lands somewhere the transcript owns.
     fn control_turn(&mut self, key: &str, deltas: &mut Vec<Delta>) -> String {
-        if let Some(open) = self.open.last().cloned() {
+        if let Some(open) = self.assistant_turn.clone() {
             return open;
         }
         self.started.insert(key.to_owned(), ());
@@ -3264,5 +3337,316 @@ mod tests {
         assert!(fold.pending_unknown().is_empty());
         let error = decide_unknown_approval(&request, "maybe", None).expect_err("no third choice");
         assert!(error.to_string().contains("allow"));
+    }
+
+    /// W8 helpers: the assistant turns a replay opened, and how each one
+    /// finished.
+    fn assistant_ids(deltas: &[Delta]) -> Vec<&str> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::Assistant { id, .. } } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn finishes(deltas: &[Delta]) -> Vec<(&str, &TurnMeta)> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnFinished { turn_id, meta } => Some((turn_id.as_str(), meta)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The first `assistant` message id in a fixture: the turn id a
+    /// single-turn fold must open, live and on replay alike.
+    fn first_message_id(lines: &[String]) -> String {
+        lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+            })
+            .filter_map(|value| {
+                value
+                    .get("message")
+                    .and_then(|message| message.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .next()
+            .expect("the fixture carries an assistant message")
+    }
+
+    /// The `result` frames in a fixture, in order, as the totals the fold
+    /// must report exactly once per turn: `(tokens_in, tokens_out,
+    /// reasoning, cost, model, duration_ms)`.
+    fn result_totals(lines: &[String]) -> Vec<(u64, u64, u64, f64, String, u64)> {
+        lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            })
+            .map(|value| {
+                let usage = value.get("usage").cloned().unwrap_or(serde_json::Value::Null);
+                let uint = |key: &str| usage.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let tokens_in = uint("input_tokens")
+                    + uint("cache_read_input_tokens")
+                    + uint("cache_creation_input_tokens");
+                let reasoning = usage
+                    .get("output_tokens_details")
+                    .and_then(|details| details.get("thinking_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let model = value
+                    .get("modelUsage")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|usage| usage.keys().next().cloned())
+                    .unwrap_or_default();
+                (
+                    tokens_in,
+                    uint("output_tokens"),
+                    reasoning,
+                    value.get("total_cost_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                    model,
+                    value.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
+    /// W8, defect 1: one user turn is one assistant turn. Each
+    /// multi-message fixture opens exactly one assistant turn — keyed by
+    /// its first message — and finishes exactly that turn. Folding one
+    /// turn per message (the old arms) opens three on `edit.jsonl`.
+    #[test]
+    fn one_user_turn_is_one_assistant_turn() {
+        for name in ["edit.jsonl", "approval-default.jsonl", "todo.jsonl", "subagent.jsonl"] {
+            let lines = fixture_lines(name);
+            let (_, deltas) = fold_lines(&lines);
+            let starts = assistant_ids(&deltas);
+            let done = finishes(&deltas);
+            assert_eq!(starts.len(), 1, "{name}: one assistant turn opens");
+            assert_eq!(done.len(), 1, "{name}: one assistant turn finishes");
+            assert_eq!(starts[0], done[0].0, "{name}: the finish closes the open turn");
+            assert_eq!(
+                starts[0],
+                first_message_id(&lines),
+                "{name}: the turn id is the first message, live and on replay"
+            );
+        }
+    }
+
+    /// W8, defect 2: the turn's totals land once. Each finished meta equals
+    /// its `result` frame's usage — never copied into several turns, never
+    /// summed across messages.
+    #[test]
+    fn turn_totals_equal_the_result_frame_once() {
+        for name in ["edit.jsonl", "approval-default.jsonl", "todo.jsonl", "subagent.jsonl"] {
+            let lines = fixture_lines(name);
+            let (_, deltas) = fold_lines(&lines);
+            let done = finishes(&deltas);
+            let want = result_totals(&lines);
+            assert_eq!(want.len(), 1, "{name}: one result frame");
+            assert_eq!(done.len(), 1, "{name}: one finish carries it");
+            let meta = done[0].1;
+            assert_eq!(meta.tokens_in, want[0].0, "{name}: whole billed prompt, once");
+            assert_eq!(meta.tokens_out, want[0].1, "{name}: completions, once");
+            assert_eq!(meta.reasoning_tokens, want[0].2, "{name}: reasoning, once");
+            assert!(
+                (meta.cost_usd - want[0].3).abs() < 1e-9,
+                "{name}: real cost {}",
+                meta.cost_usd
+            );
+            assert_eq!(meta.model, want[0].4, "{name}: result model");
+            assert_eq!(meta.duration_ms, want[0].5, "{name}: wall clock");
+        }
+    }
+
+    /// W8, defect 3 (fold half): history replays under the live turn's id.
+    /// Folding a turn's user+assistant lines and closing with
+    /// `finish_stored_turns` finishes the same id the live fold (with the
+    /// `result` frame) finished — so the ledger's no-op-on-replay insert
+    /// sees one key, not two.
+    #[test]
+    fn history_replay_reuses_the_live_turn_id() {
+        let lines = fixture_lines("edit.jsonl");
+        let (_, live) = fold_lines(&lines);
+        let live_done = finishes(&live);
+        assert_eq!(live_done.len(), 1);
+        let stored: Vec<String> = lines
+            .iter()
+            .filter(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|value| {
+                        value.get("type").and_then(serde_json::Value::as_str).map(str::to_owned)
+                    })
+                    .as_deref()
+                    != Some("result")
+            })
+            .cloned()
+            .collect();
+        let mut fold = ClaudeFold::new();
+        let mut replayed = Vec::new();
+        for line in &stored {
+            replayed.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        replayed.extend(fold.finish_stored_turns());
+        let replay_done = finishes(&replayed);
+        assert_eq!(replay_done.len(), 1, "the replayed turn closes once");
+        assert_eq!(
+            replay_done[0].0, live_done[0].0,
+            "replay reuses the live turn id or the ledger doubles"
+        );
+    }
+
+    /// W8, stored-history boundary: a fresh prompt echo closes the still
+    /// open turn, so replaying two turns without `result` frames still
+    /// folds to two turns. Without the echo close the second turn's blocks
+    /// join the first and only `finish_stored_turns` ever finishes.
+    #[test]
+    fn a_new_prompt_closes_the_previous_turn() {
+        fn echo(uuid: &str, text: &str) -> String {
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+                "session_id": "s",
+                "uuid": uuid,
+            })
+            .to_string()
+        }
+        fn reply(message: &str, text: &str) -> String {
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": message, "content": [{"type": "text", "text": text}]},
+                "session_id": "s",
+                "uuid": format!("u-{message}"),
+                "parent_tool_use_id": null,
+            })
+            .to_string()
+        }
+        let mut fold = ClaudeFold::new();
+        let mut deltas = Vec::new();
+        for line in [echo("u-1", "first"), reply("msg-1", "one"), echo("u-2", "second"), reply("msg-2", "two")] {
+            deltas.extend(fold.apply(&decode_line(&line).expect("decodes")));
+        }
+        // The second echo already closed the first turn, before any
+        // `finish_stored_turns`.
+        let done = finishes(&deltas);
+        assert_eq!(done.len(), 1, "the echo closes the previous turn: {deltas:?}");
+        assert_eq!(done[0].0, "msg-1");
+        let echo_at = deltas
+            .iter()
+            .position(|delta| matches!(
+                delta,
+                Delta::TurnStarted { turn: Turn::User { id, .. } } if id == "u-2"
+            ))
+            .expect("the second bubble");
+        let finish_at = deltas
+            .iter()
+            .position(|delta| matches!(delta, Delta::TurnFinished { .. }))
+            .expect("the close");
+        assert!(finish_at < echo_at, "close lands before the next bubble");
+        deltas.extend(fold.finish_stored_turns());
+        let done = finishes(&deltas);
+        assert_eq!(done.len(), 2, "both turns close");
+        assert_ne!(done[0].0, done[1].0, "distinct turns, distinct ids");
+    }
+
+    /// W8, three turns live (`resume-replay.jsonl`): three echoes, three
+    /// assistant turns, three finishes — each finish carrying its own
+    /// `result` frame's totals, in order.
+    #[test]
+    fn three_live_turns_finish_three_times_with_own_totals() {
+        let lines = fixture_lines("resume-replay.jsonl");
+        let (_, deltas) = fold_lines(&lines);
+        assert_eq!(user_turns(&deltas).len(), 3, "three prompts bubble");
+        let starts = assistant_ids(&deltas);
+        assert_eq!(starts.len(), 3, "three assistant turns open");
+        let done = finishes(&deltas);
+        assert_eq!(done.len(), 3, "three assistant turns finish");
+        for (start, (id, _)) in starts.iter().zip(done.iter()) {
+            assert_eq!(start, id, "each finish closes its own turn");
+        }
+        let want = result_totals(&lines);
+        assert_eq!(want.len(), 3, "three result frames");
+        for ((_, meta), total) in done.iter().zip(want.iter()) {
+            assert_eq!(meta.tokens_in, total.0, "each turn billed once");
+            assert_eq!(meta.tokens_out, total.1);
+            assert!((meta.cost_usd - total.3).abs() < 1e-9);
+        }
+    }
+
+    /// W8, defect 5 (structural half): a turn whose thinking rendered keeps
+    /// its trace and its count on the same turn — the condition that
+    /// selects the library's plain `N reasoning` cell over the silent one.
+    /// (Redacted empty thinking still folds to nothing; see
+    /// `thinking_fixture_skips_empty_thinking_but_counts_reasoning`.)
+    #[test]
+    fn visible_thinking_and_reasoning_share_one_turn() {
+        let thinking = serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg-1", "content": [
+                {"type": "thinking", "thinking": "let me think"},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "true"}},
+            ]},
+            "session_id": "s",
+            "uuid": "u-1",
+            "parent_tool_use_id": null,
+        })
+        .to_string();
+        let answered = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+            ]},
+            "session_id": "s",
+            "uuid": "u-2",
+            "parent_tool_use_id": null,
+        })
+        .to_string();
+        let said = serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg-2", "content": [{"type": "text", "text": "DONE"}]},
+            "session_id": "s",
+            "uuid": "u-3",
+            "parent_tool_use_id": null,
+        })
+        .to_string();
+        let end = serde_json::json!({
+            "type": "result",
+            "session_id": "s",
+            "result": "DONE",
+            "usage": {"input_tokens": 5, "output_tokens": 7,
+                      "output_tokens_details": {"thinking_tokens": 87}},
+            "total_cost_usd": 0.01,
+            "duration_ms": 1000,
+            "modelUsage": {"m": {}},
+        })
+        .to_string();
+        let mut fold = ClaudeFold::new();
+        let mut deltas = Vec::new();
+        for line in [&thinking, &answered, &said, &end] {
+            deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        let starts = assistant_ids(&deltas);
+        assert_eq!(starts, ["msg-1"], "one turn across both messages");
+        let thinking_on_turn: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { turn_id, block: Block::Thinking { .. } } => Some(turn_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_on_turn, ["msg-1"], "the trace renders on the turn");
+        let done = finishes(&deltas);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, "msg-1");
+        assert_eq!(done[0].1.reasoning_tokens, 87, "the count lands on the same turn");
     }
 }
