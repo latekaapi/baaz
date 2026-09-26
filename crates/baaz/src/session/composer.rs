@@ -403,14 +403,16 @@ impl SessionView {
             // Window-level commands: the session cannot act on the window, so
             // it hands them up. They reach the same `run_window_command` the
             // ⌘K palette uses, which is what keeps the two routes honest —
-            // these six also appear in the composer's own `/` menu (it is
+            // these also appear in the composer's own `/` menu (it is
             // built from `Command::ALL`), and a menu row that did nothing
-            // would be worse than no row.
+            // would be worse than no row. `/skills` typed as a whole draft
+            // arrives here too: the page opens, and no turn is ever sent.
             Command::RightBrowser
             | Command::RightDiff
             | Command::RightGit
             | Command::RightFiles
             | Command::Terminal
+            | Command::Skills
             | Command::NewTerminalCmd => cx.emit(SessionEvent::WindowCommand(command)),
         }
     }

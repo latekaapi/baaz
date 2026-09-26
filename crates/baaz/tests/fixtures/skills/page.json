@@ -1,0 +1,495 @@
+{
+ "skills": [
+  {
+   "id": "bundled:browser-app-delivery",
+   "name": "browser-app-delivery",
+   "display_name": "browser-app-delivery",
+   "description": "Deliver a runnable local browser app so the user can operate it on the first handoff. This delivery skill does not choose whether a requested local system shoul\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/browser-app-delivery/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 1884,
+    "startup_estimated_tokens": 471,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:create-skill",
+   "name": "create-skill",
+   "display_name": "create-skill",
+   "description": "Create and validate a new Muse skill \u2014 project-local in the current workspace by default, or a personal skill staged for `muse skills install` into the managed\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/create-skill/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 477,
+    "startup_estimated_tokens": 120,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:doctor",
+   "name": "doctor",
+   "display_name": "doctor",
+   "description": "Diagnose Muse Code product/runtime issues from installed binary evidence. Use ONLY when the user explicitly invokes the doctor skill, asks to debug/troubleshoot\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/doctor/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 519,
+    "startup_estimated_tokens": 130,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:durable-test-collateral",
+   "name": "durable-test-collateral",
+   "display_name": "durable-test-collateral",
+   "description": "Load the body before the first implementation edit for a bug fix or behavior change, or when the user or governing specification makes reusable tests a delivera\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/durable-test-collateral/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 693,
+    "startup_estimated_tokens": 174,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:git",
+   "name": "git",
+   "display_name": "git",
+   "description": "Source-control safety for Git. Two rules apply whether or not you read the body. First, never commit, amend, push, tag, rebase, cherry-pick, revert, or reset --\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/git/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 793,
+    "startup_estimated_tokens": 199,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:greenfield-project-scaffolding",
+   "name": "greenfield-project-scaffolding",
+   "display_name": "greenfield-project-scaffolding",
+   "description": "Use only when all three gates already hold. (1) This same user turn explicitly says to start, implement, build, scaffold, or go ahead with a new project now; pr\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/greenfield-project-scaffolding/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 822,
+    "startup_estimated_tokens": 206,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:grill",
+   "name": "grill",
+   "display_name": "grill",
+   "description": "Run an explicitly requested decision interview and record each settled decision in durable project documentation.",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/grill/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 184,
+    "startup_estimated_tokens": 46,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:import",
+   "name": "import",
+   "display_name": "import",
+   "description": "Handle explicit /import requests for read-only transcript recovery and a resume checkpoint, or continue work from other coding agents and unnamed artifacts. For\u2026",
+   "short_description": "Import a Claude Code, Codex, or Grok session",
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/import/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 471,
+    "startup_estimated_tokens": 118,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:manage-settings",
+   "name": "manage-settings",
+   "display_name": "manage-settings",
+   "description": "Any explicit Muse Code setting question or change (model, reasoning effort, /settings) requires a silent read_skill call for bundled:manage-settings as FIRST AC\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/manage-settings/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 386,
+    "startup_estimated_tokens": 97,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:migrate",
+   "name": "migrate",
+   "display_name": "migrate",
+   "description": "Bring what Claude Code or Codex already remembers or has configured for this user into Muse Code \u2014 their memory notes and their MCP servers \u2014 whenever the user\u2026",
+   "short_description": "Migrate Claude Code / Codex memory and MCP servers into Muse",
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/migrate/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 1038,
+    "startup_estimated_tokens": 260,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:plan",
+   "name": "plan",
+   "display_name": "plan",
+   "description": "On an explicit planning request, always call `read_skill` for this skill before answering. Research first, then return one concise inline plan; do not create a\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/plan/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 672,
+    "startup_estimated_tokens": 168,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:python-env",
+   "name": "python-env",
+   "display_name": "python-env",
+   "description": "Setting up or installing into a Python environment. One rule applies whether or not you read the body - the environment belongs with the project, so create it i\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/python-env/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 528,
+    "startup_estimated_tokens": 132,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:read-session",
+   "name": "read-session",
+   "display_name": "read-session",
+   "description": "Locate and read Muse Code's OWN session logs \u2014 the current session or a prior one. Use when the user asks to pull context from, continue, summarize, or inspect\u2026",
+   "short_description": "Read this session's or a past session's logs",
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/read-session/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 973,
+    "startup_estimated_tokens": 244,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:requirements-clarification",
+   "name": "requirements-clarification",
+   "display_name": "requirements-clarification",
+   "description": "Clarify a material user-owned product decision before substantive implementation commitments. Use only when request and named/governing evidence still leave a c\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/requirements-clarification/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 1164,
+    "startup_estimated_tokens": 291,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:resume-claude",
+   "name": "resume-claude",
+   "display_name": "resume-claude",
+   "description": "Continue work from a local Claude Code session in Muse Code. Use when the user asks to resume, continue, or recover unfinished Claude Code work, with or without\u2026",
+   "short_description": "Continue a Claude Code session here",
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/resume-claude/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 435,
+    "startup_estimated_tokens": 109,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:resume-codex",
+   "name": "resume-codex",
+   "display_name": "resume-codex",
+   "description": "Continue work from a local Codex session in Muse Code. Use when the user asks to resume, continue, or recover unfinished Codex work, with or without a session I\u2026",
+   "short_description": "Continue a Codex session here",
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/resume-codex/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 412,
+    "startup_estimated_tokens": 103,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:table-fit",
+   "name": "table-fit",
+   "display_name": "table-fit",
+   "description": "Keep a Markdown table readable in a narrow terminal of about 100 display columns - a wide table or one carrying prose in its cells wraps into unreadable ragged\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/table-fit/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 757,
+    "startup_estimated_tokens": 190,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:taste",
+   "name": "taste",
+   "display_name": "taste",
+   "description": "Mandatory preflight for web frontend visual design. If available, call read_skill for bundled:taste before the first frontend create or edit tool call whenever\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/taste/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 521,
+    "startup_estimated_tokens": 131,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:workflow-authoring",
+   "name": "workflow-authoring",
+   "display_name": "workflow-authoring",
+   "description": "Use when authoring a non-trivial Workflow for research, review, migration, or other multi-agent work, especially when the task needs multiple evidence sources,\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/workflow-authoring/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 310,
+    "startup_estimated_tokens": 78,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "decoction",
+   "name": "decoction",
+   "display_name": "decoction",
+   "description": "Project shadow of the personal decoction skill.",
+   "short_description": null,
+   "scope": "project",
+   "source": {
+    "type": "local"
+   },
+   "path": ".agents/skills/decoction/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 114,
+    "startup_estimated_tokens": 29,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "demo-skill",
+   "name": "demo-skill",
+   "display_name": "demo-skill",
+   "description": "Demo skill for fixtures.",
+   "short_description": null,
+   "scope": "project",
+   "source": {
+    "type": "local"
+   },
+   "path": ".agents/skills/demo-skill/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 95,
+    "startup_estimated_tokens": 24,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "plugin:threejs:threejs",
+   "name": "plugin:threejs:threejs",
+   "display_name": "plugin:threejs:threejs",
+   "description": "Three.js 3D reference hub. Use when working with Three.js: pick the topic below and read its file for patterns and API guidance.",
+   "short_description": null,
+   "scope": "plugin",
+   "source": {
+    "type": "local"
+   },
+   "path": "plugin://threejs/skills/threejs/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 240,
+    "startup_estimated_tokens": 60,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "relay",
+   "name": "relay",
+   "display_name": "relay",
+   "description": "Plan work, hand the implementation to Muse Code, verify it independently, and report back small. Use when the user says \"build this out with relay\", \"relay this\u2026",
+   "short_description": null,
+   "scope": "user",
+   "source": {
+    "type": "local"
+   },
+   "path": "$HOME/.claude/skills/relay/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 630,
+    "startup_estimated_tokens": 158,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  }
+ ],
+ "diagnostics": [
+  {
+   "code": "skill-shadowed",
+   "message": "skill `decoction` skipped because a higher-priority source defines the same id",
+   "scope": "user",
+   "path": "$HOME/.claude/skills/decoction/SKILL.md"
+  }
+ ]
+}

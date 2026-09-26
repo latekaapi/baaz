@@ -1204,6 +1204,10 @@ impl Harness {
             self.projects.current = Some(id.to_owned());
             self.current_project = Some(id.to_owned());
             projects::write(&self.projects);
+            // A new session in another project moves the page's root (D55).
+            if self.skills.open {
+                self.relist_skills(cx);
+            }
         }
         // A missing root is nowhere to start: fall back to the effective
         // current (a missing current is never current), or start nothing.
@@ -1638,7 +1642,10 @@ impl Harness {
         if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
             return;
         }
-        self.adopt_session_project(&session_id);
+        self.adopt_session_project(&session_id, cx);
+        // Selecting a session returns from the Skills page (D54).
+        self.skills.open = false;
+        self.skills.detail_focused = false;
         // The click's target first: the row highlights on the click's own
         // frame, even when there is no client to open with (a `--replay`
         // capture, the `open:` step's screenshots). `activate` below sets
@@ -1804,7 +1811,7 @@ impl Harness {
     /// and both feed only the boot and removal fallbacks
     /// ([`Projects::most_recent_available`](crate::projects::Projects::most_recent_available))
     /// now.
-    fn adopt_session_project(&mut self, session_id: &str) {
+    fn adopt_session_project(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let project = self
             .sessions
             .iter()
@@ -1812,9 +1819,14 @@ impl Harness {
             .and_then(|e| e.project.clone())
             .filter(|id| self.projects.find(id).is_some());
         let Some(id) = project else { return };
+        let moved = self.current_project.as_deref() != Some(id.as_str());
         self.projects.current = Some(id.clone());
         self.current_project = Some(id);
         projects::write(&self.projects);
+        // The project moved under the open Skills page: re-list (D55).
+        if moved && self.skills.open {
+            self.relist_skills(cx);
+        }
     }
 
     /// Put a fresh session view in the centre pane now and subscribe to what
@@ -1841,7 +1853,7 @@ impl Harness {
         let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
-        self.adopt_session_project(&session_id);
+        self.adopt_session_project(&session_id, cx);
         if backfill && client.is_some() {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.backfill(cx));

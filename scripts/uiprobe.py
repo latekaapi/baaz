@@ -88,6 +88,14 @@ ENTRIES = {
                                       "--steps", "new;setprovider:claude-code"]},
     "lane-codex":            {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;setprovider:codex"]},
+    # The Skills page, open on a fixture catalog (no CLI, deterministic,
+    # offline): the full page with its detail pane, and the empty-project
+    # state. `skills:` is a window-only steps verb, so `--login signed-in
+    # --no-connect` runs it with no session open.
+    "skills-page":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills:page"]},
+    "skills-empty":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills:empty"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},

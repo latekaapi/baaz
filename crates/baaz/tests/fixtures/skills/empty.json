@@ -1,0 +1,68 @@
+{
+ "skills": [
+  {
+   "id": "bundled:browser-app-delivery",
+   "name": "browser-app-delivery",
+   "display_name": "browser-app-delivery",
+   "description": "Deliver a runnable local browser app so the user can operate it on the first handoff. This delivery skill does not choose whether a requested local system shoul\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/browser-app-delivery/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 1884,
+    "startup_estimated_tokens": 471,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:create-skill",
+   "name": "create-skill",
+   "display_name": "create-skill",
+   "description": "Create and validate a new Muse skill \u2014 project-local in the current workspace by default, or a personal skill staged for `muse skills install` into the managed\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/create-skill/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 477,
+    "startup_estimated_tokens": 120,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  },
+  {
+   "id": "bundled:doctor",
+   "name": "doctor",
+   "display_name": "doctor",
+   "description": "Diagnose Muse Code product/runtime issues from installed binary evidence. Use ONLY when the user explicitly invokes the doctor skill, asks to debug/troubleshoot\u2026",
+   "short_description": null,
+   "scope": "bundled",
+   "source": {
+    "type": "local"
+   },
+   "path": "bundled://muse-core/skills/doctor/SKILL.md",
+   "activation": "on",
+   "diagnostics": [],
+   "provenance": null,
+   "context_cost": {
+    "startup_bytes": 519,
+    "startup_estimated_tokens": 130,
+    "invoke_bytes": null,
+    "invoke_estimated_tokens": null
+   }
+  }
+ ],
+ "diagnostics": []
+}
