@@ -64,6 +64,9 @@ struct ProviderOpen {
     session_id: String,
     project: Option<String>,
     workspace: String,
+    /// The provider's own display title from the ack, when it supplied
+    /// one: the label ladder's fallback under a generated title.
+    title: Option<String>,
 }
 
 /// What [`Harness::ensure_boot_session`] should do about the boot session.
@@ -476,8 +479,11 @@ impl Harness {
                     // Local rows whose id the reply does not contain survive;
                     // a local whose id is listed is replaced by its wire row.
                     // Provisional rows are never local: the first reply drops
-                    // every one of them here.
+                    // every one of them here. Provider-lane rows survive in
+                    // the merge, and the record rebuilds any the reply's
+                    // wholesale replace dropped.
                     this.sessions = sidebar::merge_session_list(wire, &this.sessions);
+                    this.merge_provider_rows();
                     this.branches = branches;
                     this.derive_titles(cx);
                     crate::log::boot_mark(&format!(
@@ -1002,6 +1008,35 @@ impl Harness {
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
         self.sessions.retain(|entry| entry.local);
         self.sessions.extend(rows);
+        // A restart lands here before `session/list`: the provider rows
+        // install from the local record now, so the sidebar shows them
+        // with no wire round-trip.
+        self.merge_provider_rows();
+    }
+
+    /// Refresh one provider row from its record and the overrides,
+    /// keeping its live facts. [`Self::rejoin`] refreshes every such row
+    /// through here; the turn handlers use the one-row version directly.
+    pub(crate) fn rejoin_provider_row(&mut self, session_id: &str) {
+        let Some(record) = self.provider_sessions.get(session_id).cloned() else { return };
+        let Some(ix) = self.sessions.iter().position(|entry| entry.id == session_id) else { return };
+        let mut row = sidebar::SessionEntry::provider_row(
+            &record,
+            self.overrides.get(session_id),
+            &self.projects,
+        );
+        // The row's live facts survive the rejoin, like in
+        // [`Self::merge_provider_rows`].
+        row.running = self.sessions[ix].running;
+        row.turn_started = self.sessions[ix].turn_started;
+        row.approval_command = self.sessions[ix].approval_command.clone();
+        row.pending_question = self.sessions[ix].pending_question.clone();
+        row.attention = self.sessions[ix].attention.clone();
+        Harness::apply_title_flags(&self.titles_pending, &self.side_sessions, &mut row);
+        if self.sessions[ix] != row {
+            self.sessions[ix] = row;
+            self.invalidate_list();
+        }
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,
@@ -1010,7 +1045,17 @@ impl Harness {
     /// The same precedence [`SessionEntry::join`] documents, in one place.
     pub(crate) fn rejoin(&mut self) {
         self.invalidate_list();
+        // Provider-lane rows rejoin from their record, not from the wire
+        // or the index: the generic ladder below knows neither.
+        let provider_ids: Vec<String> =
+            self.sessions.iter().filter(|entry| entry.provider.is_some()).map(|entry| entry.id.clone()).collect();
+        for id in provider_ids {
+            self.rejoin_provider_row(&id);
+        }
         for entry in &mut self.sessions {
+            if entry.provider.is_some() {
+                continue;
+            }
             // The adoption may have changed under the row: re-resolve every
             // entry, including local and replayed ones, whose labels keep
             // their own rules below.
@@ -1570,6 +1615,18 @@ impl Harness {
             // it.
             self.sidebar_user_scrolled = false;
         }
+        // A provider-lane session: a parked view just activates — the
+        // click switches to the live session — and otherwise the stored
+        // record reopens over `ResumeSession`, with its history replayed.
+        // muse sessions continue below.
+        if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
+            if let Some(view) = self.cache_take(&session_id) {
+                self.activate(view, quiet, window, cx);
+                return;
+            }
+            self.reopen_provider(record, window, cx);
+            return;
+        }
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`) has no child to
             // resume from: the row opens as a local view, so a capture can
@@ -1793,13 +1850,14 @@ impl Harness {
                 model_provider: None,
             })?;
             match ack {
-                provider::Ack::Session { session_id, .. } => Ok(ProviderOpen {
+                provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
                     provider_id,
                     provider,
                     events,
                     session_id,
                     project,
                     workspace,
+                    title,
                 }),
                 other => Err(provider::ProviderError::Rejected {
                     reason: format!("OpenSession answered {other:?} instead of a session"),
@@ -1857,18 +1915,18 @@ impl Harness {
                     })
                     .map_err(|error| error.to_string())?;
                 match ack {
-                    provider::Ack::Session { session_id, .. } => Ok((provider, session_id)),
+                    provider::Ack::Session { session_id, title, .. } => Ok((provider, session_id, title)),
                     other => Err(format!("OpenSession answered {other:?} instead of a session")),
                 }
             })
-            .map(|(provider, session_id)| {
+            .map(|(provider, session_id, title)| {
                 let (provider, events) = conn::gate(provider);
-                (provider, events, session_id)
+                (provider, events, session_id, title)
             });
         match bridged {
-            Ok((provider, events, session_id)) => {
+            Ok((provider, events, session_id, title)) => {
                 self.finish_provider_open(
-                    ProviderOpen { provider_id, provider, events, session_id, project, workspace },
+                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title },
                     window,
                     cx,
                 );
@@ -1893,11 +1951,11 @@ impl Harness {
 
     /// Land a connected provider session: construct its lane view and
     /// register it everywhere [`Self::open`] registers muse views — the
-    /// drafts map, the project override, a provisional sidebar row, and the
-    /// centre pane with the composer focused — so it becomes the visible
-    /// session.
+    /// drafts map, the project override, the local record with its sidebar
+    /// row, and the centre pane with the composer focused — so it becomes
+    /// the visible session.
     fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
-        let ProviderOpen { provider_id, provider, events, session_id, project, workspace } = open;
+        let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title } = open;
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost {
@@ -1916,20 +1974,24 @@ impl Harness {
             self.set_override(&session_id, |meta| meta.project = Some(id.clone()), cx);
             self.drafts.insert(id, session_id.clone());
         }
-        // A provisional sidebar row now, titled when the first turn lands:
-        // `session/list` only knows muse sessions, so nothing else would
-        // draw one for this lane.
-        let mut row = sidebar::local_started_row(
+        // The local record: `session/list` only knows muse sessions, so
+        // this row is what brings the lane back after a restart — the
+        // sidebar reads it, and the click reopens it. Written before the
+        // row below is built, so the two never disagree.
+        crate::provider_sessions::upsert_open(
+            &mut self.provider_sessions,
+            provider_id.as_str(),
             &session_id,
-            sidebar::UNNAMED.to_owned(),
+            Some(workspace.clone()),
             project.clone(),
-            Some(workspace),
-            crate::clock::now_local(),
+            title,
         );
-        row.provisional = true;
-        self.sessions.retain(|entry| entry.id != session_id);
-        self.sessions.push(row);
-        self.invalidate_list();
+        crate::provider_sessions::write(&self.provider_sessions);
+        // No row with content yet: like a muse draft, the session earns
+        // its row on the first send (`ProviderTurnAccepted`), titled from
+        // the prompt — but the record above already exists, so a restart
+        // before that still reopens it.
+        self.merge_provider_rows();
         // The swap that makes it the visible session: parks the outgoing
         // view, points the event subscription at the new one, focuses the
         // composer — everything `open` does for muse.
@@ -1940,6 +2002,198 @@ impl Harness {
             "baaz: provider lane open provider={} session={session_id}",
             provider_id.as_str()
         );
+    }
+
+    /// Rebuild the sidebar rows the provider record owns: one row per
+    /// stored session, joined with the overrides, preserving each row's
+    /// live facts (a running turn, pending approvals) across the rebuild.
+    /// Rows whose record is gone (deleted) leave with it. Returns whether
+    /// the list changed.
+    pub(crate) fn merge_provider_rows(&mut self) -> bool {
+        self.sessions.retain(|entry| entry.provider.is_none() || self.provider_sessions.contains_key(&entry.id));
+        if self.provider_sessions.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        let mut records: Vec<crate::provider_sessions::ProviderSessionRecord> =
+            self.provider_sessions.values().cloned().collect();
+        records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        for record in &records {
+            let mut row = sidebar::SessionEntry::provider_row(
+                record,
+                self.overrides.get(&record.session_id),
+                &self.projects,
+            );
+            // The row's live facts survive the rebuild: a running turn,
+            // pending words and the title-pending flag belong to the view
+            // and the titler, not the store.
+            if let Some(existing) = self.sessions.iter().find(|entry| entry.id == record.session_id) {
+                row.running = existing.running;
+                row.turn_started = existing.turn_started;
+                row.approval_command = existing.approval_command.clone();
+                row.pending_question = existing.pending_question.clone();
+                row.attention = existing.attention.clone();
+            }
+            Harness::apply_title_flags(&self.titles_pending, &self.side_sessions, &mut row);
+            match self.sessions.iter().position(|entry| entry.id == record.session_id) {
+                Some(ix) if self.sessions[ix] == row => {}
+                Some(ix) => {
+                    self.sessions[ix] = row;
+                    changed = true;
+                }
+                None => {
+                    self.sessions.push(row);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.invalidate_list();
+        }
+        changed
+    }
+
+    /// Reopen a stored provider session after a restart: connect a fresh
+    /// child through the factory and `ResumeSession` it there, then land
+    /// it like any lane open. The adapter replays the transcript's deltas
+    /// (Claude Code its `~/.claude` jsonl, Codex its thread), which the
+    /// lane folds into the view. A refusal dialogs with the reason and
+    /// opens nothing — never a silent muse fallback, never a fresh empty
+    /// session under the old id.
+    pub(crate) fn reopen_provider(
+        &mut self,
+        record: crate::provider_sessions::ProviderSessionRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_switch_pending = true;
+        let provider_id = ProviderId::parse(&record.provider);
+        if provider_id == ProviderId::Muse {
+            crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
+            self.session_switch_pending = false;
+            self.set_dialog(
+                cx,
+                Dialog {
+                    title: "Couldn't reopen session".into(),
+                    detail: format!("Unknown provider {:?}", record.provider),
+                    kind: DialogKind::Error,
+                    primary: "Dismiss",
+                    action: DialogAction::Dismiss,
+                    archive_target: None,
+                },
+            );
+            return;
+        }
+        // Scripted chrome (`--no-connect` / `--replay`): the stand-in
+        // answers `OpenSession` but no resume — the reopen still goes
+        // through `ResumeSession` so the failure is the honest one.
+        if self.client.is_none() {
+            use provider::ProviderAdapter as _;
+            let mut resumed = provider::scripted::ScriptedProvider::new();
+            let bridged = resumed
+                .connect(&conn::connect_info())
+                .map_err(|error| error.to_string())
+                .and_then(|_| {
+                    let provider = provider::Provider::new(resumed);
+                    let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())
+                        .map_err(|error| error.to_string())?;
+                    let (provider, events) = conn::gate(provider);
+                    Ok((provider, events, session_id))
+                });
+            match bridged {
+                Ok((provider, events, session_id)) => {
+                    let workspace =
+                        record.workspace.clone().unwrap_or_else(|| self.workspace());
+                    self.finish_provider_open(
+                        ProviderOpen {
+                            provider_id,
+                            provider,
+                            events,
+                            session_id,
+                            project: record.project.clone(),
+                            workspace,
+                            title: record.title.clone(),
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                Err(reason) => {
+                    crate::baaz_log!("scripted provider resume failed ({}): {reason}", provider_id.label());
+                    self.session_switch_pending = false;
+                    self.set_dialog(
+                        cx,
+                        Dialog {
+                            title: format!("Couldn't start {}", provider_id.label()),
+                            detail: reason,
+                            kind: DialogKind::Error,
+                            primary: "Dismiss",
+                            action: DialogAction::Dismiss,
+                            archive_target: None,
+                        },
+                    );
+                }
+            }
+            return;
+        }
+        let factory = self.provider_factory.clone();
+        let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+        let work = move || -> Result<ProviderOpen, provider::ProviderError> {
+            let provider = factory(provider_id)?;
+            let (provider, events) = conn::gate(provider);
+            let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())?;
+            Ok(ProviderOpen {
+                provider_id,
+                provider,
+                events,
+                session_id,
+                project: record.project.clone(),
+                workspace: record.workspace.clone().unwrap_or(workspace),
+                title: record.title.clone(),
+            })
+        };
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(open) => {
+                this.finish_provider_open(open, window, cx);
+            }
+            Err(error) => {
+                crate::baaz_log!("provider resume failed ({}): {error}", provider_id.label());
+                this.session_switch_pending = false;
+                this.set_dialog(
+                    cx,
+                    Dialog {
+                        title: format!("Couldn't reopen {}", provider_id.label()),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    },
+                );
+            }
+        });
+    }
+
+    /// Forget a provider session for good: the record, its row and its
+    /// views leave together. Dropping a view hangs its child up (see
+    /// `SessionView::drop`), so deleting the open or parked session also
+    /// shuts the child down — no orphaned `claude` / `codex` process.
+    /// muse sessions never reach here: their list is the server's, and
+    /// Baaz only ever hides or archives them.
+    pub(crate) fn delete_provider_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+            self.active = None;
+        }
+        self.session_cache.retain(|(id, _)| id != session_id);
+        self.sessions.retain(|entry| entry.id != session_id);
+        self.overrides.remove(session_id);
+        if crate::provider_sessions::remove(&mut self.provider_sessions, session_id) {
+            crate::provider_sessions::write(&self.provider_sessions);
+        }
+        crate::sessions::write(&self.overrides);
+        self.rejoin();
+        self.invalidate_list();
+        cx.notify();
     }
 
     /// Open a fork minted by `ForkSession` as a new provider-lane view on
@@ -1977,17 +2231,17 @@ impl Harness {
                         })
                         .map_err(|error| error.to_string())?;
                     match ack {
-                        provider::Ack::Session { session_id, .. } => {
+                        provider::Ack::Session { session_id, title, .. } => {
                             let (provider, events) = conn::gate(provider);
-                            Ok((provider, events, session_id))
+                            Ok((provider, events, session_id, title))
                         }
                         other => Err(format!("ResumeSession answered {other:?} instead of a session")),
                     }
                 });
             match bridged {
-                Ok((provider, events, session_id)) => {
+                Ok((provider, events, session_id, title)) => {
                     self.finish_provider_open(
-                        ProviderOpen { provider_id, provider, events, session_id, project: None, workspace },
+                        ProviderOpen { provider_id, provider, events, session_id, project: None, workspace, title },
                         window,
                         cx,
                     );
@@ -2022,13 +2276,14 @@ impl Harness {
                 metadata_only: false,
             })?;
             match ack {
-                provider::Ack::Session { session_id, .. } => Ok(ProviderOpen {
+                provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
                     provider_id,
                     provider,
                     events,
                     session_id,
                     project: None,
                     workspace: workspace_bg,
+                    title,
                     // The fork groups under no project: it is a new session
                     // the sidebar names when its first turn lands.
                 }),
@@ -2077,6 +2332,19 @@ impl Harness {
         }
         if let Some(view) = self.cache_take(session_id) {
             view.update(cx, |view, _| view.shutdown_lane());
+        }
+        // A provider draft that never sent leaves no transcript anywhere —
+        // no live turns, no replayed ones, not even a first prompt — so its
+        // record leaves with its view instead of lingering as a row the
+        // empty filter hides forever. Anything with history keeps its
+        // record: only the view is forgotten.
+        let unsent_draft = self
+            .provider_sessions
+            .get(session_id)
+            .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
+        if unsent_draft {
+            self.delete_provider_session(session_id, cx);
+            return;
         }
         cx.notify();
     }
@@ -2367,6 +2635,75 @@ impl Harness {
                         this.open_forked_on_provider(provider, session_id, workspace, window, cx);
                     });
                 }));
+            }
+            // A provider lane admitted a turn: the row goes visible now
+            // (titled from the prompt when it carries no name of its own),
+            // the session may earn a generated title, and the record moves
+            // to now — the lane's `turn/started`.
+            SessionEvent::ProviderTurnAccepted { session_id, prompt, .. } => {
+                let (session_id, prompt) = (session_id.clone(), prompt.clone());
+                // A turn that started is a session made real: it is no
+                // draft any more, whether it already had a row or not.
+                self.drafts.retain(|_, named| named != &session_id);
+                crate::provider_sessions::note_first_prompt(
+                    &mut self.provider_sessions,
+                    &session_id,
+                    &prompt,
+                );
+                if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
+                    crate::provider_sessions::write(&self.provider_sessions);
+                }
+                if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
+                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local()) {
+                        self.invalidate_list();
+                    }
+                } else {
+                    // No row yet (a restart between the open and this
+                    // send): build it now, titled from the prompt.
+                    self.merge_provider_rows();
+                    if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
+                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local());
+                        self.invalidate_list();
+                    }
+                }
+                // A first send may earn a generated title: the same cheap
+                // muse side session the muse lane uses — never a second
+                // provider child.
+                self.maybe_start_title(&session_id, Some(prompt), cx);
+                self.title_from_transcript(cx);
+                self.sync_row_live(&session_id, true, cx);
+            }
+            // A provider lane settled a turn: the free byline lands, the
+            // ledger gains its tagged row, and the record counts the turn —
+            // the lane's `turn/completed`.
+            SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
+                let (session_id, turn_id, meta) = (session_id.clone(), turn_id.clone(), meta.clone());
+                let provider = view.read(cx).provider_kind().as_str().to_owned();
+                let cursor =
+                    view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
+                let row = crate::provider_sessions::ledger_row(
+                    &session_id,
+                    &provider,
+                    &cursor,
+                    &turn_id,
+                    &meta,
+                );
+                // Fire-and-forget on the background executor, like the muse
+                // lane's recorder: usage history is a ledger, not a feature
+                // anything blocks on. The `(session_id, turn_id)` key makes
+                // a replayed turn a no-op insert rather than a duplicate.
+                self.wire_call(cx, move || crate::usage::record_backfilled(&[row]), |_this, (), _cx| {});
+                if crate::provider_sessions::note_settled_turn(&mut self.provider_sessions, &session_id) {
+                    crate::provider_sessions::write(&self.provider_sessions);
+                }
+                self.rejoin_provider_row(&session_id);
+                self.sync_row_live(&session_id, false, cx);
+                self.record_last_summary(cx);
+                self.title_from_transcript(cx);
+                // The free excerpt just landed; a poor one may earn one
+                // debounced rewrite — idle sessions only, never a running
+                // turn — through the same side session as a title.
+                self.maybe_rewrite_byline(cx);
             }
             // The fork result is a resume envelope for the **new** session, so
             // it is already attached: opening it and paging it in is all that
@@ -2978,8 +3315,15 @@ mod tests {
             );
             let open_id = view.read(cx).session_id.clone();
             assert!(
-                harness.sessions.iter().any(|entry| entry.id == open_id && entry.provisional),
-                "a provisional sidebar row names the lane session"
+                harness.provider_sessions.contains_key(&open_id),
+                "the lane open writes the local record"
+            );
+            assert!(
+                harness
+                    .sessions
+                    .iter()
+                    .any(|entry| entry.id == open_id && entry.provider.as_deref() == Some("codex")),
+                "a provider sidebar row names the lane session"
             );
         });
         lane_restore(state);
@@ -3156,6 +3500,356 @@ mod tests {
         // The shutdown itself is proven in the lane tests (dropping a lane
         // view hangs up its child: a later command is refused as shut
         // down); here the close path above called it outright.
+        lane_restore(state);
+    }
+
+    /// A factory that records what it was asked and replays one history
+    /// turn on resume: the reopen path's double, beside `resumable_factory`.
+    /// The replayed user turn plus its finished assistant turn is what a
+    /// real adapter replays from its backend store.
+    fn recording_resumable_factory() -> (
+        crate::providers::ProviderFactory,
+        std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
+    ) {
+        use provider::ProviderAdapter as _;
+        struct RecordingResumable {
+            tx: crossbeam_channel::Sender<provider::ProviderEvent>,
+            rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
+            connected: bool,
+            commands: std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
+        }
+        impl provider::ProviderAdapter for RecordingResumable {
+            fn id(&self) -> provider::ProviderId {
+                aui_protocol::Provider::Codex
+            }
+            fn connect(&mut self, _client: &provider::ConnectInfo) -> Result<provider::Handshake, provider::ProviderError> {
+                self.connected = true;
+                Ok(provider::Handshake {
+                    provider: aui_protocol::Provider::Codex,
+                    agent_name: "recording-resumable".into(),
+                    agent_version: "0.0.0".into(),
+                })
+            }
+            fn capabilities(&self) -> provider::CapabilitySet {
+                use provider::{Capability, CapabilityState};
+                let native = CapabilityState::Native;
+                let off = || CapabilityState::Unavailable {
+                    reason: "the recording double opens and resumes sessions only".into(),
+                };
+                provider::CapabilitySet::new([
+                    (Capability::SessionLifecycle, native.clone()),
+                    (Capability::SubmitTurn, native.clone()),
+                    (Capability::ModelCatalog, native.clone()),
+                    (Capability::ForkSession, off()),
+                    (Capability::CompactSession, off()),
+                    (Capability::SessionConfig, off()),
+                    (Capability::SessionShell, off()),
+                    (Capability::SteerTurn, off()),
+                    (Capability::TurnControl, off()),
+                    (Capability::Approvals, off()),
+                    (Capability::Questions, off()),
+                    (Capability::Transcript, off()),
+                    (Capability::Account, off()),
+                    (Capability::ClientTools, off()),
+                    (Capability::ReasoningTraces, off()),
+                    (Capability::SubagentTurns, off()),
+                ])
+            }
+            fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+                if !self.connected {
+                    return Err(provider::ProviderError::Unavailable { reason: "not connected".into() });
+                }
+                self.commands.lock().expect("commands").push(command.clone());
+                match command {
+                    provider::Command::OpenSession { .. } => {
+                        Ok(provider::Ack::Session { session_id: "s-open".into(), title: None })
+                    }
+                    provider::Command::ResumeSession { session_id, .. } => {
+                        // The backend's stored transcript, replayed as
+                        // deltas the way a real resume replays them.
+                        let _ = self.tx.send(provider::ProviderEvent::Deltas {
+                            session_id: Some(session_id.clone()),
+                            deltas: vec![
+                                aui_protocol::Delta::TurnStarted {
+                                    turn: aui_protocol::Turn::User {
+                                        id: "u-old".into(),
+                                        text: "Restore the header".into(),
+                                        attachments: Vec::new(),
+                                        mentions: Vec::new(),
+                                        timestamp: None,
+                                    },
+                                },
+                                aui_protocol::Delta::TurnStarted {
+                                    turn: aui_protocol::Turn::Assistant {
+                                        id: "a-old".into(),
+                                        blocks: Vec::new(),
+                                        meta: aui_protocol::TurnMeta::default(),
+                                        timestamp: None,
+                                    },
+                                },
+                                aui_protocol::Delta::BlockAdded {
+                                    turn_id: "a-old".into(),
+                                    block: aui_protocol::Block::Text {
+                                        text: "The header is restored".into(),
+                                        streaming: false,
+                                    },
+                                },
+                                aui_protocol::Delta::TurnFinished {
+                                    turn_id: "a-old".into(),
+                                    meta: aui_protocol::TurnMeta {
+                                        model: "codex-mini".into(),
+                                        tokens_in: 1200,
+                                        tokens_out: 300,
+                                        cost_usd: 0.04,
+                                        ..Default::default()
+                                    },
+                                },
+                            ],
+                        });
+                        Ok(provider::Ack::Session { session_id, title: None })
+                    }
+                    provider::Command::ListModels { .. } => {
+                        Ok(provider::Ack::ModelCatalog { models: Vec::new(), provider: "recording".into() })
+                    }
+                    provider::Command::ListPending { .. } => {
+                        Ok(provider::Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                    }
+                    other => Err(provider::ProviderError::unsupported(
+                        other.capability(),
+                        "the recording double opens and resumes sessions only",
+                    )),
+                }
+            }
+            fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
+                self.rx.clone()
+            }
+            fn shutdown(&mut self) {}
+        }
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory_commands = commands.clone();
+        let factory = std::sync::Arc::new(move |_: ProviderId| {
+            let (tx, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
+            let mut adapter = RecordingResumable {
+                tx,
+                rx,
+                connected: false,
+                commands: factory_commands.clone(),
+            };
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        });
+        (factory, commands)
+    }
+
+    /// The W5 reopen arm, end to end at the seam: a provider session
+    /// opened, abandoned (its views dropped like a restart drops them),
+    /// reinstalled from the record and clicked — travels as
+    /// `ResumeSession` for the stored id, lands a lane view showing the
+    /// replayed transcript, and records the replayed turn once.
+    #[gpui::test]
+    fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("reopen");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let open_id = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        assert_eq!(open_id, "s-open");
+        // The restart: the harness forgets its views (active and parked
+        // alike) and its rows, but the record the open wrote survives on
+        // disk. The forgotten views stay alive in this local: dropping
+        // them here would hang up their bridge threads mid-test, which
+        // gpui's test scheduler refuses (see `conn::forward`) — a real
+        // restart drops them with the process instead.
+        let mut forgotten = Vec::new();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                if let Some(view) = harness.active.take() {
+                    forgotten.push(view);
+                }
+                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                harness.sessions.clear();
+                harness.provider_sessions = crate::provider_sessions::read();
+                harness.merge_provider_rows();
+            });
+        });
+        let _forgotten = forgotten;
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(
+                harness.provider_sessions.contains_key(&open_id),
+                "the record survives the restart"
+            );
+            assert!(
+                harness
+                    .sessions
+                    .iter()
+                    .any(|entry| entry.id == open_id && entry.provider.as_deref() == Some("codex")),
+                "the sidebar reinstalls the provider row from the record"
+            );
+        });
+        // The click: no parked view, so the record reopens.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet(open_id.clone(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the resumed lane is open");
+            assert!(view.read(cx).is_provider_lane(), "the click reopens a lane, not a muse view");
+            assert_eq!(view.read(cx).session_id, open_id);
+            assert!(!harness.session_switch_pending, "the switch landed");
+            assert!(
+                harness.overlays.read(cx).dialog.is_none(),
+                "no failure dialog on a clean resume"
+            );
+            let texts: Vec<String> = view
+                .read(cx)
+                .session()
+                .map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .flat_map(|turn| turn.blocks())
+                        .filter_map(|block| match block {
+                            aui_protocol::Block::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                texts.iter().any(|text| text.contains("The header is restored")),
+                "the view shows the replayed transcript, drew {texts:?}"
+            );
+        });
+        let sent = commands.lock().expect("commands").clone();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                provider::Command::ResumeSession { session_id, metadata_only: false, .. }
+                if session_id == &open_id
+            )),
+            "the reopen travels as ResumeSession for the stored id, drew {sent:?}"
+        );
+        // The replayed turn lands in the ledger once, tagged with its
+        // lane and the adapter-reported cost.
+        vc.update(|_, _| {
+            let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
+            let kept = crate::usage::find_turn(&connection, &open_id, "a-old").expect("replayed turn recorded");
+            assert_eq!(kept.provider, "codex");
+            assert_eq!(kept.cost_usd, 0.04);
+            assert_eq!(crate::usage::count_for_session(&connection, &open_id), 1);
+        });
+        lane_restore(state);
+    }
+
+    /// The W5 title arm through the real rejoin: a generated title the
+    /// muse side session wrote lands on the provider row's label.
+    #[gpui::test]
+    fn a_generated_title_lands_on_a_provider_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("retitle");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let open_id = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_override(&open_id, |meta| {
+                    meta.generated_title = Some("Shiny generated".into());
+                }, cx);
+            });
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+            assert_eq!(row.label, "Shiny generated", "the auto-title names the provider row");
+        });
+        lane_restore(state);
+    }
+
+    /// The W5 delete arm: forgetting a provider session drops its record,
+    /// its row and its views together — and dropping the views hangs the
+    /// child up, so nothing is orphaned.
+    #[gpui::test]
+    fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("delete");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let open_id = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        // The deleted view stays alive in this local until teardown:
+        // dropping it here would hang up its bridge thread mid-test
+        // (see `conn::forward`); the harness-side removal below is what
+        // this proves, and the lane tests prove a dropped view shuts
+        // its child down.
+        let held = vc.update(|_, cx| baaz.read(cx).active.clone());
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.delete_provider_session(&open_id, cx));
+        });
+        let _held = held;
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(!harness.provider_sessions.contains_key(&open_id), "the record is gone");
+            assert!(
+                !harness.sessions.iter().any(|entry| entry.id == open_id),
+                "the row is gone"
+            );
+            assert!(harness.active.is_none(), "the open view is gone");
+            assert!(
+                !harness.session_cache.iter().any(|(id, _)| id == &open_id),
+                "no parked view survives to reopen it"
+            );
+            assert!(
+                !crate::provider_sessions::read().contains_key(&open_id),
+                "the file forgets it too"
+            );
+        });
         lane_restore(state);
     }
 }

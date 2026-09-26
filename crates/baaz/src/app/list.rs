@@ -214,6 +214,10 @@ impl Harness {
                     // the wire answering — the same reason the open session
                     // is excluded below.
                     && !entry.provisional
+                    // Never sweep a provider-lane row for being quiet: its
+                    // turns live in the local record, and a hidden flag
+                    // here would strand the session past its next send.
+                    && entry.provider.is_none()
                     && entry.is_empty()
                     && !active.as_deref().is_some_and(|id| id == entry.id)
             })

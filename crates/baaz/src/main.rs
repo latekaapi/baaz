@@ -58,6 +58,7 @@ mod overlays;
 mod plan;
 mod project_menu;
 mod projects;
+mod provider_sessions;
 mod providers;
 mod resize;
 mod right;

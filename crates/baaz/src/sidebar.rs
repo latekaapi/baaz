@@ -74,6 +74,11 @@ pub struct SessionEntry {
     /// A `--replay` capture, labelled by file rather than by the index. No
     /// store source speaks for its label, so a rejoin keeps it.
     pub replayed: bool,
+    /// Which provider serves this session, when it is not muse: the wire
+    /// id (`"claude-code"`, `"codex"`). `None` is the muse lane.
+    /// [`Self::summary`] turns it into the row's provider mark, and the
+    /// list merge keeps these rows — `session/list` never names them.
+    pub provider: Option<String>,
     /// Named with `/name` or the row's pencil. A named session with no turns
     /// is somebody's draft, not noise, so the empty filter leaves it alone.
     pub named: bool,
@@ -247,6 +252,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
+            provider: None,
             named: name.is_some(),
             needs_title: label.is_none(),
             title_pending: false,
@@ -344,6 +350,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
+            provider: None,
             named: name.is_some(),
             needs_title: false,
             title_pending: false,
@@ -364,6 +371,83 @@ impl SessionEntry {
             branch: None,
             terminals_running: 0,
         })
+    }
+
+    /// One provider-lane row from the local record, joined with Baaz's own
+    /// overrides exactly like a wire row: the name, the generated title,
+    /// the byline halves and the hidden/pinned/archived flags all read the
+    /// same store a muse row reads — only identity, workspace and recency
+    /// come from the provider record, because `session/list` never names
+    /// these sessions.
+    ///
+    /// The label, best first: the name someone gave it, the generated
+    /// title one cheap model call wrote, the provider's own ack title, the
+    /// first prompt this app sent, the transcript-derived title, else
+    /// [`UNNAMED`]. `needs_title` stays false on purpose: the derived
+    /// title for these rows is the first prompt, already held, and no
+    /// `session/read` may ever spend itself on an id the muse wire never
+    /// listed.
+    pub fn provider_row(
+        record: &crate::provider_sessions::ProviderSessionRecord,
+        meta: Option<&SessionMeta>,
+        projects: &crate::projects::Projects,
+    ) -> Self {
+        fn pick(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|s| !s.is_empty())
+        }
+        let name = pick(meta.and_then(|m| m.name.as_deref()));
+        let label = name
+            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
+            .or_else(|| pick(record.title.as_deref()))
+            .or_else(|| pick(record.first_prompt.as_deref()))
+            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
+        let user_named = name.is_some();
+        let text = label.unwrap_or(UNNAMED);
+        let updated = DateTime::from_timestamp_millis(record.updated_ms)
+            .map(|t| t.with_timezone(&Local))
+            .unwrap_or_else(crate::clock::now_local);
+        let workspace = record.workspace.as_deref().map(crate::projects::canonical_str);
+        let stored_project = meta.and_then(|m| m.project.as_deref()).or(record.project.as_deref());
+        let resolved = projects.resolve_available(record.workspace.as_deref(), stored_project);
+        let project = resolved.as_ref().map(|p| p.id.clone());
+        let project_name = resolved.as_ref().map(|p| p.name.clone());
+        Self {
+            id: record.session_id.clone(),
+            label: one_line(text),
+            updated,
+            running: false,
+            turns: record.turns,
+            hidden: meta.is_some_and(|m| m.hidden),
+            pinned: meta.is_some_and(|m| m.pinned),
+            archived: meta.is_some_and(|m| m.archived),
+            description: describe(meta, None, text, user_named),
+            last_ask: meta
+                .and_then(|m| m.last_ask.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            replayed: false,
+            provider: Some(record.provider.clone()),
+            named: name.is_some(),
+            needs_title: false,
+            title_pending: false,
+            local: false,
+            provisional: false,
+            workspace,
+            project,
+            project_name,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: meta
+                .and_then(|m| m.last_error.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            branch: None,
+            terminals_running: 0,
+        }
     }
 
     /// The one row a `--replay` window shows: the capture it is reading.
@@ -393,6 +477,7 @@ impl SessionEntry {
             archived: false,
             description: String::new(),
             replayed: true,
+            provider: None,
             named: false,
             needs_title: false,
             title_pending: false,
@@ -604,10 +689,14 @@ impl SessionEntry {
         }
     }
 
-    /// The library row for this session, labelled against `now`. No
-    /// provider mark: the sidebar rows read title, preview and elapsed only.
+    /// The library row for this session, labelled against `now`. A
+    /// provider-lane row carries its provider's mark after the tags; a
+    /// muse row carries none.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
+        if let Some(provider) = self.provider.as_deref().and_then(provider_mark) {
+            row = row.provider(provider);
+        }
         // Option B's context priority: the live approval/question override
         // first, then the ladder below.
         if let Some(command) = self.approval_text() {
@@ -731,6 +820,7 @@ pub fn local_started_row(
         archived: false,
         description: String::new(),
         replayed: false,
+        provider: None,
         named: false,
         needs_title: false,
         title_pending: false,
@@ -782,10 +872,30 @@ pub fn first_send_update(entry: &mut SessionEntry, prompt: Option<&str>, now: Da
     true
 }
 
+/// The wire id's sidebar mark. `None` is the muse lane or an id no
+/// release ever taught the sidebar — a row that cannot name its lane
+/// draws like a muse one rather than nothing.
+pub fn provider_mark(id: &str) -> Option<aui_icons::Provider> {
+    match id {
+        "muse" => Some(aui_icons::Provider::Muse),
+        "claude-code" => Some(aui_icons::Provider::Claude),
+        "codex" => Some(aui_icons::Provider::Codex),
+        _ => None,
+    }
+}
+
 pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) -> Vec<SessionEntry> {
     let mut merged = wire;
     let listed: std::collections::HashSet<String> = merged.iter().map(|entry| entry.id.clone()).collect();
-    merged.extend(existing.iter().filter(|entry| entry.local && !listed.contains(&entry.id)).cloned());
+    // Local rows survive until the wire lists them — and provider-lane rows
+    // survive every merge, because `session/list` never lists them: their
+    // only record is the local one.
+    merged.extend(
+        existing
+            .iter()
+            .filter(|entry| (entry.local || entry.provider.is_some()) && !listed.contains(&entry.id))
+            .cloned(),
+    );
     merged
 }
 
@@ -796,7 +906,10 @@ pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) ->
 /// always applies wholesale. The caller ANDs the list-having-landed bit —
 /// the first reply applies even against an empty list.
 pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) -> bool {
-    let listed: Vec<&SessionEntry> = existing.iter().filter(|entry| !entry.local).collect();
+    // Provider-lane rows are the window's own, like locals: the wire never
+    // lists them, so they never count toward (or against) a match.
+    let listed: Vec<&SessionEntry> =
+        existing.iter().filter(|entry| !entry.local && entry.provider.is_none()).collect();
     listed.len() == wire.len() && listed.iter().zip(wire.iter()).all(|(a, b)| a == &b)
 }
 
@@ -1691,6 +1804,7 @@ mod tests {
             archived: false,
             description: String::new(),
             replayed: false,
+            provider: None,
             named: false,
             needs_title: false,
             title_pending: false,
@@ -2512,4 +2626,89 @@ mod tests {
         assert_eq!(describe(Some(&meta), None, "x", false).chars().count(), 80);
     }
 
+    fn provider_record() -> crate::provider_sessions::ProviderSessionRecord {
+        crate::provider_sessions::ProviderSessionRecord {
+            provider: "claude-code".into(),
+            session_id: "s-provider".into(),
+            workspace: None,
+            project: None,
+            created_ms: 1_700_000_000_000,
+            updated_ms: 1_700_000_000_000,
+            turns: 2,
+            title: None,
+            first_prompt: None,
+        }
+    }
+
+    /// The W5 sidebar arm: a provider session appears in the merged list
+    /// with its provider mark, its title and its byline — and a muse row
+    /// carries no mark.
+    #[test]
+    fn provider_rows_wear_their_providers_mark() {
+        let projects = Projects::default();
+        let now = Local::now();
+        let claude = SessionEntry::provider_row(&provider_record(), None, &projects);
+        assert_eq!(claude.label, UNNAMED);
+        assert!(!claude.needs_title, "no session/read may spend itself on a provider id");
+        let summary = claude.summary(now);
+        assert!(
+            summary.providers.contains(&aui_icons::Provider::Claude),
+            "a Claude Code row wears the Claude mark, drew {:?}",
+            summary.providers
+        );
+        let mut codex = provider_record();
+        codex.provider = "codex".into();
+        let row = SessionEntry::provider_row(&codex, None, &projects);
+        assert!(row.summary(now).providers.contains(&aui_icons::Provider::Codex));
+        let muse = SessionEntry::join(&wire_session(), None, None, &projects);
+        assert!(muse.summary(now).providers.is_empty(), "a muse row wears no mark");
+    }
+
+    /// The W5 title arm: the provider label ladder reads name, generated
+    /// title, ack title, first prompt, derived title — in that order.
+    #[test]
+    fn provider_labels_prefer_a_name_then_the_generated_title() {
+        let projects = Projects::default();
+        let mut record = provider_record();
+        record.title = Some("Ack title".into());
+        record.first_prompt = Some("Fix the header".into());
+        let row = SessionEntry::provider_row(&record, None, &projects);
+        assert_eq!(row.label, "Ack title");
+        record.title = None;
+        let row = SessionEntry::provider_row(&record, None, &projects);
+        assert_eq!(row.label, "Fix the header");
+        let meta = SessionMeta {
+            generated_title: Some("Shiny generated".into()),
+            last_ask: Some("Fix the header".into()),
+            last_summary: Some("Fixed it".into()),
+            ..SessionMeta::default()
+        };
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
+        assert_eq!(row.label, "Shiny generated", "the auto-title outranks the first prompt");
+        assert_eq!(row.last_ask.as_deref(), Some("Fix the header"), "the byline ask rides along");
+        let named = SessionMeta { name: Some("Mine".into()), ..SessionMeta::default() };
+        let row = SessionEntry::provider_row(&record, Some(&named), &projects);
+        assert_eq!(row.label, "Mine", "a user-given name outranks everything");
+    }
+
+    /// The W5 merge arm: provider rows survive a `session/list` reply that
+    /// never names them, and never count toward its unchanged check.
+    #[test]
+    fn the_list_merge_keeps_provider_rows_past_every_reply() {
+        let projects = Projects::default();
+        let provider = SessionEntry::provider_row(&provider_record(), None, &projects);
+        let merged = merge_session_list(Vec::new(), std::slice::from_ref(&provider));
+        assert_eq!(merged.len(), 1, "the provider row survives an empty reply");
+        assert_eq!(merged[0].provider.as_deref(), Some("claude-code"));
+        // A reply that matches the muse rows still applies wholesale with
+        // a provider row standing beside them.
+        let wire = SessionEntry::join(&wire_session(), None, None, &projects);
+        let existing = vec![wire.clone(), provider];
+        assert!(
+            list_apply_unchanged(&existing, std::slice::from_ref(&wire)),
+            "provider rows never count against the unchanged check"
+        );
+        let merged = merge_session_list(vec![wire], &existing);
+        assert_eq!(merged.len(), 2, "wire rows and provider rows merge, newest-first downstream");
+    }
 }

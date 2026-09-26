@@ -283,6 +283,32 @@ pub enum SessionEvent {
         /// never a switch.
         provider: ProviderId,
     },
+    /// A provider lane admitted a turn: the `SubmitInput` ack named its
+    /// turn. The application reveals the row, titles it from the prompt,
+    /// and touches the local record — the lane's equivalent of the muse
+    /// route's `turn/started` arm. The turn id itself stays in the view
+    /// (which tracks the running turn); the application needs only the
+    /// session and the prompt.
+    ProviderTurnAccepted {
+        /// The lane session that sent.
+        session_id: String,
+        /// What the person sent, verbatim — the title's source.
+        prompt: String,
+    },
+    /// A provider lane settled a turn: a `TurnFinished` delta landed. The
+    /// application records the byline, the ledger row and the record bump —
+    /// the lane's equivalent of the muse route's `turn/completed` arm.
+    /// Replayed history settles here too (a reopen replays finished
+    /// turns), and every write below is idempotent, so replays land the
+    /// byline without double-counting the ledger.
+    ProviderTurnFinished {
+        /// The lane session that settled.
+        session_id: String,
+        /// The finished turn — half of the ledger key.
+        turn_id: String,
+        /// The turn's final counters, carrying the adapter-reported cost.
+        meta: aui_protocol::TurnMeta,
+    },
     /// `/logout`.
     Logout,
     /// `/status` or `/usage`: the application owns the dialog stack.

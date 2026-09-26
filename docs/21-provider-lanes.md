@@ -388,6 +388,32 @@ Each task compiles and leaves the app working; muse sessions stay on
   `crates/baaz/src/store.rs`, `crates/baaz/src/titles.rs`,
   `crates/baaz/src/byline.rs`, `crates/baaz/src/usage.rs`.
   Verification: `cargo test -p baaz sidebar`.
+  - **Built 2026-09-26:** `provider-sessions.json` in the support dir
+    records each lane session (provider, session id, workspace, project,
+    created/updated, turns, ack title, first prompt) — written on open,
+    touched on admission, bumped on every settled turn, removed on
+    delete. The sidebar builds one row per record in its project group,
+    ordered by recency with muse rows, wearing the provider mark
+    (`SessionSummary::provider`), with running/settled/needs-you status
+    from the live view; `session/list` merges never drop them and the
+    unchanged check ignores them. Titles, bylines, rename, archive, pin
+    and hide ride the existing `sessions.json` writers keyed by session
+    id: a lane admission fires the same muse side-session auto-title
+    (never a second provider child), a settle records the free byline
+    excerpt and may earn the same debounced rewrite. Clicking a stored
+    session with no live view connects a fresh child and sends
+    `ResumeSession` (full resume, never metadata-only); the adapter's
+    replayed deltas fold into the view. Each settled lane turn writes one
+    `usage_turns` row tagged `claude-code`/`codex` (schema v3 adds the
+    `provider` column with a default in one transaction; muse rows keep
+    today's untagged shape), keyed `(session_id, turn_id)` so replays
+    never double-count. Deleting a provider session drops its record,
+    row, overrides and views together (shutting the child down); closing
+    an unsent draft forgets its record too. No new controls were added,
+    so no new accessibility labels were needed. Verified by record
+    round-trip, sidebar mark/ladder/merge, reopen-`ResumeSession` with
+    replayed transcript, tagged-ledger, migration, and generated-title
+    tests — each failing with its arm removed.
 - **W6 — Duplicate `session/start` fix + parity sweep.** Title: idempotent
   start and matrix close-out. Globs: `crates/baaz/src/app/lifecycle.rs`,
   `crates/baaz/src/steps.rs`, `crates/baaz/tests/*.rs`. Verification:
