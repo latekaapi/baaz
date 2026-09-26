@@ -98,6 +98,44 @@ impl SessionView {
     /// one is `forkBoundaryInvalid`. Invoked from `/fork` with nothing named, it
     /// is the newest completed turn.
     pub fn fork(&mut self, last_turn_id: Option<String>, cx: &mut Context<Self>) {
+        // The provider lane forks through the seam: `ForkSession` where
+        // the capability is anything but `Unavailable`, the fork opening
+        // as a new provider-lane view on the same provider — and a refusal
+        // banners its reason rather than going quiet.
+        if self.is_provider_lane() {
+            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::ForkSession)
+                .allows_attempt()
+            {
+                let reason = crate::providers::gate(
+                    self.provider_kind(),
+                    provider::Capability::ForkSession,
+                )
+                .unwrap_or_else(|| "Forking is not available on this provider.".into());
+                self.banner = Some(reason);
+                self.banner_action = None;
+                cx.notify();
+                return;
+            }
+            let through_turn =
+                last_turn_id.or_else(|| self.newest_completed_turn());
+            let command = ProviderCommand::ForkSession {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                through_turn,
+                metadata_only: false,
+            };
+            let provider = self.provider_kind();
+            self.provider_send(command, cx, move |this, result, cx| match result {
+                Ok(provider::Ack::Session { session_id, .. }) => {
+                    cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
+                }
+                Ok(_) => {
+                    this.set_banner("The fork answered without a session.", None, cx);
+                }
+                Err(error) => this.report_provider_error(&error, cx),
+            });
+            return;
+        }
         let Some(client) = self.wire_client(cx) else { return };
         let cut_point =
             last_turn_id.or_else(|| self.newest_completed_turn()).map(|last_turn_id| ForkCutPoint { last_turn_id });

@@ -341,6 +341,41 @@ Each task compiles and leaves the app working; muse sessions stay on
   `crates/baaz/src/session/composer.rs`, `crates/baaz/src/session.rs`,
   `crates/baaz/src/projects.rs`. Verification:
   `cargo test -p baaz composer`.
+  - **Built 2026-09-26:** the registry reads each provider's table from
+    its adapter crate's `caps` function (muse at the newest supported
+    floor, 1.3.0 — Baaz never observes the connected version), so no
+    hand-copied table can drift; a test pins all three tables equal to
+    their adapters. A lane open asks `ListModels`: the menu lists what
+    the child returns, the chip shows the effective model's human name
+    (never the provider id), and a pick sends `SelectModel` at once —
+    recorded in `pending_model` until the ack, un-recorded with a banner
+    on refusal. Claude Code keeps Baaz's supplied alias list (no catalog
+    surface was ever probed). Effort stays client-side on the lane: both
+    adapters' turns carry no effort channel (Codex `turn/start` takes
+    thread, model and text only; Claude Code's stdin line takes text
+    only), so the pick rides the chip and the project default; the Codex
+    per-model levels still derive from the catalog through the existing
+    `codex_effort_options` path. Approval-mode picks send
+    `SelectApprovalMode` with the seam's closed mode set, and plan mode
+    attempts the same switch — both adapters refuse a mid-session
+    change, so the refusal banners its reason and the plan pill stands
+    back down. The meter on a lane sums the folded transcript's
+    `TurnMeta` input/output tokens ("N tokens", no window — no adapter
+    reports one); cache tokens are excluded from the sums, per
+    `TurnMeta`'s own double-count warning. `CompactSession` and
+    `ForkSession` travel where not `Unavailable`, refusals banner their
+    reason, and a forked ack opens as a new lane view on the same
+    provider (fresh child + `ResumeSession`). The strip names only
+    `Unavailable` cells with their human reason; `Unverified` is
+    attempted, never advertised. Known seam gap, stated not hidden: the
+    `ModelCatalog` ack carries ids, labels and the active flag but no
+    per-model reasoning levels, so a production Codex lane fills the
+    model menu live while its effort menu still waits on the raw
+    `model/list` answer — until the seam extends the ack, that menu
+    shows the typed reason. Verified by lane tests over recording
+    doubles in baaz test code (adapter crates untouched): catalog,
+    pick, meter, compact/fork, mode/plan, strip, and the table-equality
+    pin — each failing with its arm removed.
 - **W5 — Sidebar/persistence/ledger for lane sessions.** Title: local rows,
   resume, titles, byline, ledger tagging. Globs:
   `crates/baaz/src/sessions.rs`, `crates/baaz/src/sidebar.rs`,

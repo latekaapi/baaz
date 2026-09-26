@@ -114,8 +114,10 @@ impl SessionView {
         // A (re)opened lane may have missed an approval or a question while
         // it was away: pull the pending set, the way the muse lane's
         // `reconnected` re-reads `approval/listPending` before trusting the
-        // next frame.
+        // next frame. And the model menu lists what the child returns, so
+        // the catalog is asked for on the same open.
         this.request_provider_pending(cx);
+        this.request_provider_models(cx);
         this.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
@@ -362,6 +364,40 @@ impl SessionView {
         }
     }
 
+    /// Ask the lane's child for its model catalog after open, so the model
+    /// menu lists what the child returns and the chip reads the effective
+    /// model's human name. Claude Code has no catalog surface — Baaz owns
+    /// its supplied alias list (the `Emulated` cell) — so that folds
+    /// synchronously instead of asking. A refusal or an empty answer
+    /// records the typed reason for the picker's stand-in row and stays
+    /// quiet otherwise: a background fetch never banners.
+    pub(super) fn request_provider_models(&mut self, cx: &mut Context<Self>) {
+        if self.provider_kind() == ProviderId::ClaudeCode {
+            let current = self.model_id();
+            let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
+            let provider = self.provider_id.clone();
+            self.apply_model_catalog(rows, &provider, cx);
+            return;
+        }
+        let command = provider::Command::ListModels { session: Some(self.session_id.clone()) };
+        self.provider_send(command, cx, |this, result, cx| match result {
+            Ok(provider::Ack::ModelCatalog { models, provider }) => {
+                this.apply_model_catalog(models, &provider, cx);
+            }
+            Ok(_) => {
+                this.models = Vec::new();
+                this.models_error = Some("the model catalog answered without a catalog".to_owned());
+                cx.notify();
+            }
+            Err(error) => {
+                crate::baaz_log!("provider lane: ListModels refused: {error}");
+                this.models = Vec::new();
+                this.models_error = Some(error.to_string());
+                cx.notify();
+            }
+        });
+    }
+
     /// Pull the lane's pending set on (re)open, so an approval or a
     /// question that arrived while the view was away still shows. Point in
     /// time — acting on it stays race-safe through the seam's stage and
@@ -509,9 +545,11 @@ mod tests {
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view(vc, "s-1");
         vc.update(|_, cx| {
-            // Two tasks: the lane's one drain loop, plus the one-shot
-            // `ListPending` the open pulls so a missed approval still shows.
-            assert_eq!(view.read(cx).tasks.len(), 2, "the drain loop plus the open's pending pull");
+            // Three tasks: the lane's one drain loop, plus the one-shot
+            // `ListPending` the open pulls so a missed approval still
+            // shows, plus the one-shot `ListModels` the open pulls so the
+            // menu lists what the child returns.
+            assert_eq!(view.read(cx).tasks.len(), 3, "the drain loop plus the open's two pulls");
             assert!(view.read(cx).is_provider_lane());
         });
         submit_and_deliver(&view, &tx, vc, "hello");
@@ -731,7 +769,10 @@ mod tests {
     /// steer, turn control, approvals, questions, shell, lifecycle,
     /// catalog, transcript) and refusing the rest — so each test below
     /// fails when its routing arm is removed, because the arm's command
-    /// never lands in `received`.
+    /// never lands in `received`. W4 adds fork, compact and session
+    /// config as `Native` for the same reason, and serves a configurable
+    /// model catalog on `ListModels` (empty by default, which folds to
+    /// the typed-reason row).
     ///
     /// Lives in baaz test code only: the provider crate's own
     /// [`provider::scripted::ScriptedProvider`] answers just three
@@ -752,6 +793,8 @@ mod tests {
         received: Vec<provider::Command>,
         pending_approvals: Vec<provider::PendingApproval>,
         pending_questions: Vec<provider::PendingQuestion>,
+        catalog: Vec<provider::ModelSummary>,
+        catalog_provider: String,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -789,6 +832,20 @@ mod tests {
             Self::with_pending(Vec::new(), Vec::new())
         }
 
+        /// A double serving a model catalog: `ListModels` answers `models`
+        /// with `active` flagging the effective model, the way a live child
+        /// does. Fork, compact and session config answer `Native` here so
+        /// each W4 routing arm has something to land in `received`.
+        fn with_catalog(models: Vec<provider::ModelSummary>) -> (Self, RecordingHandle) {
+            let (adapter, handle) = Self::with_pending(Vec::new(), Vec::new());
+            {
+                let mut state = adapter.inner.state.lock().expect("recording mutex");
+                state.catalog = models;
+                state.catalog_provider = "recording".to_owned();
+            }
+            (adapter, handle)
+        }
+
         fn with_pending(
             approvals: Vec<provider::PendingApproval>,
             questions: Vec<provider::PendingQuestion>,
@@ -801,6 +858,8 @@ mod tests {
                     received: Vec::new(),
                     pending_approvals: approvals,
                     pending_questions: questions,
+                    catalog: Vec::new(),
+                    catalog_provider: "recording".to_owned(),
                 }),
                 tx,
                 rx,
@@ -839,9 +898,9 @@ mod tests {
             };
             provider::CapabilitySet::new([
                 (Capability::SessionLifecycle, native.clone()),
-                (Capability::ForkSession, off()),
-                (Capability::CompactSession, off()),
-                (Capability::SessionConfig, off()),
+                (Capability::ForkSession, native.clone()),
+                (Capability::CompactSession, native.clone()),
+                (Capability::SessionConfig, native.clone()),
                 (Capability::SessionShell, native.clone()),
                 (Capability::SubmitTurn, native.clone()),
                 (Capability::SteerTurn, native.clone()),
@@ -941,7 +1000,17 @@ mod tests {
                 | provider::Command::ClarifyQuestion { .. } => Ok(provider::Ack::Accepted),
                 provider::Command::RunShell { .. } => Ok(provider::Ack::Accepted),
                 provider::Command::ListModels { .. } => {
-                    Ok(provider::Ack::ModelCatalog { models: Vec::new(), provider: "recording".into() })
+                    let state = self.inner.state.lock().expect("recording mutex");
+                    Ok(provider::Ack::ModelCatalog {
+                        models: state.catalog.clone(),
+                        provider: state.catalog_provider.clone(),
+                    })
+                }
+                provider::Command::SelectModel { .. }
+                | provider::Command::SelectApprovalMode { .. }
+                | provider::Command::CompactSession { .. } => Ok(provider::Ack::Accepted),
+                provider::Command::ForkSession { .. } => {
+                    Ok(provider::Ack::Session { session_id: "s-fork".into(), title: None })
                 }
                 other => Err(provider::ProviderError::unsupported(
                     other.capability(),
@@ -1400,6 +1469,302 @@ mod tests {
                 view.read(cx).banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
                 "the refusal's reason reaches the banner, drew {:?}",
                 view.read(cx).banner
+            );
+        });
+    }
+
+    // ------------------------------------------------- W4: model, effort,
+    // mode, meter, compact, fork
+
+    /// W4: opening the lane lists the child catalog — the menu carries the
+    /// child's rows, the chip reads the effective model's human name, and
+    /// a pick sends `SelectModel` and moves the chip. The wire id never
+    /// renders anywhere.
+    #[gpui::test]
+    fn lane_open_lists_models_and_the_pick_travels_as_select_model(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::with_catalog(vec![
+            provider::ModelSummary { id: "gx-1".into(), label: "GX One".into(), active: true },
+            provider::ModelSummary { id: "gx-2".into(), label: "GX Two".into(), active: false },
+        ]);
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            let ids: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+            assert_eq!(ids, ["gx-1", "gx-2"], "the menu lists what the child returned");
+            assert_eq!(view.model().as_ref(), "GX One", "the chip reads the active row's human name");
+            assert!(!view.model().as_ref().contains("codex"), "never the provider id");
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.pick_model("gx-2", cx)));
+        vc.run_until_parked();
+        let selects: Vec<_> = handle
+            .received()
+            .into_iter()
+            .filter(|c| matches!(c, provider::Command::SelectModel { .. }))
+            .collect();
+        assert_eq!(selects.len(), 1, "one SelectModel leaves the lane, drew {selects:?}");
+        match &selects[0] {
+            provider::Command::SelectModel { session_id, model, .. } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(model, "gx-2");
+            }
+            other => panic!("a pick must travel as SelectModel, travelled as {other:?}"),
+        }
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).model().as_ref(), "GX Two", "the chip follows the pick");
+            assert!(
+                view.read(cx).pending_model.as_deref() == Some("gx-2"),
+                "recorded in pending_model until confirmed"
+            );
+        });
+    }
+
+    /// W4: a refused pick un-records itself and banners the reason — the
+    /// chip never claims a model the child never took. The scripted
+    /// provider answers `SessionConfig` as `Unavailable`, so the seam
+    /// refuses before any adapter code runs.
+    #[gpui::test]
+    fn a_refused_model_pick_unrecords_and_banners(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        // The background `ListModels` pull stays quiet: the reason row
+        // explains the catalog, never a banner.
+        vc.update(|_, cx| assert!(view.read(cx).banner.is_none(), "the catalog pull stays quiet"));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.pick_model("gx-9", cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.pending_model.is_none(), "the unlanded pick is dropped");
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
+                "the refusal's reason reaches the banner, drew {:?}",
+                view.banner
+            );
+        });
+    }
+
+    /// W4: the lane meter reads the folded transcript's `TurnMeta` — real
+    /// input/output totals after a turn, no window no percentage, and the
+    /// strip stays silent where nothing is refused.
+    #[gpui::test]
+    fn the_lane_meter_reads_turn_meta_tokens(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| {
+            let meter = view.read(cx).context();
+            assert_eq!(meter.used_tokens, 0, "no turns yet: the meter reads zero, honestly");
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    aui_protocol::Delta::TurnStarted {
+                        turn: aui_protocol::Turn::Assistant {
+                            id: "a-1".to_owned(),
+                            blocks: Vec::new(),
+                            meta: aui_protocol::TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    aui_protocol::Delta::TurnFinished {
+                        turn_id: "a-1".to_owned(),
+                        meta: aui_protocol::TurnMeta {
+                            tokens_in: 1200,
+                            tokens_out: 300,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            let meter = view.context();
+            assert_eq!(meter.prompt_tokens, 1200, "input tokens out of TurnMeta");
+            assert_eq!(meter.output_tokens, 300, "output tokens out of TurnMeta");
+            assert_eq!(meter.total_tokens, 1500);
+            assert_eq!(meter.used_tokens, 1500, "the footer meter shows real numbers");
+            assert_eq!(meter.window_tokens, None, "no adapter reports a window");
+            assert!(meter.label().contains("tokens"), "no window, no percentage: {}", meter.label());
+            assert!(
+                view.capability_strip_rows().is_empty(),
+                "codex refuses nothing: no strip at all"
+            );
+        });
+    }
+
+    /// W4: the strip names only refusals. Claude Code's questions ask in
+    /// prose — the one `Unavailable` row — while steering, interruption
+    /// and everything else stay attempted and unadvertised.
+    #[gpui::test]
+    fn the_strip_lists_only_unavailable(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (claude, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            let rows = claude.read(cx).capability_strip_rows();
+            assert_eq!(rows.len(), 1, "one refusal on this lane, drew {rows:?}");
+            assert_eq!(rows[0].0, "Answer questions");
+            assert!(rows[0].1.contains("prose"), "the human reason, in plain words");
+            assert!(
+                rows.iter().all(|(_, reason)| !reason.contains("nobody has probed")),
+                "no developer wording about unverified cells: {rows:?}"
+            );
+        });
+        let (adapter, _handle) = RecordingProvider::new();
+        let (muse, _tx) = open_recording_view(vc, "s-m", "muse", adapter);
+        vc.update(|_, cx| {
+            assert!(muse.read(cx).capability_strip_rows().is_empty(), "muse shows no strip");
+        });
+    }
+
+    /// W4: compact and fork travel as their commands — compact with no cut,
+    /// fork through the newest completed turn — and the fork's ack raises
+    /// the event that opens the new lane view.
+    #[gpui::test]
+    fn compact_and_fork_travel_as_their_commands(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        // One finished turn for the fork to name.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    aui_protocol::Delta::TurnStarted {
+                        turn: aui_protocol::Turn::Assistant {
+                            id: "a-7".to_owned(),
+                            blocks: Vec::new(),
+                            meta: aui_protocol::TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    aui_protocol::Delta::TurnFinished {
+                        turn_id: "a-7".to_owned(),
+                        meta: aui_protocol::TurnMeta::default(),
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, cx| view.compact(cx)));
+        vc.run_until_parked();
+        let compacts = handle.commands_of("compact-session");
+        assert_eq!(compacts.len(), 1, "one CompactSession leaves the lane, drew {compacts:?}");
+        // The fork's ack opens the new view: watch for its event.
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        vc.update(|_, cx| {
+            let seen = seen.clone();
+            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+                if let super::super::SessionEvent::ForkedOnProvider { session_id, provider } = event {
+                    assert_eq!(*provider, crate::providers::ProviderId::Codex, "the fork stays on its lane");
+                    seen.borrow_mut().push(session_id.clone());
+                }
+            });
+            std::mem::forget(sub);
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.fork(None, cx)));
+        vc.run_until_parked();
+        let forks = handle.commands_of("fork-session");
+        assert_eq!(forks.len(), 1, "one ForkSession leaves the lane, drew {forks:?}");
+        match &forks[0] {
+            provider::Command::ForkSession { through_turn, .. } => {
+                assert_eq!(through_turn.as_deref(), Some("a-7"), "through the newest completed turn");
+            }
+            other => panic!("a fork must travel as ForkSession, travelled as {other:?}"),
+        }
+        assert_eq!(
+            seen.borrow().as_slice(),
+            ["s-fork"],
+            "the fork's ack raises the open-the-lane event"
+        );
+    }
+
+    /// W4: a refused compact banners its reason. The scripted provider
+    /// answers `CompactSession` as `Unavailable`, so the seam refuses
+    /// before any adapter code runs — surfaced, never swallowed. (On
+    /// Claude Code the same banner carries the no-compact-now reason.)
+    #[gpui::test]
+    fn a_refused_compact_banners_its_reason(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, cx| view.compact(cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).banner.as_deref().is_some_and(|banner| !banner.is_empty()),
+                "the refusal's reason reaches the banner, drew {:?}",
+                view.read(cx).banner
+            );
+        });
+    }
+
+    /// W4: the approval-mode pick travels as `SelectApprovalMode` with the
+    /// provider's own closed mode set — and plan mode attempts the same
+    /// switch, standing back down when the child refuses it.
+    #[gpui::test]
+    fn approval_mode_and_plan_travel_as_select_approval_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.pick_mode(aui_protocol::PermissionMode::AllowAll, cx))
+        });
+        vc.run_until_parked();
+        let modes: Vec<_> = handle
+            .received()
+            .into_iter()
+            .filter(|c| matches!(c, provider::Command::SelectApprovalMode { .. }))
+            .collect();
+        assert_eq!(modes.len(), 1, "one SelectApprovalMode leaves the lane, drew {modes:?}");
+        match &modes[0] {
+            provider::Command::SelectApprovalMode { mode, .. } => {
+                assert_eq!(*mode, aui_protocol::PermissionMode::AllowAll, "the provider's own mode, mapped one-to-one");
+            }
+            other => panic!("a mode pick must travel as SelectApprovalMode, travelled as {other:?}"),
+        }
+        // Plan mode attempts the same switch on a lane that accepts it.
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_plan(true, cx)));
+        vc.run_until_parked();
+        let modes: Vec<_> = handle
+            .received()
+            .into_iter()
+            .filter(|c| matches!(c, provider::Command::SelectApprovalMode { .. }))
+            .collect();
+        assert_eq!(modes.len(), 2, "plan mode attempts the DenyUnmatched switch, drew {modes:?}");
+        vc.update(|_, cx| assert!(view.read(cx).plan_mode(), "the accepted switch holds the pill"));
+    }
+
+    /// W4: plan mode stands back down when the child refuses the switch —
+    /// the pill never claims enforcement the child never took.
+    #[gpui::test]
+    fn plan_mode_stands_down_on_refusal(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, cx| view.set_plan(true, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.plan_mode(), "the refused switch stands the pill back down");
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
+                "the refusal's reason reaches the banner, drew {:?}",
+                view.banner
             );
         });
     }

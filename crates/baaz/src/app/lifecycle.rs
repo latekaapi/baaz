@@ -1942,6 +1942,123 @@ impl Harness {
         );
     }
 
+    /// Open a fork minted by `ForkSession` as a new provider-lane view on
+    /// the same provider: connect a fresh child through the factory and
+    /// resume the fork there, then land it like any lane open. A refused
+    /// resume dialogs with the reason and opens nothing — never a silent
+    /// muse fallback, never the source session.
+    pub(crate) fn open_forked_on_provider(
+        &mut self,
+        provider_id: ProviderId,
+        session_id: String,
+        workspace: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        self.session_switch_pending = true;
+        // Scripted chrome (`--no-connect` / `--replay`): the stand-in
+        // answers `OpenSession` but no resume — the fork still goes
+        // through `ResumeSession` so the failure is the honest one.
+        if self.client.is_none() {
+            use provider::ProviderAdapter as _;
+            let mut resumed = provider::scripted::ScriptedProvider::new();
+            let bridged = resumed
+                .connect(&conn::connect_info())
+                .map_err(|error| error.to_string())
+                .and_then(|_| {
+                    let provider = provider::Provider::new(resumed);
+                    let ack = provider
+                        .send(provider::Command::ResumeSession {
+                            request_id: new_command_id(),
+                            session_id: session_id.clone(),
+                            cursor: None,
+                            metadata_only: false,
+                        })
+                        .map_err(|error| error.to_string())?;
+                    match ack {
+                        provider::Ack::Session { session_id, .. } => {
+                            let (provider, events) = conn::gate(provider);
+                            Ok((provider, events, session_id))
+                        }
+                        other => Err(format!("ResumeSession answered {other:?} instead of a session")),
+                    }
+                });
+            match bridged {
+                Ok((provider, events, session_id)) => {
+                    self.finish_provider_open(
+                        ProviderOpen { provider_id, provider, events, session_id, project: None, workspace },
+                        window,
+                        cx,
+                    );
+                }
+                Err(reason) => {
+                    crate::baaz_log!("scripted fork resume failed ({}): {reason}", provider_id.label());
+                    self.session_switch_pending = false;
+                    self.set_dialog(
+                        cx,
+                        Dialog {
+                            title: format!("Couldn't start {}", provider_id.label()),
+                            detail: reason,
+                            kind: DialogKind::Error,
+                            primary: "Dismiss",
+                            action: DialogAction::Dismiss,
+                            archive_target: None,
+                        },
+                    );
+                }
+            }
+            return;
+        }
+        let factory = self.provider_factory.clone();
+        let workspace_bg = workspace.clone();
+        let work = move || -> Result<ProviderOpen, provider::ProviderError> {
+            let provider = factory(provider_id)?;
+            let (provider, events) = conn::gate(provider);
+            let ack = provider.send(provider::Command::ResumeSession {
+                request_id: new_command_id(),
+                session_id: session_id.clone(),
+                cursor: None,
+                metadata_only: false,
+            })?;
+            match ack {
+                provider::Ack::Session { session_id, .. } => Ok(ProviderOpen {
+                    provider_id,
+                    provider,
+                    events,
+                    session_id,
+                    project: None,
+                    workspace: workspace_bg,
+                    // The fork groups under no project: it is a new session
+                    // the sidebar names when its first turn lands.
+                }),
+                other => Err(provider::ProviderError::Rejected {
+                    reason: format!("ResumeSession answered {other:?} instead of a session"),
+                }),
+            }
+        };
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(open) => {
+                this.finish_provider_open(open, window, cx);
+            }
+            Err(error) => {
+                crate::baaz_log!("provider fork resume failed ({}): {error}", provider_id.label());
+                this.session_switch_pending = false;
+                this.set_dialog(
+                    cx,
+                    Dialog {
+                        title: format!("Couldn't start {}", provider_id.label()),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    },
+                );
+            }
+        });
+    }
+
     /// Forget `session_id`'s view wherever it lives — open or parked. A
     /// provider lane's child is hung up first, so a discarded session leaves
     /// no orphaned `claude` / `codex` process; a muse draft has no child to
@@ -2236,6 +2353,19 @@ impl Harness {
             SessionEvent::NewSession => {
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
+                }));
+            }
+            // A provider lane's fork, minted by `ForkSession`: connect a
+            // fresh child on the same provider and resume the fork there,
+            // opening it as a new lane view — the source view's lane is
+            // never disturbed.
+            SessionEvent::ForkedOnProvider { session_id, provider } => {
+                let (session_id, provider) = (session_id.clone(), *provider);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        let workspace = this.workspace();
+                        this.open_forked_on_provider(provider, session_id, workspace, window, cx);
+                    });
                 }));
             }
             // The fork result is a resume envelope for the **new** session, so
@@ -2698,6 +2828,87 @@ mod tests {
         })
     }
 
+    /// A factory whose provider answers `ResumeSession` by echoing the
+    /// session: what the forked-open path drives without spawning a child.
+    fn resumable_factory() -> crate::providers::ProviderFactory {
+        use provider::ProviderAdapter as _;
+        struct Resumable {
+            rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
+            connected: bool,
+        }
+        impl provider::ProviderAdapter for Resumable {
+            fn id(&self) -> provider::ProviderId {
+                aui_protocol::Provider::Codex
+            }
+            fn connect(&mut self, _client: &provider::ConnectInfo) -> Result<provider::Handshake, provider::ProviderError> {
+                self.connected = true;
+                Ok(provider::Handshake {
+                    provider: aui_protocol::Provider::Codex,
+                    agent_name: "resumable".into(),
+                    agent_version: "0.0.0".into(),
+                })
+            }
+            fn capabilities(&self) -> provider::CapabilitySet {
+                use provider::{Capability, CapabilityState};
+                let native = CapabilityState::Native;
+                let off = || CapabilityState::Unavailable {
+                    reason: "the resumable double opens and resumes sessions only".into(),
+                };
+                provider::CapabilitySet::new([
+                    (Capability::SessionLifecycle, native.clone()),
+                    (Capability::ForkSession, off()),
+                    (Capability::CompactSession, off()),
+                    (Capability::SessionConfig, off()),
+                    (Capability::SessionShell, off()),
+                    (Capability::SubmitTurn, off()),
+                    (Capability::SteerTurn, off()),
+                    (Capability::TurnControl, off()),
+                    (Capability::ModelCatalog, native.clone()),
+                    (Capability::Approvals, off()),
+                    (Capability::Questions, off()),
+                    (Capability::Transcript, off()),
+                    (Capability::Account, off()),
+                    (Capability::ClientTools, off()),
+                    (Capability::ReasoningTraces, off()),
+                    (Capability::SubagentTurns, off()),
+                ])
+            }
+            fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+                if !self.connected {
+                    return Err(provider::ProviderError::Unavailable { reason: "not connected".into() });
+                }
+                match command {
+                    provider::Command::OpenSession { .. } => {
+                        Ok(provider::Ack::Session { session_id: "s-open".into(), title: None })
+                    }
+                    provider::Command::ResumeSession { session_id, .. } => {
+                        Ok(provider::Ack::Session { session_id, title: None })
+                    }
+                    provider::Command::ListModels { .. } => {
+                        Ok(provider::Ack::ModelCatalog { models: Vec::new(), provider: "resumable".into() })
+                    }
+                    provider::Command::ListPending { .. } => {
+                        Ok(provider::Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                    }
+                    other => Err(provider::ProviderError::unsupported(
+                        other.capability(),
+                        "the resumable double opens and resumes sessions only",
+                    )),
+                }
+            }
+            fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
+                self.rx.clone()
+            }
+            fn shutdown(&mut self) {}
+        }
+        std::sync::Arc::new(|_: ProviderId| {
+            let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
+            let mut adapter = Resumable { rx, connected: false };
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        })
+    }
+
     /// A factory that never connects: the failed-open path.
     fn failing_factory(reason: &str) -> crate::providers::ProviderFactory {
         let reason = reason.to_owned();
@@ -2800,6 +3011,46 @@ mod tests {
             let dialog = harness.overlays.read(cx).dialog.as_ref().expect("the failure is dialogued");
             assert_eq!(dialog.title, "Couldn't start Claude Code");
             assert!(dialog.detail.contains("no child here"), "the reason survives: {}", dialog.detail);
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn opening_a_fork_resumes_it_on_a_new_lane_of_the_same_provider(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("fork");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = resumable_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_forked_on_provider(
+                    ProviderId::Codex,
+                    "s-fork".to_owned(),
+                    workspace,
+                    window,
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the fork is open");
+            assert!(view.read(cx).is_provider_lane(), "the fork opens a provider lane");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex, "on the same provider");
+            assert_eq!(view.read(cx).session_id, "s-fork", "resuming the fork, not a fresh session");
+            assert!(!harness.session_switch_pending, "the switch landed");
+            assert!(
+                harness.overlays.read(cx).dialog.is_none(),
+                "no failure dialog: the resume answered a session"
+            );
         });
         lane_restore(state);
     }

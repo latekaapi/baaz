@@ -1,11 +1,11 @@
 //! The provider registry: the backends a new session can start on.
 //!
 //! Three entries — `muse` (existing), `claude-code`, `codex`. Each entry
-//! exposes its capability map, mirrored cell-for-cell from the adapter
-//! crates that own the evidence (`provider-muse`, `provider-claude-code`
-//! and `provider-codex` `caps.rs`): this registry never re-probes, it only
-//! repeats what those files declare, so a fixture that upgrades a cell
-//! updates the mirror here with it.
+//! exposes its capability map read live from the adapter crate that owns
+//! the evidence (`provider-muse`, `provider-claude-code` and `provider-codex`
+//! `caps.rs`): this registry never re-probes and keeps no hand-copied
+//! table, so a fixture that upgrades a cell upgrades the UI with it —
+//! the drift `docs/20` names is unrepresentable here.
 //!
 //! # One session, one serving lane
 //!
@@ -120,76 +120,36 @@ impl ProviderId {
     }
 }
 
-/// The capability map for one registry entry, mirrored from the adapter
-/// crate that owns the evidence (named per arm). A fixture that upgrades
-/// a cell there upgrades the mirror here with it.
+/// The capability map for one registry entry, read from the adapter crate
+/// that owns the evidence — never a hand-copied table. A fixture that
+/// upgrades a cell there upgrades this answer with it; the human reasons
+/// ride along from the source, verbatim.
 pub fn capability_state(id: ProviderId, capability: Capability) -> CapabilityState {
-    match (id, capability) {
-        // `provider-muse` caps: every command-backed capability Native
-        // except the shell and reasoning traces (Unverified).
-        (ProviderId::Muse, Capability::SessionLifecycle) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::ForkSession) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::CompactSession) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::SessionConfig) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::SessionShell) => CapabilityState::Unverified,
-        (ProviderId::Muse, Capability::SubmitTurn) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::SteerTurn) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::TurnControl) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::ModelCatalog) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::Approvals) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::Questions) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::Transcript) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::Account) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::ClientTools) => CapabilityState::Native,
-        (ProviderId::Muse, Capability::ReasoningTraces) => CapabilityState::Unverified,
-        (ProviderId::Muse, Capability::SubagentTurns) => CapabilityState::Unverified,
-        // `provider-claude-code` caps: SteerTurn and TurnControl
-        // Unverified (nothing probed them — do not upgrade without a
-        // fixture); Questions Unavailable (asks in prose, no id to
-        // answer); compaction and the catalog emulated by Baaz.
-        (ProviderId::ClaudeCode, Capability::SessionLifecycle) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::ForkSession) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::CompactSession) => CapabilityState::Emulated {
-            reason: "No 'compact now' over --print; Baaz sets an autocompact window instead".into(),
-        },
-        (ProviderId::ClaudeCode, Capability::SessionConfig) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::SessionShell) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::SubmitTurn) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::SteerTurn) => CapabilityState::Unverified,
-        (ProviderId::ClaudeCode, Capability::TurnControl) => CapabilityState::Unverified,
-        (ProviderId::ClaudeCode, Capability::ModelCatalog) => CapabilityState::Emulated {
-            reason: "No fixture enumerates models; Baaz supplies the list".into(),
-        },
-        (ProviderId::ClaudeCode, Capability::Approvals) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::Questions) => CapabilityState::Unavailable {
-            reason: "Claude Code asks in prose; there is no question id to answer".into(),
-        },
-        (ProviderId::ClaudeCode, Capability::Transcript) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::Account) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::ClientTools) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::ReasoningTraces) => CapabilityState::Native,
-        (ProviderId::ClaudeCode, Capability::SubagentTurns) => CapabilityState::Unverified,
-        // `provider-codex` caps: steering and interruption proven
-        // mid-turn (Native); fork, compaction, transcript paging, client
-        // tools and questions read off method names but never executed
-        // (Unverified — never quietly upgraded without a fixture).
-        (ProviderId::Codex, Capability::SessionLifecycle) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::ForkSession) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::CompactSession) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::SessionConfig) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::SessionShell) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::SubmitTurn) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::SteerTurn) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::TurnControl) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::ModelCatalog) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::Approvals) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::Questions) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::Transcript) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::Account) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::ClientTools) => CapabilityState::Unverified,
-        (ProviderId::Codex, Capability::ReasoningTraces) => CapabilityState::Native,
-        (ProviderId::Codex, Capability::SubagentTurns) => CapabilityState::Unverified,
+    match id {
+        ProviderId::Muse => muse_capability_state(muse_table_version(), capability),
+        ProviderId::ClaudeCode => {
+            provider_claude_code::caps::capabilities().state(capability).clone()
+        }
+        ProviderId::Codex => provider_codex::caps::capabilities().state(capability).clone(),
     }
+}
+
+/// The muse version the registry reads the adapter table at. Baaz never
+/// observes the connected muse's version — the handshake's `agent_version`
+/// is logged, never stored — so the table reads at the newest floor the
+/// seam supports ([`MUSE_MCP_VERSION_FLOOR`](provider_muse::MUSE_MCP_VERSION_FLOOR)):
+/// client tools granted, everything else as declared. That is exactly
+/// today's answer, now derived instead of repeated.
+fn muse_table_version() -> &'static str {
+    provider_muse::MUSE_MCP_VERSION_FLOOR
+}
+
+/// muse's declared state for one agent version, straight from the owning
+/// crate. The versioned entry point the registry's fixed answer above
+/// goes through — and what a caller that *does* know its server's version
+/// reads instead.
+pub fn muse_capability_state(version: &str, capability: Capability) -> CapabilityState {
+    provider_muse::capabilities_for_version(version).state(capability).clone()
 }
 
 /// What the UI may offer for one capability on one provider: `None` means
@@ -669,6 +629,34 @@ impl ExternalApprovalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W4: the UI table is the adapter table — for all three providers.
+    /// A fixture that upgrades a cell in any adapter crate fails here
+    /// until the UI reads it, which it does by construction now: there is
+    /// no hand-copied table left to drift.
+    #[test]
+    fn the_registry_table_equals_the_adapter_tables() {
+        for capability in provider::Capability::all() {
+            assert_eq!(
+                capability_state(ProviderId::ClaudeCode, capability),
+                *provider_claude_code::caps::capabilities().state(capability),
+                "claude-code {:?} drifted from its adapter",
+                capability
+            );
+            assert_eq!(
+                capability_state(ProviderId::Codex, capability),
+                *provider_codex::caps::capabilities().state(capability),
+                "codex {:?} drifted from its adapter",
+                capability
+            );
+            assert_eq!(
+                capability_state(ProviderId::Muse, capability),
+                *provider_muse::capabilities_for_version(muse_table_version()).state(capability),
+                "muse {:?} drifted from its adapter",
+                capability
+            );
+        }
+    }
 
     #[test]
     fn three_entries_in_the_registry() {
