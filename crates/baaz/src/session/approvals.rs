@@ -17,6 +17,15 @@ impl SessionView {
     /// keeps rather than from the card, because the block has no room for it and
     /// the choices change between stages.
     pub fn decide_approval(&mut self, approval_id: String, choice_id: String, feedback: Option<String>, cx: &mut Context<Self>) {
+        // A provider lane has no muse wire: the inline card's choice
+        // travels as the adapter's own `DecideApproval`, carrying the
+        // card's choice id verbatim (each adapter answers its own
+        // choices). The card stays pending — only the server's
+        // resolution moves it, never this send.
+        if self.is_provider_lane() {
+            self.decide_provider_approval(approval_id, choice_id, feedback, cx);
+            return;
+        }
         let Some(requirement_id) = self
             .fold
             .side(&self.session_id)
@@ -324,6 +333,44 @@ impl SessionView {
                     // an `Unsupported` refusal shows it verbatim.
                     this.external_approvals.repark(&approval);
                     this.report_provider_error(&error, cx);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Decide the inline approval card on a provider lane: the card's own
+    /// choice id travels as `DecideApproval`, with the parked tap's stage
+    /// token when one is parked. The card stays pending — only the
+    /// server's resolution moves it, never this send; a refused send
+    /// banners and leaves the press retryable.
+    pub fn decide_provider_approval(
+        &mut self,
+        approval_id: String,
+        choice_id: String,
+        feedback: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let stage_token =
+            self.external_approvals.get(&approval_id).and_then(|tap| tap.stage_token.clone());
+        crate::baaz_log!("provider approval {approval_id}: deciding {choice_id} on the inline card");
+        self.external_outbox.push(ProviderCommand::DecideApproval {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            session_id: self.session_id.clone(),
+            approval: approval_id.clone(),
+            choice: choice_id,
+            stage_token,
+            feedback,
+        });
+        for command in self.take_external_outbox() {
+            let approval = match &command {
+                ProviderCommand::DecideApproval { approval, .. } => approval.clone(),
+                _ => String::new(),
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                    crate::baaz_log!("provider approval {approval}: the decision never landed: {error}");
                 }
             });
         }

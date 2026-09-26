@@ -2775,6 +2775,12 @@ impl Harness {
                 self.title_from_transcript(cx);
                 self.sync_row_live(&session_id, true, cx);
             }
+            // A provider lane landed or settled an approval card: the
+            // row re-reads the open view's pending words, so it stands
+            // on the needs-you state while the approval waits.
+            SessionEvent::ProviderApprovalsChanged { session_id } => {
+                self.sync_row_live(session_id, false, cx);
+            }
             // A provider lane settled a turn: the free byline lands, the
             // ledger gains its tagged row, and the record counts the turn —
             // the lane's `turn/completed`.

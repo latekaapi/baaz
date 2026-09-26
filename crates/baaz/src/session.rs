@@ -295,6 +295,16 @@ pub enum SessionEvent {
         /// What the person sent, verbatim — the title's source.
         prompt: String,
     },
+    /// A provider lane landed or settled an approval card: a
+    /// `Block::Approval` arrived or left `Pending`. The application
+    /// re-reads the open view's pending words into the sidebar row — the
+    /// lane's equivalent of the muse route's approval/question sync — so
+    /// the row reads the needs-you state while the approval waits
+    /// instead of `Working`.
+    ProviderApprovalsChanged {
+        /// The lane session whose cards moved.
+        session_id: String,
+    },
     /// A provider lane settled a turn: a `TurnFinished` delta landed. The
     /// application records the byline, the ledger row and the record bump —
     /// the lane's equivalent of the muse route's `turn/completed` arm.

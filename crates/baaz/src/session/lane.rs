@@ -355,12 +355,18 @@ impl SessionView {
                 }
                 // An approval block that leaves `Pending` is the server's
                 // resolution: the only thing that ever settles the card
-                // after the press, per the no-optimism rule.
+                // after the press, per the no-optimism rule. Either way —
+                // a card landing or settling — the sidebar row re-reads
+                // the pending words, so it stands on the needs-you state
+                // while the approval waits instead of `Working`.
                 Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => {
                     if let Block::Approval { id, state, .. } = block {
                         if *state != ApprovalState::Pending {
                             self.resolve_external_approval(id, cx);
                         }
+                        cx.emit(super::SessionEvent::ProviderApprovalsChanged {
+                            session_id: self.session_id.clone(),
+                        });
                     }
                 }
                 _ => {}
@@ -2027,6 +2033,197 @@ mod tests {
             handle.commands_of("submit-input").len(),
             1,
             "the send is never gated on a tier the lane has no account behind"
+        );
+    }
+
+    // ------------------------------------------------- W7b: one approval card
+
+    /// One Write approval card in `state`, the way an adapter folds its
+    /// ask: the path face with allow/deny choices.
+    fn write_card(state: aui_protocol::ApprovalState) -> aui_protocol::Block {
+        use aui_protocol::{
+            ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, Block,
+        };
+        Block::Approval {
+            id: "ap-1".to_owned(),
+            tool: "Write".to_owned(),
+            command: "/tmp/probe/note.txt".to_owned(),
+            reason: "/tmp/probe/note.txt\nhello".to_owned(),
+            cwd: "/tmp/probe".to_owned(),
+            capabilities: Vec::new(),
+            scope: ApprovalScope::ThisCommand,
+            state,
+            rule: None,
+            choices: vec![
+                ApprovalChoice {
+                    id: "accept".into(),
+                    label: "Allow once".into(),
+                    decision: ApprovalDecision::Once,
+                    scope: ApprovalScope::ThisCommand,
+                    rule_preview: None,
+                    accepts_feedback: false,
+                },
+                ApprovalChoice {
+                    id: "decline".into(),
+                    label: "Deny".into(),
+                    decision: ApprovalDecision::Deny,
+                    scope: ApprovalScope::ThisCommand,
+                    rule_preview: None,
+                    accepts_feedback: false,
+                },
+            ],
+            stages: Vec::new(),
+            current_stage: None,
+            badges: ApprovalBadges::default(),
+            feedback: None,
+            resolved_by: None,
+        }
+    }
+
+    /// One pending Write approval as deltas, the way an adapter folds its
+    /// ask: an open assistant turn plus the pending card.
+    fn pending_write_deltas() -> Vec<aui_protocol::Delta> {
+        use aui_protocol::{ApprovalState, Delta, Turn, TurnMeta};
+        vec![
+            Delta::TurnStarted {
+                turn: Turn::Assistant {
+                    id: "a-1".to_owned(),
+                    blocks: Vec::new(),
+                    meta: TurnMeta::default(),
+                    timestamp: None,
+                },
+            },
+            Delta::BlockAdded {
+                turn_id: "a-1".to_owned(),
+                block: write_card(ApprovalState::Pending),
+            },
+        ]
+    }
+
+    fn inline_approvals(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Vec<ApprovalState> {
+        vc.update(|_, cx| {
+            view.read(cx)
+                .session()
+                .map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .flat_map(|turn| turn.blocks())
+                        .filter_map(|block| match block {
+                            Block::Approval { state, .. } => Some(state.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// W7b: one ask is one surface on a provider lane. The tap parks (it
+    /// routes the decision) and the fold holds the inline card — but the
+    /// strip above the composer stays empty, so the ask never draws twice.
+    /// Drop the lane gate and the strip fills.
+    #[gpui::test]
+    fn provider_lane_shows_one_approval_surface(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::ApprovalState;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: pending_write_deltas(),
+            })
+            .expect("the lane channel is open");
+            tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+                session_id: "s-1".to_owned(),
+                approval_id: "ap-1".to_owned(),
+                headline: "/tmp/probe/note.txt".to_owned(),
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        assert_eq!(
+            inline_approvals(&view, vc),
+            [ApprovalState::Pending],
+            "the fold holds the one inline card"
+        );
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).external_strip().is_empty(),
+                "the strip stays empty on a provider lane: the inline card is the surface"
+            );
+            // The row still stands on the waiting ask, as muse rows do.
+            assert_eq!(
+                view.read(cx).row_pending(),
+                (Some("/tmp/probe/note.txt".to_owned()), None),
+                "the fold's pending card feeds the needs-you row"
+            );
+            assert_eq!(view.read(cx).waiting_on_you(), Some((1, 0)));
+        });
+    }
+
+    /// W7b: the inline card decides through the lane with the card's own
+    /// choice id, and the press settles nothing — only the server's
+    /// resolution moves the card, per the no-optimism rule.
+    #[gpui::test]
+    fn inline_card_decide_settles_only_on_resolution(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{ApprovalState, Delta};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: pending_write_deltas(),
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.decide_approval("ap-1".to_owned(), "accept".to_owned(), None, cx)
+            });
+        });
+        vc.run_until_parked();
+        let decides: Vec<_> = handle
+            .commands_of("decide-approval")
+            .into_iter()
+            .filter(|c| matches!(c, provider::Command::DecideApproval { .. }))
+            .collect();
+        assert_eq!(decides.len(), 1, "one DecideApproval leaves the lane, drew {decides:?}");
+        match &decides[0] {
+            provider::Command::DecideApproval { approval, choice, .. } => {
+                assert_eq!(approval, "ap-1");
+                assert_eq!(choice, "accept", "the card's own choice id travels verbatim");
+            }
+            other => panic!("a press must travel as DecideApproval, travelled as {other:?}"),
+        }
+        assert_eq!(
+            inline_approvals(&view, vc),
+            [ApprovalState::Pending],
+            "the press settles nothing: the card waits for the server"
+        );
+        // The server's resolution settles the card the press never may.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![Delta::BlockUpdated {
+                    turn_id: "a-1".to_owned(),
+                    block_index: 0,
+                    block: write_card(ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 }),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        assert!(
+            inline_approvals(&view, vc)
+                .iter()
+                .any(|state| matches!(state, ApprovalState::AllowedOnce { .. })),
+            "the resolution settles the card to allowed"
         );
     }
 }
