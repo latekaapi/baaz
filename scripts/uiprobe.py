@@ -80,6 +80,14 @@ ENTRIES = {
                                       "--steps", "new;setprovider:claude-code"]},
     "composer-codex":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;setprovider:codex"]},
+    # One empty provider session per non-muse lane, reached by the same
+    # scripted pick as the composer entries above: the empty state plus
+    # the composer on the lane, so Tier V can see provider sessions.
+    # Offline only — no turn is ever sent from an entry.
+    "lane-claude-code":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:claude-code"]},
+    "lane-codex":            {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:codex"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},

@@ -63,6 +63,12 @@ impl ExternalQuestions {
         self.questions.insert(question.id.clone(), question);
     }
 
+    /// The newest parked question's headline, by id — what the sidebar row
+    /// stands on while a provider lane waits on a person.
+    pub(super) fn newest_headline(&self) -> Option<String> {
+        self.questions.values().max_by(|a, b| a.id.cmp(&b.id)).map(|question| question.headline.clone())
+    }
+
     /// Look one up, for the question surface.
     #[cfg(test)]
     fn get(&self, id: &str) -> Option<&ExternalQuestion> {
@@ -626,6 +632,34 @@ mod tests {
                 .get("ap-1")
                 .expect("the tap parks on the approvals surface");
             assert_eq!(approval.headline, "rm -rf /tmp/probe");
+        });
+    }
+
+    #[gpui::test]
+    fn a_lane_approval_tap_drives_the_needs_you_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+                session_id: "s-1".to_owned(),
+                approval_id: "ap-1".to_owned(),
+                headline: "rm -rf /tmp/probe".to_owned(),
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            // The tap lives beside the fold, so the row reads it from
+            // there: without the `row_pending` fallback the row said
+            // `Working` while the approval waited.
+            let (approval, _) = view.read(cx).row_pending();
+            assert_eq!(approval.as_deref(), Some("rm -rf /tmp/probe"));
+            assert_eq!(
+                view.read(cx).waiting_on_you(),
+                Some((1, 0)),
+                "the needs-you banner lights for a lane approval too"
+            );
         });
     }
 

@@ -533,6 +533,18 @@ fn is_session_step(step: &str) -> bool {
     WINDOW_VERBS.iter().all(|v| v.verb != head)
 }
 
+/// Whether the script's head starts a session itself: the first step is
+/// `new` (bare or `new:<project>`). The boot session must not start one
+/// eagerly ahead of it — boot plus the head's own `new` opened two sessions
+/// (two `provider lane open` lines, two sidebar rows) for one action.
+/// See [`crate::app::lifecycle::boot_decision`].
+pub(crate) fn steps_begin_with_new(steps: &[String]) -> bool {
+    match steps.first() {
+        None => false,
+        Some(step) => matches!(split(step).0, "new" | "new-in"),
+    }
+}
+
 /// Whether the script's head can run with no session open: a window verb
 /// or `wait:`, neither of which touches the session. This is what lets a
 /// mixed script start — `new;effort` begins with `new`, which opens the
@@ -815,6 +827,19 @@ mod tests {
         assert!(super::is_session_step("send:hi"));
         assert!(super::is_session_step("wait:3000"));
         assert!(super::is_session_step("bogusverb"));
+    }
+
+    #[test]
+    fn a_script_headed_by_new_starts_its_own_session() {
+        // The boot session reads this: a list beginning with `new` starts
+        // its own session, so booting one eagerly ahead of it opens two.
+        assert!(super::steps_begin_with_new(&["new".into(), "setprovider:codex".into()]));
+        assert!(super::steps_begin_with_new(&["new:demo".into(), "send:hi".into()]));
+        assert!(super::steps_begin_with_new(&["new".into()]));
+        assert!(!super::steps_begin_with_new(&["send:hi".into(), "new".into()]));
+        assert!(super::steps_begin_with_new(&["new-in:/tmp/x".into()]));
+        assert!(!super::steps_begin_with_new(&["provider".into()]));
+        assert!(!super::steps_begin_with_new(&[]));
     }
 
     #[test]

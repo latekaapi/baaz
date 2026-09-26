@@ -67,6 +67,10 @@ struct ProviderOpen {
     /// The provider's own display title from the ack, when it supplied
     /// one: the label ladder's fallback under a generated title.
     title: Option<String>,
+    /// Which open this is ([`Harness::provider_open_epoch`]): `finish`
+    /// lands only the newest ask, so a late-finishing earlier open never
+    /// steals focus or the send.
+    epoch: u64,
 }
 
 /// What [`Harness::ensure_boot_session`] should do about the boot session.
@@ -100,13 +104,19 @@ pub(crate) struct BootState<'a> {
     pub send: bool,
     /// A `--steps` list is waiting for a session.
     pub steps_pending: bool,
+    /// That list starts its own session (`new` up front): booting one
+    /// eagerly ahead of it opened two sessions for one action.
+    pub steps_begin_with_new: bool,
     /// The session list has landed at least once.
     pub sessions_loaded: bool,
 }
 
 /// The boot-session decision, in pure form: at most one attempt, only on a
 /// live wire, and `latest` alone waits for the list — everything else the
-/// wire and a project can already answer.
+/// wire and a project can already answer. A `--steps` list headed by `new`
+/// starts its own session, so booting one ahead of it is never wanted:
+/// boot plus the head's `new` opened two sessions (two `provider lane open`
+/// lines, two sidebar rows) for one action.
 pub(crate) fn boot_decision(state: BootState<'_>) -> BootDecision {
     if state.active || state.switch_pending || state.attempted {
         return BootDecision::Idle;
@@ -118,6 +128,9 @@ pub(crate) fn boot_decision(state: BootState<'_>) -> BootDecision {
         return BootDecision::WaitForList;
     }
     if state.session_arg.is_none() && !state.send && !state.steps_pending {
+        return BootDecision::Idle;
+    }
+    if state.session_arg.is_none() && state.steps_begin_with_new {
         return BootDecision::Idle;
     }
     BootDecision::Open
@@ -142,6 +155,7 @@ pub(crate) fn steps_ready_for(
     connected: bool,
     session_open: bool,
     window_only: bool,
+    switch_pending: bool,
 ) -> bool {
     if !steps_pending {
         return false;
@@ -157,6 +171,15 @@ pub(crate) fn steps_ready_for(
     // would create deadlocks the script before it starts.
     if window_only {
         return true;
+    }
+    // A provider lane opens on a background round-trip exactly like
+    // `session/start` does, and session verbs must wait for it the same
+    // way: `new;setprovider:codex;send:` failed with `no open session`
+    // because `send` ran before the lane's open finished. Window verbs
+    // never touch the session, so they still run — the capture's bound,
+    // not this gate, is what releases a switch that never lands.
+    if switch_pending {
+        return false;
     }
     if replay || offline {
         return session_open;
@@ -541,6 +564,7 @@ impl Harness {
             session_arg: self.args.session.as_deref(),
             send: self.args.send.is_some(),
             steps_pending: !self.args.steps.is_empty(),
+            steps_begin_with_new: crate::steps::steps_begin_with_new(&self.args.steps),
             sessions_loaded: self.sessions_loaded,
         }) {
             BootDecision::Idle | BootDecision::WaitForList => return,
@@ -615,6 +639,9 @@ impl Harness {
             // [`crate::steps::head_runs_without_session`]).
             crate::steps::all_window_steps(&self.args.steps)
                 || crate::steps::head_runs_without_session(&self.args.steps),
+            // An in-flight open — `session/start` or a provider lane —
+            // holds session verbs until it lands; window verbs run on.
+            self.session_switch_pending,
         )
     }
 
@@ -1164,6 +1191,14 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One session per `new`: a switch already in flight owns the next
+        // session — a second `new` (boot racing the head's `new`, a double
+        // ⌘N, a scripted repeat) starts nothing, unless a provider switch
+        // claimed it for its replacement (see `switch_claim`).
+        if self.session_switch_pending && self.switch_claim.take().is_none() {
+            crate::baaz_log!("new: a session is already opening; keeping it");
+            return;
+        }
         if let Some(id) = project.as_deref().filter(|id| self.projects.find_available(id).is_some()) {
             self.projects.touch(id);
             self.projects.current = Some(id.to_owned());
@@ -1346,6 +1381,12 @@ impl Harness {
     /// has no project id to key a draft on, so every call starts a fresh
     /// session.
     pub(crate) fn new_session_in_root(&mut self, root: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        // Same one-session rule as [`Self::new_session_in`]: a switch in
+        // flight owns the next session unless a provider switch claimed it.
+        if self.session_switch_pending && self.switch_claim.take().is_none() {
+            crate::baaz_log!("new: a session is already opening; keeping it");
+            return;
+        }
         let root = root.to_path_buf();
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
@@ -1830,12 +1871,17 @@ impl Harness {
         // session verbs wait for it instead of acting on the session that is
         // still open.
         self.session_switch_pending = true;
+        // Whichever open the user asked for last wins: this ask's epoch
+        // travels into the background work, and `finish_provider_open`
+        // drops any finish that is no longer current.
+        self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
+        let epoch = self.provider_open_epoch;
         // Scripted chrome (`--no-connect` / `--replay`): no child to spawn,
         // so the lane opens over a connected scripted provider — the same
         // stand-in `open_local_draft` uses for muse, and what lets
         // `new;setprovider:claude-code` end on a provider lane offline.
         if self.client.is_none() {
-            self.open_scripted_lane(provider_id, project, workspace, window, cx);
+            self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
             return;
         }
         let factory = self.provider_factory.clone();
@@ -1858,6 +1904,7 @@ impl Harness {
                     project,
                     workspace,
                     title,
+                    epoch,
                 }),
                 other => Err(provider::ProviderError::Rejected {
                     reason: format!("OpenSession answered {other:?} instead of a session"),
@@ -1896,6 +1943,7 @@ impl Harness {
         provider_id: ProviderId,
         project: Option<String>,
         workspace: String,
+        epoch: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1926,7 +1974,7 @@ impl Harness {
         match bridged {
             Ok((provider, events, session_id, title)) => {
                 self.finish_provider_open(
-                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title },
+                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, epoch },
                     window,
                     cx,
                 );
@@ -1955,7 +2003,20 @@ impl Harness {
     /// row, and the centre pane with the composer focused — so it becomes
     /// the visible session.
     fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
-        let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title } = open;
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch } =
+            open;
+        // Last ask wins: an earlier open finishing after a newer one was
+        // asked for never steals focus or the send — its child is shut
+        // down and nothing else is touched. The pending switch belongs to
+        // the current open, so it stays set; no record, no row, no view.
+        if epoch != self.provider_open_epoch {
+            crate::baaz_log!(
+                "provider lane superseded provider={} session={session_id}",
+                provider_id.as_str()
+            );
+            provider.shutdown();
+            return;
+        }
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost {
@@ -1998,8 +2059,10 @@ impl Harness {
         self.activate(view, false, window, cx);
         // The scriptable check: a `--steps` run greps the log for this line
         // to prove the pick ended on a provider lane, not a muse session.
+        // (`baaz_log!` already carries the `baaz: ` prefix; spelling it
+        // here doubled it to `baaz: baaz:`.)
         crate::baaz_log!(
-            "baaz: provider lane open provider={} session={session_id}",
+            "provider lane open provider={} session={session_id}",
             provider_id.as_str()
         );
     }
@@ -2069,6 +2132,10 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.session_switch_pending = true;
+        // A reopen is an ask like any other: it joins the last-wins epoch
+        // so a newer open is never stolen by its late finish.
+        self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
+        let epoch = self.provider_open_epoch;
         let provider_id = ProviderId::parse(&record.provider);
         if provider_id == ProviderId::Muse {
             crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
@@ -2086,12 +2153,13 @@ impl Harness {
             );
             return;
         }
-        // An untouched draft — a record with no settled turns — holds no
-        // history anywhere: resuming it would replay nothing, so it opens
-        // fresh instead, and the stale record leaves with it so the
-        // sidebar never accumulates dead rows. (A restarted draft that
-        // never sent is the only record with `turns == 0`.)
-        if record.turns == 0 {
+        // An untouched draft — a record with no settled turns and no
+        // prompt ever sent — holds no history anywhere: resuming it would
+        // replay nothing, so it opens fresh instead, and the stale record
+        // leaves with it so the sidebar never accumulates dead rows. (A
+        // record whose only turn was cut off carries `firstPrompt` with
+        // `turns == 0`: that prompt must resume, not be dropped.)
+        if record.turns == 0 && record.first_prompt.is_none() {
             crate::baaz_log!(
                 "provider reopen: {} has no turns, opening fresh",
                 record.session_id
@@ -2132,6 +2200,7 @@ impl Harness {
                             project: record.project.clone(),
                             workspace,
                             title: record.title.clone(),
+                            epoch,
                         },
                         window,
                         cx,
@@ -2169,6 +2238,7 @@ impl Harness {
                 project: record.project.clone(),
                 workspace: record.workspace.clone().unwrap_or(workspace),
                 title: record.title.clone(),
+                epoch,
             })
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
@@ -2230,6 +2300,9 @@ impl Harness {
     ) {
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         self.session_switch_pending = true;
+        // A fork is an ask like any other: it joins the last-wins epoch.
+        self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
+        let epoch = self.provider_open_epoch;
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the fork still goes
         // through `ResumeSession` so the failure is the honest one.
@@ -2260,7 +2333,16 @@ impl Harness {
             match bridged {
                 Ok((provider, events, session_id, title)) => {
                     self.finish_provider_open(
-                        ProviderOpen { provider_id, provider, events, session_id, project: None, workspace, title },
+                        ProviderOpen {
+                            provider_id,
+                            provider,
+                            events,
+                            session_id,
+                            project: None,
+                            workspace,
+                            title,
+                            epoch,
+                        },
                         window,
                         cx,
                     );
@@ -2303,6 +2385,7 @@ impl Harness {
                     project: None,
                     workspace: workspace_bg,
                     title,
+                    epoch,
                     // The fork groups under no project: it is a new session
                     // the sidebar names when its first turn lands.
                 }),
@@ -2712,7 +2795,26 @@ impl Harness {
                 // anything blocks on. The `(session_id, turn_id)` key makes
                 // a replayed turn a no-op insert rather than a duplicate.
                 self.wire_call(cx, move || crate::usage::record_backfilled(&[row]), |_this, (), _cx| {});
-                if crate::provider_sessions::note_settled_turn(&mut self.provider_sessions, &session_id) {
+                // Count exchanges, as muse rows do: the folded assistant
+                // turns, never a blind increment — a reopen replays the
+                // same `TurnFinished`s, and incrementing again read "2
+                // turns" for one user+assistant exchange.
+                let exchanges = view
+                    .read(cx)
+                    .session()
+                    .map(|session| {
+                        session
+                            .turns
+                            .iter()
+                            .filter(|turn| matches!(turn, aui_protocol::Turn::Assistant { .. }))
+                            .count() as u64
+                    })
+                    .unwrap_or(0);
+                if crate::provider_sessions::note_settled_turn_counted(
+                    &mut self.provider_sessions,
+                    &session_id,
+                    exchanges,
+                ) {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
                 self.rejoin_provider_row(&session_id);
@@ -2807,6 +2909,14 @@ impl Harness {
                 self.select_new_provider(*provider, cx);
                 self.drafts.retain(|_, id| *id != old);
                 self.close_view(&old, cx);
+                // The replacement starts on a task, but the switch is
+                // already in flight as far as scripted verbs are concerned:
+                // claiming it now keeps a following `send:` waiting for the
+                // lane instead of failing on the closed draft — and the
+                // claim is what lets the start through the one-session
+                // guard above.
+                self.session_switch_pending = true;
+                self.switch_claim = Some(old);
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
                 }));
@@ -2816,6 +2926,11 @@ impl Harness {
             // pick, which also becomes the default for later sessions.
             SessionEvent::NewSessionOnProvider { provider } => {
                 self.select_new_provider(*provider, cx);
+                // Same claim as the switch above: the new session starts on
+                // a task, and session verbs wait for it rather than acting
+                // on the session that is still open.
+                self.session_switch_pending = true;
+                self.switch_claim = Some(view.read(cx).session_id.clone());
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
                 }));
@@ -3006,6 +3121,7 @@ mod tests {
             session_arg: None,
             send: false,
             steps_pending: true,
+            steps_begin_with_new: false,
             sessions_loaded: false,
         }
     }
@@ -3053,6 +3169,31 @@ mod tests {
     }
 
     #[test]
+    fn a_script_headed_by_new_boots_no_session() {
+        // `new;setprovider:codex` starts its own session: booting one
+        // eagerly ahead of it opened two (two lane-open lines, two rows).
+        // Remove the arm and boot opens again beside the head's `new`.
+        assert_eq!(
+            boot_decision(BootState { steps_begin_with_new: true, ..boot_state() }),
+            BootDecision::Idle
+        );
+        // Any other script still boots: the session has to come from
+        // somewhere.
+        assert_eq!(boot_decision(boot_state()), BootDecision::Open);
+        // An explicit `--session` resumes even when the steps begin with
+        // `new`: the head's `new` then reuses or replaces, never doubles
+        // the boot.
+        assert_eq!(
+            boot_decision(BootState {
+                session_arg: Some("s-1"),
+                steps_begin_with_new: true,
+                ..boot_state()
+            }),
+            BootDecision::Open
+        );
+    }
+
+    #[test]
     fn an_unscripted_boot_opens_nothing() {
         assert_eq!(
             boot_decision(BootState { steps_pending: false, sessions_loaded: true, ..boot_state() }),
@@ -3077,30 +3218,39 @@ mod tests {
     #[test]
     fn steps_run_live_only_with_a_wire_and_a_session() {
         // Live: both.
-        assert!(steps_ready_for(true, false, false, true, true, false));
-        assert!(!steps_ready_for(true, false, false, true, false, false));
-        assert!(!steps_ready_for(true, false, false, false, true, false));
-        assert!(!steps_ready_for(true, false, false, false, false, false));
+        assert!(steps_ready_for(true, false, false, true, true, false, false));
+        assert!(!steps_ready_for(true, false, false, true, false, false, false));
+        assert!(!steps_ready_for(true, false, false, false, true, false, false));
+        assert!(!steps_ready_for(true, false, false, false, false, false, false));
         // Replay and offline have no wire: the open session alone decides,
         // connected or not.
-        assert!(steps_ready_for(true, true, false, false, true, false));
-        assert!(steps_ready_for(true, false, true, false, true, false));
-        assert!(!steps_ready_for(true, true, false, false, false, false));
-        assert!(!steps_ready_for(true, false, true, false, false, false));
+        assert!(steps_ready_for(true, true, false, false, true, false, false));
+        assert!(steps_ready_for(true, false, true, false, true, false, false));
+        assert!(!steps_ready_for(true, true, false, false, false, false, false));
+        assert!(!steps_ready_for(true, false, true, false, false, false, false));
         // A window-only script needs no session at all. This is the arm that
         // was missing: `--login signed-in --no-connect` opens no session, so
         // every window verb was silently skipped and the capture still
         // exited 0. Five right-pane entries were written against that and
         // produced five identical screenshots of an empty shell.
-        assert!(steps_ready_for(true, false, true, false, false, true));
-        assert!(steps_ready_for(true, false, false, false, false, true));
-        assert!(steps_ready_for(true, true, false, false, false, true));
+        assert!(steps_ready_for(true, false, true, false, false, true, false));
+        assert!(steps_ready_for(true, false, false, false, false, true, false));
+        assert!(steps_ready_for(true, true, false, false, false, true, false));
+        // An in-flight open — `session/start` or a provider lane — holds
+        // session verbs until it lands, exactly like a missing session
+        // does: `new;setprovider:codex;send:` failed with `no open
+        // session` because `send` ran before the lane finished. Window
+        // verbs never touch the session, so they run on regardless.
+        assert!(!steps_ready_for(true, false, false, true, true, false, true));
+        assert!(!steps_ready_for(true, false, true, false, true, false, true));
+        assert!(steps_ready_for(true, false, true, false, false, true, true));
+        assert!(steps_ready_for(true, false, false, true, false, true, true));
         // Still nothing to do with no steps pending, whatever else holds.
-        assert!(!steps_ready_for(false, false, true, false, false, true));
+        assert!(!steps_ready_for(false, false, true, false, false, true, false));
         // No script left, nowhere: never ready, in every mode.
-        assert!(!steps_ready_for(false, false, false, true, true, false));
-        assert!(!steps_ready_for(false, true, false, false, true, false));
-        assert!(!steps_ready_for(false, false, true, false, true, false));
+        assert!(!steps_ready_for(false, false, false, true, true, false, false));
+        assert!(!steps_ready_for(false, true, false, false, true, false, false));
+        assert!(!steps_ready_for(false, false, true, false, true, false, false));
     }
 
     #[test]
@@ -3490,6 +3640,164 @@ mod tests {
         lane_restore(state);
     }
 
+    // ------------------------------------------------- W6 one session per new
+
+    /// A factory that counts every child it spawns, around the scripted
+    /// stand-in: the W6 tests measure provider opens with it instead of
+    /// grepping stderr.
+    fn counting_factory() -> (crate::providers::ProviderFactory, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use provider::ProviderAdapter as _;
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_opens = opens.clone();
+        let factory: crate::providers::ProviderFactory = std::sync::Arc::new(move |_: ProviderId| {
+            factory_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut adapter = provider::scripted::ScriptedProvider::new();
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        });
+        (factory, opens)
+    }
+
+    fn opens_of(opens: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[gpui::test]
+    fn a_second_new_while_a_switch_is_in_flight_starts_nothing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("w6-new-twice");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, opens) = counting_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            });
+        });
+        // Two `new`s back to back: the second lands while the first open
+        // is still in flight. Remove the guard and the factory spawns
+        // twice for one action.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.new_session(window, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(opens_of(&opens), 1, "one `new` pair spawns one child");
+            let view = harness.active.clone().expect("the session opened");
+            assert!(view.read(cx).is_provider_lane(), "it rides the provider lane");
+            assert!(!harness.session_switch_pending, "the switch landed");
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("w6-switch");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, opens) = counting_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session(window, cx));
+        });
+        vc.run_until_parked();
+        let draft = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(opens_of(&opens), 1, "the draft opens one child");
+            harness.active.clone().expect("the draft opened").read(cx).session_id.clone()
+        });
+        // Through the real `SwitchProvider` event, not the handler's steps
+        // by hand: the close is synchronous, the replacement starts on a
+        // task. Remove the claim (or the synchronous pending) and the
+        // replacement never starts — or a following verb fails on the
+        // closed draft.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the draft is open");
+                harness.on_session_event(
+                    view,
+                    &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(opens_of(&opens), 2, "draft plus exactly one replacement");
+            let view = harness.active.clone().expect("the replacement opened");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
+            // (No id inequality: the scripted double mints one fixed id,
+            // so draft and replacement share it; the lane change above is
+            // what proves the replacement.)
+            let _ = draft;
+            let rows: Vec<_> =
+                harness.sessions.iter().filter(|entry| entry.provider.is_some()).collect();
+            assert_eq!(rows.len(), 1, "exactly one provider row names the lane");
+            assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the replacement");
+            assert!(!harness.session_switch_pending, "the switch landed");
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("w6-epoch");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, opens) = counting_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        // Two asks back to back on different lanes; whichever background
+        // open finishes first, the Codex ask is stale. Remove the epoch
+        // and both finishes land: two rows, and the active lane is
+        // whichever happened to finish last.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace.clone(), window, cx);
+                harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(opens_of(&opens), 2, "both asks spawned");
+            let view = harness.active.clone().expect("a lane opened");
+            assert_eq!(
+                view.read(cx).provider_kind(),
+                ProviderId::ClaudeCode,
+                "the last ask wins, however the finishes order"
+            );
+            let rows: Vec<_> =
+                harness.sessions.iter().filter(|entry| entry.provider.is_some()).collect();
+            assert_eq!(rows.len(), 1, "the stale finish leaves no row");
+            assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the winner");
+            assert!(!harness.session_switch_pending, "the switch landed");
+        });
+        lane_restore(state);
+    }
+
     #[gpui::test]
     fn closing_a_provider_view_hangs_up_its_child(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -3693,9 +4001,10 @@ mod tests {
         // draft with no turns opens fresh instead (see the next test).
         vc.update(|_, cx| {
             baaz.update(cx, |harness, _| {
-                crate::provider_sessions::note_settled_turn(
+                crate::provider_sessions::note_settled_turn_counted(
                     &mut harness.provider_sessions,
                     &open_id,
+                    1,
                 );
                 crate::provider_sessions::write(&harness.provider_sessions);
             });

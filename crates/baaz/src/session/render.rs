@@ -477,6 +477,9 @@ impl SessionView {
         // `Rc` clones: O(1). Only visible rows are built below.
         let turns = self.cached_turns.clone();
         let rows = self.rows.clone();
+        // Read before the `'static` row closure below: replayed history
+        // draws settled while nothing is live (see the `settled` flag).
+        let idle = !self.busy();
         let folds = Rc::new(folds);
         let width_report = cx.entity().downgrade();
         // The wrapper is a flex column so the virtual list's own
@@ -584,8 +587,14 @@ impl SessionView {
                             }
                             // Under the deterministic flag every turn draws settled:
                             // the newest turn's reveal (fade + rise) never lands on
-                            // the same frame twice.
-                            let settled = turn_ix != last_turn || crate::clock::deterministic();
+                            // the same frame twice. And a turn draws settled
+                            // whenever nothing is live: replayed history on a
+                            // reopened session is finished work, not a turn
+                            // still arriving — leaving the last turn on its
+                            // entrance animation dimmed the reply, its
+                            // actions and its meta row forever.
+                            let settled =
+                                turn_ix != last_turn || crate::clock::deterministic() || idle;
                             item.child(transcript::turn_row(turn, row, settled, &folds, window, cx)).into_any_element()
                         })
                         .flex_1()
@@ -1148,6 +1157,18 @@ impl SessionView {
     /// the row always had. The timer, the `esc` hint and the queued/memory
     /// notes are unchanged.
     fn status_phase(&self) -> String {
+        // Blocked on the person beats everything, in the muse words: a
+        // provider-lane approval lives beside the fold, never inside it,
+        // so the block scan below cannot see it — without this the status
+        // read "Finishing up…" while a Codex approval waited.
+        if let Some((approvals, questions)) = self.waiting_on_you() {
+            if approvals > 0 {
+                return "Waiting for approval…".to_owned();
+            }
+            if questions > 0 {
+                return "Waiting for your answer…".to_owned();
+            }
+        }
         if let Some(running) = self.running.as_ref() {
             let blocks = self.cached_turns.iter().find(|turn| turn.id() == running.turn_id).and_then(
                 |turn| match turn.as_ref() {
@@ -1226,6 +1247,18 @@ impl SessionView {
 /// outranks running (a tool in flight names its family), which outranks a
 /// growing reasoning trace. `None` is the generic working/finishing pair —
 /// nothing here was specific enough to name.
+    /// The approval card's body: the reason sentence, unless it says nothing
+    /// the headline does not already say — a lane tap carries the headline in
+    /// both fields when the backend supplies no separate reason, and drawing
+    /// both repeated the same sentence twice.
+    fn card_reason(headline: &str, reason: &str) -> Option<String> {
+        let reason = reason.trim();
+        if reason.is_empty() || reason == headline.trim() {
+            return None;
+        }
+        Some(reason.to_owned())
+    }
+
 fn status_phase_for_blocks(blocks: &[Block]) -> Option<String> {
     use aui_protocol::{ApprovalState, ThinkingState};
     if blocks.iter().any(|block| matches!(block, Block::Approval { state: ApprovalState::Pending, .. })) {
@@ -2074,8 +2107,14 @@ impl SessionView {
             .aria_label(format!("Approval: {}", approval.headline))
             .gap(px(scale::SP_1))
             .child(div().text_color(dim).child(approval.kind.tag().to_owned()))
-            .child(div().text_color(ink).child(approval.headline.clone()))
-            .child(div().text_color(dim).child(approval.reason.clone()));
+            .child(div().text_color(ink).child(approval.headline.clone()));
+        // The lane carries only the headline when the backend supplies no
+        // separate reason sentence — rendering both read the same words
+        // twice ("Allow me to create … as requested?" as headline and
+        // body), so the body draws only when it says something new.
+        if let Some(reason) = Self::card_reason(&approval.headline, &approval.reason) {
+            card = card.child(div().text_color(dim).child(reason));
+        }
         if let Some(note) = approval.dont_ask_again.clone() {
             card = card.child(
                 div()
@@ -2166,6 +2205,23 @@ mod tests {
     fn an_absolute_path_outside_the_workspace_resolves_as_is() {
         assert_eq!(resolve_link_path(&workspace(), "/etc/passwd"), PathBuf::from("/etc/passwd"));
         assert_eq!(resolve_link_path(&workspace(), "/tmp/scratch/note.txt"), PathBuf::from("/tmp/scratch/note.txt"));
+    }
+
+    #[test]
+    fn an_approval_card_shows_a_duplicated_reason_once() {
+        // The lane tap carries the headline in both fields when the
+        // backend supplies no separate reason: drawing both repeats the
+        // sentence. Remove the `card_reason` arm and the card reads the
+        // same words twice.
+        assert_eq!(
+            SessionView::card_reason("Allow me to create X as requested?", "Allow me to create X as requested?"),
+            None
+        );
+        assert_eq!(SessionView::card_reason("headline", "  "), None);
+        assert_eq!(
+            SessionView::card_reason("headline", "because the backend asked nicely"),
+            Some("because the backend asked nicely".to_owned())
+        );
     }
 
     #[test]
