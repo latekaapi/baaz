@@ -294,6 +294,11 @@ pub enum SessionEvent {
         session_id: String,
         /// What the person sent, verbatim — the title's source.
         prompt: String,
+        /// The turn the ack admitted. An ack can arrive after its turn
+        /// already finished, and the row must decline such a stale
+        /// admission instead of manufacturing a fresh `Working · now`
+        /// (W8c) — so the id travels with the event.
+        turn_id: String,
     },
     /// A provider lane landed or settled an approval card: a
     /// `Block::Approval` arrived or left `Pending`. The application
@@ -1177,6 +1182,14 @@ impl SessionView {
 
     pub fn busy(&self) -> bool {
         self.running.is_some() || self.submitting
+    }
+
+    /// Whether the provider lane already saw this turn finish: a late
+    /// admission or a re-delivered start for it is stale, never new work.
+    /// The application reads this off the [`SessionEvent::ProviderTurnAccepted`]
+    /// turn id before arming the row (W8c).
+    pub fn provider_turn_finished(&self, turn_id: &str) -> bool {
+        self.completed_turns.contains(turn_id)
     }
 
     /// What the sidebar row stands on while this session waits on a person:

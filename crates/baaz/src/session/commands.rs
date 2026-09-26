@@ -176,10 +176,14 @@ impl SessionView {
                 self.adopt_open_provider_turn(cx);
                 // The lane's admission: the application reveals the row,
                 // titles it and touches the record, the way the muse
-                // route's `turn/started` arm does for its lane.
+                // route's `turn/started` arm does for its lane. The
+                // admitted turn id travels along so a late ack — one
+                // that arrives after its turn already finished — cannot
+                // re-arm the row as new work (W8c).
                 cx.emit(crate::session::SessionEvent::ProviderTurnAccepted {
                     session_id: self.session_id.clone(),
                     prompt: text.clone(),
+                    turn_id: turn_id.clone(),
                 });
                 if planning {
                     self.plan_turn = Some(turn_id);
