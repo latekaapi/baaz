@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 fn fixture(name: &str) -> Value {
-    let path = format!("{}/fixtures/skills/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/tests/fixtures/skills/{name}", env!("CARGO_MANIFEST_DIR"));
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("fixture reads: {path}"));
     serde_json::from_str(&text).unwrap_or_else(|_| panic!("fixture parses: {path}"))
