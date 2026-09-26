@@ -370,30 +370,27 @@ impl Harness {
         self.skills.detail_body = None;
         self.skills.overflow_open = false;
         let root = self.skills_root();
-        match self.skills_lookup(&key) {
-            Some(VisibleRow::Live(index)) => {
-                let skill = self.skills.catalog.rows[index].clone();
-                if skill.is_virtual() {
-                    self.skills.detail_loading = true;
-                    let program = self.args.program.clone();
-                    self.wire_call(
-                        cx,
-                        move || skills::skill_body(&program, &skill, &root),
-                        move |this, body, cx| {
-                            this.skills.detail_loading = false;
-                            if this.skills.selected.as_deref() == Some(key.as_str()) {
-                                this.skills.detail_body = body.map(|text| (key.clone(), text));
-                            }
-                            cx.notify();
-                        },
-                    );
-                } else if let Some(body) = skills::skill_body(&self.args.program, &self.skills.catalog.rows[index], &root)
-                {
-                    let id = self.skills.catalog.rows[index].id.clone();
-                    self.skills.detail_body = Some((id, body));
-                }
+        if let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) {
+            let skill = self.skills.catalog.rows[index].clone();
+            if skill.is_virtual() {
+                self.skills.detail_loading = true;
+                let program = self.args.program.clone();
+                self.wire_call(
+                    cx,
+                    move || skills::skill_body(&program, &skill, &root),
+                    move |this, body, cx| {
+                        this.skills.detail_loading = false;
+                        if this.skills.selected.as_deref() == Some(key.as_str()) {
+                            this.skills.detail_body = body.map(|text| (key.clone(), text));
+                        }
+                        cx.notify();
+                    },
+                );
+            } else if let Some(body) = skills::skill_body(&self.args.program, &self.skills.catalog.rows[index], &root)
+            {
+                let id = self.skills.catalog.rows[index].id.clone();
+                self.skills.detail_body = Some((id, body));
             }
-            _ => {}
         }
         cx.notify();
     }
@@ -597,6 +594,8 @@ impl Harness {
                     .items_center()
                     .gap(px(5.0))
                     .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Skills project, {project_name}. Switch project."))
                     .on_click(open_menu)
                     .child(div().ui(scale::FS_13).medium().text_color(p.ink).child(project_name))
                     .child(div().flex_none().text_color(p.ink_3).child("▾")),
@@ -1212,18 +1211,5 @@ mod tests {
     fn plugin_paths_name_their_plugin() {
         assert_eq!(plugin_name("plugin://threejs/skills/threejs/SKILL.md"), Some("threejs"));
         assert_eq!(plugin_name("bundled://x/SKILL.md"), None);
-    }
-}
-
-/// The scope chip the detail wears.
-fn skill_scope_chip(skill: &Skill) -> String {
-    match skill.section() {
-        ScopeSection::Project => "This project".to_owned(),
-        ScopeSection::Personal => "Personal".to_owned(),
-        ScopeSection::Builtin => "Built-in".to_owned(),
-        ScopeSection::Plugins => match skill.path.as_deref().and_then(plugin_name) {
-            Some(name) => format!("Plugin · {name}"),
-            None => "Plugin".to_owned(),
-        },
     }
 }
