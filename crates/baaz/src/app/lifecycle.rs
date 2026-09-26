@@ -2769,8 +2769,9 @@ impl Harness {
             // (titled from the prompt when it carries no name of its own),
             // the session may earn a generated title, and the record moves
             // to now — the lane's `turn/started`.
-            SessionEvent::ProviderTurnAccepted { session_id, prompt, .. } => {
-                let (session_id, prompt) = (session_id.clone(), prompt.clone());
+            SessionEvent::ProviderTurnAccepted { session_id, prompt, turn_id, .. } => {
+                let (session_id, prompt, turn_id) =
+                    (session_id.clone(), prompt.clone(), turn_id.clone());
                 // A turn that started is a session made real: it is no
                 // draft any more, whether it already had a row or not.
                 self.drafts.retain(|_, named| named != &session_id);
@@ -2800,13 +2801,21 @@ impl Harness {
                 // provider child.
                 self.maybe_start_title(&session_id, Some(prompt), cx);
                 self.title_from_transcript(cx);
-                self.sync_row_live(&session_id, true, cx);
+                // A late admission — the ack arriving after its turn
+                // already finished — is bookkeeping only (row, record,
+                // title above): the row declines it as a start and
+                // re-reads the settled view instead of manufacturing a
+                // fresh `Working · now` (W8c).
+                let stale = view.read(cx).provider_turn_finished(&turn_id);
+                self.sync_row_live(&session_id, !stale, cx);
+                cx.notify();
             }
             // A provider lane landed or settled an approval card: the
             // row re-reads the open view's pending words, so it stands
             // on the needs-you state while the approval waits.
             SessionEvent::ProviderApprovalsChanged { session_id } => {
                 self.sync_row_live(session_id, false, cx);
+                cx.notify();
             }
             // A provider lane settled a turn: the free byline lands, the
             // ledger gains its tagged row, and the record counts the turn —
@@ -2858,6 +2867,9 @@ impl Harness {
                 // debounced rewrite — idle sessions only, never a running
                 // turn — through the same side session as a title.
                 self.maybe_rewrite_byline(cx);
+                // The lane settled: repaint on this path even if the
+                // view's own notify raced the event delivery (W8c).
+                cx.notify();
             }
             // The fork result is a resume envelope for the **new** session, so
             // it is already attached: opening it and paging it in is all that

@@ -306,14 +306,23 @@ impl SessionView {
             match delta {
                 Delta::TurnStarted { turn } => match turn {
                     Turn::Assistant { id, .. } => {
-                        self.completed_turns.remove(id);
-                        self.running = Some(super::Running {
-                            turn_id: id.clone(),
-                            started: crate::clock::now_instant(),
-                        });
-                        self.submitting = false;
-                        self.last_tick_secs = None;
-                        self.start_ticker(cx);
+                        // A start for a turn this view already saw complete
+                        // is a re-delivered start (a replayed batch, a
+                        // re-attach), not new work: it folds like any
+                        // repeat, but it never marks running — otherwise a
+                        // start re-delivered after its turn finished leaves
+                        // the stop button up on a settled turn (W8c).
+                        // Genuinely new work always carries a new turn id,
+                        // exactly as on the muse lane.
+                        if !self.completed_turns.contains(id) {
+                            self.running = Some(super::Running {
+                                turn_id: id.clone(),
+                                started: crate::clock::now_instant(),
+                            });
+                            self.submitting = false;
+                            self.last_tick_secs = None;
+                            self.start_ticker(cx);
+                        }
                     }
                     Turn::User { .. } => {
                         self.submitting = false;
@@ -1338,6 +1347,164 @@ mod tests {
             );
             assert!(view.read(cx).external_approvals.get("ap-1").is_none());
         });
+    }
+
+    /// W8c: an approval turn settles however its decision ack interleaves —
+    /// and stays settled when a start is re-delivered after the finish.
+    ///
+    /// Replays the recorded `codex/approval.jsonl` exchange (one ask, the
+    /// command allowed and run to completion) through a recording lane: the
+    /// press travels as one `DecideApproval`, the card waits for the
+    /// resolution, and after the `TurnFinished` the view is idle with no
+    /// pending words — whether the decide ack lands before the finish or
+    /// after it. A `TurnStarted` for the finished turn re-delivered
+    /// afterwards (a re-attach replaying the start) must not re-arm the
+    /// stop button: without the completed-turn guard the final assertion
+    /// fails.
+    #[gpui::test]
+    fn approval_turn_settles_in_every_ack_order(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for ack_first in [true, false] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+            // The recorded exchange, folded the way the live pump folds it.
+            let path =
+                format!("{}/../../fixtures/codex/approval.jsonl", env!("CARGO_MANIFEST_DIR"));
+            let text = std::fs::read_to_string(&path).expect("the approval fixture reads");
+            let mut fold = provider_codex::fold::CodexFold::new();
+            let mut deltas = Vec::new();
+            for line in text.lines() {
+                let (_, frame) =
+                    provider_codex::frame::decode_envelope(line).expect("the fixture decodes");
+                deltas.extend(fold.apply(&frame));
+            }
+            // The turn the exchange opens and finishes, and the card it
+            // asks on: whatever ids the fixture carries.
+            let turn_id = deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    aui_protocol::Delta::TurnStarted {
+                        turn: aui_protocol::Turn::Assistant { id, .. },
+                    } => Some(id.clone()),
+                    _ => None,
+                })
+                .expect("the exchange opens an assistant turn");
+            let finish = deltas
+                .iter()
+                .position(|delta| {
+                    matches!(delta, aui_protocol::Delta::TurnFinished { turn_id: done, .. } if done == &turn_id)
+                })
+                .expect("the exchange finishes the turn it opened");
+            let approval_id = deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    aui_protocol::Delta::BlockAdded {
+                        block: aui_protocol::Block::Approval { id, .. },
+                        ..
+                    } => Some(id.clone()),
+                    _ => None,
+                })
+                .expect("the exchange asks one approval");
+            let settle = deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    aui_protocol::Delta::BlockUpdated {
+                        block: card @ aui_protocol::Block::Approval { id, .. },
+                        ..
+                    } if id == &approval_id => Some(delta.clone()),
+                    _ => None,
+                })
+                .expect("the exchange settles the card it asked");
+            // Everything before the finish opens the turn and parks the
+            // ask; the tap arrives the way the live bridge taps it.
+            vc.update(|_, _| {
+                tx.unbounded_send(provider::ProviderEvent::Deltas {
+                    session_id: Some("s-1".to_owned()),
+                    deltas: deltas[..finish].to_vec(),
+                })
+                .expect("the lane channel is open");
+                tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+                    session_id: "s-1".to_owned(),
+                    approval_id: approval_id.clone(),
+                    headline: "run the approved command".to_owned(),
+                })
+                .expect("the lane channel is open");
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                assert!(
+                    view.read(cx).busy(),
+                    "ack-first={ack_first}: the approval turn runs while it waits"
+                );
+                view.update(cx, |view, cx| {
+                    view.decide_external_approval(
+                        approval_id.clone(),
+                        crate::providers::ApprovalChoice::Accept,
+                        None,
+                        cx,
+                    );
+                });
+            });
+            if ack_first {
+                // The decision ack lands before the finish — the order
+                // that settles live.
+                vc.run_until_parked();
+            }
+            // The rest of the exchange: the card settles, the turn finishes.
+            vc.update(|_, _| {
+                tx.unbounded_send(provider::ProviderEvent::Deltas {
+                    session_id: Some("s-1".to_owned()),
+                    deltas: deltas[finish..].to_vec(),
+                })
+                .expect("the lane channel is open");
+            });
+            vc.run_until_parked();
+            // A late settle and a re-delivered start for the finished turn:
+            // the approval block settling after the finish, and a re-attach
+            // replaying the start. Neither re-arms the view.
+            vc.update(|_, _| {
+                tx.unbounded_send(provider::ProviderEvent::Deltas {
+                    session_id: Some("s-1".to_owned()),
+                    deltas: vec![
+                        settle.clone(),
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: turn_id.clone(),
+                                blocks: Vec::new(),
+                                meta: aui_protocol::TurnMeta::default(),
+                                timestamp: None,
+                            },
+                        },
+                    ],
+                })
+                .expect("the lane channel is open");
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let settled = view.read(cx).provider_turn_finished(&turn_id);
+                assert!(settled, "ack-first={ack_first}: the finished turn counts as finished");
+                assert!(
+                    !view.read(cx).busy(),
+                    "ack-first={ack_first}: the finished approval turn drops the stop button"
+                );
+                assert_eq!(
+                    view.read(cx).row_pending(),
+                    (None, None),
+                    "ack-first={ack_first}: no pending words left for the row to stand on"
+                );
+            });
+            let decides: Vec<_> = handle
+                .commands_of("decide-approval")
+                .into_iter()
+                .filter(|c| matches!(c, provider::Command::DecideApproval { .. }))
+                .collect();
+            assert_eq!(
+                decides.len(),
+                1,
+                "ack-first={ack_first}: one DecideApproval leaves the lane, drew {decides:?}"
+            );
+        }
     }
 
     #[gpui::test]

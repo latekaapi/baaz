@@ -366,11 +366,11 @@ pub fn block_key(turn_id: &str, index: usize) -> String {
 /// The reasoning tokens a finished turn billed without showing any work, if any.
 ///
 /// A turn can bill a reasoning budget and emit no `reasoning` item at all —
-/// the fold records the count on [`TurnMeta::reasoning_tokens`] either way —
-/// so a count with no thinking card means the model thought silently. Returns
-/// the count when the turn is an assistant turn with `reasoning_tokens > 0`
-/// and no [`Block::Thinking`], and `None` otherwise (user turns, no billed
-/// reasoning, or a visible trace that speaks for itself).
+/// the fold records the count on [`TurnMeta::reasoning_tokens`] either way.
+/// Returns the count when the turn is an assistant turn with
+/// `reasoning_tokens > 0` and no [`Block::Thinking`], and `None` otherwise
+/// (user turns, no billed reasoning, or a visible trace that speaks for
+/// itself).
 pub fn silent_reasoning(turn: &Turn) -> Option<u64> {
     let Turn::Assistant { blocks, meta, .. } = turn else { return None };
     if meta.reasoning_tokens == 0 {
@@ -384,12 +384,12 @@ pub fn silent_reasoning(turn: &Turn) -> Option<u64> {
 
 /// The footer's reasoning cell for a turn [`silent_reasoning`] fired on.
 ///
-/// The library footer draws `"419 reasoning"`; on a silent turn the same cell
-/// reads `"419 reasoning, thought silently"`, on the same line in the same
-/// style. Turns with a visible thinking card keep the library's cell
-/// unchanged.
+/// The library footer draws `"419 reasoning"`, and a silent turn's cell
+/// reads the same — the count with no thinking card behind it, on the same
+/// line in the same style. Turns with a visible thinking card keep the
+/// library's cell unchanged.
 pub fn silent_reasoning_text(count: u64) -> String {
-    format!("{count} reasoning, thought silently")
+    format!("{count} reasoning")
 }
 
 /// The library footer's cells for a silent turn: a mirror of the library's
@@ -1397,7 +1397,7 @@ mod tests {
 
     #[test]
     fn the_silent_cell_names_the_footer_count() {
-        assert_eq!(silent_reasoning_text(419), "419 reasoning, thought silently");
+        assert_eq!(silent_reasoning_text(419), "419 reasoning");
     }
 
     #[test]
@@ -1456,7 +1456,7 @@ mod tests {
                 "muse-spark-1.3-contributor".to_owned(),
                 "17.3 s".to_owned(),
                 "59.2k tokens".to_owned(),
-                "419 reasoning, thought silently".to_owned(),
+                "419 reasoning".to_owned(),
             ]
         );
     }

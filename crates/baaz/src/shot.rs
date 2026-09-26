@@ -317,6 +317,19 @@ pub fn capture_and_quit(
         // the PNG encode and the write go to the background executor
         // (finding `performance-15`). They are the expensive two thirds of a
         // capture and none of them needs the window.
+        // The turn-wait above can observe the settled model in the same
+        // tick as the finish lands, before the window paints the settle —
+        // and `render_to_image` below reads the last painted frame without
+        // painting first. Refresh and let one frame land, so the capture
+        // shows the settled window rather than the frame from while the
+        // turn was still running (W8c). A turn that never settles still
+        // waits above on `TURN_CEILING`, never here.
+        cx.update(|cx| {
+            let _ = handle.update(cx, |_root, window, _cx| {
+                window.refresh();
+            });
+        });
+        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
         let rendered = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();
