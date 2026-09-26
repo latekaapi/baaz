@@ -278,9 +278,36 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    fn submit_text(&self, session_id: &str, text: &str, turn_id: String) -> Result<Ack, ProviderError> {
+    /// Split neutral submission parts into the turn's text plus its image
+    /// parts: text joins in order (the lane's long-standing rule), images
+    /// ride as base64 `source` blocks (probed live 2026-09-26,
+    /// `fixtures/claude-code/image.jsonl`).
+    fn split_parts(parts: &[provider::SubmissionPart]) -> (String, Vec<argv::ImageInput>) {
+        let mut text = String::new();
+        let mut images = Vec::new();
+        for part in parts {
+            match part {
+                provider::SubmissionPart::Text(chunk) => text.push_str(chunk),
+                provider::SubmissionPart::Image { base64_data, media_type } => {
+                    images.push(argv::ImageInput {
+                        base64_data: base64_data.clone(),
+                        media_type: media_type.clone(),
+                    });
+                }
+            }
+        }
+        (text, images)
+    }
+
+    fn submit_parts(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: &[argv::ImageInput],
+        turn_id: String,
+    ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
-        let line = argv::user_input_line(text);
+        let line = argv::user_content_line(text, images);
         match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
@@ -466,38 +493,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                  runs inside turns",
             )),
             Command::SubmitInput { request_id, session_id, parts, .. } => {
-                let mut text = String::new();
-                for part in &parts {
-                    match part {
-                        provider::SubmissionPart::Text(chunk) => text.push_str(chunk),
-                        provider::SubmissionPart::Image { .. } => {
-                            return Err(ProviderError::Rejected {
-                                reason: "no image input shape was probed over stream-json stdin"
-                                    .into(),
-                            })
-                        }
-                    }
-                }
-                self.submit_text(&session_id, &text, request_id)
+                let (text, images) = Self::split_parts(&parts);
+                self.submit_parts(&session_id, &text, &images, request_id)
             }
             // Unverified, so attempted: a second stdin frame mid-turn is the
             // only lane the process shape offers, unprobed as it is.
             Command::SteerInput { request_id, session_id, parts, .. } => {
                 let _ = request_id;
-                let mut text = String::new();
-                for part in &parts {
-                    match part {
-                        provider::SubmissionPart::Text(chunk) => text.push_str(chunk),
-                        provider::SubmissionPart::Image { .. } => {
-                            return Err(ProviderError::Rejected {
-                                reason: "no image input shape was probed over stream-json stdin"
-                                    .into(),
-                            })
-                        }
-                    }
-                }
+                let (text, images) = Self::split_parts(&parts);
                 self.check_session(&session_id)?;
-                let line = argv::user_input_line(&text);
+                let line = argv::user_content_line(&text, &images);
                 match self.child.lock().expect("child mutex").as_mut() {
                     Some(running) => {
                         running.send_line(&line).map_err(|error| ProviderError::Unavailable {

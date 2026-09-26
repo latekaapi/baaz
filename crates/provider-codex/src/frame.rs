@@ -80,6 +80,30 @@ impl TokenUsage {
     }
 }
 
+/// One attached image inside a `userMessage`'s content: the wire echoes
+/// the submission back with its path (`localImage`) or URL (`image`) —
+/// never the bytes — so the fold carries the reference, not the data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodexAttachment {
+    /// The file name for the chip: the path's final segment.
+    pub name: String,
+    /// The echoed path or URL, kept whole for inspection.
+    pub path: String,
+}
+
+/// One file change inside a `fileChange` item, as the wire describes it:
+/// a path, a change kind (`add`, …), and either the new file's content
+/// (for additions) or a unified diff (for modifications).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileChangeEntry {
+    /// The changed path, as reported (absolute in every fixture).
+    pub path: String,
+    /// The change kind (`add`, `modify`, …), verbatim from the wire.
+    pub kind: String,
+    /// New content or unified diff text, when reported.
+    pub diff: String,
+}
+
 /// One transcript item carried by `item/started` / `item/completed`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
@@ -96,6 +120,8 @@ pub enum Item {
         id: String,
         /// The prompt text.
         text: String,
+        /// The echoed image references, in order.
+        attachments: Vec<CodexAttachment>,
     },
     /// A `reasoning` trace: summaries joined (empty in every fixture).
     Reasoning {
@@ -114,6 +140,41 @@ pub enum Item {
         status: String,
         /// Process exit code, when reported.
         exit_code: Option<i64>,
+        /// The completed run's captured output (`aggregatedOutput`):
+        /// what the card body renders. `None` while running or when the
+        /// server reports none.
+        aggregated_output: Option<String>,
+    },
+    /// A `fileChange`: the agent's edit, with per-file diffs.
+    FileChange {
+        /// The wire item id (`exec-…`, shared with the approval lane).
+        id: String,
+        /// Wire status (`inProgress`, `completed`, …).
+        status: String,
+        /// The changed files, in wire order.
+        changes: Vec<FileChangeEntry>,
+    },
+    /// A `subAgentActivity` marker: a delegated agent's lifecycle
+    /// (`started`, `interacted`, …) on its own thread (`agentThreadId`),
+    /// at a path (`agentPath`, e.g. `/root/read_notes`).
+    SubAgentActivity {
+        /// The wire item id (`call_…`).
+        id: String,
+        /// The lifecycle kind (`started`, `interacted`, …).
+        kind: String,
+        /// The delegated agent's path, shown on the card.
+        agent_path: String,
+    },
+    /// A `collabAgentToolCall`: agent-to-agent plumbing (the observed
+    /// `wait` tool). Carried for the transcript; the delegation itself is
+    /// the `subAgentActivity` card.
+    CollabAgentToolCall {
+        /// The wire item id (`call_…`).
+        id: String,
+        /// The tool name (`wait`, …).
+        tool: String,
+        /// Wire status (`inProgress`, `completed`, …).
+        status: String,
     },
     /// An item kind this decoder does not know. Carried, not dropped.
     Other {
@@ -201,6 +262,18 @@ pub enum Notification {
         turn_id: String,
         /// Total vs last buckets plus the context window.
         usage: TokenUsage,
+    },
+    /// `turn/diff/updated`: the turn's working-tree diff as a unified
+    /// patch. Carried (so frame counts balance and the shape stays
+    /// pinned); the per-file chip counts come from the `fileChange`
+    /// items themselves, never parsed out of this turn-scoped text.
+    TurnDiff {
+        /// The owning thread.
+        thread_id: String,
+        /// The owning turn.
+        turn_id: String,
+        /// The unified diff text.
+        diff: String,
     },
     /// `account/rateLimits/updated`: the money guard's feed, pushed
     /// unprompted. Kept raw: the fold only needs presence, not fields.
@@ -342,6 +415,48 @@ fn strings_joined(value: &Value) -> String {
     }
 }
 
+/// The image references inside a `userMessage`'s content: `localImage`
+/// parts carry a `path`, `image` parts a `url`. Text parts are not
+/// attachments — [`text_parts`] already joins those.
+fn attachments_from(content: &Value) -> Vec<CodexAttachment> {
+    let parts = content.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    parts
+        .iter()
+        .filter_map(|part| {
+            let part_type = part.get("type").and_then(Value::as_str)?;
+            let reference = match part_type {
+                "localImage" => part.get("path")?.as_str()?,
+                "image" => part.get("url")?.as_str()?,
+                _ => return None,
+            };
+            let name = reference.rsplit('/').next().unwrap_or(reference).to_owned();
+            Some(CodexAttachment { name, path: reference.to_owned() })
+        })
+        .collect()
+}
+
+fn file_changes_from(item: &Value) -> Vec<FileChangeEntry> {
+    item.get("changes")
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .map(|change| FileChangeEntry {
+                    path: change.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    kind: change
+                        .get("kind")
+                        .and_then(|kind| {
+                            kind.get("type").and_then(Value::as_str).or_else(|| kind.as_str())
+                        })
+                        .unwrap_or("")
+                        .to_owned(),
+                    diff: change.get("diff").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn decode_item(item: &Value) -> Item {
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     let id = str_field(item, "id");
@@ -350,6 +465,10 @@ fn decode_item(item: &Value) -> Item {
         "userMessage" => Item::UserMessage {
             id,
             text: item.get("content").map(text_parts).unwrap_or_default(),
+            attachments: item
+                .get("content")
+                .map(attachments_from)
+                .unwrap_or_default(),
         },
         "reasoning" => {
             let mut text = item.get("summary").map(strings_joined).unwrap_or_default();
@@ -361,6 +480,25 @@ fn decode_item(item: &Value) -> Item {
             command: str_field(item, "command"),
             status: str_field(item, "status"),
             exit_code: item.get("exitCode").and_then(Value::as_i64),
+            aggregated_output: item
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        },
+        "fileChange" => Item::FileChange {
+            id,
+            status: str_field(item, "status"),
+            changes: file_changes_from(item),
+        },
+        "subAgentActivity" => Item::SubAgentActivity {
+            id,
+            kind: str_field(item, "kind"),
+            agent_path: str_field(item, "agentPath"),
+        },
+        "collabAgentToolCall" => Item::CollabAgentToolCall {
+            id,
+            tool: str_field(item, "tool"),
+            status: str_field(item, "status"),
         },
         other => Item::Other { item_type: other.to_owned(), id },
     }
@@ -441,6 +579,11 @@ fn decode_notification(method: &str, params: &Value) -> Notification {
             thread_id: thread(),
             turn_id: turn(),
             usage: params.get("tokenUsage").map(usage_from).unwrap_or_default(),
+        },
+        "turn/diff/updated" => Notification::TurnDiff {
+            thread_id: thread(),
+            turn_id: turn(),
+            diff: str_field(params, "diff"),
         },
         "account/rateLimits/updated" => {
             Notification::RateLimitsUpdated { params: params.clone() }
@@ -534,13 +677,16 @@ pub fn decode_envelope(line: &str) -> Result<(Direction, Frame), DecodeError> {
 }
 
 impl Item {
-    /// The wire item id (`msg_…`, `exec-…`, …).
+    /// The wire item id (`msg_…`, `exec-…`, `call_…`, …).
     pub fn id(&self) -> &str {
         match self {
             Item::AgentMessage { id, .. }
             | Item::UserMessage { id, .. }
             | Item::Reasoning { id, .. }
             | Item::CommandExecution { id, .. }
+            | Item::FileChange { id, .. }
+            | Item::SubAgentActivity { id, .. }
+            | Item::CollabAgentToolCall { id, .. }
             | Item::Other { id, .. } => id,
         }
     }
@@ -552,6 +698,9 @@ impl Item {
             Item::UserMessage { .. } => "userMessage",
             Item::Reasoning { .. } => "reasoning",
             Item::CommandExecution { .. } => "commandExecution",
+            Item::FileChange { .. } => "fileChange",
+            Item::SubAgentActivity { .. } => "subAgentActivity",
+            Item::CollabAgentToolCall { .. } => "collabAgentToolCall",
             Item::Other { .. } => "other",
         }
     }
@@ -563,7 +712,19 @@ impl Item {
             Item::AgentMessage { text, .. }
             | Item::UserMessage { text, .. }
             | Item::Reasoning { text, .. } => text,
-            Item::CommandExecution { .. } | Item::Other { .. } => "",
+            Item::CommandExecution { .. }
+            | Item::FileChange { .. }
+            | Item::SubAgentActivity { .. }
+            | Item::CollabAgentToolCall { .. }
+            | Item::Other { .. } => "",
+        }
+    }
+
+    /// The echoed image references, for user messages; empty otherwise.
+    pub fn attachments(&self) -> &[CodexAttachment] {
+        match self {
+            Item::UserMessage { attachments, .. } => attachments,
+            _ => &[],
         }
     }
 
@@ -578,7 +739,9 @@ impl Item {
     /// The wire `status` for command executions; empty otherwise.
     pub fn status(&self) -> &str {
         match self {
-            Item::CommandExecution { status, .. } => status,
+            Item::CommandExecution { status, .. }
+            | Item::FileChange { status, .. }
+            | Item::CollabAgentToolCall { status, .. } => status,
             _ => "",
         }
     }
@@ -588,6 +751,46 @@ impl Item {
         match self {
             Item::CommandExecution { exit_code, .. } => *exit_code,
             _ => None,
+        }
+    }
+
+    /// The captured output, for command executions; `None` otherwise.
+    pub fn aggregated_output(&self) -> Option<&str> {
+        match self {
+            Item::CommandExecution { aggregated_output, .. } => aggregated_output.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The changed files, for file changes; empty otherwise.
+    pub fn changes(&self) -> &[FileChangeEntry] {
+        match self {
+            Item::FileChange { changes, .. } => changes,
+            _ => &[],
+        }
+    }
+
+    /// The delegated agent's path, for sub-agent activity; empty otherwise.
+    pub fn agent_path(&self) -> &str {
+        match self {
+            Item::SubAgentActivity { agent_path, .. } => agent_path,
+            _ => "",
+        }
+    }
+
+    /// The lifecycle kind, for sub-agent activity; empty otherwise.
+    pub fn activity_kind(&self) -> &str {
+        match self {
+            Item::SubAgentActivity { kind, .. } => kind,
+            _ => "",
+        }
+    }
+
+    /// The tool name, for collab agent tool calls; empty otherwise.
+    pub fn tool(&self) -> &str {
+        match self {
+            Item::CollabAgentToolCall { tool, .. } => tool,
+            _ => "",
         }
     }
 }
@@ -603,6 +806,7 @@ impl Notification {
             | Notification::ItemStarted { thread_id, .. }
             | Notification::ItemCompleted { thread_id, .. }
             | Notification::AgentMessageDelta { thread_id, .. }
+            | Notification::TurnDiff { thread_id, .. }
             | Notification::TokenUsage { thread_id, .. } => Some(thread_id),
             Notification::McpStatus { thread_id, .. }
             | Notification::ServerRequestResolved { thread_id, .. } => thread_id.as_deref(),
@@ -621,6 +825,7 @@ impl Notification {
             | Notification::ItemStarted { turn_id, .. }
             | Notification::ItemCompleted { turn_id, .. }
             | Notification::AgentMessageDelta { turn_id, .. }
+            | Notification::TurnDiff { turn_id, .. }
             | Notification::TokenUsage { turn_id, .. } => Some(turn_id),
             _ => None,
         }
@@ -685,6 +890,14 @@ impl Notification {
             _ => None,
         }
     }
+
+    /// The unified diff text, for `turn/diff/updated`.
+    pub fn turn_diff(&self) -> Option<&str> {
+        match self {
+            Notification::TurnDiff { diff, .. } => Some(diff),
+            _ => None,
+        }
+    }
 }
 
 impl Frame {
@@ -712,12 +925,128 @@ mod tests {
 
     #[test]
     fn every_fixture_frame_decodes_without_error() {
-        for name in ["basic.jsonl", "approval.jsonl", "interrupt.jsonl"] {
+        for name in [
+            "basic.jsonl",
+            "approval.jsonl",
+            "interrupt.jsonl",
+            "edit.jsonl",
+            "read-search.jsonl",
+            "thinking.jsonl",
+            "todo.jsonl",
+            "subagent.jsonl",
+            "approval-default.jsonl",
+            "error.jsonl",
+            "image.jsonl",
+        ] {
             for (index, line) in fixture_lines(name).iter().enumerate() {
                 decode_envelope(line)
                     .unwrap_or_else(|error| panic!("{name}:{index}: {error}"));
             }
         }
+    }
+
+    fn completed_items(name: &str) -> Vec<crate::frame::Item> {
+        fixture_lines(name)
+            .iter()
+            .filter_map(|line| decode_envelope(line).ok())
+            .filter_map(|(_, frame)| match frame {
+                Frame::Notification(Notification::ItemCompleted { item, .. }) => Some(item),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn command_execution_carries_aggregated_output() {
+        // `read-search.jsonl`: the completed run reports its captured
+        // output beside the exit code. An arm that drops it renders the
+        // defect-2 card: exit 0, empty body.
+        let execs: Vec<_> = completed_items("read-search.jsonl")
+            .into_iter()
+            .filter(|item| item.kind() == "commandExecution")
+            .collect();
+        assert_eq!(execs.len(), 1);
+        assert_eq!(
+            execs[0].aggregated_output(),
+            Some("hello\nworld\n./data.txt:3:gamma\n")
+        );
+        assert_eq!(execs[0].exit_code(), Some(0));
+    }
+
+    #[test]
+    fn file_change_decodes_with_per_file_diffs() {
+        // `edit.jsonl`: one addition carrying the new file's content.
+        let changes: Vec<_> = completed_items("edit.jsonl")
+            .into_iter()
+            .filter(|item| item.kind() == "fileChange")
+            .collect();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status(), "completed");
+        assert_eq!(
+            changes[0].changes(),
+            &[FileChangeEntry {
+                path: "/tmp/w4b/work/greet-codex.txt".into(),
+                kind: "add".into(),
+                diff: "hello there\nbye\n".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn sub_agent_activity_and_collab_call_decode() {
+        // `subagent.jsonl`: the delegation markers the fold cards.
+        let items = completed_items("subagent.jsonl");
+        let activities: Vec<_> =
+            items.iter().filter(|item| item.kind() == "subAgentActivity").collect();
+        assert_eq!(activities.len(), 2);
+        assert!(activities.iter().any(|item| item.agent_path() == "/root/read_notes"
+            && item.activity_kind() == "started"));
+        assert!(activities.iter().any(|item| item.agent_path() == "/root"
+            && item.activity_kind() == "interacted"));
+        let collabs: Vec<_> =
+            items.iter().filter(|item| item.kind() == "collabAgentToolCall").collect();
+        assert_eq!(collabs.len(), 1);
+        assert_eq!(collabs[0].tool(), "wait");
+        assert_eq!(collabs[0].status(), "completed");
+    }
+
+    #[test]
+    fn local_image_decodes_to_an_attachment() {
+        // `image.jsonl`: the server echoes the submission with the image
+        // reference (`localImage` + path) beside the text — never bytes.
+        let users: Vec<_> = completed_items("image.jsonl")
+            .into_iter()
+            .filter(|item| item.kind() == "userMessage")
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert_eq!(
+            users[0].attachments(),
+            &[CodexAttachment {
+                name: "tiny.png".into(),
+                path: "/tmp/w4b/work/tiny.png".into(),
+            }]
+        );
+        assert!(users[0].text().contains("three words"));
+    }
+
+    #[test]
+    fn turn_diff_decodes_and_carries_the_patch() {
+        // `edit.jsonl`: the turn-scoped unified diff is carried, not
+        // rendered — the per-file chips come from the `fileChange` item.
+        let diffs: Vec<_> = fixture_lines("edit.jsonl")
+            .iter()
+            .filter_map(|line| decode_envelope(line).ok())
+            .filter_map(|(_, frame)| match frame {
+                Frame::Notification(notification) => notification.turn_diff().map(str::to_owned),
+                _ => None,
+            })
+            .collect();
+        assert!(!diffs.is_empty(), "the fixture must carry turn/diff/updated");
+        assert!(
+            diffs.iter().all(|diff| diff.contains("greet-codex.txt")
+                && diff.contains("+hello there")),
+            "unified patch for the edited file: {diffs:?}"
+        );
     }
 
     #[test]

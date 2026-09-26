@@ -52,6 +52,11 @@ pub fn base_argv() -> Vec<String> {
         "host",
         "--permission-prompt-tool",
         "stdio",
+        // The prompt echo (W4b, live probe 2026-09-26): without this the
+        // child never re-emits the submitted text and the transcript has
+        // no user bubble — the turn shows the tool card and reply but not
+        // what the person sent. The fold renders the echo as `Turn::User`.
+        "--replay-user-messages",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -157,18 +162,44 @@ pub fn argv_for_fork(
     }
 }
 
-/// One user turn as NDJSON for the child's stdin (doc §1 input frame).
-/// Text parts join in order; images have no probed input shape and are
-/// refused by dispatch before they reach here.
+/// One text-only user turn as NDJSON for the child's stdin (doc §1
+/// input frame). Text parts join in order; use [`user_content_line`] when
+/// the turn carries images.
 pub fn user_input_line(text: &str) -> String {
+    user_content_line(text, &[])
+}
+
+/// One user turn carrying text plus image parts, as NDJSON for the
+/// child's stdin. Probed live 2026-09-26 (`fixtures/claude-code/image.jsonl`):
+/// an `image` content part with a base64 `source` is accepted and echoed
+/// back by `--replay-user-messages` with its media type and length.
+pub fn user_content_line(text: &str, images: &[ImageInput]) -> String {
+    let mut content = vec![serde_json::json!({"type": "text", "text": text})];
+    for image in images {
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": image.base64_data,
+            },
+        }));
+    }
     serde_json::json!({
         "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-        },
+        "message": {"role": "user", "content": content},
     })
     .to_string()
+}
+
+/// One image part of an outgoing user turn: base64 bytes plus their media
+/// type, exactly what the seam's `SubmissionPart::Image` carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageInput {
+    /// Base64-encoded bytes.
+    pub base64_data: String,
+    /// e.g. `"image/png"`.
+    pub media_type: String,
 }
 
 #[cfg(test)]
@@ -262,5 +293,67 @@ mod tests {
         assert!(!line.contains('\n'));
         let value: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
         assert_eq!(value.get("type").and_then(|t| t.as_str()), Some("user"));
+    }
+
+    #[test]
+    fn base_lane_replays_user_messages() {
+        // Defect 1: without this flag the child never re-emits the
+        // submitted text and the transcript has no user bubble.
+        assert!(
+            base_argv().contains(&"--replay-user-messages".to_owned()),
+            "every launcher echoes the prompt"
+        );
+        for argv in [
+            argv_for_open("req-1", None, None, None).argv,
+            argv_for_resume("sess-9", None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None).argv,
+        ] {
+            assert!(
+                argv.contains(&"--replay-user-messages".to_owned()),
+                "open/resume/fork all echo: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_turns_carry_base64_source_parts() {
+        // Probed live (`fixtures/claude-code/image.jsonl`): the `image`
+        // part with a base64 `source` is what the CLI accepts.
+        let line = user_content_line("see this", &[ImageInput {
+            base64_data: "aGVsbG8=".into(),
+            media_type: "image/png".into(),
+        }]);
+        assert!(!line.contains('\n'));
+        let value: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
+        let content = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(serde_json::Value::as_array)
+            .expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[1].get("type").and_then(serde_json::Value::as_str),
+            Some("image")
+        );
+        let source = content[1].get("source").expect("image source");
+        assert_eq!(
+            source.get("media_type").and_then(serde_json::Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            source.get("data").and_then(serde_json::Value::as_str),
+            Some("aGVsbG8=")
+        );
+        // And the text-only spelling is unchanged: one text part.
+        let plain: serde_json::Value =
+            serde_json::from_str(&user_input_line("Say A1")).expect("one JSON object");
+        assert_eq!(
+            plain
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
     }
 }

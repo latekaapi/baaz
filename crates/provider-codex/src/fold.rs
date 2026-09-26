@@ -55,11 +55,131 @@
 
 use std::collections::{HashMap, HashSet};
 
-use aui_protocol::{Block, Delta, ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta};
+use aui_protocol::{
+    Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat, Hunk,
+    ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
+};
 use provider::ProviderEvent;
 use serde_json::Value;
 
-use crate::frame::{Frame, Notification, TokenCounts};
+use crate::frame::{FileChangeEntry, Frame, Notification, TokenCounts};
+
+/// The model's command with the runner unwrapped: the server wraps what
+/// the model asked for in `/bin/zsh -lc '<inner>'` (single- or
+/// double-quoted), and the card titles the inner command — the wrapper
+/// is how it ran, not what was asked. Unwraps one layer only; anything
+/// else renders verbatim, and the full wrapper stays in the fixture.
+fn display_command(command: &str) -> String {
+    let inner = command
+        .strip_prefix("/bin/zsh -lc ")
+        .map(str::trim)
+        .unwrap_or(command);
+    if inner.len() >= 2 {
+        let bytes = inner.as_bytes();
+        if (bytes[0] == b'\'' && bytes[inner.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[inner.len() - 1] == b'"')
+        {
+            return inner[1..inner.len() - 1].to_owned();
+        }
+    }
+    inner.to_owned()
+}
+
+/// The `+N/−N` chip counts over one `fileChange` item's own change
+/// entries: `add` entries count their new-content lines; anything else
+/// counts unified-diff `+`/`-` lines (`+++`/`---` headers skipped).
+/// `files` is the entry count, never a line count.
+fn file_change_stat(changes: &[FileChangeEntry]) -> DiffStat {
+    let mut added: u64 = 0;
+    let mut removed: u64 = 0;
+    for change in changes {
+        if change.kind == "add" {
+            added += change.diff.lines().count() as u64;
+            continue;
+        }
+        for line in change.diff.lines() {
+            if let Some(rest) = line.strip_prefix('+') {
+                if !rest.starts_with('+') {
+                    added += 1;
+                }
+            } else if let Some(rest) = line.strip_prefix('-') {
+                if !rest.starts_with('-') {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    DiffStat { added, removed, files: changes.len() as u64 }
+}
+
+/// One display hunk per change entry: `add` content as all-addition
+/// rows, unified diffs parsed into add/del/context rows (line numbers
+/// run from 1 within the entry — display order, not file offsets).
+fn file_change_diff(path: &str, changes: &[FileChangeEntry]) -> Diff {
+    let mut hunks = Vec::new();
+    let mut total_added: u32 = 0;
+    let mut total_removed: u32 = 0;
+    for change in changes {
+        let mut lines = Vec::new();
+        let mut new_no: u32 = 1;
+        let mut old_no: u32 = 1;
+        if change.kind == "add" {
+            for line in change.diff.lines() {
+                lines.push(DiffLine {
+                    kind: DiffKind::Add,
+                    old_no: None,
+                    new_no: Some(new_no),
+                    text: line.to_owned(),
+                });
+                new_no += 1;
+                total_added += 1;
+            }
+        } else {
+            for line in change.diff.lines() {
+                if let Some(rest) = line.strip_prefix('+') {
+                    if rest.starts_with('+') {
+                        continue;
+                    }
+                    lines.push(DiffLine {
+                        kind: DiffKind::Add,
+                        old_no: None,
+                        new_no: Some(new_no),
+                        text: rest.to_owned(),
+                    });
+                    new_no += 1;
+                    total_added += 1;
+                } else if let Some(rest) = line.strip_prefix('-') {
+                    if rest.starts_with('-') {
+                        continue;
+                    }
+                    lines.push(DiffLine {
+                        kind: DiffKind::Del,
+                        old_no: Some(old_no),
+                        new_no: None,
+                        text: rest.to_owned(),
+                    });
+                    old_no += 1;
+                    total_removed += 1;
+                } else {
+                    let text = line.strip_prefix(' ').unwrap_or(line);
+                    lines.push(DiffLine {
+                        kind: DiffKind::Context,
+                        old_no: Some(old_no),
+                        new_no: Some(new_no),
+                        text: text.to_owned(),
+                    });
+                    old_no += 1;
+                    new_no += 1;
+                }
+            }
+        }
+        hunks.push(Hunk {
+            header: format!("@@ {} @@", change.path),
+            lines,
+        });
+    }
+    Diff { path: path.to_owned(), hunks, added: total_added, removed: total_removed }
+}
 
 /// The money guard's feed: the latest `account/rateLimits/updated` push, kept
 /// beside the seam's account shape.
@@ -310,7 +430,17 @@ impl CodexFold {
                         turn: Turn::User {
                             id: item.id().to_owned(),
                             text: item.text().to_owned(),
-                            attachments: Vec::new(),
+                            attachments: item
+                                .attachments()
+                                .iter()
+                                .map(|attachment| Attachment {
+                                    name: attachment.name.clone(),
+                                    kind: AttachmentKind::Image,
+                                    size_bytes: None,
+                                    meta: Some(attachment.path.clone()),
+                                    state: UploadState::Ready,
+                                })
+                                .collect(),
                             mentions: Vec::new(),
                             timestamp: None,
                         },
@@ -353,14 +483,84 @@ impl CodexFold {
                         id: item.id().to_owned(),
                         kind: ToolKind::Shell,
                         verb: "Ran".into(),
-                        target: item.command().to_owned(),
+                        target: display_command(item.command()),
                         status,
                         duration_ms: None,
                         body: ToolBody::Shell {
-                            output_lines: Vec::new(),
+                            output_lines: item
+                                .aggregated_output()
+                                .map(|output| {
+                                    output.lines().map(str::to_owned).collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
                             exit_code,
                             live: false,
                         },
+                        diff_stat: None,
+                    },
+                });
+            }
+            "fileChange" => {
+                self.ensure_assistant(turn_id, &mut deltas);
+                // Same fail-closed status rule as shell: only a clean
+                // `completed` reads as success.
+                let status = match item.status() {
+                    "inProgress" => ToolStatus::Running,
+                    "completed" => ToolStatus::Success,
+                    "declined" => ToolStatus::Cancelled,
+                    _unknown => ToolStatus::Error,
+                };
+                let changes = item.changes();
+                let is_write = !changes.is_empty()
+                    && changes.iter().all(|change| change.kind == "add");
+                let (kind, verb) = if is_write {
+                    (ToolKind::Write, "Wrote")
+                } else {
+                    (ToolKind::Edit, "Edited")
+                };
+                let path = changes
+                    .first()
+                    .map(|change| change.path.clone())
+                    .unwrap_or_default();
+                let stat = file_change_stat(changes);
+                deltas.push(Delta::BlockAdded {
+                    turn_id: turn_id.to_owned(),
+                    block: Block::ToolCall {
+                        id: item.id().to_owned(),
+                        kind,
+                        verb: verb.into(),
+                        target: path.clone(),
+                        status,
+                        duration_ms: None,
+                        body: ToolBody::Edit { diff: file_change_diff(&path, changes) },
+                        diff_stat: Some(stat),
+                    },
+                });
+            }
+            "subAgentActivity" => {
+                self.ensure_assistant(turn_id, &mut deltas);
+                // One marker, one card: markers carry distinct item ids
+                // even for one delegation (`subagent.jsonl` shows a
+                // `started` and an `interacted` under different ids), so
+                // joining them by id would forge what the wire keeps
+                // apart. The nested transcript itself is never delivered
+                // on this turn's items, so the card carries the
+                // delegation — never a forged transcript.
+                let status = if item.activity_kind() == "started" {
+                    ToolStatus::Running
+                } else {
+                    ToolStatus::Success
+                };
+                deltas.push(Delta::BlockAdded {
+                    turn_id: turn_id.to_owned(),
+                    block: Block::ToolCall {
+                        id: item.id().to_owned(),
+                        kind: ToolKind::SubAgent,
+                        verb: "Delegated".into(),
+                        target: item.agent_path().to_owned(),
+                        status,
+                        duration_ms: None,
+                        body: ToolBody::SubAgent { turns: Vec::new() },
                         diff_stat: None,
                     },
                 });
@@ -541,7 +741,18 @@ mod tests {
     /// The next test pins that survival instead.
     #[test]
     fn delta_and_completed_lanes_agree() {
-        for name in ["basic.jsonl", "approval.jsonl"] {
+        for name in [
+            "basic.jsonl",
+            "approval.jsonl",
+            "edit.jsonl",
+            "read-search.jsonl",
+            "thinking.jsonl",
+            "todo.jsonl",
+            "subagent.jsonl",
+            "approval-default.jsonl",
+            "error.jsonl",
+            "image.jsonl",
+        ] {
             let lines = fixture_lines(name);
             let (_, whole) = replay(name);
             let stripped: Vec<String> =
@@ -717,6 +928,299 @@ mod tests {
             })
             .collect();
         assert_eq!(thinking, ["plannedtrace"], "summary plus content, joined");
+    }
+
+    fn shell_cards(deltas: &[Delta]) -> Vec<(ToolStatus, String, Vec<String>, Option<i32>)> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Shell,
+                            status,
+                            target,
+                            body: ToolBody::Shell { output_lines, exit_code, .. },
+                            ..
+                        },
+                    ..
+                } => Some((
+                    *status,
+                    target.clone(),
+                    output_lines.clone(),
+                    *exit_code,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assistant_texts(deltas: &[Delta]) -> Vec<String> {
+        texts(deltas).iter().map(|text| (*text).to_owned()).collect()
+    }
+
+    /// Defects 2 and 3, pinned on `read-search.jsonl`: the card titles
+    /// the model's inner command (no `/bin/zsh -lc` wrapper) and shows
+    /// the run's captured output. Removing either fold arm fails this:
+    /// the wrapper strip or the `aggregatedOutput` join.
+    #[test]
+    fn shell_card_shows_inner_command_with_captured_output() {
+        let (_, deltas) = replay("read-search.jsonl");
+        let shells = shell_cards(&deltas);
+        assert_eq!(shells.len(), 1, "one executed command, one card");
+        let (status, target, output, exit_code) = &shells[0];
+        assert_eq!(*status, ToolStatus::Success);
+        assert!(
+            !target.contains("/bin/zsh"),
+            "the wrapper stays out of the title: {target}"
+        );
+        assert!(target.contains("rg"), "the model's command survives: {target}");
+        assert_eq!(output, &["hello", "world", "./data.txt:3:gamma"]);
+        assert_eq!(*exit_code, Some(0));
+    }
+
+    /// The `error.jsonl` turn: a failed run folds to an `Error` card
+    /// carrying the daemon's own stderr, and the agent's reaction still
+    /// renders.
+    #[test]
+    fn failed_command_folds_to_error_card_with_output() {
+        let (_, deltas) = replay("error.jsonl");
+        let shells = shell_cards(&deltas);
+        assert_eq!(shells.len(), 1);
+        let (status, target, output, _) = &shells[0];
+        assert_eq!(*status, ToolStatus::Error);
+        assert_eq!(target, "ls /nonexistent-dir-xyz-123");
+        assert!(output.iter().any(|line| line.contains("No such file")),
+            "stderr survives: {output:?}");
+        assert!(
+            assistant_texts(&deltas).iter().any(|text| text == "DONE"),
+            "the turn still answers"
+        );
+    }
+
+    /// `edit.jsonl`: the `fileChange` item folds to a Wrote card with a
+    /// `+2/−0` chip, and the wire shows the approval that preceded it —
+    /// a `fileChange/requestApproval` the client accepted, then the
+    /// completed change. The fold cards the change; the request itself is
+    /// the pump's routing business (answered, never rendered).
+    #[test]
+    fn file_change_folds_to_write_card_with_diff_stat() {
+        let (_, deltas) = replay("edit.jsonl");
+        let writes: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Write,
+                            target,
+                            status,
+                            body: ToolBody::Edit { diff },
+                            diff_stat,
+                            ..
+                        },
+                    ..
+                } => Some((target.clone(), *status, diff.clone(), *diff_stat)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes.len(), 1, "one file change, one card");
+        let (target, status, diff, stat) = &writes[0];
+        assert!(target.ends_with("greet-codex.txt"), "target: {target}");
+        assert_eq!(*status, ToolStatus::Success);
+        let stat = stat.expect("the chip counts ride the card");
+        assert_eq!((stat.added, stat.removed, stat.files), (2, 0, 1));
+        assert_eq!((diff.added, diff.removed), (2, 0));
+        // The approval round trip is on the wire beside it.
+        let lines = fixture_lines("edit.jsonl");
+        let asked = lines.iter().filter(|line| {
+            line.contains("item/fileChange/requestApproval")
+                && line.contains("server->client")
+        }).count();
+        let accepted = lines.iter().filter(|line| {
+            line.contains("client->server")
+                && line.contains("\"decision\"")
+                && line.contains("\"accept\"")
+        }).count();
+        assert_eq!((asked, accepted), (1, 1), "asked once, accepted once");
+    }
+
+    /// `thinking.jsonl`: the client turn carries the `effort: "max"`
+    /// override, and the per-turn footer counts the reasoning the wire
+    /// reports. The reasoning items themselves arrive empty — no thinking
+    /// text exists on this wire even at max effort — so no `Thinking`
+    /// block is forged from nothing.
+    #[test]
+    fn thinking_effort_recorded_and_reasoning_counted() {
+        let lines = fixture_lines("thinking.jsonl");
+        let effort = lines
+            .iter()
+            .filter_map(|line| decode_envelope(line).ok())
+            .filter_map(|(_, frame)| match frame {
+                Frame::Request { method, params, .. } => {
+                    (method == "turn/start").then(|| {
+                        params.get("effort").and_then(Value::as_str).map(str::to_owned)
+                    }).flatten()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(effort, ["max"], "the override rides turn/start");
+        let (_, deltas) = replay("thinking.jsonl");
+        let thinking =
+            deltas.iter().filter(|d| matches!(d, Delta::BlockAdded { block: Block::Thinking { .. }, .. })).count();
+        assert_eq!(thinking, 0, "empty reasoning items render nothing");
+        let finished: Vec<&TurnMeta> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnFinished { meta, .. } => Some(meta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 1);
+        assert!(
+            finished[0].reasoning_tokens > 0,
+            "the wire's reasoning count reaches the footer"
+        );
+    }
+
+    /// `todo.jsonl`: Codex keeps its plan in prose — `Todo update: …`
+    /// agent messages — with no structured plan item on the wire, so the
+    /// fold renders the updates as text and mints no `Todo` card.
+    #[test]
+    fn todo_updates_arrive_as_prose_without_structured_items() {
+        let (_, deltas) = replay("todo.jsonl");
+        let rendered = assistant_texts(&deltas).join("\n");
+        for item in ["List files", "Read notes.txt", "Summarize contents"] {
+            assert!(rendered.contains(item), "progress over {item}: {rendered:.200}…");
+        }
+        assert!(
+            deltas.iter().all(|delta| !matches!(
+                delta, Delta::BlockAdded { block: Block::Todo { .. }, .. }
+            )),
+            "no structured plan surface, no Todo card"
+        );
+    }
+
+    /// `subagent.jsonl`: both delegation markers card as `SubAgent`
+    /// (paths on the card), and the `wait` plumbing rides a Generic card
+    /// — carried, never dropped.
+    #[test]
+    fn subagent_delegations_card_with_paths() {
+        let (_, deltas) = replay("subagent.jsonl");
+        let agents: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::SubAgent, target, status, ..
+                        },
+                    ..
+                } => Some((target.clone(), *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(agents.len(), 2, "one card per marker: {agents:?}");
+        assert!(agents.iter().any(|(target, status)| target == "/root/read_notes"
+            && *status == ToolStatus::Running));
+        assert!(agents.iter().any(|(target, status)| target == "/root"
+            && *status == ToolStatus::Success));
+        let generics = deltas
+            .iter()
+            .filter(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, .. }, .. }
+                if kind == "collabAgentToolCall"
+            ))
+            .count();
+        assert_eq!(generics, 1, "the wait call is carried generically");
+    }
+
+    /// `approval-default.jsonl`: the default profile asks before writing
+    /// outside the workspace — the request carries the model's own
+    /// reason — and after the accept the write completes and the turn
+    /// answers.
+    #[test]
+    fn approval_default_flow_asks_then_runs() {
+        let lines = fixture_lines("approval-default.jsonl");
+        let reasons: Vec<String> = lines
+            .iter()
+            .filter_map(|line| decode_envelope(line).ok())
+            .filter_map(|(_, frame)| match frame {
+                Frame::Request { method, params, .. } => {
+                    (method == "item/commandExecution/requestApproval").then(|| {
+                        params.get("reason").and_then(Value::as_str).map(str::to_owned)
+                    }).flatten()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0].contains("outside-codex.txt"),
+            "the model's own justification: {}",
+            reasons[0]
+        );
+        let (_, deltas) = replay("approval-default.jsonl");
+        let shells = shell_cards(&deltas);
+        assert!(
+            shells.iter().any(|(status, target, _, _)| {
+                *status == ToolStatus::Success && target.contains("outside-codex.txt")
+            }),
+            "the approved write ran: {shells:?}"
+        );
+        assert!(
+            assistant_texts(&deltas).iter().any(|text| text == "DONE"),
+            "the turn still answers"
+        );
+    }
+
+    /// `image.jsonl`: the echoed `localImage` reference folds into the
+    /// user turn as an image attachment, and the turn answers.
+    #[test]
+    fn image_part_accepted_as_user_attachment() {
+        let (_, deltas) = replay("image.jsonl");
+        let users: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::User { text, attachments, .. } } => {
+                    Some((text.clone(), attachments.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].0.contains("three words"));
+        assert_eq!(users[0].1.len(), 1, "the attached PNG rides the turn");
+        assert_eq!(users[0].1[0].name, "tiny.png");
+        assert!(matches!(users[0].1[0].kind, AttachmentKind::Image));
+        assert!(
+            assistant_texts(&deltas).iter().any(|text| text.contains("DONE")),
+            "the turn saw the image and answered"
+        );
+    }
+
+    /// `turn/diff/updated` is carried, never rendered: folding those
+    /// lines alone yields no deltas.
+    #[test]
+    fn turn_diff_moves_no_transcript() {
+        let lines = fixture_lines("edit.jsonl");
+        let mut fold = CodexFold::new();
+        let mut deltas = Vec::new();
+        let mut count = 0;
+        for line in &lines {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            if matches!(
+                frame,
+                Frame::Notification(Notification::TurnDiff { .. })
+            ) {
+                count += 1;
+                deltas.extend(fold.apply(&frame));
+            }
+        }
+        assert!(count > 0, "the fixture must carry turn/diff/updated");
+        assert!(deltas.is_empty(), "carried, never rendered");
     }
 
     /// Approval fixture command executions fold to one shell card, completed
