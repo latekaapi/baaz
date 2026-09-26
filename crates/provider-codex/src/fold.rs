@@ -44,6 +44,11 @@
 //!   back to a spinner).
 //! * `item/completed` with anything else: a [`Block::Generic`] carrying the
 //!   wire kind, status, and text — carried, never dropped.
+//! * `turn/plan/updated`: the turn's plan as one [`Block::Todo`] — the same
+//!   plan/todo block Claude Code's TodoWrite produces. The first update
+//!   adds the card; every later update rewrites it wholesale at the same
+//!   block index (replace, never append), so four updates still render
+//!   one card showing the latest statuses.
 //! * `turn/completed`: one [`Delta::TurnFinished`] per started turn, keyed on
 //!   the wire turn id, with per-turn tokens from the `last` bucket (never the
 //!   cumulative `total`) and `cost_usd: 0.0` — the neutral unknown default,
@@ -57,7 +62,8 @@ use std::collections::{HashMap, HashSet};
 
 use aui_protocol::{
     Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat, Hunk,
-    ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
+    ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    UploadState,
 };
 use provider::ProviderEvent;
 use serde_json::Value;
@@ -65,24 +71,110 @@ use serde_json::Value;
 use crate::frame::{FileChangeEntry, Frame, Notification, TokenCounts};
 
 /// The model's command with the runner unwrapped: the server wraps what
-/// the model asked for in `/bin/zsh -lc '<inner>'` (single- or
+/// the model asked for in `<shell> -c '<inner>'` (single- or
 /// double-quoted), and the card titles the inner command — the wrapper
 /// is how it ran, not what was asked. Unwraps one layer only; anything
 /// else renders verbatim, and the full wrapper stays in the fixture.
 fn display_command(command: &str) -> String {
-    let inner = command
-        .strip_prefix("/bin/zsh -lc ")
-        .map(str::trim)
-        .unwrap_or(command);
-    if inner.len() >= 2 {
-        let bytes = inner.as_bytes();
-        if (bytes[0] == b'\'' && bytes[inner.len() - 1] == b'\'')
-            || (bytes[0] == b'"' && bytes[inner.len() - 1] == b'"')
-        {
-            return inner[1..inner.len() - 1].to_owned();
+    let Some(arg) = shell_wrapper_arg(command) else { return command.to_owned() };
+    // The wrapper takes exactly one argument: anything that is not one
+    // shell word (extra words, trailing garbage, unterminated quotes) is
+    // not a clean wrapper invocation — leave the whole command verbatim
+    // rather than guessing which half the model meant.
+    parse_shell_word(arg)
+        .filter(|(_, rest)| rest.is_empty())
+        .map(|(word, _)| word)
+        .unwrap_or_else(|| command.to_owned())
+}
+
+/// The single argument of a `-c` wrapper invocation, when `command` is
+/// one: `<shell> (-c | -lc) <arg>` where the shell is `sh`, `bash`, or
+/// `zsh` with an optional `/bin/` prefix. A command that merely starts
+/// with a shell path but is not a `-c` wrapper (`/bin/zsh script.sh`)
+/// is not unwrapped.
+fn shell_wrapper_arg(command: &str) -> Option<&str> {
+    // Longest prefixes first so `/bin/` never shadows the bare name.
+    for shell in ["/bin/bash", "/bin/zsh", "/bin/sh", "bash", "zsh", "sh"] {
+        for flag in ["-lc", "-c"] {
+            let prefix = format!("{shell} {flag} ");
+            if let Some(arg) = command.strip_prefix(prefix.as_str()) {
+                return Some(arg);
+            }
         }
     }
-    inner.to_owned()
+    None
+}
+
+/// Parse one POSIX shell word from the front of `input`, returning the
+/// word's value plus the unparsed remainder. Single quotes carry
+/// everything literally (so `'it'\''s'` is `it's`); inside double quotes
+/// a backslash escapes only `"`, `\`, `$`, `` ` ``, and newline (so
+/// `"a\"b"` is `a"b`); elsewhere a backslash escapes the next byte.
+/// An unterminated quote is not a word — `None`.
+fn parse_shell_word(input: &str) -> Option<(String, &str)> {
+    let mut word = String::new();
+    let mut chars = input.char_indices().peekable();
+    match chars.peek() {
+        Some((_, first)) if !first.is_whitespace() => {}
+        _ => return None,
+    }
+    // The unparsed remainder: the whitespace run where the word stopped,
+    // or empty when the word ran to the end of the string.
+    let mut rest = "";
+    while let Some((index, char)) = chars.next() {
+        if char.is_whitespace() {
+            rest = &input[index..];
+            break;
+        }
+        match char {
+            '\'' => {
+                let mut closed = false;
+                for (_, char) in chars.by_ref() {
+                    if char == '\'' {
+                        closed = true;
+                        break;
+                    }
+                    word.push(char);
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            '"' => {
+                let mut closed = false;
+                let mut escaped = false;
+                for (_, char) in chars.by_ref() {
+                    if escaped {
+                        // Inside double quotes a backslash escapes only
+                        // `"`, `\`, `$`, backtick, and newline; otherwise
+                        // both bytes survive.
+                        if !matches!(char, '"' | '\\' | '$' | '`' | '\n') {
+                            word.push('\\');
+                        }
+                        word.push(char);
+                        escaped = false;
+                    } else if char == '\\' {
+                        escaped = true;
+                    } else if char == '"' {
+                        closed = true;
+                        break;
+                    } else {
+                        word.push(char);
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            '\\' => {
+                // A trailing backslash escapes nothing: not a word.
+                let (_, next) = chars.next()?;
+                word.push(next);
+            }
+            char => word.push(char),
+        }
+    }
+    Some((word, rest))
 }
 
 /// The `+N/−N` chip counts over one `fileChange` item's own change
@@ -241,6 +333,17 @@ impl AccountSnapshot {
     }
 }
 
+/// The wire's plan step status vocabulary onto the transcript's: the
+/// same mapping Claude Code's TodoWrite uses, so both providers render
+/// one plan/todo block shape.
+fn map_plan_state(status: &str) -> TodoState {
+    match status {
+        "inProgress" => TodoState::Running,
+        "completed" => TodoState::Done,
+        _ => TodoState::Pending,
+    }
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: turn id → started turn (many
@@ -253,6 +356,13 @@ pub struct CodexFold {
     thread_id: Option<String>,
     model: Option<String>,
     assistant_started: HashSet<String>,
+    /// Blocks added per turn, in order: the index a later `turn/plan/updated`
+    /// rewrites wholesale (replace, never append).
+    turn_blocks: HashMap<String, usize>,
+    /// Turn id → the block index its plan card was added at, while the
+    /// turn is open. One card per turn no matter how many updates refine
+    /// it — the same shape Claude Code's TodoWrite produces.
+    plan_cards: HashMap<String, usize>,
     /// The fallback lane: streamed `item/agentMessage/delta` text per
     /// `(turn_id, item_id)`, in first-seen order. Dropped when an
     /// `item/completed` closes the item; flushed at `turn/completed` when
@@ -341,6 +451,7 @@ impl CodexFold {
                 Vec::new()
             }
             Notification::ItemCompleted { .. } => self.apply_item(notification),
+            Notification::PlanUpdated { .. } => self.apply_plan(notification),
             Notification::AgentMessageDelta { turn_id, item_id, delta, .. } => {
                 self.push_delta(turn_id, item_id, delta);
                 Vec::new()
@@ -363,6 +474,47 @@ impl CodexFold {
                 },
             });
         }
+    }
+
+    /// Push one block onto `turn_id` and count it: the count is the block
+    /// index a later `turn/plan/updated` addresses for its wholesale
+    /// rewrite. Only additions consume indices — updates address them.
+    fn push_block(&mut self, turn_id: &str, block: Block, deltas: &mut Vec<Delta>) {
+        deltas.push(Delta::BlockAdded { turn_id: turn_id.to_owned(), block });
+        *self.turn_blocks.entry(turn_id.to_owned()).or_default() += 1;
+    }
+
+    /// Refine the turn's plan card from one `turn/plan/updated`: the first
+    /// update opens the card, every later update rewrites it wholesale —
+    /// replace, never append — so four updates still render one card. An
+    /// empty plan opens nothing (but still clears a card already open).
+    fn apply_plan(&mut self, notification: &Notification) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let (Some(turn_id), Some(plan)) =
+            (notification.turn_id(), notification.plan()) else { return deltas };
+        let block = Block::Todo {
+            items: plan
+                .iter()
+                .map(|step| TodoItem {
+                    label: step.step.clone(),
+                    state: map_plan_state(&step.status),
+                    elapsed_ms: None,
+                })
+                .collect(),
+        };
+        if let Some(block_index) = self.plan_cards.get(turn_id).copied() {
+            deltas.push(Delta::BlockUpdated {
+                turn_id: turn_id.to_owned(),
+                block_index,
+                block,
+            });
+        } else if !plan.is_empty() {
+            self.ensure_assistant(turn_id, &mut deltas);
+            let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+            self.push_block(turn_id, block, &mut deltas);
+            self.plan_cards.insert(turn_id.to_owned(), block_index);
+        }
+        deltas
     }
 
     /// Accumulate one streamed chunk on the fallback lane. Nothing renders
@@ -419,10 +571,11 @@ impl CodexFold {
                     return deltas;
                 }
                 self.ensure_assistant(turn_id, &mut deltas);
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::Text { text: item.text().to_owned(), streaming: false },
-                });
+                self.push_block(
+                    turn_id,
+                    Block::Text { text: item.text().to_owned(), streaming: false },
+                    &mut deltas,
+                );
             }
             "userMessage" => {
                 if self.user_started.insert(item.id().to_owned()) {
@@ -452,15 +605,16 @@ impl CodexFold {
                     return deltas;
                 }
                 self.ensure_assistant(turn_id, &mut deltas);
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::Thinking {
+                self.push_block(
+                    turn_id,
+                    Block::Thinking {
                         text: item.text().to_owned(),
                         elapsed_ms: 0,
                         summary: None,
                         state: ThinkingState::Done,
                     },
-                });
+                    &mut deltas,
+                );
             }
             "commandExecution" => {
                 self.ensure_assistant(turn_id, &mut deltas);
@@ -477,9 +631,9 @@ impl CodexFold {
                     (_unknown, _) => ToolStatus::Error,
                 };
                 let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::ToolCall {
+                self.push_block(
+                    turn_id,
+                    Block::ToolCall {
                         id: item.id().to_owned(),
                         kind: ToolKind::Shell,
                         verb: "Ran".into(),
@@ -498,7 +652,8 @@ impl CodexFold {
                         },
                         diff_stat: None,
                     },
-                });
+                    &mut deltas,
+                );
             }
             "fileChange" => {
                 self.ensure_assistant(turn_id, &mut deltas);
@@ -523,9 +678,9 @@ impl CodexFold {
                     .map(|change| change.path.clone())
                     .unwrap_or_default();
                 let stat = file_change_stat(changes);
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::ToolCall {
+                self.push_block(
+                    turn_id,
+                    Block::ToolCall {
                         id: item.id().to_owned(),
                         kind,
                         verb: verb.into(),
@@ -535,7 +690,8 @@ impl CodexFold {
                         body: ToolBody::Edit { diff: file_change_diff(&path, changes) },
                         diff_stat: Some(stat),
                     },
-                });
+                    &mut deltas,
+                );
             }
             "subAgentActivity" => {
                 self.ensure_assistant(turn_id, &mut deltas);
@@ -551,9 +707,9 @@ impl CodexFold {
                 } else {
                     ToolStatus::Success
                 };
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::ToolCall {
+                self.push_block(
+                    turn_id,
+                    Block::ToolCall {
                         id: item.id().to_owned(),
                         kind: ToolKind::SubAgent,
                         verb: "Delegated".into(),
@@ -563,18 +719,20 @@ impl CodexFold {
                         body: ToolBody::SubAgent { turns: Vec::new() },
                         diff_stat: None,
                     },
-                });
+                    &mut deltas,
+                );
             }
             _ => {
                 self.ensure_assistant(turn_id, &mut deltas);
-                deltas.push(Delta::BlockAdded {
-                    turn_id: turn_id.to_owned(),
-                    block: Block::Generic {
+                self.push_block(
+                    turn_id,
+                    Block::Generic {
                         kind: item.kind().to_owned(),
                         status: item.status().to_owned(),
                         text: item.text().to_owned(),
                     },
-                });
+                    &mut deltas,
+                );
             }
         }
         deltas
@@ -590,10 +748,11 @@ impl CodexFold {
         // buffer, so this cannot double-render the normal path.
         for text in self.take_pending_delta_text(turn_id) {
             self.ensure_assistant(turn_id, &mut deltas);
-            deltas.push(Delta::BlockAdded {
-                turn_id: turn_id.to_owned(),
-                block: Block::Text { text, streaming: false },
-            });
+            self.push_block(
+                turn_id,
+                Block::Text { text, streaming: false },
+                &mut deltas,
+            );
         }
         if !self.assistant_started.contains(turn_id) {
             // No content lane ever opened this turn and no deltas survived
@@ -979,6 +1138,50 @@ mod tests {
         assert_eq!(*exit_code, Some(0));
     }
 
+    /// The `-c` wrapper unwraps one layer with POSIX quote rules, across
+    /// the shells the server uses — and nothing else. Removing the parser
+    /// (or the shell list) fails this: the naive first/last-byte strip
+    /// mangles the `'\''` idiom and `\"` escapes.
+    #[test]
+    fn display_command_unwraps_one_wrapper_layer_with_posix_quotes() {
+        // Single-quoted inner, all known shells and both flags.
+        for command in [
+            "/bin/zsh -lc 'rg --files -g foo'",
+            "/bin/bash -lc 'rg --files -g foo'",
+            "bash -lc 'rg --files -g foo'",
+            "sh -c 'rg --files -g foo'",
+            "zsh -lc 'rg --files -g foo'",
+            "/bin/zsh -c 'rg --files -g foo'",
+        ] {
+            assert_eq!(display_command(command), "rg --files -g foo", "{command}");
+        }
+        // The standard '\'' idiom: quote, end, escaped quote, quote.
+        assert_eq!(
+            display_command("/bin/zsh -lc 'echo it'\\''s fine'"),
+            "echo it's fine"
+        );
+        // Double-quote escapes unescape; other backslashes survive.
+        assert_eq!(display_command("/bin/zsh -lc \"rg \\\"quoted\\\"\""), "rg \"quoted\"");
+        assert_eq!(
+            display_command("/bin/zsh -lc \"rg --files -g '*'\""),
+            "rg --files -g '*'"
+        );
+        // Anything else renders verbatim: a command that merely starts
+        // with a shell path but is not a `-c` wrapper, an unknown shell,
+        // a bare command, extra words after the single argument, and an
+        // unterminated quote (not a word, never guessed).
+        for verbatim in [
+            "/bin/zsh script.sh",
+            "/bin/zsh -l",
+            "dash -c 'ls'",
+            "ls /nonexistent-dir-xyz-123",
+            "/bin/zsh -lc 'a' 'b'",
+            "/bin/zsh -lc 'unterminated",
+        ] {
+            assert_eq!(display_command(verbatim), verbatim, "{verbatim}");
+        }
+    }
+
     /// The `error.jsonl` turn: a failed run folds to an `Error` card
     /// carrying the daemon's own stderr, and the agent's reaction still
     /// renders.
@@ -1084,22 +1287,78 @@ mod tests {
         );
     }
 
-    /// `todo.jsonl`: Codex keeps its plan in prose — `Todo update: …`
-    /// agent messages — with no structured plan item on the wire, so the
-    /// fold renders the updates as text and mints no `Todo` card.
+    /// `todo.jsonl`: four `turn/plan/updated` frames fold to exactly one
+    /// `Todo` card — added once, rewritten wholesale on each later update
+    /// — ending with the final statuses. Removing the plan arm fails this:
+    /// the updates would render as prose alone with no structured block.
     #[test]
-    fn todo_updates_arrive_as_prose_without_structured_items() {
+    fn todo_plan_updates_replace_one_structured_card() {
         let (_, deltas) = replay("todo.jsonl");
-        let rendered = assistant_texts(&deltas).join("\n");
-        for item in ["List files", "Read notes.txt", "Summarize contents"] {
-            assert!(rendered.contains(item), "progress over {item}: {rendered:.200}…");
-        }
-        assert!(
-            deltas.iter().all(|delta| !matches!(
-                delta, Delta::BlockAdded { block: Block::Todo { .. }, .. }
-            )),
-            "no structured plan surface, no Todo card"
+        let added: Vec<&Vec<TodoItem>> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Todo { items }, .. } => Some(items),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(added.len(), 1, "four updates, one card: {deltas:?}");
+        assert_eq!(
+            added[0].iter().map(|item| item.label.as_str()).collect::<Vec<_>>(),
+            ["List files", "Read notes.txt", "Summarize contents"]
         );
+        // The added card is the FIRST update's snapshot: "List files" is
+        // already running, the rest still pending.
+        assert_eq!(
+            added[0].iter().map(|item| item.state).collect::<Vec<_>>(),
+            [TodoState::Running, TodoState::Pending, TodoState::Pending]
+        );
+        let updated: Vec<(&str, usize, &Vec<TodoItem>)> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated {
+                    turn_id,
+                    block_index,
+                    block: Block::Todo { items },
+                } => Some((turn_id.as_str(), *block_index, items)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updated.len(), 3, "updates two through four rewrite: {updated:?}");
+        // The LAST rewrite carries the latest statuses: every step done.
+        // Replace, never append — the first update's `inProgress` is gone,
+        // not stacked under a second card.
+        assert!(
+            updated[2].2.iter().all(|item| item.state == TodoState::Done),
+            "the final update completes every step: {:?}",
+            updated[2].2
+        );
+        // Every rewrite addresses the added card's own index on the same
+        // turn: a rewrite anywhere else would fork the transcript.
+        let added_at = deltas
+            .iter()
+            .position(|delta| {
+                matches!(delta, Delta::BlockAdded { block: Block::Todo { .. }, .. })
+            })
+            .expect("the card is added");
+        let (added_turn, added_index) = match &deltas[added_at] {
+            Delta::BlockAdded { turn_id, .. } => (turn_id.clone(), {
+                deltas[..added_at]
+                    .iter()
+                    .filter(|delta| {
+                        matches!(delta, Delta::BlockAdded { turn_id: id, .. } if id == turn_id)
+                    })
+                    .count()
+            }),
+            _ => unreachable!(),
+        };
+        for (turn_id, block_index, _) in &updated {
+            assert_eq!(*turn_id, added_turn, "same turn");
+            assert_eq!(*block_index, added_index, "same card");
+        }
+        // The model's own progress prose still renders beside the card —
+        // the card structures the plan, it does not silence the commentary.
+        let rendered = assistant_texts(&deltas).join("\n");
+        assert!(rendered.contains("DONE"), "the turn still answers");
     }
 
     /// `subagent.jsonl`: both delegation markers card as `SubAgent`

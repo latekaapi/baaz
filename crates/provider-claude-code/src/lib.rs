@@ -396,6 +396,36 @@ impl ClaudeCodeAdapter {
             .filter(|candidate| candidate.is_file())
     }
 
+    /// Best-effort resume seeding: mark every user echo uuid the stored
+    /// transcript already carries, so the resumed child's stream cannot
+    /// re-bubble history the adapter already showed. Returns the marked
+    /// count. Zero when the workspace is unknown, the slug directory is
+    /// absent, or the file is missing or unreadable — the same
+    /// honest-unavailable cases as [`Self::find_stored`] — in which case
+    /// no disk history exists to collide with, and the fold still
+    /// dedupes within the stream itself. A fresh adapter resuming
+    /// without a workspace cannot locate the file; that limit is
+    /// documented, never guessed around.
+    fn seed_history_echoes(&self, session_id: &str) -> usize {
+        let Some(path) = self.find_stored(session_id) else { return 0 };
+        let Ok(text) = std::fs::read_to_string(&path) else { return 0 };
+        let mut fold = self.fold.lock().expect("fold mutex");
+        let mut marked = 0;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(frame) = frame::decode_line(line) else { continue };
+            if let frame::Frame::UserText { uuid, .. } = frame {
+                if !uuid.is_empty() {
+                    fold.mark_user_echo_seen(&uuid);
+                    marked += 1;
+                }
+            }
+        }
+        marked
+    }
+
     fn stored_deltas(&self, session_id: &str) -> Result<Vec<Delta>, ProviderError> {
         let Some(path) = self.find_stored(session_id) else {
             return Err(ProviderError::Unavailable {
@@ -475,7 +505,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             }
             Command::ResumeSession { session_id, .. } => {
                 let launch = argv::argv_for_resume(&session_id, None, None, None);
-                self.spawn_launch(&launch)
+                let ack = self.spawn_launch(&launch)?;
+                // Best-effort resume seeding (see `seed_history_echoes`):
+                // history already shown must not bubble again off the
+                // resumed child's stream.
+                self.seed_history_echoes(&session_id);
+                Ok(ack)
             }
             Command::ForkSession { request_id, session_id, .. } => {
                 let launch = argv::argv_for_fork(&request_id, &session_id, None, None, None);
@@ -840,6 +875,54 @@ mod tests {
             "default relaunches flagless: {:?}",
             launch.argv
         );
+    }
+
+    #[test]
+    fn resume_seeding_marks_stored_user_echoes() {
+        // Offline: plant a stored transcript under a fake home and seed
+        // from it. The text echo's uuid marks; the tool-result frame (no
+        // bubble) and the torn line mark nothing. Unknown workspace marks
+        // nothing — honest unavailable, never a guess.
+        let home = std::env::temp_dir().join("cc-seed-test-home");
+        let workspace = std::env::temp_dir().join("cc-seed-test-work");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let resolved = crate::history::resolve_cwd(&workspace).expect("resolves");
+        let slug = crate::history::slug_for_cwd(&resolved);
+        let dir = home.join(".claude").join("projects").join(slug);
+        std::fs::create_dir_all(&dir).expect("slug dir");
+        std::fs::write(
+            dir.join("sess-9.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Say R1\"}]},\"session_id\":\"sess-9\",\"parent_tool_use_id\":null,\"uuid\":\"u-echo-1\"}\n\
+             {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_1\",\"type\":\"tool_result\",\"content\":\"ok\"}]},\"session_id\":\"sess-9\",\"uuid\":\"u-result-1\"}\n\
+             not json at all\n",
+        )
+        .expect("plant");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_home(home.clone())
+            .with_workspace(workspace.clone());
+        assert_eq!(adapter.seed_history_echoes("sess-9"), 1, "one echo marked");
+        // The marked echo renders nothing; an unmarked one still bubbles.
+        let echo = frame::decode_line(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Say R1\"}]},\"session_id\":\"sess-9\",\"parent_tool_use_id\":null,\"uuid\":\"u-echo-1\"}",
+        )
+        .expect("decodes");
+        let fresh = frame::decode_line(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Say R2\"}]},\"session_id\":\"sess-9\",\"parent_tool_use_id\":null,\"uuid\":\"u-echo-2\"}",
+        )
+        .expect("decodes");
+        {
+            let mut fold = adapter.fold.lock().expect("fold mutex");
+            assert!(fold.apply(&echo).is_empty(), "seeded history never re-bubbles");
+            assert_eq!(fold.apply(&fresh).len(), 1, "the new turn still bubbles");
+        }
+        // Missing file and unknown workspace: zero, honestly.
+        assert_eq!(adapter.seed_history_echoes("no-such-session"), 0);
+        let bare = ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(home.clone());
+        assert_eq!(bare.seed_history_echoes("sess-9"), 0, "no workspace, no guess");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

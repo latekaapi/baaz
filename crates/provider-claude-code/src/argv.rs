@@ -58,6 +58,12 @@ pub fn base_argv() -> Vec<String> {
         // child never re-emits the submitted text and the transcript has
         // no user bubble — the turn shows the tool card and reply but not
         // what the person sent. The fold renders the echo as `Turn::User`.
+        // Resume and fork keep the flag on purpose (W4d, live probe
+        // 2026-09-26, `resume-replay.jsonl`): a resumed child emits only
+        // the NEW turn's echo — no history replay — and a flagless resume
+        // emits no echo at all, so the post-resume turn would lose its
+        // bubble. History collisions are handled by uuid, not by dropping
+        // the flag: see `ClaudeFold::mark_user_echo_seen`.
         "--replay-user-messages",
     ]
     .into_iter()
@@ -328,7 +334,11 @@ mod tests {
     #[test]
     fn base_lane_replays_user_messages() {
         // Defect 1: without this flag the child never re-emits the
-        // submitted text and the transcript has no user bubble.
+        // submitted text and the transcript has no user bubble. That
+        // holds for resume too — a flagless resume emits no echo at all
+        // (probed live: the R4 turn answered with no user frame) — so
+        // resume and fork keep the flag; history collisions are handled
+        // by echo uuid, not by dropping it.
         assert!(
             base_argv().contains(&"--replay-user-messages".to_owned()),
             "every launcher echoes the prompt"

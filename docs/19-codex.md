@@ -271,3 +271,22 @@ expansions are redundant with the aggregate and are deliberately not committed.
 
 A drift is not a failure — it means the CLI moved. The gate's job is to make that
 a decision rather than a surprise.
+
+## 10. W4d — plan card and shell unwrap (from `todo.jsonl`)
+
+**Structured plans are a `Todo` card, not prose.** The turn carries four
+`turn/plan/updated` frames (`TurnPlanUpdatedNotification`: `threadId`,
+`turnId`, `plan[]` of `{step, status}` with `pending` / `inProgress` /
+`completed`), each superseding the last, beside the model's own `Todo
+update: …` prose. The fold renders the structured list as the same
+`Todo` block Claude Code's TodoWrite produces — first update adds the
+card, later updates rewrite it wholesale at the same block index, so
+four updates still render one card ending all-`Done`. The prose stays;
+the card structures the plan, it does not silence the commentary.
+
+**The shell card titles the inner command.** The server wraps the
+model's command as `<shell> -c '<inner>'` (`sh`, `bash`, `zsh`, with or
+without `/bin/`, `-c` or `-lc`); the fold unwraps one layer with POSIX
+single/double-quote rules (the `'\''` idiom, `\"` escapes) and leaves
+anything else — a bare command, a non-wrapper shell path, extra words,
+an unterminated quote — verbatim.
