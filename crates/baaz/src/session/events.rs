@@ -12,6 +12,13 @@ impl SessionView {
 
     /// Fold one wire event and react to the few that are more than transcript.
     pub fn apply(&mut self, event: MuseEvent, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            crate::baaz_log!(
+                "muse event refused: session {} rides the provider lane",
+                self.session_id
+            );
+            return;
+        }
         if let MuseEvent::Closed(_) = &event {
             cx.emit(SessionEvent::Closed);
             self.running = None;
