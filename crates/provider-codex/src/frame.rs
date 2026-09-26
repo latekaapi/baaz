@@ -91,6 +91,17 @@ pub struct CodexAttachment {
     pub path: String,
 }
 
+/// One step of the turn's plan, as `turn/plan/updated` reports it: the
+/// human step text plus the wire status (`pending`, `inProgress`,
+/// `completed` — see `TurnPlanStepStatus` in the v2 schema bundle).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanStep {
+    /// The step text (`step`).
+    pub step: String,
+    /// The wire status string, verbatim.
+    pub status: String,
+}
+
 /// One file change inside a `fileChange` item, as the wire describes it:
 /// a path, a change kind (`add`, …), and either the new file's content
 /// (for additions) or a unified diff (for modifications).
@@ -274,6 +285,19 @@ pub enum Notification {
         turn_id: String,
         /// The unified diff text.
         diff: String,
+    },
+    /// `turn/plan/updated`: the turn's structured plan — the same
+    /// plan/todo list Claude Code's TodoWrite produces, carried here as
+    /// steps. Each update replaces the whole list; the fold renders it
+    /// as one `Todo` card per turn, rewritten (never appended) per
+    /// update.
+    PlanUpdated {
+        /// The owning thread.
+        thread_id: String,
+        /// The owning turn.
+        turn_id: String,
+        /// The whole plan as last reported, in order.
+        plan: Vec<PlanStep>,
     },
     /// `account/rateLimits/updated`: the money guard's feed, pushed
     /// unprompted. Kept raw: the fold only needs presence, not fields.
@@ -585,6 +609,27 @@ fn decode_notification(method: &str, params: &Value) -> Notification {
             turn_id: turn(),
             diff: str_field(params, "diff"),
         },
+        "turn/plan/updated" => Notification::PlanUpdated {
+            thread_id: thread(),
+            turn_id: turn(),
+            plan: params
+                .get("plan")
+                .and_then(Value::as_array)
+                .map(|steps| {
+                    steps
+                        .iter()
+                        .map(|step| PlanStep {
+                            step: step.get("step").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                            status: step
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
         "account/rateLimits/updated" => {
             Notification::RateLimitsUpdated { params: params.clone() }
         }
@@ -807,6 +852,7 @@ impl Notification {
             | Notification::ItemCompleted { thread_id, .. }
             | Notification::AgentMessageDelta { thread_id, .. }
             | Notification::TurnDiff { thread_id, .. }
+            | Notification::PlanUpdated { thread_id, .. }
             | Notification::TokenUsage { thread_id, .. } => Some(thread_id),
             Notification::McpStatus { thread_id, .. }
             | Notification::ServerRequestResolved { thread_id, .. } => thread_id.as_deref(),
@@ -826,6 +872,7 @@ impl Notification {
             | Notification::ItemCompleted { turn_id, .. }
             | Notification::AgentMessageDelta { turn_id, .. }
             | Notification::TurnDiff { turn_id, .. }
+            | Notification::PlanUpdated { turn_id, .. }
             | Notification::TokenUsage { turn_id, .. } => Some(turn_id),
             _ => None,
         }
@@ -895,6 +942,14 @@ impl Notification {
     pub fn turn_diff(&self) -> Option<&str> {
         match self {
             Notification::TurnDiff { diff, .. } => Some(diff),
+            _ => None,
+        }
+    }
+
+    /// The whole reported plan, for `turn/plan/updated`.
+    pub fn plan(&self) -> Option<&[PlanStep]> {
+        match self {
+            Notification::PlanUpdated { plan, .. } => Some(plan),
             _ => None,
         }
     }

@@ -687,6 +687,7 @@ mod tests {
             "partial.jsonl",
             "mcp.jsonl",
             "resume.jsonl",
+            "resume-replay.jsonl",
             "bidi.jsonl",
             "edit.jsonl",
             "read-search.jsonl",

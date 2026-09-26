@@ -49,7 +49,7 @@
 //! * everything else: no deltas (`init` records identity; `rate_limit`
 //!   updates the account snapshot).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 
 use aui_protocol::{
@@ -477,10 +477,15 @@ pub struct ClaudeFold {
     /// `tool_use` ids of todo-list calls (TaskCreate/TaskUpdate/TodoWrite):
     /// their results refine the turn's todo card, never a tool card.
     todo_tool_ids: HashSet<String>,
-    /// Turn id → its todo card, while the turn is open.
-    todos: HashMap<String, TodoCard>,
+    /// Turn id → its todo card, while the turn is open. Ordered, so two
+    /// concurrent todo cards resolve deterministically: a `HashMap` here
+    /// made the fallback lookup (and the result fan-out below) pick
+    /// whichever card hashed first.
+    todos: BTreeMap<String, TodoCard>,
     /// `Agent` tool-use id → its nesting card, while the turn is open.
-    agents: HashMap<String, AgentCard>,
+    /// Ordered, so the turn-end flush renders concurrent subagents in
+    /// id order rather than hash order.
+    agents: BTreeMap<String, AgentCard>,
     /// Blocks already emitted per turn, so a second `assistant` frame with
     /// the same message id continues the index sequence (and a later
     /// `BlockUpdated` for a tool result addresses the right card).
@@ -777,6 +782,19 @@ impl ClaudeFold {
             }
         }
         deltas
+    }
+
+    /// Pre-mark one echo uuid as already rendered, without rendering it:
+    /// the resume path. History the adapter already showed carries the
+    /// same uuids the resumed child's stream repeats (proven live by
+    /// `resume-replay.jsonl`: every stored user entry shares its echo's
+    /// uuid), so a resumed session seeds these before the stream runs and
+    /// each user turn bubbles exactly once — history plus the new turn.
+    /// An empty uuid marks nothing: it could never match an echo.
+    pub fn mark_user_echo_seen(&mut self, uuid: &str) {
+        if !uuid.is_empty() {
+            self.user_echoes.insert(uuid.to_owned());
+        }
     }
 
     /// The echoed prompt (`--replay-user-messages`) as the person's own
@@ -1550,6 +1568,108 @@ mod tests {
         assert_eq!(users[0].1, 0, "no attachments on this turn");
     }
 
+    fn resume_segments() -> (Vec<String>, Vec<String>) {
+        // `resume-replay.jsonl` is two child runs concatenated: two turns,
+        // quit, resume, one more turn. The split is the resume's
+        // `SessionStart:resume` hook — everything before is history,
+        // everything after is the resumed child's stream.
+        let lines = fixture_lines("resume-replay.jsonl");
+        let at = lines
+            .iter()
+            .position(|line| line.contains("\"hook_name\":\"SessionStart:resume\""))
+            .expect("the resume run starts with its own SessionStart hook");
+        (lines[..at].to_vec(), lines[at..].to_vec())
+    }
+
+    fn user_texts(deltas: &[Delta]) -> Vec<&str> {
+        user_turns(deltas).iter().map(|(text, _)| *text).collect()
+    }
+
+    /// `resume-replay.jsonl` (captured live: two turns, quit, resume, one
+    /// more turn, all with `--replay-user-messages`): the folded session
+    /// shows each user turn exactly once — history plus the new turn.
+    #[test]
+    fn resume_replay_folds_each_user_turn_exactly_once() {
+        let (history, resumed) = resume_segments();
+        // The capture's own finding, pinned: the resumed child re-emits
+        // only the new turn. If a future CLI replays history on resume,
+        // this fails first — revisit the seeding, not the assertion.
+        let resumed_folded = fold_lines(&resumed);
+        let resumed_users = user_texts(&resumed_folded.1);
+        assert_eq!(resumed_users, ["Say R3"], "no history re-emitted: {resumed_users:?}");
+        // And the whole session — history plus the new turn — bubbles
+        // each prompt exactly once.
+        let mut all = history.clone();
+        all.extend(resumed.clone());
+        let folded = fold_lines(&all);
+        let users = user_texts(&folded.1);
+        assert_eq!(users, ["Say R1", "Say R2", "Say R3"], "each turn once: {users:?}");
+    }
+
+    /// The seeded resume: history the adapter already showed (the stored
+    /// transcript carries the same uuids the stream repeats — proven by
+    /// the capture) is pre-marked, so the resumed stream cannot bubble it
+    /// again, while the new turn still bubbles. Without the seeding the
+    /// repeated echo would mint a second bubble for the same uuid.
+    #[test]
+    fn resume_seed_drops_repeated_history_echo_keeps_new_turn() {
+        let (history, resumed) = resume_segments();
+        let history_uuids: Vec<String> = history
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .filter_map(|frame| match frame {
+                Frame::UserText { uuid, .. } => Some(uuid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(history_uuids.len(), 2, "history holds R1 and R2");
+        // Unseeded control: the resume stream bubbles its new turn — the
+        // flag is load-bearing here (a flagless resume emits no echo at
+        // all, probed live as R4). Seeding must not break this.
+        let unseeded_folded = fold_lines(&resumed);
+        let unseeded = user_texts(&unseeded_folded.1);
+        assert_eq!(unseeded, ["Say R3"], "the new turn bubbles: {unseeded:?}");
+        // Seeded with history: the repeated R1/R2 echoes (same uuids
+        // the stored transcript carries) render nothing — history was
+        // already shown elsewhere — while R3, never seen, still bubbles
+        // exactly once.
+        let mut fold = ClaudeFold::new();
+        for uuid in &history_uuids {
+            fold.mark_user_echo_seen(uuid);
+        }
+        fold.mark_user_echo_seen("");
+        let mut deltas = Vec::new();
+        for line in history.iter().chain(resumed.iter()) {
+            deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        assert_eq!(user_texts(&deltas), ["Say R3"], "seeded history stays silent");
+        // And when history already covers everything (the stored file
+        // written after the new turn landed), the repeated stream echoes
+        // bubble nothing at all — but the assistant's reply still renders.
+        let mut covered = ClaudeFold::new();
+        for line in resumed.iter() {
+            if let Ok(Frame::UserText { uuid, .. }) = decode_line(line) {
+                covered.mark_user_echo_seen(&uuid);
+            }
+        }
+        let mut redeltas = Vec::new();
+        for line in &resumed {
+            redeltas.extend(covered.apply(&decode_line(line).expect("decodes")));
+        }
+        assert!(
+            user_texts(&redeltas).is_empty(),
+            "covered history never re-bubbles"
+        );
+        let texts: Vec<&str> = redeltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block, .. } => text_of(block),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"R3"), "the reply survives the seeding: {texts:?}");
+    }
+
     /// Defect 4, pinned on `basic.jsonl` (a pre-replay capture, so no
     /// bubble is involved): the billed prompt is bare input PLUS both
     /// cache legs. `input_tokens` alone reads 10 for a ~30k prompt; the
@@ -1778,6 +1898,148 @@ mod tests {
             ))
             .expect("the card flushed");
         assert!(agent_update_at < finish_at, "nested work renders before the finish");
+    }
+
+    fn agent_tool_frame(message: &str, tool: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": message,
+                "content": [{
+                    "type": "tool_use",
+                    "id": tool,
+                    "name": "Agent",
+                    "input": {"subagent_type": "Explore", "description": tool},
+                }],
+            },
+            "session_id": "s",
+            "uuid": format!("u-{message}"),
+            "parent_tool_use_id": null,
+        })
+        .to_string()
+    }
+
+    fn nested_text_frame(tool: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": format!("{tool}-nested"), "content": [{"type": "text", "text": text}]},
+            "session_id": "s",
+            "uuid": format!("u-{tool}-nested"),
+            "parent_tool_use_id": tool,
+        })
+        .to_string()
+    }
+
+    /// Two (and three) concurrent subagents flush in tool-use id order,
+    /// not hash order: the turn-end pass used to iterate a `HashMap`, so
+    /// the card sequence depended on the hasher. Each id set below runs
+    /// in one fresh fold and must come out sorted — over many distinct
+    /// id sets a hash-ordered flush could not stay sorted every time.
+    #[test]
+    fn concurrent_subagents_flush_in_id_order() {
+        for tools in [
+            vec!["toolu_02", "toolu_01"],
+            vec!["toolu_zz", "toolu_aa"],
+            vec!["toolu_c", "toolu_a", "toolu_b"],
+            vec!["toolu_10", "toolu_9"],
+        ] {
+            let mut fold = ClaudeFold::new();
+            let mut deltas = Vec::new();
+            // One message opens every delegation; each agent buffers one
+            // nested text block; the turn ends with all agents still
+            // running, so the flush — not an agent result — renders them.
+            for &tool in &tools {
+                let line = agent_tool_frame("msg-1", tool);
+                deltas.extend(fold.apply(&decode_line(&line).expect("decodes")));
+            }
+            for &tool in &tools {
+                let line = nested_text_frame(tool, &format!("work from {tool}"));
+                deltas.extend(fold.apply(&decode_line(&line).expect("decodes")));
+            }
+            let end = decode_line(r#"{"type":"result","session_id":"s"}"#).expect("decodes");
+            deltas.extend(fold.apply(&end));
+            let flushed: Vec<&str> = deltas
+                .iter()
+                .filter_map(|delta| match delta {
+                    Delta::BlockUpdated {
+                        block: Block::ToolCall { id, kind: ToolKind::SubAgent, .. },
+                        ..
+                    } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let mut sorted = tools.clone();
+            sorted.sort_unstable();
+            assert_eq!(flushed, sorted, "flush order is id order for {tools:?}");
+        }
+    }
+
+    /// The todo-result fan-out resolves deterministically: two cards from
+    /// two turns hold the same provisional key (a replayed `tool_use` id),
+    /// and the creation result renames exactly the card whose message
+    /// sorts first. Over many message-id pairs a hash-ordered scan could
+    /// not pick the first-sorted card every time.
+    #[test]
+    fn todo_result_fanout_resolves_first_sorted_card() {
+        for (later, earlier) in [
+            ("msg-b", "msg-a"),
+            ("msg-2", "msg-10"),
+            ("msg-zzz", "msg-aaa"),
+            ("msg-k", "msg-c"),
+        ] {
+            let mut fold = ClaudeFold::new();
+            let mut deltas = Vec::new();
+            for message in [later, earlier] {
+                let line = serde_json::json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": message,
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "toolu_shared",
+                            "name": "TaskCreate",
+                            "input": {"subject": message},
+                        }],
+                    },
+                    "session_id": "s",
+                    "uuid": format!("u-{message}"),
+                    "parent_tool_use_id": null,
+                })
+                .to_string();
+                deltas.extend(fold.apply(&decode_line(&line).expect("decodes")));
+                // Close the turn so the next call opens a second card
+                // rather than refining the first.
+                let end =
+                    decode_line(r#"{"type":"result","session_id":"s"}"#).expect("decodes");
+                deltas.extend(fold.apply(&end));
+            }
+            let result = serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_shared",
+                        "content": "Task #7 created successfully: shared",
+                    }],
+                },
+                "session_id": "s",
+                "uuid": "u-result",
+                "parent_tool_use_id": null,
+            })
+            .to_string();
+            deltas.extend(fold.apply(&decode_line(&result).expect("decodes")));
+            let updated: Vec<&str> = deltas
+                .iter()
+                .filter_map(|delta| match delta {
+                    Delta::BlockUpdated { turn_id, block: Block::Todo { .. }, .. } => {
+                        Some(turn_id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(updated, [earlier], "the first-sorted card wins for {later}/{earlier}");
+        }
     }
 
     /// `thinking.jsonl` (sonnet, 8-puzzle): the thinking block folds, and

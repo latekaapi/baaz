@@ -146,6 +146,20 @@ already a counter-example** — the slug follows the *resolved* path. S3.1 must
 resolve the cwd before slugging and must degrade to `Unverified`, never to a
 wrong file, if the directory is absent.
 
+**Resume with `--replay-user-messages` (W4d, live probe 2026-09-26,
+`fixtures/claude-code/resume-replay.jsonl`).** Two turns, quit, resume,
+one more turn, all with the flag: the resumed child emits a fresh `init`
+and then only the new turn's echo (R3) — R1/R2 are never re-emitted,
+and a resume that submits nothing emits nothing at all. A flagless
+resume likewise emits no echo for its new turn (R4 answered with no
+user frame), so resume and fork keep the flag. The remaining collision
+is with history the adapter reads from disk: every stored user entry
+shares its echo's uuid (verified across all three turns), so
+`ResumeSession` seeds the live fold with the stored uuids and each user
+turn bubbles exactly once — history plus the new turn. Seeding is
+best-effort: without a known workspace the adapter cannot locate the
+file, and says so rather than guessing.
+
 ## 4. Client tools — the reason Stage 3 comes before Stage 4
 
 Evidenced end-to-end by `mcp.jsonl`. A stdio MCP server declared in a
