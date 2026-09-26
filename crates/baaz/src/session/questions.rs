@@ -53,12 +53,62 @@ impl SessionView {
         })
     }
 
+    /// The pending provider-lane question a block id names, read off the
+    /// folded transcript: the full prompt arrived as a delta, so its
+    /// options and labels are what the card drew. Matches the block's own
+    /// id, or a `turn:block` key suffixing it.
+    pub(super) fn provider_question(&self, block_id: &str) -> Option<Pending> {
+        if !self.is_provider_lane() {
+            return None;
+        }
+        let session = self.session()?;
+        for turn in session.turns.iter() {
+            let Turn::Assistant { blocks, .. } = turn else { continue };
+            for block in blocks {
+                if let Block::Question { id, multi, options, .. } = block {
+                    if id == block_id || block_id.split(':').next_back() == Some(id.as_str()) {
+                        return Some(Pending {
+                            input_id: id.clone(),
+                            question_id: id.clone(),
+                            multi: *multi,
+                            labels: options.iter().map(|o| o.label.clone()).collect(),
+                            questions: 1,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether the question lane may be attempted here: `Unavailable`
+    /// (Claude Code asks in prose — there is no question id to answer)
+    /// refuses with the registry's own reason, so a stray press banners
+    /// instead of sending a command the seam refuses.
+    fn check_questions_gate(&mut self, cx: &mut Context<Self>) -> bool {
+        if crate::providers::capability_state(self.provider_kind(), provider::Capability::Questions)
+            .allows_attempt()
+        {
+            return true;
+        }
+        let reason =
+            self.questions_gate().unwrap_or_else(|| "Questions are not available on this provider.".into());
+        self.banner = Some(reason);
+        self.banner_action = None;
+        cx.notify();
+        false
+    }
+
     /// "Continue" on a question.
     ///
     /// MSP settles the whole prompt at once and keys answers on option
     /// **labels**, so a request with several questions gathers its answers here
     /// and sends one `userInput/answer` when the last one is answered.
     pub fn answer_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            self.answer_provider_question(block_id, cx);
+            return;
+        }
         let Some(pending) = self.question(&block_id) else { return };
         let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
         if selected.is_empty() {
@@ -100,8 +150,64 @@ impl SessionView {
         cx.notify();
     }
 
+    /// "Continue" on a provider-lane question: one `AnswerQuestion` per
+    /// answered card, keyed on the options' labels like the muse lane.
+    /// The card settles only when the provider's delta answers it back —
+    /// never on this press.
+    fn answer_provider_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        if !self.check_questions_gate(cx) {
+            return;
+        }
+        let Some(pending) = self.provider_question(&block_id) else { return };
+        let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
+        if selected.is_empty() {
+            return;
+        }
+        let chosen: Vec<String> = selected.iter().filter_map(|i| pending.labels.get(*i).cloned()).collect();
+        let answer = provider::QuestionAnswer {
+            question_id: pending.question_id.clone(),
+            selected_label: (!pending.multi).then(|| chosen.first().cloned()).flatten(),
+            selected_labels: pending.multi.then(|| chosen.clone()),
+            free_text: None,
+            note: None,
+        };
+        let input_id = pending.input_id.clone();
+        let command = ProviderCommand::AnswerQuestion {
+            request_id: new_command_id(),
+            session_id: self.session_id.clone(),
+            question: input_id.clone(),
+            answers: vec![answer],
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
+            if let Err(error) = result {
+                this.report_provider_error(&error, cx);
+            }
+        });
+        cx.notify();
+    }
+
     /// "Skip": `userInput/cancel`.
     pub fn skip_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            if !self.check_questions_gate(cx) {
+                return;
+            }
+            let Some(pending) = self.provider_question(&block_id) else { return };
+            let input_id = pending.input_id.clone();
+            let command = ProviderCommand::DismissQuestion {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                question: input_id,
+                reason: Some("The person declined to answer.".to_owned()),
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         let Some(pending) = self.question(&block_id) else { return };
         let Some(client) = self.wire_client(cx) else { return };
         self.answers.remove(&pending.input_id);
@@ -133,6 +239,34 @@ impl SessionView {
     }
 
     pub(super) fn send_clarification(&mut self, block_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The provider lane clarifies with free text instead of the offered
+        // options — the "let me explain" path — gated like every question
+        // command.
+        if self.is_provider_lane() {
+            if !self.check_questions_gate(cx) {
+                return;
+            }
+            let Some(pending) = self.provider_question(block_id) else { return };
+            let content = self.clarify.read(cx).value().to_string();
+            if content.trim().is_empty() {
+                return;
+            }
+            self.clarify_open = None;
+            self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
+            let command = ProviderCommand::ClarifyQuestion {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                question: pending.input_id.clone(),
+                text: content,
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         let Some(pending) = self.question(block_id) else { return };
         let content = self.clarify.read(cx).value().to_string();
         if content.trim().is_empty() {

@@ -309,6 +309,33 @@ Each task compiles and leaves the app working; muse sessions stay on
   interrupt, decide, answer through `Provider::send` with gate UI.
   Globs: `crates/baaz/src/session/*.rs`, `crates/baaz/src/app.rs`.
   Verification: `cargo test -p baaz session::`.
+  - **Built 2026-09-26:** one dispatch point
+    (`SessionView::provider_send`, `crates/baaz/src/session/lane.rs`)
+    carries every provider-lane action as a `provider::Command` on the
+    background executor via `ProviderCall`, with `Unsupported` reasons
+    shown in the session banner, never swallowed. Submit sends text plus
+    composer images as `SubmissionPart::Image` with `display_text` verbatim
+    (queued-while-running submits, mirroring muse); steer sends
+    `SteerInput` with `expected_turn`; stop sends `InterruptTurn` with
+    `retract`; reclaim sends `ReclaimQueued` — all under the existing
+    `steer_gate`/`turn_gate`. Running state (`busy()`, stop button,
+    "working" indicator) derives from folded `TurnStarted`/`TurnFinished`
+    deltas plus the `SubmitInput` ack, so interrupted/failed turns settle
+    the view. Approval presses send `DecideApproval` (id, choice,
+    `stage_token`, feedback) by draining `take_external_outbox()`
+    oldest-first; the card waits for the delta/ack resolution
+    (no-optimism), re-parks on refusal, and `ListPending` is pulled on
+    every lane open. Questions answer/dismiss/clarify through their
+    commands where `questions_gate` allows; Claude Code's `Unavailable`
+    questions refuse with the registry reason (its asks stay prose).
+    `!` shell sends `RunShell` under the `SessionShell` gate; `retry_turn`
+    resubmits the remembered text through the same route. The tier banner
+    and its send gate are muse-lane-only (`set_tier_banner` refuses and
+    `render_tier_banner` hides on provider lanes). Verified by twelve
+    lane tests over a recording double in baaz test code (the provider
+    crate untouched): submit/steer/stop/decide/answer/shell/retry parts
+    and ids, pending-until-resolved cards, `Unsupported` reason surfacing,
+    and the tier-banner refusal — each failing with its arm removed.
 - **W4 — Model/effort/mode/shell/fork/compact on the lane.** Title: config and
   lifecycle commands per capability table. Globs:
   `crates/baaz/src/session/composer.rs`, `crates/baaz/src/session.rs`,

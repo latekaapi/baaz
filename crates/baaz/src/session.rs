@@ -935,10 +935,8 @@ impl SessionView {
     /// the provider lane to drain. The card waits on these; it never
     /// settles on the press.
     ///
-    /// No production caller yet: the lane drains this the moment it
-    /// lands, the way [`WireCall`](crate::wire::WireCall) sites drain
-    /// their own completions today.
-    #[allow(dead_code)]
+    /// [`SessionView::decide_external_approval`] drains this the moment a
+    /// press lands, oldest first, through the lane's dispatch point.
     pub fn take_external_outbox(&mut self) -> Vec<ProviderCommand> {
         std::mem::take(&mut self.external_outbox)
     }
@@ -1106,8 +1104,13 @@ impl SessionView {
     /// The billing guard's banner, or `None` when the login's tier is fine.
     ///
     /// Pushed by the application, which owns the probe: the session view knows
-    /// only what to draw and what to refuse.
+    /// only what to draw and what to refuse. Muse lanes only — a provider
+    /// session has no muse account behind it, so the banner never lands
+    /// there and never gates its send.
     pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            return;
+        }
         if self.tier_banner != banner {
             self.tier_banner = banner;
             cx.notify();

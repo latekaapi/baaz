@@ -308,6 +308,25 @@ impl SessionView {
             stage_token,
             feedback,
         });
+        // Drain the outbox oldest-first through the lane, now — this is the
+        // production caller `take_external_outbox` was waiting for. The
+        // card stays as the press left it ("sent, waiting"): only the
+        // server's resolution moves it, never the ack below.
+        for command in self.take_external_outbox() {
+            let approval = match &command {
+                ProviderCommand::DecideApproval { approval, .. } => approval.clone(),
+                _ => String::new(),
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    // The decision never landed: re-park the card so the
+                    // press can be tried again, and banner the reason —
+                    // an `Unsupported` refusal shows it verbatim.
+                    this.external_approvals.repark(&approval);
+                    this.report_provider_error(&error, cx);
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -315,10 +334,8 @@ impl SessionView {
     /// only thing that ever moves the card after the press. Returns
     /// whether anything was waiting under that id.
     ///
-    /// No production caller yet, for the same reason as
-    /// [`Self::inject_external_approval`]: the notification path calls
-    /// this when the provider lane lands.
-    #[allow(dead_code)]
+    /// The provider lane calls this when a landed delta settles the
+    /// approval block, and tests call it to stand in for that delta.
     pub fn resolve_external_approval(&mut self, approval_id: &str, cx: &mut Context<Self>) -> bool {
         let settled = self.external_approvals.resolve(approval_id);
         if settled {
