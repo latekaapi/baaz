@@ -1888,6 +1888,7 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
+            #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::OpenSession {
                 request_id: new_command_id(),
@@ -1895,6 +1896,10 @@ impl Harness {
                 model: None,
                 model_provider: None,
             })?;
+            // Tests drain after the send, synchronously on the test
+            // executor: no forwarding thread ever wakes the lane task.
+            #[cfg(test)]
+            let (provider, events) = conn::gate_sync(provider);
             match ack {
                 provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
                     provider_id,
@@ -1968,6 +1973,11 @@ impl Harness {
                 }
             })
             .map(|(provider, session_id, title)| {
+                // The send above already ran: drain it synchronously in
+                // tests so no forwarding thread wakes the lane task.
+                #[cfg(test)]
+                let (provider, events) = conn::gate_sync(provider);
+                #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
                 (provider, events, session_id, title)
             });
@@ -2184,6 +2194,9 @@ impl Harness {
                     let provider = provider::Provider::new(resumed);
                     let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())
                         .map_err(|error| error.to_string())?;
+                    #[cfg(test)]
+                    let (provider, events) = conn::gate_sync(provider);
+                    #[cfg(not(test))]
                     let (provider, events) = conn::gate(provider);
                     Ok((provider, events, session_id))
                 });
@@ -2228,8 +2241,14 @@ impl Harness {
         let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
+            #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())?;
+            // Tests drain after the resume, synchronously on the test
+            // executor: the replayed deltas are buffered before the lane
+            // starts, with no forwarding thread.
+            #[cfg(test)]
+            let (provider, events) = conn::gate_sync(provider);
             Ok(ProviderOpen {
                 provider_id,
                 provider,
@@ -2324,6 +2343,9 @@ impl Harness {
                         .map_err(|error| error.to_string())?;
                     match ack {
                         provider::Ack::Session { session_id, title, .. } => {
+                            #[cfg(test)]
+                            let (provider, events) = conn::gate_sync(provider);
+                            #[cfg(not(test))]
                             let (provider, events) = conn::gate(provider);
                             Ok((provider, events, session_id, title))
                         }
@@ -2369,6 +2391,7 @@ impl Harness {
         let workspace_bg = workspace.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
+            #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::ResumeSession {
                 request_id: new_command_id(),
@@ -2376,6 +2399,10 @@ impl Harness {
                 cursor: None,
                 metadata_only: false,
             })?;
+            // Tests drain after the resume, synchronously on the test
+            // executor: no forwarding thread wakes the lane task.
+            #[cfg(test)]
+            let (provider, events) = conn::gate_sync(provider);
             match ack {
                 provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {
                     provider_id,
@@ -4017,9 +4044,9 @@ mod tests {
         });
         // The restart: the harness forgets its views (active and parked
         // alike) and its rows, but the record the open wrote survives on
-        // disk. The forgotten views stay alive in this local: dropping
-        // them here would hang up their bridge threads mid-test, which
-        // gpui's test scheduler refuses (see `conn::forward`) — a real
+        // disk. The forgotten views stay alive in this local until
+        // teardown: lanes now bridge synchronously in tests (see
+        // `conn::gate_sync`), so dropping them is harmless — a real
         // restart drops them with the process instead.
         let mut forgotten = Vec::new();
         vc.update(|_, cx| {
@@ -4256,11 +4283,10 @@ mod tests {
         let open_id = vc.update(|_, cx| {
             baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
         });
-        // The deleted view stays alive in this local until teardown:
-        // dropping it here would hang up its bridge thread mid-test
-        // (see `conn::forward`); the harness-side removal below is what
-        // this proves, and the lane tests prove a dropped view shuts
-        // its child down.
+        // The deleted view stays alive in this local until teardown
+        // (lanes bridge synchronously in tests, see `conn::gate_sync`);
+        // the harness-side removal below is what this proves, and the
+        // lane tests prove a dropped view shuts its child down.
         let held = vc.update(|_, cx| baaz.read(cx).active.clone());
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.delete_provider_session(&open_id, cx));

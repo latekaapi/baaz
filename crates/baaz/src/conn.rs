@@ -152,6 +152,24 @@ pub(crate) fn gate(provider: Provider) -> (Provider, UnboundedReceiver<ProviderE
     (provider, events)
 }
 
+/// Test-only bridge: move whatever the provider has already emitted on its
+/// competing crossbeam stream into a futures channel, synchronously, with
+/// no OS thread. The caller drains *after* the send that produced the
+/// events, so everything the lane needs is already buffered before its
+/// drain task starts — and nothing wakes a foreground task from a foreign
+/// thread inside a `#[gpui::test]` (see `forward`). Production keeps the
+/// real bridge thread above; this never runs outside tests.
+#[cfg(test)]
+pub(crate) fn gate_sync(provider: Provider) -> (Provider, UnboundedReceiver<ProviderEvent>) {
+    let (tx, rx) = unbounded();
+    for event in provider.events().try_iter() {
+        if tx.unbounded_send(event).is_err() {
+            break;
+        }
+    }
+    (provider, rx)
+}
+
 /// Move every event from a competing crossbeam receiver onto a futures
 /// channel a gpui task can await. The thread ends when the sender side is
 /// dropped, which happens when the adapter (and, for the legacy stream, the
