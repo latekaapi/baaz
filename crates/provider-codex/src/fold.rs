@@ -2135,10 +2135,16 @@ mod tests {
     /// every ask.
     #[test]
     fn folding_an_approval_request_emits_the_card_never_the_tap() {
-        let line = fixture_lines("approval-default.jsonl")
+        let envelope = fixture_lines("approval-default.jsonl")
             .into_iter()
             .find(|line| line.contains("item/commandExecution/requestApproval"))
             .expect("the ask on the wire");
+        // The fixture records `{"_dir", "frame"}` envelopes; the live
+        // `step_line` folds bare JSON-RPC frames, so the test hands it
+        // the frame the envelope carries — feeding the envelope itself
+        // decodes to nothing and cards nothing.
+        let frame: Value = serde_json::from_str(&envelope).expect("fixture is JSON");
+        let line = frame.get("frame").expect("envelope carries a frame").to_string();
         let mut fold = CodexFold::new();
         let mut events = Vec::new();
         step_line(&mut fold, &line, &mut |event| events.push(event));
@@ -2178,11 +2184,14 @@ mod tests {
             .to_string()
         }
         fn completed(item: &str, status: &str) -> Frame {
+            // The wire always carries `exitCode` on a finished execution
+            // (see `approval-default.jsonl`); a completion without one is
+            // not a clean finish, and the fold fails it closed to `Error`.
             let line = serde_json::json!({
                 "method": "item/completed",
                 "params": {
                     "threadId": "th", "turnId": "t-1",
-                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": status},
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": status, "exitCode": 0},
                 },
             })
             .to_string();

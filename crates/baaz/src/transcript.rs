@@ -42,6 +42,33 @@ use gpui_kit::base::{h_flex, v_flex};
 /// library does not know whose command it is and this app does.
 pub const APPROVAL_TITLE: &str = "Allow Muse to run this command?";
 
+/// The verb a provider approval title asks with, per tool: the card asks
+/// what the tool would do, not what the last tool did.
+fn approval_verb(tool: &str) -> String {
+    match tool {
+        "Bash" => "run this command".to_owned(),
+        "Write" => "write this file".to_owned(),
+        "Edit" | "MultiEdit" => "edit this file".to_owned(),
+        "Read" => "read this file".to_owned(),
+        "WebFetch" => "fetch this URL".to_owned(),
+        "WebSearch" => "search the web".to_owned(),
+        "Permissions" => "change permissions".to_owned(),
+        other => format!("use {other}"),
+    }
+}
+
+/// The pending question for one approval card: the muse lane keeps
+/// [`APPROVAL_TITLE`], and a provider session names its provider
+/// ("Allow Claude Code to write this file?") with a verb that fits the
+/// tool. `None` is the muse lane — the host is only ever `Some` beside
+/// the fold's provider cards.
+pub fn approval_title(host: Option<&str>, tool: &str) -> String {
+    match host {
+        Some(host) => format!("Allow {host} to {}?", approval_verb(tool)),
+        None => APPROVAL_TITLE.to_owned(),
+    }
+}
+
 /// What a collapsible card needs from the view: which cards the person has
 /// toggled away from their default, and where a click on a header goes.
 ///
@@ -62,6 +89,11 @@ pub struct Folds {
     pub plan: Option<PlanHandler>,
     /// The live approval and question wiring. `None` renders both read-only.
     pub cards: Option<Cards>,
+    /// Whose command a pending approval card asks about: `Some` ("Claude
+    /// Code", "Codex") on a provider session, `None` on the muse lane
+    /// (which keeps [`APPROVAL_TITLE`]). The card title names the host
+    /// and a verb that fits the tool, per [`approval_title`].
+    pub approval_host: Option<String>,
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name the session it came from rather than its uuid.
     pub titles: Rc<HashMap<String, String>>,
@@ -608,6 +640,7 @@ fn block(
         Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds, cx),
         Block::Thinking { text, elapsed_ms, summary, state } => {
             thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
+                .unwrap_or_else(|| div().into_any_element())
         }
         Block::Activity { steps, summary, elapsed_ms, state } => {
             activity_card(id, key, steps, summary, *elapsed_ms, *state, folds)
@@ -789,6 +822,10 @@ fn code_run_row(
 
 /// The reasoning trace: a live one stays open, a finished one collapses to
 /// its summary until the person asks for it.
+///
+/// A trace with no text renders nothing: providers bill redacted thoughts
+/// (a signature with no utterance) that must never become an empty
+/// "Thought for 0.0 s" shell, on any lane.
 fn thinking_card(
     id: ElementId,
     key: &str,
@@ -797,7 +834,10 @@ fn thinking_card(
     summary: Option<&str>,
     state: ThinkingState,
     folds: &Folds,
-) -> AnyElement {
+) -> Option<AnyElement> {
+    if text.trim().is_empty() {
+        return None;
+    }
     let done = state == ThinkingState::Done;
     let mut card = thinking_block(id, text.to_owned(), elapsed(elapsed_ms), state)
         .expanded(folds.open(key, !done))
@@ -805,7 +845,7 @@ fn thinking_card(
     if let Some(summary) = summary {
         card = card.summary(summary.to_owned());
     }
-    card.into_any_element()
+    Some(card.into_any_element())
 }
 
 /// A run of small steps, folded to one line by default.
@@ -868,7 +908,7 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         return div().into_any_element();
     };
     let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
-        .title(APPROVAL_TITLE)
+        .title(approval_title(folds.approval_host.as_deref(), tool))
         .reason(reason.clone())
         .cwd(cwd.clone())
         .capabilities(capabilities.clone())
@@ -1534,5 +1574,78 @@ mod tests {
         assert_eq!(blocks[1].command, "npm test");
         assert!(runnable_blocks("Just prose, no fences.").is_empty());
         assert!(runnable_blocks("```rust\nlet x = 1;\n```\n").is_empty());
+    }
+
+    /// W7b: the pending question names the host and fits the tool. The
+    /// muse lane keeps its own title; a provider session asks in the
+    /// provider's name with the tool's verb. Drop a verb arm and its
+    /// line here names the fallback instead.
+    #[test]
+    fn approval_titles_name_the_provider_and_fit_the_tool() {
+        assert_eq!(approval_title(None, "Bash"), APPROVAL_TITLE);
+        assert_eq!(approval_title(None, "Write"), APPROVAL_TITLE);
+        assert_eq!(approval_title(Some("Claude Code"), "Bash"), "Allow Claude Code to run this command?");
+        assert_eq!(approval_title(Some("Claude Code"), "Write"), "Allow Claude Code to write this file?");
+        assert_eq!(approval_title(Some("Claude Code"), "Edit"), "Allow Claude Code to edit this file?");
+        assert_eq!(approval_title(Some("Claude Code"), "MultiEdit"), "Allow Claude Code to edit this file?");
+        assert_eq!(approval_title(Some("Claude Code"), "WebFetch"), "Allow Claude Code to fetch this URL?");
+        assert_eq!(approval_title(Some("Codex"), "Bash"), "Allow Codex to run this command?");
+        assert_eq!(approval_title(Some("Codex"), "Edit"), "Allow Codex to edit this file?");
+        assert_eq!(
+            approval_title(Some("Codex"), "Permissions"),
+            "Allow Codex to change permissions?"
+        );
+        assert_eq!(
+            approval_title(Some("Claude Code"), "mcp__server__tool"),
+            "Allow Claude Code to use mcp__server__tool?"
+        );
+    }
+
+    fn quiet_folds() -> Folds {
+        Folds {
+            toggled: Rc::new(HashSet::new()),
+            toggle: Rc::new(|_: String, _: &mut Window, _: &mut App| {}),
+            plan: None,
+            cards: None,
+            titles: Rc::new(HashMap::new()),
+            approval_host: None,
+            full_output: Rc::new(HashMap::new()),
+            show_full_output: None,
+            at_rest: true,
+            now_ms: 0,
+            copied: Rc::new(HashSet::new()),
+            link: None,
+            assistant_action: None,
+            user_action: None,
+            span_held: Rc::new(HashMap::new()),
+            span_event: None,
+            tool_group: None,
+            terminal_run: None,
+        }
+    }
+
+    fn thinking_id() -> ElementId {
+        ElementId::from(SharedString::from("thought"))
+    }
+
+    /// W7b: a trace with no text earns no card — redacted (signature-only)
+    /// thinking must never become an empty "Thought for 0.0 s" shell. A
+    /// real trace still cards. Unwire the guard and the empty lines card.
+    #[test]
+    fn empty_thinking_earns_no_card() {
+        let folds = quiet_folds();
+        assert!(
+            thinking_card(thinking_id(), "t:0", "", 0, None, ThinkingState::Done, &folds).is_none(),
+            "empty text cards nothing"
+        );
+        assert!(
+            thinking_card(thinking_id(), "t:0", "   \n  ", 0, None, ThinkingState::Done, &folds)
+                .is_none(),
+            "whitespace-only text cards nothing"
+        );
+        assert!(
+            thinking_card(thinking_id(), "t:0", "hmm", 0, None, ThinkingState::Done, &folds).is_some(),
+            "a real trace still cards"
+        );
     }
 }

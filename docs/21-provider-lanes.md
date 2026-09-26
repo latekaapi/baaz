@@ -107,8 +107,13 @@ So the view needs no second fold type:
   directly. Both write the same `Session` struct — one writer per view (§3).
 - `ApprovalRequested { session_id, approval_id, headline }` →
   `external_approvals` store (`crates/baaz/src/session.rs:437`); the full card
-  already arrived as a delta. `QuestionRaised { … question_id, headline }` →
-  same surface for questions. `ConnectionLost { reason }` → reconnect flow.
+  already arrived as a delta. The tap parks only as the decision-routing
+  record (and the sidebar row's fallback): on a provider lane the strip
+  above the composer stays empty (`external_strip`), so the fold's inline
+  approval card — carrying the full choice set the adapter declares — is
+  the one surface, decided through the same card via `DecideApproval`.
+  `QuestionRaised { … question_id, headline }` → same surface for questions.
+  `ConnectionLost { reason }` → reconnect flow.
 - `ListPending` (`Command::ListPending`) closes the missed-approval hole on
   (re)connect, mirroring the muse lane's approval pull dual noted on
   `SessionView::reconnected`.
@@ -475,6 +480,20 @@ Each task compiles and leaves the app working; muse sessions stay on
     row for lane approvals, single-sentence approval card, settled
     reopened turns with exchange turn counts, and `firstPrompt`-only
     records resuming. Root cause in §6 above.
+- **W7b — One approval card per provider session.** Title: the fold's
+  inline approval card carries the full choice set the adapter declares
+  (allow/deny on Claude Code, the four tokens on Codex) with the
+  number-key shortcuts; the strip above the composer stays empty on
+  provider lanes (`external_strip`). The card title names the provider
+  with a verb that fits the tool (`approval_title`); the face is per
+  tool (Bash → command + cwd, Write → path + preview, Edit → path +
+  diff, WebFetch → URL, MCP → server/tool + args — never raw JSON,
+  never wire ids); gated tool cards wait in the present tense and read
+  done only after running; empty thinking earns no card; the sidebar
+  row re-reads pending words on every approval delta
+  (`ProviderApprovalsChanged` → `sync_row_live`). Decided through the
+  inline card as `DecideApproval` with the card's own choice id; the
+  card settles only on the server's resolution, never on the press.
 
 ## 8. Risks and what no automated test can prove
 

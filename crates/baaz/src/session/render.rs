@@ -260,6 +260,12 @@ impl SessionView {
             // picking an option are local, and anything that would reach the
             // wire is refused by `wire_client` with a banner that says why.
             cards: Some(self.card_intents(window, cx)),
+            // A provider session's approval cards ask in the provider's
+            // name ("Allow Claude Code to write this file?"); the muse
+            // lane keeps its own title.
+            approval_host: self
+                .is_provider_lane()
+                .then(|| self.provider_kind().label().to_owned()),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
             // One clock per frame for every turn age, and the one turn (if
@@ -1219,7 +1225,11 @@ impl SessionView {
                 row = row.elapsed(transcript::elapsed(elapsed));
             }
             let queued = self.fold.side(&self.session_id).map(|s| s.queued.len()).unwrap_or(0);
-            let note = match (finishing, queued) {
+            // Blocked on the person, the tail is not memory reminders: the
+            // turn waits for an approval or an answer, and saying otherwise
+            // misnames the wait on the approval's own screen.
+            let waiting = self.waiting_on_you().is_some_and(|(approvals, questions)| approvals + questions > 0);
+            let note = match (finishing && !waiting, queued) {
                 (true, 0) => Some("memory reminders".to_owned()),
                 (true, queued) => Some(format!("memory reminders · {queued} queued")),
                 (false, 0) => None,
@@ -2050,6 +2060,19 @@ impl SessionView {
         )
     }
 
+    /// Which parked provider taps the strip below the transcript may show.
+    /// Empty on a provider lane: the fold's inline approval card carries
+    /// the full choice set the adapter declares, so a second strip above
+    /// the composer would double every ask. The parked tap stays as the
+    /// decision-routing record (and the row's fallback), never as a
+    /// surface.
+    pub(super) fn external_strip(&self) -> Vec<ExternalApproval> {
+        if self.is_provider_lane() {
+            return Vec::new();
+        }
+        self.external_approvals.outstanding().into_iter().cloned().collect()
+    }
+
     /// The external approval cards: one per new-provider approval the
     /// server has not resolved yet, on the same surface as the legacy
     /// cards and under the same rule — the card changes only on the
@@ -2059,13 +2082,15 @@ impl SessionView {
     /// no, do something else) and `cancel` ("Deny and stop": no, stop)
     /// as visibly different buttons. A sent card offers no second press:
     /// it reads "sent, waiting for the server".
+    ///
+    /// Never on a provider lane: [`Self::external_strip`] is empty there,
+    /// because the inline card is the one surface.
     pub(super) fn render_external_approvals(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let approvals: Vec<ExternalApproval> =
-            self.external_approvals.outstanding().into_iter().cloned().collect();
+        let approvals: Vec<ExternalApproval> = self.external_strip();
         if approvals.is_empty() {
             return None;
         }
