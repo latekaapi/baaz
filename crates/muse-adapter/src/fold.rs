@@ -2529,6 +2529,26 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
             if tool == "web_search" { "Searched the web".to_owned() } else { "Fetched".to_owned() },
             field("url").or_else(|| field("query")).unwrap_or_else(raw),
         ),
+        // Interactive-exec tools poll a live process instead of running one
+        // shot: their names are model vocabulary (`bash_input` reads as
+        // nothing to a person), so they fold as shell cards with a human verb
+        // and the command — or the first 80 chars of the input — as the
+        // target, never the raw tool name alone.
+        "bash_input" | "exec_command" => (
+            ToolKind::Shell,
+            "Ran".to_owned(),
+            field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
+        ),
+        "write_stdin" => (
+            ToolKind::Shell,
+            "Sent input".to_owned(),
+            field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
+        ),
+        tool if tool.ends_with("_input") => (
+            ToolKind::Shell,
+            "Sent input".to_owned(),
+            field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
+        ),
         _ => (
             // There is no tool *kind* taxonomy on the wire, so anything the app
             // does not recognise is presented as a Muse-provided tool.
@@ -2640,11 +2660,16 @@ fn tool_presentation(
                 .or_else(|| elide_command(&envelope.description))
                 .unwrap_or(target);
             let exit_code = envelope.exit_code.or(item.exit_code);
-            let status = envelope_status(terminal, exit_code, envelope.terminal_status.as_deref());
+            let status = envelope_status(
+                terminal,
+                exit_code,
+                envelope.terminal_status.as_deref(),
+                envelope.execution_state.as_deref(),
+            );
             let body = ToolBody::Shell {
                 output_lines: split_lines(&envelope.output),
                 exit_code,
-                live: !terminal,
+                live: !terminal || is_running_state(envelope.execution_state.as_deref()),
             };
             return (verb, target, status, body);
         }
@@ -2672,38 +2697,31 @@ fn tool_presentation(
 }
 
 /// A shell result carried as one JSON object rather than as plain text: the
-/// shape painted raw in the transcript (`command`, `description`,
-/// `exit_code`, `terminal_status`, an output field).
+/// classic shape painted raw in the transcript (`command`, `description`,
+/// `exit_code`, `terminal_status`, an output field), or an interactive-exec
+/// result (`bash_input` polls and kin) carrying visible text with no
+/// `command`, plus optional `exit_code`/`execution_state`/`status`.
 struct ShellEnvelope {
     command: String,
     description: String,
     output: String,
     exit_code: Option<i32>,
     terminal_status: Option<String>,
+    execution_state: Option<String>,
 }
 
 /// Parse a shell JSON envelope, or `None` for anything else — in particular
-/// for plain-text output and for JSON without a `command` and an output
-/// field, which take the generic pretty-printed path instead.
+/// for plain-text output and for JSON without an output field, which take the
+/// generic pretty-printed path instead.
+///
+/// Only Shell-kind tools reach this, so a `text`/`result` key on any other
+/// tool still takes the generic path.
 fn shell_envelope(visible: &str) -> Option<ShellEnvelope> {
     let object = serde_json::from_str::<Value>(visible.trim()).ok()?;
     let object = object.as_object()?;
-    let command = object.get("command")?.as_str()?;
-    let output = match (
-        object.get("output").and_then(Value::as_str),
-        object.get("stdout").and_then(Value::as_str),
-        object.get("stderr").and_then(Value::as_str),
-    ) {
-        (Some(output), _, _) => output.to_owned(),
-        (None, Some(stdout), Some(stderr)) if !stderr.is_empty() => {
-            format!("{stdout}\n{stderr}")
-        }
-        (None, Some(stdout), _) => stdout.to_owned(),
-        (None, None, Some(stderr)) => stderr.to_owned(),
-        _ => return None,
-    };
+    let output = shell_output_text(object)?;
     Some(ShellEnvelope {
-        command: command.to_owned(),
+        command: object.get("command").and_then(Value::as_str).unwrap_or_default().to_owned(),
         description: object
             .get("description")
             .and_then(Value::as_str)
@@ -2715,28 +2733,79 @@ fn shell_envelope(visible: &str) -> Option<ShellEnvelope> {
             .and_then(Value::as_i64)
             .and_then(|code| i32::try_from(code).ok()),
         terminal_status: object.get("terminal_status").and_then(Value::as_str).map(str::to_owned),
+        execution_state: object
+            .get("execution_state")
+            .or_else(|| object.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
-/// A shell card's status from the envelope's own exit code, falling back to
-/// the terminal status. A finished call with no code said nothing went wrong.
+/// The visible text of a shell JSON object: the first string-valued output
+/// field. `stdout` and `stderr` combine; `result`/`chunk`/`text` are the
+/// interactive-exec carriers. A non-string payload (a nested result object)
+/// is not visible text — it takes the generic pretty-printed path.
+fn shell_output_text(object: &serde_json::Map<String, Value>) -> Option<String> {
+    if let Some(output) = object.get("output").and_then(Value::as_str) {
+        return Some(output.to_owned());
+    }
+    match (
+        object.get("stdout").and_then(Value::as_str),
+        object.get("stderr").and_then(Value::as_str),
+    ) {
+        (Some(stdout), Some(stderr)) if !stderr.is_empty() => {
+            return Some(format!("{stdout}\n{stderr}"));
+        }
+        (Some(stdout), _) => return Some(stdout.to_owned()),
+        (None, Some(stderr)) => return Some(stderr.to_owned()),
+        (None, None) => {}
+    }
+    for key in ["result", "chunk", "text"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+
+/// An interactive-exec `execution_state`/`status` meaning output may still
+/// arrive: the card stays live.
+fn is_running_state(state: Option<&str>) -> bool {
+    let Some(state) = state else { return false };
+    matches!(
+        state.to_ascii_lowercase().as_str(),
+        "running" | "active" | "inprogress" | "in_progress" | "started"
+    )
+}
+
+/// A shell card's status from the envelope's own liveness and exit code,
+/// falling back to the execution and terminal states. `running` stays live
+/// even on a terminal poll; a finished call with no code said nothing went
+/// wrong.
 fn envelope_status(
     terminal: bool,
     exit_code: Option<i32>,
     terminal_status: Option<&str>,
+    exec_state: Option<&str>,
 ) -> ToolStatus {
+    if is_running_state(exec_state) {
+        return ToolStatus::Running;
+    }
     if !terminal {
         return ToolStatus::Running;
     }
-    match exit_code {
-        Some(0) => ToolStatus::Success,
-        Some(_) => ToolStatus::Error,
-        None => match terminal_status {
-            Some("cancelled") => ToolStatus::Cancelled,
-            Some("failed") | Some("error") | Some("timedOut") => ToolStatus::Error,
-            _ => ToolStatus::Success,
-        },
+    if let Some(code) = exit_code {
+        return if code == 0 { ToolStatus::Success } else { ToolStatus::Error };
     }
+    for state in [exec_state, terminal_status].into_iter().flatten() {
+        match state.to_ascii_lowercase().as_str() {
+            "cancelled" | "canceled" => return ToolStatus::Cancelled,
+            "failed" | "failure" | "error" | "timedout" => return ToolStatus::Error,
+            "completed" | "complete" | "done" | "exited" => return ToolStatus::Success,
+            _ => {}
+        }
+    }
+    ToolStatus::Success
 }
 
 /// A command as a one-line card title: first line, overlong commands cut with
@@ -2754,14 +2823,67 @@ fn elide_command(command: &str) -> Option<String> {
     Some(format!("{cut}…"))
 }
 
+/// Model-routing metadata that must never reach a user-visible card body,
+/// stripped recursively before any JSON result is pretty-printed. One list:
+/// extend here, not at the call sites.
+const MODEL_ONLY_KEYS: [&str; 7] = [
+    "model_guidance",
+    "chunk_id",
+    "work_id",
+    "original_output_tokens",
+    "yield_time_ms",
+    "session_id",
+    "execution_state",
+];
+
+/// Drop every [`MODEL_ONLY_KEYS`] entry from `value`, descending into nested
+/// objects and arrays.
+fn strip_model_only_keys(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in MODEL_ONLY_KEYS {
+                map.remove(key);
+            }
+            for value in map.values_mut() {
+                strip_model_only_keys(value);
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                strip_model_only_keys(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Pretty-print a JSON object/array result, or `None` when the text is not
 /// one. Bare strings and numbers are not results worth a code body.
+/// Model-only keys are stripped first; an object left empty by that reads as
+/// "(no output)", never `{}`.
 fn pretty_json_object(visible: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(visible.trim()).ok()?;
+    let mut value: Value = serde_json::from_str(visible.trim()).ok()?;
     if !matches!(value, Value::Object(_) | Value::Array(_)) {
         return None;
     }
+    strip_model_only_keys(&mut value);
+    if matches!(&value, Value::Object(map) if map.is_empty()) {
+        return Some("(no output)".to_owned());
+    }
     serde_json::to_string_pretty(&value).ok()
+}
+
+/// First 80 chars of an interactive-exec tool's input text, for the card
+/// title. The tool name itself never names what happened, so this is the
+/// target when there is no `command`.
+fn input_snippet(parsed: &Option<Value>) -> Option<String> {
+    let text = parsed
+        .as_ref()?
+        .get("input")
+        .or_else(|| parsed.as_ref()?.get("text"))
+        .or_else(|| parsed.as_ref()?.get("chunk"))
+        .and_then(Value::as_str)?;
+    Some(text.chars().take(80).collect())
 }
 
 /// A tool's verbatim args as name/value pairs for a generic body. Values are
@@ -3651,6 +3773,71 @@ mod tests {
         }
     }
 
+    fn tool_item(tool: &str, args: Option<Value>, visible: &str, status: &str) -> msp::Item {
+        serde_json::from_value(serde_json::json!({
+            "itemId": "i-1",
+            "turnId": "t-1",
+            "kind": "toolCall",
+            "status": status,
+            "revision": 1,
+            "tool": tool,
+            "args": args.map(|args| args.to_string()),
+            "visibleOutput": visible,
+        }))
+        .expect("a test tool item deserialises")
+    }
+
+    fn presented(
+        tool: &str,
+        args: Option<Value>,
+        visible: &str,
+        terminal: bool,
+    ) -> (String, String, ToolStatus, ToolBody) {
+        let item = tool_item(tool, args, visible, if terminal { "completed" } else { "inProgress" });
+        let (kind, verb, target) =
+            tool_shape(&item.tool.clone().unwrap_or_default(), item.args.as_deref());
+        tool_presentation(&kind, verb, target, &item, terminal)
+    }
+
+    #[test]
+    fn a_bash_input_card_shows_only_the_output_lines() {
+        let visible = serde_json::json!({
+            "session_id": "sess-1",
+            "yield_time_ms": 5000,
+            "chunk_id": "chunk-9",
+            "work_id": "work-3",
+            "execution_state": "completed",
+            "original_output_tokens": 512,
+            "exit_code": 0,
+            "output": "line one\nline two",
+            "model_guidance": "Poll again with bash_input until done. Never show this to the user.",
+        })
+        .to_string();
+        let args = Some(serde_json::json!({"session_id": "sess-1", "yield_time_ms": 5000}));
+        let (verb, target, status, body) = presented("bash_input", args, &visible, true);
+        assert_eq!(verb, "Ran", "a human verb, not the tool name");
+        assert_ne!(target, "bash_input", "the tool name never leaks into the title");
+        assert_eq!(status, ToolStatus::Success);
+        let ToolBody::Shell { output_lines, exit_code, live } = body else {
+            panic!("an interactive-exec result folds as a shell body");
+        };
+        assert_eq!(output_lines, vec!["line one".to_owned(), "line two".to_owned()]);
+        assert_eq!(exit_code, Some(0));
+        assert!(!live);
+        let joined = output_lines.join("\n");
+        for leaked in [
+            "model_guidance",
+            "chunk_id",
+            "work_id",
+            "session_id",
+            "yield_time_ms",
+            "original_output_tokens",
+            "execution_state",
+        ] {
+            assert!(!joined.contains(leaked), "no model-only key reaches the body: {leaked}");
+        }
+    }
+
     #[test]
     fn a_terminal_run_still_open_reads_running() {
         let mut fold = MuseFold::new();
@@ -3689,5 +3876,146 @@ mod tests {
             0,
             "the known session is untouched too"
         );
+    }
+
+    #[test]
+    fn interactive_exec_carriers_without_a_command_still_fold_as_shell() {
+        for (key, text) in [
+            ("result", "forty-two"),
+            ("chunk", "a chunk of output"),
+            ("text", "plain text output"),
+            ("stdout", "standard out"),
+            ("stderr", "standard error"),
+        ] {
+            let visible = serde_json::json!({ key: text, "execution_state": "completed" }).to_string();
+            let (_, _, status, body) = presented("bash_input", None, &visible, true);
+            assert_eq!(status, ToolStatus::Success, "carrier {key}");
+            let ToolBody::Shell { output_lines, live, .. } = body else {
+                panic!("carrier {key} folds as a shell body");
+            };
+            assert_eq!(output_lines, vec![text.to_owned()], "carrier {key}");
+            assert!(!live, "carrier {key}");
+        }
+    }
+
+    #[test]
+    fn a_nested_model_only_key_is_stripped_from_a_generic_body() {
+        let visible = serde_json::json!({
+            "estimate_minutes": 12,
+            "session_id": "sess-1",
+            "detail": {"model_guidance": "secret plan", "steps": ["sweep"]},
+        })
+        .to_string();
+        let (_, _, _, body) = presented("estimate", None, &visible, true);
+        let ToolBody::Mcp { result_json, .. } = body else {
+            panic!("an unknown tool folds as a generic body");
+        };
+        assert!(result_json.contains("estimate_minutes"), "user content stays");
+        assert!(result_json.contains("sweep"), "nested user content stays");
+        assert!(!result_json.contains("model_guidance"), "nested model guidance goes");
+        assert!(!result_json.contains("secret plan"), "its value goes too");
+        assert!(!result_json.contains("session_id"), "top-level routing keys go");
+    }
+
+    #[test]
+    fn an_object_emptied_by_stripping_reads_as_no_output() {
+        let visible = serde_json::json!({
+            "model_guidance": "keep polling",
+            "session_id": "sess-1",
+            "chunk_id": "c-1",
+        })
+        .to_string();
+        let (_, _, _, body) = presented("estimate", None, &visible, true);
+        let ToolBody::Mcp { result_json, .. } = body else {
+            panic!("an unknown tool folds as a generic body");
+        };
+        assert_eq!(result_json, "(no output)", "never a bare object braces pair");
+    }
+
+    #[test]
+    fn the_classic_command_output_envelope_is_unchanged() {
+        let visible = serde_json::json!({
+            "command": "ls -la",
+            "description": "List workspace files",
+            "exit_code": 0,
+            "terminal_status": "completed",
+            "output": "README.md\nnotes.txt\n",
+        })
+        .to_string();
+        let args = Some(serde_json::json!({"command": "ls -la"}));
+        let (verb, target, status, body) = presented("bash", args, &visible, true);
+        assert_eq!(verb, "Ran");
+        assert_eq!(target, "ls -la");
+        assert_eq!(status, ToolStatus::Success);
+        let ToolBody::Shell { output_lines, exit_code, live } = body else {
+            panic!("the classic envelope stays a shell body");
+        };
+        assert_eq!(output_lines, vec!["README.md".to_owned(), "notes.txt".to_owned()]);
+        assert_eq!(exit_code, Some(0));
+        assert!(!live);
+    }
+
+    #[test]
+    fn interactive_exec_status_follows_liveness_then_exit_code() {
+        let running = serde_json::json!({"output": "partial", "execution_state": "running"}).to_string();
+        let (_, _, status, body) = presented("bash_input", None, &running, true);
+        assert_eq!(status, ToolStatus::Running, "running stays live on a terminal poll");
+        let ToolBody::Shell { live, .. } = body else {
+            panic!("a running poll folds as a shell body");
+        };
+        assert!(live, "the live pill stays on while running");
+
+        let done = serde_json::json!({"output": "done", "execution_state": "completed", "exit_code": 0})
+            .to_string();
+        let (_, _, status, _) = presented("bash_input", None, &done, true);
+        assert_eq!(status, ToolStatus::Success);
+
+        let exited = serde_json::json!({"output": "done", "status": "exited"}).to_string();
+        let (_, _, status, _) = presented("bash_input", None, &exited, true);
+        assert_eq!(status, ToolStatus::Success);
+
+        let failed = serde_json::json!({"output": "boom", "execution_state": "failed", "exit_code": 1})
+            .to_string();
+        let (_, _, status, body) = presented("bash_input", None, &failed, true);
+        assert_eq!(status, ToolStatus::Error);
+        let ToolBody::Shell { live, .. } = body else {
+            panic!("a failed poll folds as a shell body");
+        };
+        assert!(!live);
+
+        let open = serde_json::json!({"output": "partial"}).to_string();
+        let (_, _, status, _) = presented("bash_input", None, &open, false);
+        assert_eq!(status, ToolStatus::Running, "a non-terminal item is live");
+    }
+
+    #[test]
+    fn input_tools_name_a_human_verb_and_the_input() {
+        let (verb, target, _, _) = presented(
+            "write_stdin",
+            Some(serde_json::json!({"input": "hello into stdin"})),
+            "hello into stdin",
+            true,
+        );
+        assert_eq!(verb, "Sent input");
+        assert_eq!(target, "hello into stdin");
+
+        let (verb, target, _, _) = presented(
+            "exec_command",
+            Some(serde_json::json!({"command": "make test"})),
+            "ok",
+            true,
+        );
+        assert_eq!(verb, "Ran");
+        assert_eq!(target, "make test");
+
+        let long = "x".repeat(200);
+        let (verb, target, _, _) = presented(
+            "tail_input",
+            Some(serde_json::json!({"input": long})),
+            "ok",
+            true,
+        );
+        assert_eq!(verb, "Sent input");
+        assert_eq!(target, "x".repeat(80), "the title keeps the first 80 chars");
     }
 }
