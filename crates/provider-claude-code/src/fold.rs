@@ -62,6 +62,19 @@ use provider::{ProviderError, ProviderEvent};
 use crate::account::AccountSnapshot;
 use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame, ToolResult};
 
+/// Where a pending approval card lives, so its tool's result or the turn's
+/// denials can settle it to its decided state.
+#[derive(Clone, Debug)]
+struct ApprovalSite {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for wholesale updates.
+    block_index: usize,
+    /// The wire tool-use id the request gates (empty when the request
+    /// names none — the card still settles, through denials alone).
+    tool_use_id: String,
+}
+
 /// Where a tool call lives, and what it was, so its result can complete it.
 #[derive(Clone, Debug)]
 struct ToolSite {
@@ -170,10 +183,16 @@ fn apply_todo_input(
 /// The completed `Agent` card: the delegation header plus one nested
 /// assistant turn carrying every block the sub-agent produced.
 fn agent_block(id: &str, site: &ToolSite, status: ToolStatus, blocks: &[Block]) -> Block {
+    // A still-running delegation keeps its pending verb; only a finished
+    // one reads done — the same pending-until-ran rule as every tool card.
+    let verb = match status {
+        ToolStatus::Pending | ToolStatus::Running => site.verb.clone(),
+        _ => past_verb(&site.kind, &site.verb),
+    };
     Block::ToolCall {
         id: id.to_owned(),
         kind: ToolKind::SubAgent,
-        verb: site.verb.clone(),
+        verb,
         target: site.target.clone(),
         status,
         duration_ms: None,
@@ -199,6 +218,22 @@ fn parse_exit_code(text: &str) -> Option<i32> {
     rest[..end].parse().ok()
 }
 
+/// The opening present-tense verb onto its completed past tense: a card
+/// opens as "Write" (it has not run) and only reads "Wrote" once the
+/// result lands. `Read` reads the same either way; anything unrecognised
+/// passes through rather than inventing a tense.
+fn past_verb(kind: &ToolKind, open: &str) -> String {
+    match (kind, open) {
+        (ToolKind::Shell, "Run") => "Ran",
+        (ToolKind::Write, "Write") => "Wrote",
+        (ToolKind::Edit, "Edit") => "Edited",
+        (ToolKind::Mcp { .. }, "Run") => "Ran",
+        (ToolKind::SubAgent, "Delegate") => "Delegated",
+        _ => open,
+    }
+    .to_owned()
+}
+
 /// Complete any tool card from its result: the one place shell output,
 /// MCP payloads, file diffs, read counts and the generic fallback are
 /// decided, shared by the main transcript and nested sub-agent buffers
@@ -213,11 +248,12 @@ fn finish_tool_block(
     result: &ToolResult,
 ) -> Block {
     let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
+    let done = past_verb(kind, verb);
     match kind {
         ToolKind::Shell => Block::ToolCall {
             id: tool_use_id.to_owned(),
             kind: kind.clone(),
-            verb: verb.to_owned(),
+            verb: done,
             target: target.to_owned(),
             status,
             duration_ms: None,
@@ -231,7 +267,7 @@ fn finish_tool_block(
         ToolKind::Mcp { .. } => Block::ToolCall {
             id: tool_use_id.to_owned(),
             kind: kind.clone(),
-            verb: verb.to_owned(),
+            verb: done,
             target: target.to_owned(),
             status,
             duration_ms: None,
@@ -243,7 +279,7 @@ fn finish_tool_block(
             Block::ToolCall {
                 id: tool_use_id.to_owned(),
                 kind: kind.clone(),
-                verb: verb.to_owned(),
+                verb: done,
                 target: target.to_owned(),
                 status,
                 duration_ms: None,
@@ -254,7 +290,7 @@ fn finish_tool_block(
         ToolKind::Read => Block::ToolCall {
             id: tool_use_id.to_owned(),
             kind: kind.clone(),
-            verb: verb.to_owned(),
+            verb: done,
             target: target.to_owned(),
             status,
             duration_ms: None,
@@ -506,6 +542,23 @@ pub struct ClaudeFold {
     /// adapter answers on its own, because an unanswered child waits
     /// silently and an auto-answered one would bypass the person.
     pending: Vec<ApprovalRequest>,
+    /// Requests already answered through `DecideApproval`, by `request_id`.
+    /// The card stays up until the settling frames arrive, and settling
+    /// rebuilds the card from the request — so the request lives here
+    /// between the press and the resolution. Cleared as each card settles.
+    decided: HashMap<String, ApprovalRequest>,
+    /// Where each carded approval lives (`request_id` → site), so the
+    /// tool's own result (allowed, it ran) or the turn's `permission_denials`
+    /// (denied, it never ran) can settle the card. Survives `take_approval`:
+    /// the decision queues the answer line, the frames settle the card —
+    /// deciding never moves it, only resolving does.
+    approval_sites: HashMap<String, ApprovalSite>,
+    /// `tool_use` id → `request_id`, the join a result needs to settle the
+    /// approval whose tool just answered. Same lifetime as `approval_sites`.
+    tool_approvals: HashMap<String, String>,
+    /// The session cwd from the `init` frame: what a pending approval card
+    /// names as where the tool would run. Empty until `init` arrives.
+    session_cwd: String,
     /// Unknown `control_request` subtypes seen so far, as
     /// `(request_id, subtype)` in arrival order. Surfaced in the transcript,
     /// never dropped.
@@ -555,12 +608,17 @@ impl ClaudeFold {
         &self.unknown_control
     }
 
-    /// Take a pending request for deciding. Removes it, so a second decision
-    /// cannot answer the same request twice. `None` means nobody asked for
-    /// that id — an unknown approval decides nothing.
+    /// Take a pending request for deciding. Moves it off the answerable
+    /// queue (so a second decision cannot answer the same request twice)
+    /// into the decided shelf, where the settling frames still find it:
+    /// deciding queues the answer line, resolving settles the card, and
+    /// the card rebuild needs the request either way. `None` means nobody
+    /// asked for that id — an unknown approval decides nothing.
     pub fn take_approval(&mut self, request_id: &str) -> Option<ApprovalRequest> {
         let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
-        Some(self.pending.remove(position))
+        let request = self.pending.remove(position);
+        self.decided.insert(request_id.to_owned(), request.clone());
+        Some(request)
     }
 
     /// Unknown-subtype control requests waiting on a human decision, oldest
@@ -578,11 +636,14 @@ impl ClaudeFold {
     }
 
     /// Put a claimed request back after an undeliverable answer, without
-    /// duplicating ids.
+    /// duplicating ids. Leaves the decided shelf alone when the request
+    /// never left it through this path (defensive; same id both places
+    /// would answer twice).
     pub fn requeue_approval(&mut self, request: ApprovalRequest) {
         if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
-            self.pending.push(request);
+            self.pending.push(request.clone());
         }
+        self.decided.remove(&request.request_id);
     }
 
     /// Put a claimed unknown-subtype request back, without duplicating ids.
@@ -598,6 +659,7 @@ impl ClaudeFold {
             Frame::Init(init) => {
                 self.session_id = Some(init.session_id.clone());
                 self.model = Some(init.model.clone());
+                self.session_cwd = init.cwd.clone();
                 Vec::new()
             }
             Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, .. } => {
@@ -639,7 +701,7 @@ impl ClaudeFold {
             }
             Frame::UserResult { results, parent_tool_use_id, .. } => {
                 if parent_tool_use_id.is_empty() {
-                    results.iter().filter_map(|result| self.apply_result(result)).collect()
+                    results.iter().flat_map(|result| self.apply_result(result)).collect()
                 } else {
                     results.iter().for_each(|result| self.apply_nested_result(parent_tool_use_id, result));
                     Vec::new()
@@ -684,7 +746,11 @@ impl ClaudeFold {
                 self.flush_agents(&mut deltas);
                 // After-the-fact refusals, on the transcript before the
                 // finish: decoded, visible, and never a substitute for
-                // answering the request itself.
+                // answering the request itself. A denial that joins to a
+                // carded approval settles that card (and its tool card) to
+                // denied instead of minting a second card beside it; a
+                // denial with no card — a bare result, no request seen —
+                // still cards generically rather than vanishing.
                 if !permission_denials.is_empty() {
                     // The card rides the running turn; with no turn open (a
                     // bare result carrying denials) a turn keyed by the
@@ -701,17 +767,39 @@ impl ClaudeFold {
                         }
                     };
                     for denial in permission_denials {
-                        deltas.push(Delta::BlockAdded {
-                            turn_id: turn_id.clone(),
-                            block: Block::Generic {
-                                kind: "permission-denial".into(),
-                                status: "denied".into(),
-                                text: format!(
-                                    "{} ({}) refused",
-                                    denial.tool_name, denial.tool_use_id
-                                ),
-                            },
-                        });
+                        let request_id =
+                            self.tool_approvals.get(&denial.tool_use_id).cloned();
+                        match request_id {
+                            Some(request_id) => {
+                                self.resolve_approval_card(
+                                    &request_id,
+                                    ApprovalState::Denied,
+                                    &mut deltas,
+                                );
+                                if let Some(site) = self.tools.get(&denial.tool_use_id).cloned() {
+                                    if let Some(block) = gated_tool_block(
+                                        &denial.tool_use_id,
+                                        &site,
+                                        ToolStatus::Cancelled,
+                                        "Denied",
+                                    ) {
+                                        deltas.push(Delta::BlockUpdated {
+                                            turn_id: site.turn_id,
+                                            block_index: site.block_index,
+                                            block,
+                                        });
+                                    }
+                                }
+                            }
+                            None => deltas.push(Delta::BlockAdded {
+                                turn_id: turn_id.clone(),
+                                block: Block::Generic {
+                                    kind: "permission-denial".into(),
+                                    status: "denied".into(),
+                                    text: format!("{} refused", denial.tool_name),
+                                },
+                            }),
+                        }
                     }
                 }
                 let open = std::mem::take(&mut self.open);
@@ -761,6 +849,12 @@ impl ClaudeFold {
         for block in blocks.iter() {
             let block_index = self.emitted.get(message_id).copied().unwrap_or(0);
             let emitted = match block {
+                // An empty thinking block is the redacted kind: the child
+                // billed the thought (its signature) without uttering it.
+                // Carding it renders an empty "Thought for 0.0 s" shell, so
+                // it folds to nothing — the billed count still reaches the
+                // footer through `reasoning_tokens`.
+                ContentBlock::Thinking { text } if text.trim().is_empty() => None,
                 ContentBlock::Thinking { text } => Some(Block::Thinking {
                     text: text.clone(),
                     elapsed_ms: 0,
@@ -774,11 +868,16 @@ impl ClaudeFold {
             };
             match block {
                 ContentBlock::Thinking { .. } | ContentBlock::Text { .. } => {
-                    deltas.push(Delta::BlockAdded {
-                        turn_id: message_id.to_owned(),
-                        block: emitted.expect("covered above"),
-                    });
-                    self.emitted.insert(message_id.to_owned(), block_index + 1);
+                    // A redacted thinking block folds to no card at all:
+                    // nothing is pushed and no index is consumed, so the
+                    // cards around the hole keep their addresses.
+                    if let Some(block) = emitted {
+                        deltas.push(Delta::BlockAdded {
+                            turn_id: message_id.to_owned(),
+                            block,
+                        });
+                        self.emitted.insert(message_id.to_owned(), block_index + 1);
+                    }
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     if is_todo_tool(name) {
@@ -895,14 +994,19 @@ impl ClaudeFold {
         }]
     }
 
-    fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Option<Delta> {
+    /// Complete one tool card from its result, settling the linked approval
+    /// card alongside it when the result is a success: a tool that ran and
+    /// answered was allowed, full stop. An error result completes only the
+    /// tool card — allowed-but-failed and denied look identical here, and
+    /// the turn's `permission_denials` tells them apart below.
+    fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Vec<Delta> {
         if self.todo_tool_ids.contains(&result.tool_use_id) {
-            return self.apply_todo_result(result);
+            return self.apply_todo_result(result).into_iter().collect();
         }
-        let site = self.tools.get(&result.tool_use_id)?.clone();
+        let Some(site) = self.tools.get(&result.tool_use_id).cloned() else { return Vec::new() };
         let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
         if site.kind == ToolKind::SubAgent {
-            return self.apply_agent_result(&result.tool_use_id, &site, status, result);
+            return self.apply_agent_result(&result.tool_use_id, &site, status, result).into_iter().collect();
         }
         let block = finish_tool_block(
             &site.kind,
@@ -913,7 +1017,22 @@ impl ClaudeFold {
             &result.tool_use_id,
             result,
         );
-        Some(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block })
+        let mut deltas =
+            vec![Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block }];
+        if !result.is_error {
+            if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
+                let exit_code = match &site.kind {
+                    ToolKind::Shell => parse_exit_code(&result.text).unwrap_or(0),
+                    _ => 0,
+                };
+                self.resolve_approval_card(
+                    &request_id,
+                    ApprovalState::AllowedOnce { exit_code, duration_ms: 0 },
+                    &mut deltas,
+                );
+            }
+        }
+        deltas
     }
 
     /// Refine the turn's todo card from one TaskCreate/TaskUpdate/TodoWrite
@@ -1079,12 +1198,17 @@ impl ClaudeFold {
             for block in blocks {
                 match block {
                     ContentBlock::Thinking { text } => {
-                        card.blocks.push(Block::Thinking {
-                            text: text.clone(),
-                            elapsed_ms: 0,
-                            summary: None,
-                            state: ThinkingState::Done,
-                        });
+                        // Redacted thinking stays out of the nested card
+                        // too: an empty trace with a spinner is noise
+                        // wherever it renders.
+                        if !text.trim().is_empty() {
+                            card.blocks.push(Block::Thinking {
+                                text: text.clone(),
+                                elapsed_ms: 0,
+                                summary: None,
+                                state: ThinkingState::Done,
+                            });
+                        }
                     }
                     ContentBlock::Text { text } => {
                         card.blocks.push(Block::Text { text: text.clone(), streaming: false });
@@ -1183,14 +1307,79 @@ impl ClaudeFold {
     /// Queue a `can_use_tool` request as pending and card it. The card rides
     /// the running turn; with no turn open (a bare control exchange) a turn
     /// keyed by the request itself opens so the card is never dangling.
+    ///
+    /// A repeat request for an already-carded id cards nothing twice: the
+    /// card moves only when the tool's result or the turn's denials
+    /// resolve it, never on a re-request.
     fn apply_approval(&mut self, request: &ApprovalRequest) -> Vec<Delta> {
         if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
             self.pending.push(request.clone());
         }
+        if self.approval_sites.contains_key(&request.request_id) {
+            return Vec::new();
+        }
         let mut deltas = Vec::new();
         let turn_id = self.control_turn(&request.request_id, &mut deltas);
-        deltas.push(Delta::BlockAdded { turn_id, block: approval_card(request) });
+        let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
+        deltas.push(Delta::BlockAdded {
+            turn_id: turn_id.clone(),
+            block: approval_card(request, &self.session_cwd),
+        });
+        self.emitted.insert(turn_id.clone(), block_index + 1);
+        self.approval_sites.insert(
+            request.request_id.clone(),
+            ApprovalSite {
+                turn_id: turn_id.clone(),
+                block_index,
+                tool_use_id: request.tool_use_id.clone(),
+            },
+        );
+        if !request.tool_use_id.is_empty() {
+            self.tool_approvals.insert(request.tool_use_id.clone(), request.request_id.clone());
+        }
+        // The gated call has not run: its open card (when the `tool_use`
+        // arrived first) drops from Running to Pending, so no spinner ever
+        // reads done beside the waiting approval.
+        if let Some(site) = self.tools.get(&request.tool_use_id).cloned() {
+            if let Some(block) = waiting_tool_block(&request.tool_use_id, &site) {
+                deltas.push(Delta::BlockUpdated {
+                    turn_id: site.turn_id,
+                    block_index: site.block_index,
+                    block,
+                });
+            }
+        }
         deltas
+    }
+
+    /// Settle one carded approval to its decided state: the only thing that
+    /// ever moves the card after the press. A repeat resolution for an
+    /// already-settled id is a no-op.
+    fn resolve_approval_card(&mut self, request_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
+        let Some(site) = self.approval_sites.remove(request_id) else { return };
+        if !site.tool_use_id.is_empty() {
+            self.tool_approvals.remove(&site.tool_use_id);
+        }
+        // The request is on the decided shelf whenever a press preceded
+        // the settling frames (the ordinary order), or still queued when
+        // the frames outran the decision bookkeeping. Either way the card
+        // rebuilds from it; a repeated resolution finds no site and stops
+        // above.
+        let request = self
+            .decided
+            .remove(request_id)
+            .or_else(|| {
+                self.pending
+                    .iter()
+                    .position(|queued| queued.request_id == request_id)
+                    .map(|position| self.pending.remove(position))
+            });
+        let Some(request) = request else { return };
+        let mut card = approval_card(&request, &self.session_cwd);
+        if let Block::Approval { state: slot, .. } = &mut card {
+            *slot = state;
+        }
+        deltas.push(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block: card });
     }
 
     /// Record an unrecognised control subtype, queue it for an explicit
@@ -1303,25 +1492,234 @@ pub fn decide_unknown_approval(
     }
 }
 
+/// One input field as plain text, for faces that name a single value.
+fn approval_field(request: &ApprovalRequest, key: &str) -> String {
+    request
+        .input
+        .get(key)
+        .and_then(|value| match value {
+            serde_json::Value::String(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The input's remaining scalar fields as `k=v` pairs, capped: the compact
+/// argument list for tools with no richer face. Keys already surfaced by
+/// the caller stay out, so the card never says the path twice.
+fn compact_args(request: &ApprovalRequest, skip: &[&str]) -> String {
+    let mut pairs = Vec::new();
+    if let Some(object) = request.input.as_object() {
+        for (key, value) in object {
+            if skip.contains(&key.as_str()) {
+                continue;
+            }
+            let rendered = match value {
+                serde_json::Value::String(text) => {
+                    if text.chars().count() > 80 {
+                        format!("{}…", text.chars().take(79).collect::<String>())
+                    } else {
+                        text.clone()
+                    }
+                }
+                serde_json::Value::Null => continue,
+                other => other.to_string(),
+            };
+            pairs.push(format!("{key}={rendered}"));
+            if pairs.len() >= 4 {
+                break;
+            }
+        }
+    }
+    pairs.join(", ")
+}
+
+/// A content preview: the first lines of a `Write`, capped so a big file
+/// does not become a big card.
+fn content_preview(content: &str) -> String {
+    const MAX_LINES: usize = 5;
+    const MAX_CHARS: usize = 300;
+    let lines: Vec<&str> = content.lines().take(MAX_LINES).collect();
+    let mut preview = lines.join("\n");
+    if content.lines().count() > MAX_LINES || preview.chars().count() > MAX_CHARS {
+        preview = preview.chars().take(MAX_CHARS).collect::<String>();
+        preview.push('…');
+    }
+    preview
+}
+
+/// A small line diff of one edit: common leading/trailing lines trimmed,
+/// the changed middle shown as `-`/`+` lines, capped. Plain text, not a
+/// patch object — the card's reason line, not a file.
+fn mini_diff(old: &str, new: &str) -> String {
+    const MAX_EACH: usize = 8;
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = &old_lines[prefix..old_lines.len() - suffix];
+    let added = &new_lines[prefix..new_lines.len() - suffix];
+    let mut out = Vec::new();
+    for line in removed.iter().take(MAX_EACH) {
+        out.push(format!("- {line}"));
+    }
+    if removed.len() > MAX_EACH {
+        out.push(format!("… {} more removed", removed.len() - MAX_EACH));
+    }
+    for line in added.iter().take(MAX_EACH) {
+        out.push(format!("+ {line}"));
+    }
+    if added.len() > MAX_EACH {
+        out.push(format!("… {} more added", added.len() - MAX_EACH));
+    }
+    if out.is_empty() {
+        out.push("(no visible change)".to_owned());
+    }
+    out.join("\n")
+}
+
+/// The child's ask (`decision_reason`) appended under a face that already
+/// says what: why the child is asking, when it said why.
+fn with_ask(mut face: String, request: &ApprovalRequest) -> String {
+    if !request.decision_reason.trim().is_empty() {
+        if !face.is_empty() {
+            face.push('\n');
+        }
+        face.push_str(request.decision_reason.trim());
+    }
+    face
+}
+
+/// The `(command, reason, cwd)` face of a `can_use_tool` request, per tool:
+/// Bash names the command and where it would run; Write names the path
+/// with a content preview; Edit names the path with the diff; fetchers
+/// name the URL; MCP tools name server/tool with compact args. The
+/// fallback names the child's own description with compact args — still
+/// never the raw input JSON, and never a wire id.
+fn approval_face(request: &ApprovalRequest, session_cwd: &str) -> (String, String, String) {
+    let cwd = session_cwd.to_owned();
+    let fallback_command =
+        if !request.description.trim().is_empty() {
+            request.description.trim().to_owned()
+        } else {
+            approval_headline(request)
+        };
+    match request.tool_name.as_str() {
+        "Bash" => {
+            let command = approval_field(request, "command");
+            let command = if command.trim().is_empty() { fallback_command } else { command };
+            let reason = with_ask(command.clone(), request);
+            (command, reason, cwd)
+        }
+        "Write" => {
+            let path = approval_field(request, "file_path");
+            let path = if path.trim().is_empty() { fallback_command.clone() } else { path };
+            let content = approval_field(request, "content");
+            let reason = if content.is_empty() {
+                with_ask(path.clone(), request)
+            } else {
+                with_ask(format!("{path}\n{}", content_preview(&content)), request)
+            };
+            (path, reason, cwd)
+        }
+        "Edit" | "MultiEdit" => {
+            let path = approval_field(request, "file_path");
+            let path = if path.trim().is_empty() { fallback_command.clone() } else { path };
+            let mut diffs = Vec::new();
+            if request.tool_name == "MultiEdit" {
+                if let Some(edits) = request.input.get("edits").and_then(|edits| edits.as_array()) {
+                    for edit in edits.iter().take(3) {
+                        let old = edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+                        let new = edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                        if !old.is_empty() || !new.is_empty() {
+                            diffs.push(mini_diff(old, new));
+                        }
+                    }
+                }
+            } else {
+                let old = approval_field(request, "old_string");
+                let new = approval_field(request, "new_string");
+                if !old.is_empty() || !new.is_empty() {
+                    diffs.push(mini_diff(&old, &new));
+                }
+            }
+            let reason = if diffs.is_empty() {
+                with_ask(path.clone(), request)
+            } else {
+                with_ask(format!("{path}\n{}", diffs.join("\n")), request)
+            };
+            (path, reason, cwd)
+        }
+        "Read" => {
+            let path = approval_field(request, "file_path");
+            let path = if path.trim().is_empty() { fallback_command.clone() } else { path };
+            (path.clone(), with_ask(path, request), cwd)
+        }
+        "WebFetch" => {
+            let url = approval_field(request, "url");
+            let url = if url.trim().is_empty() { fallback_command.clone() } else { url };
+            (url.clone(), with_ask(url, request), cwd)
+        }
+        "WebSearch" => {
+            let query = approval_field(request, "query");
+            let query = if query.trim().is_empty() { fallback_command.clone() } else { query };
+            (query.clone(), with_ask(query, request), cwd)
+        }
+        _ => {
+            if request.mcp_server.is_some() || request.tool_name.starts_with("mcp__") {
+                let server = request.mcp_server.clone().unwrap_or_default();
+                let head = if server.is_empty() {
+                    approval_headline(request)
+                } else {
+                    format!("{server} · {}", approval_headline(request))
+                };
+                let args = compact_args(request, &[]);
+                // No bare duplication: the head already rides the command
+                // line, so an arg-less call says what it allows in words.
+                let reason = if args.is_empty() {
+                    if server.is_empty() {
+                        format!("Allow {}", approval_headline(request))
+                    } else {
+                        format!("Allow {} via MCP server {server}", approval_headline(request))
+                    }
+                } else {
+                    format!("{head}\n{args}")
+                };
+                (head, with_ask(reason, request), cwd)
+            } else {
+                let args = compact_args(request, &[]);
+                let reason = if !request.decision_reason.trim().is_empty() {
+                    request.decision_reason.trim().to_owned()
+                } else {
+                    args
+                };
+                (fallback_command, reason, cwd)
+            }
+        }
+    }
+}
+
 /// The transcript card for a `can_use_tool` request: a pending approval the
 /// person resolves through `DecideApproval` with the card's `"allow"` /
 /// `"deny"` choices.
-fn approval_card(request: &ApprovalRequest) -> Block {
-    let input = match &request.input {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::Object(map) if map.is_empty() => String::new(),
-        other => other.to_string(),
-    };
-    let command = if input.is_empty() {
-        request.tool_name.clone()
-    } else {
-        format!("{} {input}", request.tool_name)
-    };
-    let mut reason =
-        format!("tool_use {} requests {}", request.tool_use_id, approval_headline(request));
-    if let Some(server) = &request.mcp_server {
-        reason.push_str(&format!(" via MCP server {server}"));
-    }
+///
+/// The face is per tool, never the raw input JSON: the command line names
+/// what would run, the reason says it in the tool's own terms, and no
+/// wire id (`toolu_…`, `request_id`) ever reaches user-facing text.
+fn approval_card(request: &ApprovalRequest, session_cwd: &str) -> Block {
+    let (command, reason, cwd) = approval_face(request, session_cwd);
     let mut capabilities = Vec::new();
     for suggestion in &request.suggestions {
         for name in &suggestion.tool_names {
@@ -1336,7 +1734,7 @@ fn approval_card(request: &ApprovalRequest) -> Block {
         tool: request.tool_name.clone(),
         command,
         reason,
-        cwd: String::new(),
+        cwd,
         capabilities,
         scope: ApprovalScope::ThisCommand,
         state: ApprovalState::Pending,
@@ -1397,23 +1795,27 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
     if name == "Bash" {
         let target =
             input.get("command").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
+        // The opening verb is present tense: the call has not run yet, and
+        // past tense beside a spinner reads done while an approval may
+        // still be gating it. The result maps it back (see `past_verb`).
         let block = Block::ToolCall {
             id: id.to_owned(),
             kind: ToolKind::Shell,
-            verb: "Ran".into(),
+            verb: "Run".into(),
             target: target.clone(),
             status: ToolStatus::Running,
             duration_ms: None,
             body: ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
             diff_stat: None,
         };
-        ToolCard { kind: ToolKind::Shell, verb: "Ran".into(), target, params, block }
+        ToolCard { kind: ToolKind::Shell, verb: "Run".into(), target, params, block }
     } else if matches!(name, "Write" | "Edit" | "Read") {
         // File cards: the header names the path; the body (diff, line
-        // count) lands when the result's structured detail arrives.
+        // count) lands when the result's structured detail arrives. Verbs
+        // stay present until the result lands, for the same reason.
         let (kind, verb) = match name {
-            "Write" => (ToolKind::Write, "Wrote"),
-            "Edit" => (ToolKind::Edit, "Edited"),
+            "Write" => (ToolKind::Write, "Write"),
+            "Edit" => (ToolKind::Edit, "Edit"),
             _ => (ToolKind::Read, "Read"),
         };
         let target = input
@@ -1452,20 +1854,20 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
         let block = Block::ToolCall {
             id: id.to_owned(),
             kind: ToolKind::SubAgent,
-            verb: "Delegated".into(),
+            verb: "Delegate".into(),
             target: target.clone(),
             status: ToolStatus::Running,
             duration_ms: None,
             body: ToolBody::SubAgent { turns: Vec::new() },
             diff_stat: None,
         };
-        ToolCard { kind: ToolKind::SubAgent, verb: "Delegated".into(), target, params, block }
+        ToolCard { kind: ToolKind::SubAgent, verb: "Delegate".into(), target, params, block }
     } else if let Some((server, tool)) = mcp_split(name) {
         let target = format!("{server} · {tool}");
         let block = Block::ToolCall {
             id: id.to_owned(),
             kind: ToolKind::Mcp { server: server.clone(), tool: tool.clone() },
-            verb: "Ran".into(),
+            verb: "Run".into(),
             target: target.clone(),
             status: ToolStatus::Running,
             duration_ms: None,
@@ -1474,7 +1876,7 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
         };
         ToolCard {
             kind: ToolKind::Mcp { server, tool },
-            verb: "Ran".into(),
+            verb: "Run".into(),
             target,
             params,
             block,
@@ -1495,6 +1897,43 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             block: Block::Generic { kind: name.to_owned(), status: "running".into(), text },
         }
     }
+}
+
+/// Rebuild an open tool card in its gated state: `Pending` with its opening
+/// verb while the approval waits, `Cancelled` reading "Denied" once the
+/// turn's denials confirm it never ran. Nothing is invented — the shape is
+/// the opening card's, minus any live output (nothing ran, so nothing
+/// streams). SubAgent cards are left alone (`None`): their nested
+/// transcript is the truth about them, not the gate.
+fn gated_tool_block(
+    tool_use_id: &str,
+    site: &ToolSite,
+    status: ToolStatus,
+    verb: &str,
+) -> Option<Block> {
+    let body = match &site.kind {
+        ToolKind::Shell => ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: false },
+        ToolKind::Edit | ToolKind::Write | ToolKind::Read => ToolBody::None,
+        ToolKind::Mcp { .. } => {
+            ToolBody::Mcp { params: site.params.clone(), result_json: String::new() }
+        }
+        _ => return None,
+    };
+    Some(Block::ToolCall {
+        id: tool_use_id.to_owned(),
+        kind: site.kind.clone(),
+        verb: verb.to_owned(),
+        target: site.target.clone(),
+        status,
+        duration_ms: None,
+        body,
+        diff_stat: None,
+    })
+}
+
+/// The gated call has not run: its open card drops to waiting.
+fn waiting_tool_block(tool_use_id: &str, site: &ToolSite) -> Option<Block> {
+    gated_tool_block(tool_use_id, site, ToolStatus::Pending, &site.verb)
 }
 
 /// Split `mcp__<server>__<tool>`; anything else is not an MCP name.
@@ -1583,6 +2022,35 @@ mod tests {
 
     fn replay(name: &str) -> (ClaudeFold, Vec<Delta>) {
         fold_lines(&fixture_lines(name))
+    }
+
+    /// The line index just past the n-th `can_use_tool` control request
+    /// (1-based): the point in the replay where n asks wait and nothing
+    /// later has answered or run yet.
+    fn nth_control_request(lines: &[String], n: usize) -> Option<usize> {
+        let mut seen = 0;
+        lines
+            .iter()
+            .position(|line| {
+                let is_ask = serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .map(|value| {
+                        value.get("type").and_then(|kind| kind.as_str()) == Some("control_request")
+                            && value
+                                .get("request")
+                                .and_then(|request| request.get("subtype"))
+                                .and_then(|subtype| subtype.as_str())
+                                == Some("can_use_tool")
+                    })
+                    .unwrap_or(false);
+                if is_ask {
+                    seen += 1;
+                    seen == n
+                } else {
+                    false
+                }
+            })
+            .map(|index| index + 1)
     }
 
     fn user_turns(deltas: &[Delta]) -> Vec<(&str, usize)> {
@@ -1754,13 +2222,36 @@ mod tests {
 
     /// `edit.jsonl`: Write then Edit fold to file cards with server-honest
     /// diff chips — `+1/−0` for the creation, `+2/−1` for the edit — and
-    /// both approvals on the wire precede their runs.
+    /// both approvals on the wire precede their runs: mid-replay both asks
+    /// wait, and the full replay settles both cards to allowed as their
+    /// tools run.
     #[test]
     fn edit_fixture_folds_write_and_edit_cards_with_diff_stats() {
+        let lines = fixture_lines("edit.jsonl");
+        let write_asked_at = nth_control_request(&lines, 1).expect("the Write ask on the wire");
+        let (fold, _) = fold_lines(&lines[..write_asked_at]);
+        assert_eq!(fold.pending_approvals().len(), 1, "Write asked");
+        let edit_asked_at = nth_control_request(&lines, 2).expect("two asks on the wire");
+        let (fold, _) = fold_lines(&lines[..edit_asked_at]);
+        // The Write already ran, so only the Edit still waits: settling
+        // follows each run, never the end of the turn.
+        assert_eq!(fold.pending_approvals().len(), 1, "Write settled, Edit asked");
         let (fold, deltas) = replay("edit.jsonl");
-        assert_eq!(fold.pending_approvals().len(), 2, "Write asked, Edit asked");
+        assert!(fold.pending_approvals().is_empty(), "both asks settled as their tools ran");
+        let allowed = deltas
+            .iter()
+            .filter(|delta| {
+                matches!(
+                    delta,
+                    Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+                )
+            })
+            .count();
+        assert_eq!(allowed, 2, "Write allowed, Edit allowed");
         let updated = tool_updates(&deltas);
-        let write = updated.iter().find_map(|block| match block {
+        // The waiting flip lands before each completion, so the last
+        // update per card is the one that ran.
+        let write = updated.iter().rev().find_map(|block| match block {
             Block::ToolCall { kind: ToolKind::Write, target, status, body, diff_stat, .. } => {
                 Some((target.clone(), *status, body.clone(), *diff_stat))
             }
@@ -1774,7 +2265,7 @@ mod tests {
             Some((1, 0, 1)),
             "one line created"
         );
-        let edit = updated.iter().find_map(|block| match block {
+        let edit = updated.iter().rev().find_map(|block| match block {
             Block::ToolCall { kind: ToolKind::Edit, target, status, body, diff_stat, .. } => {
                 Some((target.clone(), *status, body.clone(), *diff_stat))
             }
@@ -1846,17 +2337,27 @@ mod tests {
 
     /// `error.jsonl`: the failing run folds to an `Error` card with the
     /// CLI's own exit code parsed off its `Exit code N` prefix, and the
-    /// turn still finishes.
+    /// turn still finishes. The wire asks first, so the card waits as
+    /// `Pending` beside the approval before the error completes it —
+    /// pending while gated, error only once it ran and failed.
     #[test]
     fn error_fixture_marks_shell_error_with_exit_code() {
         let (_, deltas) = replay("error.jsonl");
         let updated = tool_updates(&deltas);
-        let shell = updated.iter().find_map(|block| match block {
-            Block::ToolCall {
-                kind: ToolKind::Shell, target, status, body, ..
-            } => Some((target.clone(), *status, body.clone())),
-            _ => None,
-        }).expect("the failed run completes its card");
+        let shells: Vec<_> = updated
+            .iter()
+            .filter_map(|block| match block {
+                Block::ToolCall {
+                    kind: ToolKind::Shell, target, status, body, ..
+                } => Some((target.clone(), *status, body.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shells.iter().any(|(_, status, _)| *status == ToolStatus::Pending),
+            "the gated run waits before it fails: {shells:?}"
+        );
+        let shell = shells.last().expect("the failed run completes its card");
         assert_eq!(shell.0, "ls /nonexistent-dir-xyz-123");
         assert_eq!(shell.1, ToolStatus::Error);
         match &shell.2 {
@@ -2106,19 +2607,21 @@ mod tests {
         }
     }
 
-    /// `thinking.jsonl` (sonnet, 8-puzzle): the thinking block folds, and
-    /// the footer counts the reasoning the wire reports — 262 thinking
-    /// tokens — with the whole billed prompt in `tokens_in`. The thinking
-    /// *text* is signature-only on this wire (empty here), so the block
-    /// carries presence, and the count carries the evidence.
+    /// `thinking.jsonl` (sonnet, 8-puzzle): the thinking *text* is
+    /// signature-only on this wire (empty), so no thinking block folds —
+    /// an empty "Thought for 0.0 s" shell is noise — and the footer counts
+    /// the reasoning the wire reports: 262 thinking tokens, with the whole
+    /// billed prompt in `tokens_in`. The count carries the evidence the
+    /// redacted trace cannot. Remove the empty-text skip and an empty
+    /// thinking card folds again.
     #[test]
-    fn thinking_fixture_folds_thinking_block_and_reasoning_tokens() {
+    fn thinking_fixture_skips_empty_thinking_but_counts_reasoning() {
         let (_, deltas) = replay("thinking.jsonl");
         let thinking =
             deltas.iter().filter(|delta| matches!(
                 delta, Delta::BlockAdded { block: Block::Thinking { .. }, .. }
             )).count();
-        assert!(thinking >= 1, "the reasoning trace folds to a block");
+        assert_eq!(thinking, 0, "redacted thinking folds to no block");
         let metas = finished_metas(&deltas);
         assert!(!metas.is_empty());
         for meta in &metas {
@@ -2131,12 +2634,14 @@ mod tests {
     /// `approval-default.jsonl`: the Write approval cards as pending with
     /// its own allow/deny choices, and after the allow the write runs to
     /// a completed card — the transcript shows ask-then-run, not just run.
+    /// The decision itself settles nothing: the card moves only when the
+    /// write's result lands.
     #[test]
     fn approval_default_fixture_cards_pending_approval_then_runs() {
-        let (fold, deltas) = replay("approval-default.jsonl");
-        // The replay folds the child's frames; the capture's answers ride
-        // the `host->cli` envelope lines, which decode as noise — so the
-        // request is still pending here, exactly as the live child waits.
+        let lines = fixture_lines("approval-default.jsonl");
+        let asked_at = nth_control_request(&lines, 1).expect("the Write ask on the wire");
+        let (mut fold, ask_deltas) = fold_lines(&lines[..asked_at]);
+        // The ask waits, exactly as the live child waits for its answer.
         // Deciding it must mint the same answer the capture sent.
         assert_eq!(fold.pending_approvals().len(), 1, "the Write ask waits");
         let request = fold.pending_approvals()[0].clone();
@@ -2158,7 +2663,7 @@ mod tests {
         let minted_value: serde_json::Value =
             serde_json::from_str(&minted).expect("the minted answer is JSON");
         assert_eq!(&minted_value, &sent, "the decision matches the live answer");
-        let approvals: Vec<Block> = deltas
+        let approvals: Vec<Block> = ask_deltas
             .iter()
             .filter_map(|delta| match delta {
                 Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => {
@@ -2169,7 +2674,7 @@ mod tests {
             .collect();
         assert_eq!(approvals.len(), 1, "one asked approval, one card");
         match &approvals[0] {
-            Block::Approval { tool, state, choices, .. } => {
+            Block::Approval { tool, state, choices, command, reason, cwd, .. } => {
                 assert_eq!(tool, "Write");
                 assert_eq!(*state, ApprovalState::Pending);
                 assert!(
@@ -2177,15 +2682,45 @@ mod tests {
                         && choices.iter().any(|choice| choice.id == "deny"),
                     "the card's own choices"
                 );
+                // The Write face names the path with a content preview —
+                // never the raw input JSON, never a wire id — and where it
+                // would run.
+                assert_eq!(command, "/tmp/w4b/outside-claude.txt", "the path, not JSON");
+                assert!(reason.contains("APPROVED"), "the content preview: {reason}");
+                assert!(!reason.contains("toolu_"), "no wire ids: {reason}");
+                assert!(!reason.contains('{'), "no raw JSON: {reason}");
+                assert!(!cwd.is_empty(), "the card names where the tool would run");
             }
             other => panic!("an approval card, got {other:?}"),
         }
-        let write_done = tool_updates(&deltas).iter().any(|block| matches!(
-            block,
-            Block::ToolCall {
-                kind: ToolKind::Write, status: ToolStatus::Success, diff_stat: Some(_), ..
-            }
-        ));
+        // The press itself settles nothing: take the decision, then run
+        // the rest of the capture — the write's result settles the card.
+        fold.take_approval(&request.request_id).expect("the ask is answerable");
+        let mut rest = Vec::new();
+        for line in &lines[asked_at..] {
+            rest.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the write's result settles the decided card to allowed"
+        );
+        assert!(fold.pending_approvals().is_empty(), "nothing waits after the run");
+        let write_done = rest
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block, .. } => Some(block),
+                _ => None,
+            })
+            .chain(tool_updates(&rest).iter())
+            .any(|block| matches!(
+                block,
+                Block::ToolCall {
+                    kind: ToolKind::Write, status: ToolStatus::Success, diff_stat: Some(_), ..
+                }
+            ));
         assert!(write_done, "the allowed write completed with its chip");
     }
 
@@ -2275,10 +2810,15 @@ mod tests {
 
     /// NO DOUBLE RENDER. Every `assistant` frame's content appears exactly
     /// once in the folded transcript, although `stream_event` frames
-    /// describe the same content a second time.
+    /// describe the same content a second time. Redacted (empty) thinking
+    /// folds to no block at all, so those holes leave the count.
     #[test]
     fn partial_renders_each_assistant_message_exactly_once() {
         let partial = fixture_lines("partial.jsonl");
+        let is_empty_thinking = |block: &serde_json::Value| {
+            block.get("type").and_then(|kind| kind.as_str()) == Some("thinking")
+                && block.get("thinking").and_then(|text| text.as_str()).is_some_and(|text| text.trim().is_empty())
+        };
         let assistant_blocks: usize = partial
             .iter()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -2290,7 +2830,7 @@ mod tests {
                     .get("message")
                     .and_then(|message| message.get("content"))
                     .and_then(serde_json::Value::as_array)
-                    .map(Vec::len)
+                    .map(|content| content.iter().filter(|block| !is_empty_thinking(block)).count())
                     .unwrap_or(0)
             })
             .sum();
@@ -2455,9 +2995,14 @@ mod tests {
     /// must leave the permission request pending with a card on the
     /// transcript: a reader that only folded `assistant`/`stream_event`
     /// would leave nothing pending, and the child would wait forever.
+    /// Deciding moves the request off the answerable queue exactly once
+    /// without moving the card; the PONG result then settles the card to
+    /// allowed — decided never means resolved.
     #[test]
     fn permission_request_stays_pending_until_decided() {
-        let (mut fold, _) = fold_lines(&permission_child_lines());
+        let lines = permission_child_lines();
+        let asked_at = nth_control_request(&lines, 1).expect("the ask on the wire");
+        let (mut fold, _) = fold_lines(&lines[..asked_at]);
         let request_id = {
             let pending = fold.pending_approvals();
             assert_eq!(pending.len(), 1, "the can_use_tool request must surface, not fold away");
@@ -2467,8 +3012,8 @@ mod tests {
             request.request_id.clone()
         };
         // The card is on the transcript too: a pending approval, not prose.
-        let (_, deltas) = fold_lines(&permission_child_lines());
-        let cards = deltas
+        let (_, ask_deltas) = fold_lines(&lines[..asked_at]);
+        let cards = ask_deltas
             .iter()
             .filter(|delta| {
                 matches!(
@@ -2481,18 +3026,39 @@ mod tests {
             })
             .count();
         assert_eq!(cards, 1, "one pending approval card on the transcript");
-        // Deciding takes it off the pending set exactly once.
+        // Deciding takes it off the pending set exactly once — and moves
+        // no card: the decision queues the answer line, nothing more.
         let taken = fold.take_approval(&request_id);
         assert!(taken.is_some());
         assert!(fold.pending_approvals().is_empty());
         assert!(fold.take_approval(&request_id).is_none());
+        let mut settled = Vec::new();
+        for line in &lines[asked_at..] {
+            settled.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        assert!(
+            settled.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the PONG result settles the decided card to allowed: {settled:?}"
+        );
+        assert!(
+            !settled.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Approval { .. }, .. }
+            )),
+            "settling updates the card, never cards twice"
+        );
     }
 
     /// Decisions are explicit and typed: allow and deny render their wire
     /// lines, anything else is rejected with the offered choices named.
     #[test]
     fn decisions_are_explicit_allow_or_deny() {
-        let (fold, _) = fold_lines(&permission_child_lines());
+        let lines = permission_child_lines();
+        let asked_at = nth_control_request(&lines, 1).expect("the ask on the wire");
+        let (fold, _) = fold_lines(&lines[..asked_at]);
         let request = fold.pending_approvals()[0].clone();
         let allow = decide_approval(&request, "allow", None).expect("allow decides");
         let written: serde_json::Value = serde_json::from_str(&allow).expect("encodes JSON");
@@ -2623,15 +3189,17 @@ mod tests {
             )),
             "the denial must card even with no turn open: {deltas:?}"
         );
+        // No wire ids in user-facing text: the card names the refused
+        // tool, never its `toolu_…` id.
         assert!(
             deltas.iter().any(|delta| match delta {
                 Delta::BlockAdded {
                     block: Block::Generic { text, .. },
                     ..
-                } => text.contains("toolu_01XqHeZeKksDmhf4miPM8P5C"),
+                } => text.contains("mcp__baaz__ping") && !text.contains("toolu_"),
                 _ => false,
             }),
-            "the card names the refused tool use: {deltas:?}"
+            "the card names the refused tool, never its id: {deltas:?}"
         );
         assert!(
             deltas.iter().any(|delta| matches!(delta, Delta::TurnStarted { .. })),

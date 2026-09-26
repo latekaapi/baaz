@@ -51,16 +51,36 @@ fn load_exchange() -> Exchange {
 /// request with a tap on the shoulder, and the host side of the fixture
 /// must carry exactly its answer — produced here again from an explicit
 /// decision, byte-equal.
+/// The child-side line index just past the `can_use_tool` ask: the point
+/// where the request waits and nothing later has run yet.
+fn asked_at(child_out: &[String]) -> usize {
+    let mut index = 0;
+    for (position, line) in child_out.iter().enumerate() {
+        let is_ask = decode_line(line).is_ok_and(|frame| {
+            matches!(
+                frame,
+                provider_claude_code::frame::Frame::ControlRequest(_)
+            )
+        });
+        if is_ask {
+            index = position + 1;
+            break;
+        }
+    }
+    assert!(index > 0, "the ask on the wire");
+    index
+}
+
 #[test]
 fn unanswered_request_fails_and_explicit_allow_answers() {
     let exchange = load_exchange();
+    // Surfaced: one pending request, fully shaped — folded only up to the
+    // ask, because the PONG later settles it (decided never means pending).
     let mut fold = ClaudeFold::new();
-    let mut events = Vec::new();
-    for line in &exchange.child_out {
-        step_line(&mut fold, line, &mut |event| events.push(event));
+    let mut ask_events = Vec::new();
+    for line in &exchange.child_out[..asked_at(&exchange.child_out)] {
+        step_line(&mut fold, line, &mut |event| ask_events.push(event));
     }
-
-    // Surfaced: one pending request, fully shaped.
     let pending = fold.pending_approvals();
     assert_eq!(pending.len(), 1, "the request must surface, not fold away");
     let request = &pending[0];
@@ -72,7 +92,7 @@ fn unanswered_request_fails_and_explicit_allow_answers() {
     assert_eq!(request.suggestions.len(), 1);
 
     // …with its tap on the shoulder, naming the session and the headline.
-    let taps: Vec<_> = events
+    let taps: Vec<_> = ask_events
         .iter()
         .filter_map(|event| match event {
             provider::ProviderEvent::ApprovalRequested {
@@ -87,6 +107,33 @@ fn unanswered_request_fails_and_explicit_allow_answers() {
     assert_eq!(taps[0].0, "fdd19e9e-e32b-4a7b-b88c-437271a08851");
     assert_eq!(taps[0].1, "b4554ab2-30c2-4271-8451-dd9d6f5e226d");
     assert_eq!(taps[0].2, &approval_headline(request));
+
+    // The MCP face names server/tool with compact args — never the raw
+    // input JSON, never a wire id.
+    let card = ask_events
+        .iter()
+        .filter_map(|event| match event {
+            provider::ProviderEvent::Deltas { deltas, .. } => Some(deltas),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|delta| match delta {
+            aui_protocol::Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => {
+                Some(card.clone())
+            }
+            _ => None,
+        })
+        .expect("the ask cards on the transcript");
+    match &card {
+        Block::Approval { tool, command, reason, .. } => {
+            assert_eq!(tool, "mcp__baaz__ping");
+            assert_eq!(command, "baaz · Ping (mcp__baaz__ping)");
+            assert!(reason.contains("baaz"), "the server: {reason}");
+            assert!(!reason.contains("toolu_"), "no wire ids: {reason}");
+            assert!(!reason.contains('{'), "no raw JSON: {reason}");
+        }
+        other => panic!("an approval card, got {other:?}"),
+    }
 
     // Answered: the host side carries a control_response for exactly this
     // request — fail here and the turn hung.
@@ -113,8 +160,37 @@ fn unanswered_request_fails_and_explicit_allow_answers() {
             .expect("encodes JSON");
     assert_eq!(&minted, answers[0]);
 
-    // The exchange then completes: the allowed tool's PONG lands on its
-    // card and the turn finishes with the provider's real cost.
+    // The exchange then completes: replay the whole child side through
+    // the same pump entry — the allowed tool's PONG lands on its card,
+    // the approval settles to allowed, and the turn finishes with the
+    // provider's real cost.
+    let mut fold = ClaudeFold::new();
+    let mut events = Vec::new();
+    for line in &exchange.child_out {
+        step_line(&mut fold, line, &mut |event| events.push(event));
+    }
+    assert!(
+        fold.pending_approvals().is_empty(),
+        "the answered ask settles as its tool runs"
+    );
+    let settled: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            provider::ProviderEvent::Deltas { deltas, .. } => Some(deltas),
+            _ => None,
+        })
+        .flatten()
+        .filter(|delta| {
+            matches!(
+                delta,
+                aui_protocol::Delta::BlockUpdated {
+                    block: Block::Approval { state: aui_protocol::ApprovalState::AllowedOnce { .. }, .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(settled.len(), 1, "the decided card settles to allowed, once");
     let pongs = events
         .iter()
         .filter_map(|event| match event {
