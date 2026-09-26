@@ -166,6 +166,65 @@ impl CodexAdapter {
         Ok(f(running))
     }
 
+    /// Rejoin a stored thread by id: a fresh child, the handshake, then
+    /// `thread/resume` — the response carries the thread (with its
+    /// `turns[]` history) plus the effective model, which this folds and
+    /// replays before any live delta, exactly once per resume. The
+    /// replayed history and the next live turn share the fold, so the new
+    /// turn appends after history with no echo suppression needed: the
+    /// resumed child never re-emits a completed turn's items.
+    fn resume_session(&self, session_id: &str) -> Result<Ack, ProviderError> {
+        if self.child.lock().expect("child mutex").is_some() {
+            return Err(ProviderError::Rejected {
+                reason: "this adapter already holds a session child; fork or resume instead"
+                    .into(),
+            });
+        }
+        let running = RunningChild::spawn(&self.program, Arc::clone(&self.fold), self.tx.clone())
+            .map_err(|error| ProviderError::Unavailable {
+                reason: format!("could not spawn codex: {error}"),
+            })?;
+        running
+            .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
+            .map_err(Self::unavailable)?;
+        running
+            .send_notification("initialized", initialized_notification()["params"].clone())
+            .map_err(|error| ProviderError::Unavailable {
+                reason: format!("the session child is unreachable: {error}"),
+            })?;
+        let answer = running
+            .send_frame(child::thread_resume_request(running.next_request_id(), session_id))
+            .map_err(Self::unavailable)?;
+        let (thread_id, resumed_session, model) =
+            child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
+                reason: "thread/resume answered without thread ids".into(),
+            })?;
+        let turns = child::resume_turns(&answer);
+        let deltas = {
+            let mut fold = self.fold.lock().expect("fold mutex");
+            fold.set_model(&model);
+            let mut deltas = fold.apply(&crate::frame::Frame::Notification(
+                crate::frame::Notification::ThreadStarted {
+                    thread_id: thread_id.clone(),
+                    session_id: resumed_session.clone(),
+                },
+            ));
+            deltas.extend(fold.apply_resume_turns(&thread_id, &turns));
+            deltas
+        };
+        *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
+        *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
+        *self.model.lock().expect("model mutex") = Some(model);
+        *self.child.lock().expect("child mutex") = Some(running);
+        if !deltas.is_empty() {
+            let _ = self.tx.send(provider::ProviderEvent::Deltas {
+                session_id: Some(resumed_session.clone()),
+                deltas,
+            });
+        }
+        Ok(Ack::Session { session_id: resumed_session, title: None })
+    }
+
     fn thread_and_model(&self) -> Result<(String, String), ProviderError> {
         let thread = self.thread_id.lock().expect("thread mutex").clone();
         let model = self.model.lock().expect("model mutex").clone();
@@ -408,10 +467,7 @@ impl ProviderAdapter for CodexAdapter {
             Command::OpenSession { workspace, model, .. } => {
                 self.open_session(workspace.as_deref(), model.as_deref())
             }
-            Command::ResumeSession { .. } => Err(ProviderError::Rejected {
-                reason: "thread/resume was never captured against a live server; not resumed blind"
-                    .into(),
-            }),
+            Command::ResumeSession { session_id, .. } => self.resume_session(&session_id),
             Command::ForkSession { .. } => Err(ProviderError::Rejected {
                 reason: "thread/fork was never executed against a live server; not forked blind"
                     .into(),

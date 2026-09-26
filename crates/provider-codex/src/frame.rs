@@ -481,6 +481,15 @@ fn file_changes_from(item: &Value) -> Vec<FileChangeEntry> {
         .unwrap_or_default()
 }
 
+/// One history item out of a `thread/resume` response's
+/// `thread.turns[].items[]`: the same item shape the live
+/// `item/started` / `item/completed` notifications carry, decoded by the
+/// same function so the replayed transcript and the live one cannot
+/// disagree.
+pub(crate) fn decode_thread_item(item: &Value) -> Item {
+    decode_item(item)
+}
+
 fn decode_item(item: &Value) -> Item {
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     let id = str_field(item, "id");

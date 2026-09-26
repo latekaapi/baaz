@@ -673,6 +673,12 @@ pub struct SessionView {
     /// never sets this — its chip moves only on `session/modelChanged` —
     /// and no lane ever changes provider, which has no setter by design.
     pending_model: Option<String>,
+    /// The last model a finished turn reported on the provider lane, in
+    /// arrival order: replayed history's footers land here first, so a
+    /// reopened session's chip names the session's model instead of the
+    /// provider. A later pick (see [`SessionView::pending_model`]) or a
+    /// live catalog row still wins; the muse lane never sets this.
+    history_model: Option<String>,
     /// The Codex catalog's per-model reasoning levels, folded from a
     /// `model/list` answer: model id → its `supportedReasoningEfforts`, in
     /// provider order. A snapshot like [`SessionView::models`], keyed because
@@ -889,6 +895,7 @@ impl SessionView {
             models: Vec::new(),
             models_error: None,
             pending_model: None,
+            history_model: None,
             codex_efforts: HashMap::new(),
             effort: None,
             plan: false,
@@ -1004,6 +1011,12 @@ impl SessionView {
                 self.models.iter().find(|m| m.is_active).map(|m| m.model_id.clone())
             {
                 return id;
+            }
+            // No live row (Claude Code has no catalog; a reopen lands
+            // before the fetch): the last finished turn's model — history
+            // first — so the chip names the session, never the provider.
+            if let Some(model) = self.history_model.clone() {
+                return model;
             }
             return String::new();
         }

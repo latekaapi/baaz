@@ -157,8 +157,37 @@ is with history the adapter reads from disk: every stored user entry
 shares its echo's uuid (verified across all three turns), so
 `ResumeSession` seeds the live fold with the stored uuids and each user
 turn bubbles exactly once — history plus the new turn. Seeding is
-best-effort: without a known workspace the adapter cannot locate the
-file, and says so rather than guessing.
+best-effort: without a known workspace the adapter falls back to the
+exact-id scan (see below), and says so rather than guessing.
+
+**W5b — what the stored file actually looks like (live probe 2026-09-26,
+`fixtures/claude-code/stored-history.jsonl`).** One `--print` turn with
+`--session-id` in `/tmp` scratch, then the file at
+`~/.claude/projects/-private-tmp-cc-resume-work/<id>.jsonl` (20 lines,
+164 KB). Three corrections to everything above:
+
+- The stored lines are **not** the stream frames. There is no `init` and
+  no `result`: the file carries `user` (with `uuid`, `sessionId`
+  camelCase), `assistant` (with `message.model`, `message.usage`, a
+  `message.id`, `sessionId` camelCase, and **no** `uuid`), plus
+  `attachment` environment snapshots, `queue-operation`, `last-prompt`,
+  `file-history-snapshot` and `atis-latch` noise. The lane was empty for
+  a simpler reason than any of this: nothing ever folded the file —
+  `ResumeSession` replayed nothing and the lane loaded nothing after
+  it. It replays now, as the lane's first event. The decoder still
+  learned both spellings, so the replayed frames attribute correctly;
+  without a `result` frame in the file, the finish is synthesised from
+  the stored usage/model (no cost there, so the footer reports `0.0`,
+  never a measurement).
+- `parentUuid` is the **message chain** (user → attachments → assistant),
+  not a tool-use link: mapping it onto `parent_tool_use_id` routed the
+  stored answer into a sub-agent card. The decoder reads the stream key
+  only; stored sub-agent threads (`isSidechain: true`, unprobed here)
+  render inline, unverified.
+- The chip reads the stored model. A fresh adapter after a restart holds
+  no workspace, so it locates the file by exact `<id>.jsonl` match over
+  every slug directory — zero or two matches still refuse, and a known
+  workspace never scans.
 
 ## 4. Client tools — the reason Stage 3 comes before Stage 4
 

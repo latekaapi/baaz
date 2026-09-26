@@ -68,7 +68,7 @@ use aui_protocol::{
 use provider::ProviderEvent;
 use serde_json::Value;
 
-use crate::frame::{FileChangeEntry, Frame, Notification, TokenCounts};
+use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Notification, TokenCounts};
 
 /// The model's command with the runner unwrapped: the server wraps what
 /// the model asked for in `<shell> -c '<inner>'` (single- or
@@ -373,6 +373,10 @@ pub struct CodexFold {
     usage: HashMap<(String, String), TokenCounts>,
     account: AccountSnapshot,
     current_turn: Option<String>,
+    /// History turn ids already folded from a `thread/resume` response, so
+    /// a second resume folds nothing twice. Live turns never land here —
+    /// a resumed turn is completed, and the server never re-emits it.
+    resumed_turns: HashSet<String>,
 }
 
 impl CodexFold {
@@ -406,6 +410,48 @@ impl CodexFold {
     /// The latest account reading (see [`AccountSnapshot`]).
     pub fn account(&self) -> &AccountSnapshot {
         &self.account
+    }
+
+    /// Fold one resumed history turn's items plus its completion into
+    /// render-ready deltas. Each history turn renders exactly like its
+    /// live twin: every item through the same [`Self::apply_item`] lane
+    /// an `item/completed` notification takes, then one [`Delta`] finish
+    /// with the adapter's model in its footer (history turns carry no
+    /// per-turn usage). A turn id already resumed folds to nothing, so
+    /// repeating the resume never duplicates history — and a new turn
+    /// afterwards appends after it, never inside it.
+    ///
+    /// Call with the adapter's model already set ([`Self::set_model`]):
+    /// the finish footer reads it.
+    pub fn apply_resume_turns(&mut self, thread_id: &str, turns: &[Value]) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        for turn in turns {
+            let turn_id =
+                turn.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if turn_id.is_empty() || !self.resumed_turns.insert(turn_id.clone()) {
+                continue;
+            }
+            let items = turn.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            for item in &items {
+                let item = decode_thread_item(item);
+                deltas.extend(self.apply(&Frame::Notification(Notification::ItemCompleted {
+                    thread_id: thread_id.to_owned(),
+                    turn_id: turn_id.clone(),
+                    item,
+                })));
+            }
+            deltas.extend(self.apply(&Frame::Notification(Notification::TurnCompleted {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.clone(),
+                status: turn
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed")
+                    .to_owned(),
+                duration_ms: turn.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
+            })));
+        }
+        deltas
     }
 
     /// Fold one decoded frame into render-ready deltas. Only notifications
@@ -911,6 +957,7 @@ mod tests {
             "approval-default.jsonl",
             "error.jsonl",
             "image.jsonl",
+            "resume.jsonl",
         ] {
             let lines = fixture_lines(name);
             let (_, whole) = replay(name);
@@ -1025,6 +1072,93 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(raw_total, [14293, 28645], "cumulative totals, never summed");
         assert_ne!(raw_total[1], last.total_tokens, "total != last on the second update");
+    }
+
+    /// THE RESUME TEST. `resume.jsonl` records a thread started, one
+    /// turn, a fresh child, `thread/resume` by id, and one more turn. The
+    /// adapter folds history ONLY from the resume response's
+    /// `thread.turns[]` and live frames ONLY from the pump after it — the
+    /// pre-resume stream belonged to a dead child. Replay the file the
+    /// same way: skip everything up to the resume answer, fold the
+    /// history turns from it, then fold the later live frames. Each turn
+    /// renders once, the new turn appends after history, the finish
+    /// footers name the resumed model, and repeating the resume folds
+    /// nothing twice.
+    #[test]
+    fn resume_fixture_folds_history_once_then_appends_the_new_turn() {
+        use crate::child::{resume_ids, resume_turns};
+
+        let lines = fixture_lines("resume.jsonl");
+        let mut fold = CodexFold::new();
+        let mut deltas = Vec::new();
+        let mut resumed = false;
+        let mut history_turns = 0;
+        for line in &lines {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            if !resumed {
+                if let Frame::Response { id, result } = &frame {
+                    if id.as_u64() == Some(102) {
+                        let (thread_id, session_id, model) =
+                            resume_ids(result).expect("resume answers thread ids");
+                        assert_eq!(
+                            thread_id, session_id,
+                            "a fresh thread mints equal ids"
+                        );
+                        assert_eq!(model, "gpt-5.6-sol", "the resumed model is known");
+                        fold.set_model(&model);
+                        let turns = resume_turns(result);
+                        history_turns = turns.len();
+                        deltas.extend(fold.apply_resume_turns(&thread_id, &turns));
+                        resumed = true;
+                    }
+                }
+                continue;
+            }
+            deltas.extend(fold.apply(&frame));
+        }
+        assert!(resumed, "the fixture must carry the thread/resume answer");
+        assert_eq!(history_turns, 1, "one history turn resumes");
+        // History first: the R1 prompt, its answer, and its finish.
+        let users: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::User { text, .. } } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            users,
+            ["Say R1 and nothing else", "Say R2 and nothing else"],
+            "history prompt then the new prompt, each once: {users:?}"
+        );
+        assert_eq!(
+            texts(&deltas),
+            ["R1", "R2"],
+            "history answer then the new answer, each once"
+        );
+        let finished: Vec<&TurnMeta> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnFinished { meta, .. } => Some(meta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 2, "history turn and new turn both finish");
+        for meta in &finished {
+            assert_eq!(meta.model, "gpt-5.6-sol", "footers name the resumed model");
+        }
+        // Repeating the resume folds nothing twice.
+        let mut replay = Vec::new();
+        for line in &lines {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            if let Frame::Response { id, result } = &frame {
+                if id.as_u64() == Some(102) {
+                    let (thread_id, _, _) = resume_ids(result).expect("resume parses");
+                    replay.extend(fold.apply_resume_turns(&thread_id, &resume_turns(result)));
+                }
+            }
+        }
+        assert!(replay.is_empty(), "a second resume replays nothing: {replay:?}");
     }
 
     #[test]
