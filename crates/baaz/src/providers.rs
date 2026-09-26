@@ -649,6 +649,15 @@ impl ExternalApprovalStore {
         self.approvals.remove(id).is_some()
     }
 
+    /// Re-park a card whose decision never landed (the lane refused it):
+    /// clear the in-flight mark so the press can be tried again. The card
+    /// never settled — settling is the server's job alone.
+    pub fn repark(&mut self, id: &str) {
+        if let Some(approval) = self.approvals.get_mut(id) {
+            approval.decision_sent = None;
+        }
+    }
+
     /// Whether anything the server has not resolved yet is on the card —
     /// a press sent and still waiting counts, because the card has not
     /// moved. Read by the screenshot capture's pending-approval answer.

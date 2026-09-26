@@ -1314,6 +1314,11 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// Pay-as-you-go is `Waiting`-tinted and carries both the way out and the
     /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
     pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Muse-account surface: never drawn on a provider session, even if
+        // one ever landed there.
+        if self.is_provider_lane() {
+            return None;
+        }
         let guard = self.tier_banner.clone()?;
         let sign_out = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::Logout));
         let through = cx.listener(move |_: &mut Self, _: &(), _, cx| {

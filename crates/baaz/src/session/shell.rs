@@ -20,6 +20,43 @@ impl SessionView {
     /// `!echo hi && ls` raises the two-stage approval that
     /// `fixtures/msp/transcript-approve.jsonl` records.
     pub fn run_user_shell(&mut self, command_text: String, cx: &mut Context<Self>) {
+        // The provider lane runs the shell command out-of-turn through the
+        // lane, gated by the registry mirror: Claude Code is `Native`,
+        // Codex `Unverified` (attempted, errors surfaced).
+        if self.is_provider_lane() {
+            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::SessionShell)
+                .allows_attempt()
+            {
+                let reason = crate::providers::gate(self.provider_kind(), provider::Capability::SessionShell)
+                    .unwrap_or_else(|| "Shell commands are not available on this provider.".into());
+                self.banner = Some(reason);
+                self.banner_action = None;
+                cx.notify();
+                return;
+            }
+            if let Some(notice) = self.lease_notice.clone() {
+                self.banner = Some(notice);
+                self.banner_action = None;
+                cx.notify();
+                return;
+            }
+            self.banner = None;
+            self.banner_action = None;
+            let command_id = new_command_id();
+            self.fold.record_command(&self.session_id, &command_id, &format!("!{command_text}"));
+            let command = ProviderCommand::RunShell {
+                request_id: command_id,
+                session_id: self.session_id.clone(),
+                command: command_text.clone(),
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         if !self.user_shell {
             self.set_banner("Muse did not grant this build the userShell capability.", None, cx);
             return;

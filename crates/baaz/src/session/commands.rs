@@ -51,6 +51,22 @@ impl SessionView {
     }
 
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
+        // The provider lane never touches the muse wire: text plus the
+        // composer's attachments travel as one `SubmitInput`, queued
+        // behind a running turn by the provider itself — the same
+        // queue-behind behaviour the muse lane gets from `turn/start`.
+        if self.is_provider_lane() {
+            if let Some(notice) = self.lease_notice.clone() {
+                self.banner = Some(notice);
+                self.banner_action = None;
+                self.restore_prompt(text, cx);
+                return;
+            }
+            // No billing guard here: the tier banner is a muse-account
+            // surface and never applies to a provider lane.
+            self.submit_on_provider(text, cx);
+            return;
+        }
         // Nothing leaves a replayed capture, and nothing about the person's
         // draft or their history is touched on the way to finding that out.
         if self.wire_client(cx).is_none() {
@@ -70,7 +86,8 @@ impl SessionView {
         // The billing guard. A pay-as-you-go login bills every turn as API
         // usage, so the turn does not leave until the person has said once,
         // out loud, that they meant it. The draft goes back in the composer:
-        // the banner explaining why is already above it.
+        // the banner explaining why is already above it. Muse lanes only:
+        // a provider session has no muse account behind it.
         if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
             self.restore_prompt(text, cx);
             return;
@@ -102,6 +119,94 @@ impl SessionView {
             this.sent(result, text, planning, cx);
         });
         cx.notify();
+    }
+
+    /// Submit on the provider lane: the typed text plus the composer's
+    /// attachments as one `SubmitInput`. `display_text` is what the person
+    /// typed, verbatim — what the transcript shows — while the model-visible
+    /// parts carry the files inline and the images by value.
+    fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
+        self.banner = None;
+        self.submitting = true;
+        self.append_history(text.clone(), cx);
+        let request_id = new_command_id();
+        // The wire never gives the prompt back, so the fold remembers it
+        // before the command leaves: `retry_turn` resubmits it from here.
+        self.fold.record_command(&self.session_id, &request_id, &text);
+        // Plan mode prefixes the model-visible input, exactly as on the
+        // muse lane; the display text stays the person's words.
+        let model_text = if self.plan { plan::prefix(&text) } else { text.clone() };
+        let parts = self.provider_parts(model_text);
+        let command = ProviderCommand::SubmitInput {
+            request_id,
+            session_id: self.session_id.clone(),
+            parts,
+            display_text: Some(text.clone()),
+        };
+        self.images.clear();
+        self.files.clear();
+        let planning = self.plan;
+        self.provider_send(command, cx, move |this, result, cx| {
+            this.submitted_provider(result, text, planning, cx);
+        });
+        cx.notify();
+    }
+
+    /// The `SubmitInput` ack. Admission only — the authority for what the
+    /// turn is doing is always the delta stream, never here.
+    fn submitted_provider(
+        &mut self,
+        result: Result<provider::Ack, provider::ProviderError>,
+        text: String,
+        planning: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(provider::Ack::TurnAccepted { turn_id }) => {
+                self.submitting = false;
+                // The ack names the turn that carries the input; the
+                // `TurnStarted` delta owns the running state. When the
+                // delta already landed (events beat acks), sync onto it.
+                self.adopt_open_provider_turn(cx);
+                if planning {
+                    self.plan_turn = Some(turn_id);
+                }
+            }
+            Ok(_) => {
+                self.submitting = false;
+            }
+            Err(error) => {
+                self.submitting = false;
+                // The turn never left, so the person keeps their words.
+                // An `Unsupported` refusal shows its reason, never silence.
+                self.report_provider_error(&error, cx);
+                self.restore_prompt(text, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The provider lane's content parts: attached files inline as text
+    /// (the `@` mentions stay inline text too — no neutral spelling),
+    /// then the prompt text, then every attached image by value.
+    fn provider_parts(&self, text: String) -> Vec<provider::SubmissionPart> {
+        let mut parts = Vec::new();
+        parts.extend(
+            self.files
+                .iter()
+                .map(|file| provider::SubmissionPart::Text(format!("--- file: {} ---\n{}", file.name, file.text))),
+        );
+        if !text.trim().is_empty() {
+            parts.push(provider::SubmissionPart::Text(text));
+        }
+        parts.extend(self.images.iter().map(|image| provider::SubmissionPart::Image {
+            base64_data: image.base64_data.clone(),
+            media_type: image.media_type.clone(),
+        }));
+        if parts.is_empty() {
+            parts.push(provider::SubmissionPart::Text(String::new()));
+        }
+        parts
     }
 
     /// The turn's content parts: one text part per attached file, then the
@@ -197,6 +302,28 @@ impl SessionView {
         let command_id = new_command_id();
         self.fold.record_command(&self.session_id, &command_id, &text);
         self.append_history(text.clone(), cx);
+        // The provider lane steers with `expected_turn`, the race guard
+        // that keeps input for turn A out of turn B.
+        if self.is_provider_lane() {
+            let command = ProviderCommand::SteerInput {
+                request_id: command_id,
+                session_id: self.session_id.clone(),
+                expected_turn: turn_id,
+                parts: self.provider_parts(text.clone()),
+            };
+            self.images.clear();
+            self.files.clear();
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    // The steer never landed: the banner says why, and the
+                    // words go back in the composer instead of evaporating.
+                    this.report_provider_error(&error, cx);
+                    this.restore_prompt(text, cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         let params = TurnSteerParams {
             command_id,
             session_id: self.session_id.clone(),
@@ -242,6 +369,34 @@ impl SessionView {
             cx.notify();
             return;
         }
+        // The provider lane stops with `retract`, paired as on the muse
+        // lane: a turn interrupted before anything committed is durably
+        // retracted and its prompt comes back.
+        if self.is_provider_lane() {
+            let command = ProviderCommand::InterruptTurn {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                turn: self.running.as_ref().map(|r| r.turn_id.clone()),
+                retract: true,
+            };
+            self.provider_send(command, cx, |this, result, cx| {
+                if let Err(error) = result {
+                    // The provider saying there is nothing to stop is a
+                    // better answer about the turn than the local state,
+                    // which still believes it runs — so take it, and let
+                    // the window settle instead of banner-counting.
+                    if interrupt_provider_found_turn_over(&error) {
+                        crate::baaz_log!("interrupt: the provider turn was already over; settling the view");
+                        this.clear_running();
+                        this.submitting = false;
+                        cx.notify();
+                        return;
+                    }
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            return;
+        }
         let params = TurnInterruptParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
@@ -276,6 +431,28 @@ impl SessionView {
     /// `turn/unqueue`, remembering why — and the row's text, captured now —
     /// so `turn/unqueued` needs no fold echo to know what was reclaimed.
     pub(super) fn unqueue(&mut self, turn_id: &str, why: Unqueue, text: String, cx: &mut Context<Self>) {
+        // The provider lane reclaims with `ReclaimQueued` — refused when
+        // the row already launched, which is a banner rather than a
+        // missing row. Only the provider's answer removes the row.
+        if self.is_provider_lane() {
+            self.unqueueing.insert(turn_id.to_owned(), PendingUnqueue { kind: why, text });
+            let command = ProviderCommand::ReclaimQueued {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                turn: turn_id.to_owned(),
+            };
+            let turn_id = turn_id.to_owned();
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    // The reclaim lost the race; the row stays, because
+                    // only the provider removes it.
+                    this.unqueueing.remove(&turn_id);
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            cx.notify();
+            return;
+        }
         if self.wire_client(cx).is_none() {
             return;
         }
@@ -711,6 +888,20 @@ impl SessionView {
 /// and is explicitly not a branch point.
 pub(crate) fn interrupt_found_turn_over(error: &MuseError) -> bool {
     matches!(error.kind(), Some(ErrorKind::CommandRejected)) && error.reason() == Some("already_terminal")
+}
+
+/// The provider lane's version: the seam has no `already_terminal` code,
+/// so a refusal that says there is nothing to stop — Codex's "no running
+/// turn was ever observed; nothing to stop" — settles the view the same
+/// way. Anything else (a blind interrupt Claude Code refuses, a lost
+/// child) is a banner, never a settle.
+fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
+    match error {
+        provider::ProviderError::Rejected { reason } => {
+            reason.contains("nothing to stop") || reason.contains("no running turn")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
