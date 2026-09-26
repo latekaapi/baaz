@@ -55,6 +55,7 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
             session_id: session_id.clone(),
             parts: vec![SubmissionPart::Text("hello".into())],
             display_text: None,
+            effort: None,
         })
         .expect("submit")
     else {

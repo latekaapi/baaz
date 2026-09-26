@@ -126,11 +126,10 @@ impl SessionView {
     /// typed, verbatim — what the transcript shows — while the model-visible
     /// parts carry the files inline and the images by value.
     ///
-    /// Effort stays client-side here on purpose: neither adapter's turn
-    /// carries one — Codex's `turn/start` takes thread, model and text
-    /// only (`provider-codex/src/child.rs::turn_start_request`), and Claude
-    /// Code's stdin line takes text only — so the picked effort rides the
-    /// chip and the project default, never an invented wire field.
+    /// The chip's effort rides the turn, as on the muse lane: Codex maps it
+    /// onto `turn/start`'s `effort`, and Claude Code onto its `--effort`
+    /// launch flag (relaunching with `--resume` when the pick changed).
+    /// `None` is Default: the field is omitted and the provider decides.
     fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
@@ -148,6 +147,7 @@ impl SessionView {
             session_id: self.session_id.clone(),
             parts,
             display_text: Some(text.clone()),
+            effort: crate::projects::effort_string(self.effort),
         };
         self.images.clear();
         self.files.clear();
@@ -1317,28 +1317,35 @@ mod tests {
         });
     }
 
-    /// P4, claude-code: no reasoning control is evidenced anywhere on the
-    /// lane, so the picker renders the adapter's reason — never an empty
-    /// menu, never a dead click.
+    /// W4c, claude-code: the effort menu lists Default plus the five levels
+    /// the `--effort` launch flag accepts — the installed CLI's own list,
+    /// not a guess — and picking one moves the chip at once.
     #[gpui::test]
-    fn a_provider_without_reasoning_support_renders_a_reason(cx: &mut gpui::TestAppContext) {
-        use crate::overlays::EffortOptions;
+    fn claude_code_effort_menu_lists_the_launch_flag_levels(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_label, effort_row_id};
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        let view = lane_view(vc, "claude-code", "s-noeffort");
+        let view = lane_view(vc, "claude-code", "s-effort");
         vc.update(|window, cx| {
             view.update(cx, |view, _| {
-                let EffortOptions::Unavailable(reason) = view.effort_options() else {
-                    panic!("claude-code evidences no effort control");
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("claude-code offers its --effort levels");
                 };
-                assert!(!reason.is_empty(), "a stated reason, not silence");
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max"]);
+                assert_eq!(
+                    provider_claude_code::argv::CLAUDE_EFFORT_LEVELS,
+                    ["low", "medium", "high", "xhigh", "max"],
+                    "the menu spells what the flag accepts"
+                );
             });
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             let rows = view.read(cx).menu_rows(cx);
-            assert_eq!(rows, 1, "the reason row, never zero rows");
+            assert_eq!(rows, 6, "Default plus five levels");
             view.update(cx, |view, cx| view.confirm_menu(window, cx));
             view.update(cx, |view, cx| {
-                assert!(view.overlays.read(cx).menu.is_none(), "the row acted and closed");
+                view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx);
+                assert_eq!(effort_label(view.effort), "High", "the chip follows the pick");
             });
         });
     }

@@ -67,6 +67,14 @@ Then a thread and a turn:
           "input":[{"type":"text","text":"…"}]}}
     <-  {"id":3,"result":{"turn":{"id":"01a0d344-…","status":"inProgress"}}}
 
+`turn/start` also admits `effort` (per `TurnStartParams` in
+`schemas/codex/`, "override the reasoning effort for this turn and
+subsequent turns"): the chip's pick rides `SubmitInput.effort` into that
+field for the turn (`child::turn_start_request`); Default omits the key.
+`turn/steer` admits no such field, so steers carry none. Which levels a
+model takes comes from its `model/list` row's `supportedReasoningEfforts`
+— per model, not per provider.
+
 **`threadId` and `sessionId` are the same string** on a fresh thread. Baaz can
 choose neither — unlike Claude Code's `--session-id`, the server mints it. That
 is a real difference from stage 3 and the session mapping must store it.

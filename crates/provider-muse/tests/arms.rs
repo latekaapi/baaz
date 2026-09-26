@@ -353,6 +353,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                     },
                 ],
                 display_text: Some("hello display".into()),
+                effort: Some("high".into()),
             }),
             expected_params: params_of!(TurnStartParams {
                 command_id: "cmd-submit".into(),
@@ -362,7 +363,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                     muse_client::schema::TurnInputPart::text("hello"),
                     muse_client::schema::TurnInputPart::image("aGVsbG8=", "image/png"),
                 ],
-                reasoning_effort: None,
+                reasoning_effort: Some(muse_client::schema::ReasoningEffort::High),
                 session_id: "s-1".into(),
             }),
             check_ack: Box::new(|ack| match ack {

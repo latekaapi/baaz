@@ -202,17 +202,25 @@ pub fn thread_start_request(id: u64, cwd: &str, model: &str) -> Value {
     })
 }
 
-/// The `turn/start` call carrying one text input.
-pub fn turn_start_request(id: u64, thread_id: &str, model: &str, text: &str) -> Value {
-    json!({
-        "id": id,
-        "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "model": model,
-            "input": [{"type": "text", "text": text}]
-        }
-    })
+/// The `turn/start` call carrying one text input. `effort` overrides the
+/// reasoning effort for this turn and subsequent ones (per
+/// `TurnStartParams.json`); `None` omits the key and the server decides —
+/// the Default chip, byte-identical to the old shape.
+pub fn turn_start_request(
+    id: u64,
+    thread_id: &str,
+    model: &str,
+    text: &str,
+    effort: Option<&str>,
+) -> Value {
+    let mut params = serde_json::Map::with_capacity(4);
+    params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
+    params.insert("model".to_owned(), Value::String(model.to_owned()));
+    params.insert("input".to_owned(), json!([{"type": "text", "text": text}]));
+    if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
+        params.insert("effort".to_owned(), Value::String(effort.to_owned()));
+    }
+    json!({"id": id, "method": "turn/start", "params": Value::Object(params)})
 }
 
 /// The `turn/steer` call injecting input into the running turn.
@@ -1087,6 +1095,35 @@ mod tests {
     }
 
     #[test]
+    fn turn_start_carries_the_effort_when_set_and_omits_it_when_not() {
+        // The schema shape (`TurnStartParams` admits `effort`): a set level
+        // rides `turn/start` for that turn, and Default omits the key —
+        // byte-identical to the pre-effort frame the fixture recorded.
+        let with = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", Some("high"));
+        let params = with.get("params").expect("turn/start has params");
+        assert_eq!(
+            params.get("effort").and_then(Value::as_str),
+            Some("high"),
+            "the level rides the turn: {params}"
+        );
+        assert_eq!(
+            with.get("params"),
+            Some(&json!({
+                "threadId": "thread-1",
+                "model": "gpt-5.6-sol",
+                "input": [{"type": "text", "text": "hi"}],
+                "effort": "high",
+            }))
+        );
+        let without = turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None);
+        let params = without.get("params").expect("turn/start has params");
+        assert!(
+            params.get("effort").is_none(),
+            "Default omits the key: {params}"
+        );
+    }
+
+    #[test]
     fn handshake_matches_basic_fixture_with_explicit_models() {
         // No process is spawned here: the builders below produce the same
         // frames the live probe recorded, and the assertions pin §2 —
@@ -1157,7 +1194,7 @@ mod tests {
         assert_eq!(text, "Reply with exactly the word READY. Do not use any tools.");
         let thread_id = params.get("threadId").and_then(Value::as_str).expect("threadId");
         assert_eq!(
-            turn_start_request(3, thread_id, "gpt-5.6-sol", text).get("params"),
+            turn_start_request(3, thread_id, "gpt-5.6-sol", text, None).get("params"),
             Some(&json!({
                 "threadId": thread_id,
                 "model": "gpt-5.6-sol",

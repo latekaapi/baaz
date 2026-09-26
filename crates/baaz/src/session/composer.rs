@@ -214,15 +214,14 @@ impl SessionView {
     /// levels for the currently selected model, or the typed reason there
     /// is no control. muse offers the whole closed enum, unchanged; Codex
     /// reads the selected model's `supportedReasoningEfforts` with the
-    /// provider's own descriptions; Claude Code has no control and says so.
+    /// provider's own descriptions; Claude Code offers the five levels its
+    /// `--effort` launch flag accepts (`argv::CLAUDE_EFFORT_LEVELS`).
     /// Nothing here is a constant shared across providers: changing the
     /// model re-derives the list, so the chooser follows the selection.
     pub(super) fn effort_options(&self) -> EffortOptions {
         match self.provider_kind() {
             ProviderId::Muse => EffortOptions::Available(muse_efforts()),
-            ProviderId::ClaudeCode => EffortOptions::Unavailable(
-                provider_claude_code::argv::reasoning_effort_unavailable_reason().to_owned(),
-            ),
+            ProviderId::ClaudeCode => EffortOptions::Available(Self::claude_code_efforts()),
             ProviderId::Codex => self.codex_effort_options(),
         }
     }
@@ -277,6 +276,25 @@ impl SessionView {
         self.effort = effort;
         cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
         self.close_menu(cx);
+    }
+
+    /// The Claude Code lane's menu: Default plus the five levels its
+    /// `--effort` launch flag accepts
+    /// (`provider_claude_code::argv::CLAUDE_EFFORT_LEVELS`). A level the
+    /// closed enum cannot spell would be skipped, never fabricated — today
+    /// all five spell, so the menu is Default plus five rows.
+    fn claude_code_efforts() -> Vec<EffortOption> {
+        [
+            None,
+            Some(ReasoningEffort::Low),
+            Some(ReasoningEffort::Medium),
+            Some(ReasoningEffort::High),
+            Some(ReasoningEffort::Xhigh),
+            Some(ReasoningEffort::Max),
+        ]
+        .into_iter()
+        .map(|effort| EffortOption { effort, detail: effort_detail(effort).to_owned() })
+        .collect()
     }
 
     /// The session's project display name, for the empty state. Synced by

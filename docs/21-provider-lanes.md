@@ -126,7 +126,7 @@ error.
 
 | user action | `provider::Command` | `Unavailable` UI |
 |---|---|---|
-| submit / queue | `SubmitInput { request_id, session_id, parts, display_text }` (`SubmissionPart::Text/Image`, `crates/provider/src/command.rs:17-30`) | n/a (all lanes `Native`) |
+| submit / queue | `SubmitInput { request_id, session_id, parts, display_text, effort }` (`SubmissionPart::Text/Image`, `crates/provider/src/command.rs:17-30`) — `effort` is the chip's neutral level id, `None` for Default | n/a (all lanes `Native`) |
 | steer running turn | `SteerInput { …, expected_turn, parts }` — turn-change race guard | disabled with reason (Claude Code: `SteerTurn Unverified` — attempted, not refused; `crates/provider-claude-code/src/caps.rs:51`) |
 | stop button | `InterruptTurn { turn, retract }` | disabled with reason |
 | non-urgent cancel | `CancelTurn { turn }` | same gate as stop (`TurnControl`) |
@@ -135,7 +135,7 @@ error.
 | question answer | `AnswerQuestion { question, answers: Vec<QuestionAnswer> }` | Claude Code `Questions Unavailable` (`crates/provider-claude-code/src/caps.rs:64`): question UI hidden, Coleman prose renders as text; Codex `Unverified` (`crates/baaz/src/providers.rs:184`): attempted |
 | question dismiss / clarify | `DismissQuestion` / `ClarifyQuestion` | same as answer |
 | model select | `SelectModel { session_id, model, model_provider }` + record `pending_model` until echo (`crates/baaz/src/session.rs:925`); catalog from `ListModels { session }` | catalog missing → `MODEL_UNAVAILABLE_ROW` stand-in (existing) |
-| effort | client-side only (`effort` field; "rides the next turn"); Codex levels from folded catalog (`codex_effort_options`, `crates/baaz/src/session/composer.rs:241`); Claude Code unavailable with typed reason | menu shows reason, never empty |
+| effort | rides the next turn as `SubmitInput.effort`: muse maps it onto `turn/start` `reasoningEffort`; Codex onto `turn/start` `effort` (`child::turn_start_request`); Claude Code onto its `--effort` launch flag, relaunching with `--resume <id> --effort <new>` when the pick changed (`resume_launch_for_effort`). Codex levels from folded catalog (`codex_effort_options`); Claude Code lists `low, medium, high, xhigh, max` (`argv::CLAUDE_EFFORT_LEVELS`) | menu shows reason, never empty (a model with no row still does) |
 | approval mode | `SelectApprovalMode { mode }` (forward-only; in-flight approval unaffected — `crates/provider/src/command.rs`) | n/a (`SessionConfig Native`) |
 | `!` shell | `RunShell { command }` | Claude Code `Native`; Codex `Unverified` (`crates/baaz/src/providers.rs:178`): attempted, errors surfaced |
 | attachments/images | `SubmissionPart::Image { base64_data, media_type }`; `@` file mentions stay inline text (no neutral spelling — `crates/provider/src/command.rs:17-22`); unattached-file extraction stays client-side as today | n/a |
@@ -233,7 +233,7 @@ wiring only; **W** = needs baaz wiring (adapter emits, view must render/route);
 | interrupted turn | M | W: `TurnControl Unverified` (`caps.rs:52`) — attempt `InterruptTurn`, fold what arrives | W: same (`interrupt.jsonl` proves the shape; gate `Unverified` → attempt) |
 | usage + context meter + cost | M (`session/contextUsage`, `usage.rs`) | F (`tokens_in` = input + cache-read + cache-write, test `tokens_in_sums_bare_input_and_both_cache_legs`; cache legs stay informational) → W: same counters/meter | F (ledger-grade input, `docs/19-codex.md` §6) → W |
 | ledger row in `baaz.db` | M | W (same writer, lane-tagged) | W (same writer, lane-tagged) |
-| model/effort chips from live child | M (`session/modelChanged`) | W: `pending_model` + `ListModels` + `SelectModel`; effort U with typed reason (`argv::reasoning_effort_unavailable_reason`, `composer.rs:221`) | W: `pending_model` + `codex_effort_options` (`composer.rs:241`); effort from live catalog. New wire evidence, not yet sent: `thinking.jsonl` proves `turn/start` accepts `effort` (seam carries no effort field, so the adapter still cannot send it) |
+| model/effort chips from live child | M (`session/modelChanged`) | W: `pending_model` + `ListModels` + `SelectModel`; effort rides `SubmitInput` onto `--effort`, relaunching with `--resume` when the pick changed (`composer.rs`, `argv.rs`, `lib.rs::resume_launch_for_effort`) | W: `pending_model` + `codex_effort_options`; effort rides `SubmitInput` into `turn/start` `effort` (`child::turn_start_request`), proven in `thinking.jsonl` as `effort: "max"` |
 | images in | M | F both directions (`image.jsonl`: `user_content_line` sends base64 `source`, echo folds to an attachment; tests `image_turns_carry_base64_source_parts`, `image_fixture_accepts_image_part_on_user_turn`) → W: attach `images`/`files` chips to `SubmitInput.parts` | F-receive/U-send (`image.jsonl`: `localImage` echo → user-turn attachment, test `image_part_accepted_as_user_attachment`); send stays refused with reason — `turn/start` wants a local path but the seam carries bytes (stage the bytes to a file first) |
 | `@` mentions | M (client-side picker) | W: client-side, inline text (no neutral spelling, `command.rs:17-22`) | same → W |
 | `/` commands, skills | M (client-side) | W: client-side (`run_command_with`), text into `SubmitInput` | same → W |
@@ -351,12 +351,17 @@ Each task compiles and leaves the app working; muse sessions stay on
     (never the provider id), and a pick sends `SelectModel` at once —
     recorded in `pending_model` until the ack, un-recorded with a banner
     on refusal. Claude Code keeps Baaz's supplied alias list (no catalog
-    surface was ever probed). Effort stays client-side on the lane: both
-    adapters' turns carry no effort channel (Codex `turn/start` takes
-    thread, model and text only; Claude Code's stdin line takes text
-    only), so the pick rides the chip and the project default; the Codex
-    per-model levels still derive from the catalog through the existing
-    `codex_effort_options` path. Approval-mode picks send
+    surface was ever probed). **W4c update:** effort no longer stays
+    client-side — the pick rides `SubmitInput.effort` and each adapter
+    maps it onto its own channel: Codex `turn/start`'s `effort`
+    (`child::turn_start_request`, omitted when Default), Claude Code's
+    `--effort` launch flag with a `--resume` relaunch when the pick
+    changed (`lib.rs::resume_launch_for_effort`); the baaz lane sends the
+    chip's level on every submit (lane test
+    `the_chips_effort_rides_submit_input`). The Codex per-model levels
+    still derive from the catalog through the existing
+    `codex_effort_options` path, and the Claude Code menu lists the
+    flag's own five levels. Approval-mode picks send
     `SelectApprovalMode` with the seam's closed mode set, and plan mode
     attempts the same switch — both adapters refuse a mid-session
     change, so the refusal banners its reason and the plan pill stands

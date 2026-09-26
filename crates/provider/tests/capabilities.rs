@@ -199,6 +199,7 @@ fn native_is_attempted() {
             session_id: "s".into(),
             parts: vec![SubmissionPart::Text("hi".into())],
             display_text: None,
+            effort: None,
         })
         .expect("Native must be attempted");
     assert_eq!(ack, Ack::Accepted, "the attempt must reach the adapter");

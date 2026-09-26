@@ -29,9 +29,21 @@ when stdin closed.
            --verbose \
            [--include-partial-messages] \
            [--model <alias|id>] \
+           [--effort <low|medium|high|xhigh|max>] \
            [--mcp-config <path>] [--strict-mcp-config] \
            [--resume <uuid> | --session-id <uuid>] [--fork-session] \
            [--permission-prompts host --permission-prompt-tool <tool>]
+
+`--effort` is a launch flag, not a per-turn channel: nothing over
+stream-json stdin carries a level. The effort chip therefore rides
+`SubmitInput`, and the adapter maps it onto the flag — spawning with it
+when set, and, when the pick changes mid-session, relaunching the child
+with `--resume <session-id> --effort <new>` before the turn's text goes
+to stdin. The fold lives on the adapter, not the child, so the
+transcript survives the swap, and a resumed child replays no history,
+so nothing folds twice. Accepted live by the installed CLI (W4c
+real-turn check); the gate proves the argv, not that the model reasons
+harder.
 
 So the adapter owns **one child per session**, writes user turns to its stdin
 as NDJSON, and reads frames from its stdout. This is the shape that makes
@@ -240,7 +252,7 @@ which is honest ignorance and is still attempted.
 | `SessionLifecycle` | Native | `--session-id`, `--resume`; `init` + `result` in every fixture |
 | `ForkSession` | Native | **executed**: `fork.jsonl` — resuming `f3815266-…` with `--fork-session` minted `c4b6fee5-…`, a different id |
 | `CompactSession` | Emulated | `--autocompact <auto\|tokens>` sets a window; there is no "compact now" command over `--print`. Differs from native: it happens when the window fills, not when asked |
-| `SessionConfig` | Native | `--model`, `--permission-mode`, `--add-dir`, `--append-system-prompt` |
+| `SessionConfig` | Native | `--model`, `--effort`, `--permission-mode`, `--add-dir`, `--append-system-prompt` |
 | `SessionShell` | Native | the `Bash` tool is in `init.tools`; `tool_use_result` carries `stdout`/`stderr`/`interrupted` (`partial.jsonl`) |
 | `SubmitTurn` | Native | `bidi.jsonl`: two turns, one child |
 | `SteerTurn` | Unverified | a second stdin frame mid-turn was **not** probed. Do not claim it |

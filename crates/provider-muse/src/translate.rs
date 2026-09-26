@@ -46,6 +46,26 @@ fn approval_mode(mode: aui_protocol::PermissionMode) -> ApprovalMode {
     }
 }
 
+/// The seam's neutral effort level, translated to MSP's closed tier. The
+/// spelling is MSP's own (`"high"`, `"xhigh"` — the same strings
+/// [`crate::MuseAdapter`] callers store), so this is a rename and nothing
+/// more. An unknown spelling omits the field rather than guessing: `None`
+/// is exactly today's behaviour, byte for byte.
+fn reasoning_effort(level: Option<&str>) -> Option<muse_client::schema::ReasoningEffort> {
+    use muse_client::schema::ReasoningEffort as Wire;
+    match level {
+        Some("none") => Some(Wire::None),
+        Some("minimal") => Some(Wire::Minimal),
+        Some("low") => Some(Wire::Low),
+        Some("medium") => Some(Wire::Medium),
+        Some("high") => Some(Wire::High),
+        Some("xhigh") => Some(Wire::Xhigh),
+        Some("max") => Some(Wire::Max),
+        Some("ultra") => Some(Wire::Ultra),
+        _ => None,
+    }
+}
+
 /// A neutral submission part, translated to the wire's content part.
 fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
     use muse_client::schema::TurnInputPart as Wire;
@@ -275,14 +295,14 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             Ok(Ack::Accepted)
         }
-        Command::SubmitInput { request_id, session_id, parts, display_text } => {
+        Command::SubmitInput { request_id, session_id, parts, display_text, effort } => {
             let result = client
                 .turn_start(&TurnStartParams {
                     command_id: request_id,
                     display_text,
                     if_busy: None,
                     input: parts.into_iter().map(input_part).collect(),
-                    reasoning_effort: None,
+                    reasoning_effort: reasoning_effort(effort.as_deref()),
                     session_id,
                 })
                 .map_err(transport_error)?;

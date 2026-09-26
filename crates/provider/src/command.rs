@@ -163,6 +163,15 @@ pub enum Command {
         /// Presentation form of the prompt for transcripts. Durable, never
         /// model-visible.
         display_text: Option<String>,
+        /// The reasoning level for this turn, as a neutral level id
+        /// (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` …). Rides the
+        /// turn the way muse's `reasoning_effort` does: each adapter maps
+        /// it onto its own channel (muse's `turn/start` field, Codex's
+        /// `turn/start` `effort`, Claude Code's `--effort` launch flag).
+        /// `None` is "Default": the field is omitted and the provider
+        /// decides. An adapter that cannot spell a level omits it rather
+        /// than inventing one.
+        effort: Option<String>,
     },
     /// Inject input into the running turn. `expected_turn` closes the race
     /// where the turn changes under the caller: input for turn A can never

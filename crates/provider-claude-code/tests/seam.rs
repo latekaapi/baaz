@@ -58,6 +58,7 @@ fn unsupported_is_never_spelled_as_success() {
             session_id: "s-1".into(),
             parts: vec![provider::SubmissionPart::Text("hi".into())],
             display_text: None,
+            effort: None,
         })
         .expect_err("submit with no child must not succeed");
     assert!(matches!(error, ProviderError::Unavailable { .. }));
