@@ -174,6 +174,13 @@ impl SessionView {
                 // `TurnStarted` delta owns the running state. When the
                 // delta already landed (events beat acks), sync onto it.
                 self.adopt_open_provider_turn(cx);
+                // The lane's admission: the application reveals the row,
+                // titles it and touches the record, the way the muse
+                // route's `turn/started` arm does for its lane.
+                cx.emit(crate::session::SessionEvent::ProviderTurnAccepted {
+                    session_id: self.session_id.clone(),
+                    prompt: text.clone(),
+                });
                 if planning {
                     self.plan_turn = Some(turn_id);
                 }

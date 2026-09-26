@@ -48,8 +48,11 @@ pub fn db_path() -> PathBuf {
 /// The ledger schema version, stamped in `meta`.
 ///
 /// Version 1 keyed `usage_turns` on `(session_id, view_cursor)`; version 2
-/// re-keys it on `(session_id, turn_id)` (Task D1). A version-1 database is
-/// migrated in place (see [`migrate_v1_to_v2`]): no history is dropped —
+/// re-keys it on `(session_id, turn_id)` (Task D1); version 3 adds the
+/// `provider` tag (W5: which lane served the turn — `"muse"`,
+/// `"claude-code"`, `"codex"`, or `""` for rows written before the tag
+/// existed). A version-1 database is migrated in place (see
+/// [`migrate_v1_to_v2`]): no history is dropped —
 /// rows already there are carried over, except that a turn stored twice
 /// under two cursors collapses to one row (the copy with real token data
 /// wins, then the later write; see [`COPY_V1_TO_V2`]). The
@@ -57,12 +60,16 @@ pub fn db_path() -> PathBuf {
 /// stamp run inside a single transaction — and a `usage_turns_v1` left over
 /// from an interrupted attempt is finished on the next open rather than
 /// erroring (rows already in the live table win; the backup only fills gaps).
+/// The version-2 to version-3 step adds the tag column with a default in
+/// its own single transaction (see [`migrate_v2_to_v3`]), so the key never
+/// changes and no row is rewritten.
 /// A missing or unparseable stamp is never taken for a fresh install while a
-/// ledger exists: the table's real primary key decides (v1 migrates, v2 is
-/// re-stamped, anything else fails loudly). A database stamped with a version
-/// this build has never seen is left alone and every write is skipped (with
-/// a log line) until a build that knows that version arrives.
-const SCHEMA_VERSION: u32 = 2;
+/// ledger exists: the table's real primary key decides (v1 migrates, v2
+/// gains the tag column and is re-stamped, anything else fails loudly). A
+/// database stamped with a version this build has never seen is left alone
+/// and every write is skipped (with a log line) until a build that knows
+/// that version arrives.
+const SCHEMA_VERSION: u32 = 3;
 
 /// How long a write waits for another process to let go of the database
 /// before giving up and carrying on without the row.
@@ -99,6 +106,10 @@ pub struct UsageRow {
     pub cached_tokens: i64,
     /// Cost of the turn in US dollars.
     pub cost_usd: f64,
+    /// Which lane served the turn: `"muse"`, `"claude-code"` or `"codex"`.
+    /// `""` on rows written before the tag existed (schema version 2 and
+    /// earlier) — never `NULL`, so the column needs no null handling.
+    pub provider: String,
 }
 
 /// Build the row a finished turn writes: the fold's final [`TurnMeta`] for
@@ -131,6 +142,17 @@ pub fn row_from_finished(
         cache_write_tokens: meta.cache_write_tokens.map(|v| v as i64),
         cached_tokens: meta.cached_tokens as i64,
         cost_usd: meta.cost_usd,
+        provider: String::new(),
+    }
+}
+
+impl UsageRow {
+    /// Tag the row with the lane that served it. The muse lane never calls
+    /// this — its rows keep today's untagged shape — while the provider
+    /// lane tags every row it writes.
+    pub fn with_provider(mut self, provider: &str) -> Self {
+        self.provider = provider.to_owned();
+        self
     }
 }
 
@@ -181,13 +203,17 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         .and_then(|value| value.parse().ok());
     match stored {
         Some(version) if version == SCHEMA_VERSION => {
-            connection.execute_batch(LEDGER_DDL_V2)?;
-            // A backup left beside a stamped v2 is merged back, never left
+            connection.execute_batch(LEDGER_DDL_V3)?;
+            // A backup left beside a stamped v3 is merged back, never left
             // to sit beside the live table unread.
             drain_backup_table(&mut connection)?;
         }
+        Some(2) => {
+            migrate_v2_to_v3(&mut connection)?;
+        }
         Some(1) => {
             migrate_v1_to_v2(&mut connection)?;
+            migrate_v2_to_v3(&mut connection)?;
         }
         Some(0) | None => {
             // No readable stamp: a fresh install, or a stamp nobody can
@@ -229,12 +255,26 @@ fn open_unstamped(
         return migrate_v1_to_v2(connection);
     }
     match usage_turns_pk(connection)? {
-        None => stamp_fresh_v2(connection),
+        None => stamp_fresh_v3(connection),
         Some(pk) if is_v2_pk(&pk) => {
-            connection.execute_batch(LEDGER_DDL_V2)?;
-            stamp_v2(connection)
+            // A version-2 key with no readable stamp: the tag column may or
+            // may not be there yet (a kill between the v3 alter and its
+            // stamp), so ensure it, then stamp — together, in one
+            // transaction.
+            connection.execute_batch(LEDGER_DDL_V3)?;
+            let txn = connection.transaction()?;
+            ensure_provider_column(&txn)?;
+            txn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
+            txn.commit()?;
+            Ok(())
         }
-        Some(pk) if is_v1_pk(&pk) => migrate_v1_to_v2(connection),
+        Some(pk) if is_v1_pk(&pk) => {
+            migrate_v1_to_v2(connection)?;
+            migrate_v2_to_v3(connection)
+        }
         Some(_) => Err(unreadable_version_error(stored_raw)),
     }
 }
@@ -287,11 +327,11 @@ fn is_v2_pk(pk: &[String]) -> bool {
     pk.iter().map(String::as_str).collect::<Vec<_>>() == ["session_id", "turn_id"]
 }
 
-/// Stamp a fresh (or backup-only) file as version 2, with the schema build
+/// Stamp a fresh (or backup-only) file as version 3, with the schema build
 /// in the same transaction.
-fn stamp_fresh_v2(connection: &mut Connection) -> Result<(), rusqlite::Error> {
+fn stamp_fresh_v3(connection: &mut Connection) -> Result<(), rusqlite::Error> {
     let txn = connection.transaction()?;
-    txn.execute_batch(LEDGER_DDL_V2)?;
+    txn.execute_batch(LEDGER_DDL_V3)?;
     txn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -300,16 +340,36 @@ fn stamp_fresh_v2(connection: &mut Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// Stamp the version on an already-built version-2 ledger.
-fn stamp_v2(connection: &Connection) -> Result<(), rusqlite::Error> {
-    connection.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
-        params![SCHEMA_VERSION.to_string()],
-    )?;
+/// Add the version-3 `provider` tag column when it is missing: a no-op on a
+/// ledger that already has it, so an interrupted migration's rerun is safe.
+fn ensure_provider_column(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("SELECT name FROM pragma_table_info('usage_turns')")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.iter().any(|column| column == "provider") {
+        return Ok(());
+    }
+    connection.execute_batch("ALTER TABLE usage_turns ADD COLUMN provider TEXT NOT NULL DEFAULT '';")?;
     Ok(())
 }
 
-/// Merge a leftover `usage_turns_v1` back into a stamped version-2 ledger:
+/// Tag a version-2 ledger as version 3: the tag column plus the version
+/// stamp, inside a single transaction — the key never changes and no row
+/// is rewritten, so an interruption leaves either the untouched version-2
+/// database or the finished version-3 one.
+fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), rusqlite::Error> {
+    let txn = connection.transaction()?;
+    ensure_provider_column(&txn)?;
+    txn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+        params![SCHEMA_VERSION.to_string()],
+    )?;
+    txn.commit()?;
+    Ok(())
+}
+
+/// Merge a leftover `usage_turns_v1` back into a stamped version-3 ledger:
 /// the live table wins key conflicts (the copy is `INSERT OR IGNORE` into
 /// it), the backup only fills gaps, and then the backup is dropped — all in
 /// one transaction. Nothing in either table is lost.
@@ -324,9 +384,11 @@ fn drain_backup_table(connection: &mut Connection) -> Result<(), rusqlite::Error
     Ok(())
 }
 
-/// The version-2 ledger: one row per `(session_id, turn_id)`, with the view
-/// cursor kept as an ordinary column.
-const LEDGER_DDL_V2: &str = "CREATE TABLE IF NOT EXISTS usage_turns(
+/// The version-3 ledger: one row per `(session_id, turn_id)`, with the view
+/// cursor kept as an ordinary column and the serving lane in `provider`.
+/// The key is unchanged from version 2, so the version-3 step adds the tag
+/// column rather than rebuilding the table.
+const LEDGER_DDL_V3: &str = "CREATE TABLE IF NOT EXISTS usage_turns(
     session_id TEXT NOT NULL,
     view_cursor TEXT NOT NULL,
     turn_id TEXT NOT NULL,
@@ -340,6 +402,7 @@ const LEDGER_DDL_V2: &str = "CREATE TABLE IF NOT EXISTS usage_turns(
     cache_write_tokens INTEGER,
     cached_tokens INTEGER NOT NULL,
     cost_usd REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (session_id, turn_id)
  ) WITHOUT ROWID;
  CREATE INDEX IF NOT EXISTS usage_turns_finished_at ON usage_turns(finished_at_ms);";
@@ -441,12 +504,12 @@ fn migrate_steps(
                 // Stamped 1 but the table never landed (a crash between the
                 // stamp and the write, or a hand-made file): build the new
                 // schema and stamp it, together.
-                return stamp_fresh_v2(connection);
+                return stamp_fresh_v3(connection);
             }
             Some(pk) if is_v2_pk(&pk) => {
                 // Already re-keyed with the stamp lost (a kill between the
-                // old code's drop and its stamp): just stamp it.
-                return stamp_v2(connection);
+                // old code's drop and its stamp): tag it and stamp it.
+                return migrate_v2_to_v3(connection);
             }
             Some(_) => {
                 // A version-1 key migrates below. Anything else reaches the
@@ -463,7 +526,7 @@ fn migrate_steps(
         txn.execute_batch("ALTER TABLE usage_turns RENAME TO usage_turns_v1;")?;
         interrupted(interrupt_after, 1)?;
     }
-    txn.execute_batch(LEDGER_DDL_V2)?;
+    txn.execute_batch(LEDGER_DDL_V3)?;
     interrupted(interrupt_after, 2)?;
     txn.execute(COPY_V1_TO_V2, [])?;
     interrupted(interrupt_after, 3)?;
@@ -488,8 +551,8 @@ pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusq
         "INSERT INTO usage_turns(
             session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
             tokens_in, tokens_out, reasoning_tokens,
-            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd, provider
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(session_id, turn_id) DO NOTHING",
         params![
             row.session_id,
@@ -505,6 +568,7 @@ pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusq
             row.cache_write_tokens,
             row.cached_tokens,
             row.cost_usd,
+            row.provider,
         ],
     )?;
     Ok(changed == 1)
@@ -528,7 +592,7 @@ pub fn find_turn(
         .prepare(
             "SELECT session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
                     tokens_in, tokens_out, reasoning_tokens,
-                    cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+                    cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd, provider
              FROM usage_turns WHERE session_id = ?1 AND turn_id = ?2",
         )
         .ok()?;
@@ -548,6 +612,7 @@ pub fn find_turn(
                 cache_write_tokens: row.get(10)?,
                 cached_tokens: row.get(11)?,
                 cost_usd: row.get(12)?,
+                provider: row.get(13)?,
             })
         })
         .ok()
@@ -644,6 +709,118 @@ mod tests {
         assert_eq!(read.cache_write_tokens, Some(13));
         assert_eq!(read.cached_tokens, 17);
         assert_eq!(count_for_session(&connection, "s-1"), 1);
+    }
+
+    /// The W5 ledger arm: each settled provider turn records one tagged
+    /// row, and replaying it (a reopen replays the same finished turns)
+    /// is a no-op — one row per turn, never two.
+    #[test]
+    fn a_provider_turn_writes_one_tagged_row_and_replays_do_not_double_count() {
+        let connection = memory();
+        let mut meta = meta();
+        meta.cost_usd = 0.04;
+        let live =
+            row_from_finished("s-p", "v:s:9", "t-9", 1_700_000_000_000, &meta).with_provider("codex");
+        assert!(record_turn(&connection, &live).expect("provider turn records"));
+        let read = find_turn(&connection, "s-p", "t-9").expect("row is there");
+        assert_eq!(read.provider, "codex");
+        assert_eq!(read.cost_usd, 0.04, "the adapter-reported cost lands on the row");
+        assert_eq!(read.tokens_in, 100);
+        // The reopen replay of the same finished turn, stamped with a
+        // different cursor: a no-op, not a second row.
+        let replay =
+            row_from_finished("s-p", "t-9", "t-9", 1_700_000_001_000, &meta).with_provider("codex");
+        assert!(
+            !record_turn(&connection, &replay).expect("replay records"),
+            "a replayed turn changes nothing"
+        );
+        assert_eq!(count_for_session(&connection, "s-p"), 1, "one row per settled turn");
+    }
+
+    /// Muse rows keep today's untagged shape: the tag column exists, but
+    /// the muse lane never sets it.
+    #[test]
+    fn muse_rows_keep_the_untagged_shape() {
+        let connection = memory();
+        assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("record"));
+        assert_eq!(find_turn(&connection, "s-1", "t-1").expect("row").provider, "");
+    }
+
+    /// The W5 migration arm: a version-2 ledger gains the tag column in
+    /// one transaction, keeps every row (tagged blank), and takes tagged
+    /// writes afterwards. Removing the migration leaves the stamp at 2
+    /// and the tagged write failing on the missing column.
+    #[test]
+    fn a_version_2_ledger_gains_the_tag_column_with_blank_tags() {
+        let dir = std::env::temp_dir()
+            .join(format!("baaz-usage-v2-to-v3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("baaz.db");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        {
+            let connection = Connection::open(&path).expect("v2 file opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                     INSERT INTO meta(key, value) VALUES ('schema_version', '2');
+                     CREATE TABLE usage_turns(
+                        session_id TEXT NOT NULL,
+                        view_cursor TEXT NOT NULL,
+                        turn_id TEXT NOT NULL,
+                        finished_at_ms INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        tokens_in INTEGER NOT NULL,
+                        tokens_out INTEGER NOT NULL,
+                        reasoning_tokens INTEGER NOT NULL,
+                        cache_read_tokens INTEGER,
+                        cache_write_tokens INTEGER,
+                        cached_tokens INTEGER NOT NULL,
+                        cost_usd REAL NOT NULL,
+                        PRIMARY KEY (session_id, turn_id)
+                     ) WITHOUT ROWID;",
+                )
+                .expect("v2 schema builds");
+            let old = row("v:s:1", "t-1");
+            connection
+                .execute(
+                    "INSERT INTO usage_turns(
+                        session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+                        tokens_in, tokens_out, reasoning_tokens,
+                        cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        old.session_id,
+                        old.view_cursor,
+                        old.turn_id,
+                        old.finished_at_ms,
+                        old.model,
+                        old.duration_ms,
+                        old.tokens_in,
+                        old.tokens_out,
+                        old.reasoning_tokens,
+                        old.cache_read_tokens,
+                        old.cache_write_tokens,
+                        old.cached_tokens,
+                        old.cost_usd,
+                    ],
+                )
+                .expect("v2 row writes");
+        }
+        let connection = open_at(&path).expect("migration opens");
+        assert_eq!(schema_version(&connection).as_deref(), Some("3"));
+        let kept = find_turn(&connection, "s-1", "t-1").expect("old row survives");
+        assert_eq!(kept.tokens_in, 100);
+        assert_eq!(kept.provider, "", "rows from before the tag read blank, never null");
+        let tagged =
+            row_from_finished("s-1", "v:s:2", "t-2", 1_700_000_001_000, &meta()).with_provider("claude-code");
+        assert!(record_turn(&connection, &tagged).expect("tagged write lands"));
+        assert_eq!(
+            find_turn(&connection, "s-1", "t-2").expect("tagged row").provider,
+            "claude-code"
+        );
+        assert_eq!(count_for_session(&connection, "s-1"), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -890,7 +1067,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("version is stamped");
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         // The doubled turn collapsed to one row; the other history survived.
         assert_eq!(count_for_session(&connection, "s-1"), 2);
         let kept = find_turn(&connection, "s-1", "t-2").expect("t-2 survives");
@@ -1203,7 +1380,7 @@ mod tests {
     /// collapsed smallest-cursor-first — and the ledger is alive: new writes
     /// land.
     fn assert_migrated_ledger(connection: &Connection) {
-        assert_eq!(schema_version(connection).as_deref(), Some("2"));
+        assert_eq!(schema_version(connection).as_deref(), Some("3"));
         assert_eq!(count_for_session(connection, "s-1"), 2);
         assert_eq!(
             find_turn(connection, "s-1", "t-1"),
@@ -1237,7 +1414,7 @@ mod tests {
         // history must be unreachable.
         const STATEMENTS: [&str; 4] = [
             "ALTER TABLE usage_turns RENAME TO usage_turns_v1;",
-            LEDGER_DDL_V2,
+            LEDGER_DDL_V3,
             COPY_V1_TO_V2,
             "DROP TABLE usage_turns_v1;",
         ];
@@ -1324,7 +1501,7 @@ mod tests {
             connection
                 .execute_batch("ALTER TABLE usage_turns RENAME TO usage_turns_v1;")
                 .expect("rename");
-            connection.execute_batch(LEDGER_DDL_V2).expect("rebuild");
+            connection.execute_batch(LEDGER_DDL_V3).expect("rebuild");
             connection.execute(COPY_V1_TO_V2, []).expect("copy");
         }
         let connection = open_at(&path).expect("a leftover backup recovers, not errors");
@@ -1335,14 +1512,14 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        // The same leftover beside a stamped v2 drains into the live table:
+        // The same leftover beside a stamped v3 drains into the live table:
         // the live row wins, the backup only fills gaps, nothing is lost.
         let dir2 =
             std::env::temp_dir().join(format!("baaz-usage-d1fix-drain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir2);
         let path2 = dir2.join("baaz.db");
         {
-            let connection = open_at(&path2).expect("fresh v2");
+            let connection = open_at(&path2).expect("fresh v3");
             assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("t-1 records"));
             connection
                 .execute_batch(
@@ -1375,7 +1552,7 @@ mod tests {
                 )
                 .expect("backup row writes");
         }
-        let connection = open_at(&path2).expect("a stamped v2 with a backup drains it");
+        let connection = open_at(&path2).expect("a stamped v3 with a backup drains it");
         assert_eq!(find_turn(&connection, "s-1", "t-1"), Some(row("v:s:1", "t-1")));
         assert_eq!(find_turn(&connection, "s-1", "t-2"), Some(row("v:s:2", "t-2")));
         assert!(
@@ -1423,26 +1600,26 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
-        // A garbage stamp on a healthy v2 ledger re-stamps it: the rows are
+        // A garbage stamp on a healthy v3 ledger re-stamps it: the rows are
         // intact and new writes land.
         let dir =
             std::env::temp_dir().join(format!("baaz-usage-d1fix-garbage-v2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("baaz.db");
         {
-            let connection = open_at(&path).expect("fresh v2");
+            let connection = open_at(&path).expect("fresh v3");
             assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("t-1 records"));
             connection
                 .execute("UPDATE meta SET value = 'garbage' WHERE key = 'schema_version'", [])
                 .expect("garbage stamp writes");
         }
-        let connection = open_at(&path).expect("a garbage stamp on v2 re-stamps");
+        let connection = open_at(&path).expect("a garbage stamp on v3 re-stamps");
         assert_eq!(find_turn(&connection, "s-1", "t-1"), Some(row("v:s:1", "t-1")));
         assert!(
             record_turn(&connection, &row("v:s:2", "t-2")).expect("t-2 records"),
             "the ledger takes new writes afterwards"
         );
-        assert_eq!(schema_version(&connection).as_deref(), Some("2"));
+        assert_eq!(schema_version(&connection).as_deref(), Some("3"));
         let _ = std::fs::remove_dir_all(&dir);
 
         // A garbage stamp on a table of unknown shape fails loudly, with the

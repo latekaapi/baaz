@@ -626,6 +626,11 @@ pub struct Harness {
     /// Baaz's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
     overrides: sessions::Overrides,
+    /// The local record of provider-lane sessions: which provider serves
+    /// each, where it ran, and when it last moved. `session/list` never
+    /// names these sessions, so without this the sidebar forgets them on
+    /// every restart (W5).
+    pub(crate) provider_sessions: crate::provider_sessions::ProviderSessionStore,
     /// The adopted workspaces (design `docs/12-projects.md` §4).
     pub(crate) projects: Projects,
     /// The current project: the open session's project, else the last used.
@@ -902,6 +907,7 @@ impl Harness {
             tier: None,
             tier_probing: false,
             overrides: sessions::Overrides::new(),
+            provider_sessions: crate::provider_sessions::read(),
             projects: Projects::default(),
             current_project: None,
             branches: HashMap::new(),

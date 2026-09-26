@@ -1480,6 +1480,7 @@ mod tests {
                         archived: false,
                         description: "the ask".into(),
                         replayed: false,
+                        provider: None,
                         named: true,
                         needs_title: false,
                         title_pending: false,
