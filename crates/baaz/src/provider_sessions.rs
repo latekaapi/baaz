@@ -125,12 +125,20 @@ pub fn touch(store: &mut ProviderSessionStore, session_id: &str) -> bool {
     true
 }
 
-/// One turn settled: the row moves to now and gains its turn. Returns
-/// whether the record exists — a turn for an unknown session names
-/// nothing, so the caller records nothing.
-pub fn note_settled_turn(store: &mut ProviderSessionStore, session_id: &str) -> bool {
+/// One turn settled, counted as exchanges: the row moves to now and holds
+/// the folded assistant-turn count, never less than it already held. A
+/// reopen replays the same `TurnFinished`s the live session already
+/// counted, so a blind increment read "2 turns" for one user+assistant
+/// exchange — the fold's own count is idempotent across the replay.
+/// Returns whether the record exists — a turn for an unknown session
+/// names nothing, so the caller records nothing.
+pub fn note_settled_turn_counted(
+    store: &mut ProviderSessionStore,
+    session_id: &str,
+    exchanges: u64,
+) -> bool {
     let Some(record) = store.get_mut(session_id) else { return false };
-    record.turns = record.turns.saturating_add(1);
+    record.turns = record.turns.max(exchanges);
     record.updated_ms = crate::usage::now_ms();
     true
 }
@@ -278,7 +286,7 @@ mod tests {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
         let before = store["s-1"].updated_ms;
-        assert!(note_settled_turn(&mut store, "s-1"));
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1));
         assert_eq!(store["s-1"].turns, 1);
         assert!(store["s-1"].updated_ms >= before);
         write(&store);
@@ -288,8 +296,22 @@ mod tests {
     #[test]
     fn a_turn_for_an_unknown_session_records_nothing() {
         let mut store = ProviderSessionStore::new();
-        assert!(!note_settled_turn(&mut store, "s-gone"));
+        assert!(!note_settled_turn_counted(&mut store, "s-gone", 1));
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn replayed_settles_do_not_double_count_exchanges() {
+        // One user+assistant exchange settles once live, then replays once
+        // on reopen: the row must read 1 turn, not 2.
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1));
+        assert_eq!(store["s-1"].turns, 1);
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1), "the replayed settle");
+        assert_eq!(store["s-1"].turns, 1, "a replay never double-counts");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 2), "a second live exchange");
+        assert_eq!(store["s-1"].turns, 2);
     }
 
     #[test]
@@ -326,7 +348,7 @@ mod tests {
     fn reopening_keeps_the_row_and_refreshes_recency() {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
-        note_settled_turn(&mut store, "s-1");
+        note_settled_turn_counted(&mut store, "s-1", 1);
         let created = store["s-1"].created_ms;
         upsert_open(&mut store, "claude-code", "s-1", None, None, None);
         assert_eq!(store["s-1"].created_ms, created, "a reopen is not a new session");

@@ -719,6 +719,19 @@ pub struct Harness {
     /// wait for the switch (bounded) instead of acting on the session that
     /// is still open; any activation clears it.
     pub(crate) session_switch_pending: bool,
+    /// Which provider open the app asked for last: every `open_on_provider`
+    /// / reopen / fork call bumps this and carries its value into the
+    /// background work, and `finish_provider_open` lands only the current
+    /// one — a late-finishing earlier open never steals focus or the send.
+    /// Scripted (synchronous) opens bump it too, so the count also tells
+    /// how many children one action spawned.
+    pub(crate) provider_open_epoch: u64,
+    /// The one `new_session` a provider switch is allowed to start while a
+    /// switch is still pending: `SwitchProvider` / `NewSessionOnProvider`
+    /// close the old view synchronously but start its replacement on a
+    /// task, so they claim the next start up front — any other `new` while
+    /// a switch is in flight is a duplicate and starts nothing.
+    pub(crate) switch_claim: Option<String>,
     /// Whether the boot session has been attempted: [`Harness::ensure_boot_session`]
     /// opens `--session`/`--send`/`--steps`' first session without waiting
     /// for `session/list`, at most once — a failed attempt must not retry on
@@ -937,6 +950,8 @@ impl Harness {
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
             session_switch_pending: false,
+            provider_open_epoch: 0,
+            switch_claim: None,
             boot_session_attempted: false,
             renaming_project: None,
             project_colour_open: false,

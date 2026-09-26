@@ -281,6 +281,45 @@ ensure the boot path does not start a session when `--steps` begins with
 `new`. State the observed `reason=` sequence in the fixing commit; do not fix
 blind.
 
+**Resolved 2026-09-26 (W6), reproduced against the real binary first.**
+With the remembered default provider = Codex, one scripted `new` logged two
+`provider lane open provider=codex` lines and the sidebar gained two "New
+session" rows; `setprovider:claude-code` added a third. The muse-era
+`session/start` 2–4× report is the same shape. Root causes, all in
+`crates/baaz/src/app/lifecycle.rs`:
+
+1. **Eager boot.** `ensure_boot_session` opened a boot session for any
+   pending `--steps` list, and the list's own head `new` opened another:
+   two distinct sessions from two distinct code paths, not one path
+   firing twice. Fix: `boot_decision` stays `Idle` when the steps begin
+   with `new`/`new-in` (`steps::steps_begin_with_new`).
+2. **No idempotence while opening.** A second `new` arriving while
+   `session_switch_pending` held started a second open, because the draft
+   name is only recorded when the first open lands. Fix: `new_session_in`
+   / `new_session_in_root` start nothing while a switch is in flight —
+   the in-flight switch owns the next session.
+3. **The switch's own replacement looked like a duplicate.** `SwitchProvider`
+   / `NewSessionOnProvider` close synchronously but start the replacement
+   on a task; the guard in (2) would eat it, and a following `send:` ran
+   before the lane finished (`no open session`). Fix: the handlers set
+   `session_switch_pending` synchronously and claim the next start
+   (`switch_claim`), which the guard honours exactly once; `steps_ready_for`
+   holds session verbs (never window verbs) while a switch is pending.
+4. **Overlapping opens.** Two opens in flight both landed, and the earlier
+   ask finishing last stole focus and the send
+   (`new;setprovider:claude-code` sent to Codex). Fix: every open carries
+   a `provider_open_epoch`, and `finish_provider_open` drops any finish
+   that is no longer current (child shut down, no record, no row, pending
+   untouched).
+
+After the fix one scripted `new` logs one `provider lane open` line and
+shows one row; `SwitchProvider` on an empty draft replaces it and leaves
+exactly one row. Also fixed alongside: the doubled `baaz: baaz:` log
+prefix, the lane-blind status/row (`Waiting for approval…` / `Needs
+approval` for provider taps), the twice-rendered approval sentence, and
+reopened sessions rendering settled with exchange (not increment) turn
+counts — see the W6 commit.
+
 ## 7. Implementation plan (≤6 sequential tasks)
 
 Each task compiles and leaves the app working; muse sessions stay on
@@ -429,6 +468,13 @@ Each task compiles and leaves the app working; muse sessions stay on
   start and matrix close-out. Globs: `crates/baaz/src/app/lifecycle.rs`,
   `crates/baaz/src/steps.rs`, `crates/baaz/tests/*.rs`. Verification:
   `cargo test -p baaz`.
+  - **Built 2026-09-26:** one session per `new` (boot skips lists headed
+    by `new`, in-flight guard with switch claim, last-open-wins epoch),
+    steps wait for an in-flight lane open, single `baaz:` prefix,
+    `lane-claude-code`/`lane-codex` probe entries, needs-you status and
+    row for lane approvals, single-sentence approval card, settled
+    reopened turns with exchange turn counts, and `firstPrompt`-only
+    records resuming. Root cause in §6 above.
 
 ## 8. Risks and what no automated test can prove
 

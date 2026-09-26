@@ -1164,26 +1164,34 @@ impl SessionView {
     /// unanswered question's prompt, in fold order (forward walk, last hit
     /// wins — the same block the transcript's own phase scan reads first).
     /// Live off the fold, so a caller that just applied an event reads the
-    /// event's world, never a stale snapshot.
+    /// event's world, never a stale snapshot. Provider-lane taps live
+    /// beside the fold, not inside it, so the lane's newest pending
+    /// headline stands in when the fold holds nothing — without this a
+    /// Codex approval mid-turn read `Working` on the row.
     pub fn row_pending(&self) -> (Option<String>, Option<String>) {
         use aui_protocol::ApprovalState;
-        let Some(session) = self.fold.session(&self.session_id) else {
-            return (None, None);
-        };
         let mut approval: Option<String> = None;
         let mut question: Option<String> = None;
-        for turn in session.turns.iter() {
-            for block in turn.blocks() {
-                match block {
-                    Block::Approval { command, state: ApprovalState::Pending, .. } => {
-                        approval = Some(command.clone());
+        if let Some(session) = self.fold.session(&self.session_id) {
+            for turn in session.turns.iter() {
+                for block in turn.blocks() {
+                    match block {
+                        Block::Approval { command, state: ApprovalState::Pending, .. } => {
+                            approval = Some(command.clone());
+                        }
+                        Block::Question { prompt, answer: None, .. } => {
+                            question = Some(prompt.clone());
+                        }
+                        _ => {}
                     }
-                    Block::Question { prompt, answer: None, .. } => {
-                        question = Some(prompt.clone());
-                    }
-                    _ => {}
                 }
             }
+        }
+        if approval.is_none() {
+            approval = self.external_approvals.pending().last().map(|tap| tap.headline.clone());
+        }
+        if question.is_none() {
+            question = self.external_questions.newest_headline();
         }
         (approval, question)
     }

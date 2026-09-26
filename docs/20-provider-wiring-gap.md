@@ -1,5 +1,11 @@
 # 20 — The provider seam is not connected. Written 2026-09-26.
 
+> **Update 2026-09-26 (W1–W6): the gap this file records is closed.** Baaz
+> now constructs both adapters and runs sessions on either lane — see
+> `docs/21-provider-lanes.md` for the lane model and build record. What
+> follows is the original correction of record, kept for the history of
+> what was true before W1.
+
 This document exists because three commit messages, `docs/17-providers.md` §S46
 and the build board all read as though Baaz can run a session on Claude Code or
 Codex. **It cannot.** Until that is either fixed or reworded, this file is the
@@ -28,7 +34,6 @@ The only connection path in the app is:
 
     provider_codex::child::model_catalog(...)
     provider_codex::child::supported_efforts(...)
-    provider_claude_code::argv::reasoning_effort_unavailable_reason()
 
 `ClaudeCodeAdapter` and `CodexAdapter` are **never constructed** in baaz.
 
