@@ -33,7 +33,7 @@
                   "tool_kind": {
                     "kind": "read"
                   },
-                  "verb": "Read skill",
+                  "verb": "Loaded skill",
                   "target": "bundled:manage-settings",
                   "status": "success",
                   "duration_ms": null,

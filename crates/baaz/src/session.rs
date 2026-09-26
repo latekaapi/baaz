@@ -264,6 +264,13 @@ pub enum SessionEvent {
     WindowCommand(crate::overlays::Command),
     /// `/clear`: start a new session in this workspace.
     NewSession,
+    /// A transcript skill row's tap: open the Skills page on that skill.
+    /// The session cannot act on the window, so the application opens the
+    /// page and selects the row (D63).
+    OpenSkill {
+        /// The skill name, as the quiet row's card target carried it.
+        name: String,
+    },
     /// `session/fork` succeeded: open the new session as the active one.
     Forked {
         /// The new session's id. Its resume envelope has already been served.

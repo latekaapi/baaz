@@ -725,6 +725,13 @@ pub struct Harness {
     pub(crate) skills: crate::skills_page::SkillsPage,
     /// The Skills page search field (⌘F on the page; name and description).
     pub(crate) skills_query: Entity<TextareaState>,
+    /// The New-skill dialog's name field.
+    pub(crate) skills_new_name: Entity<TextareaState>,
+    /// The New-skill dialog's description field.
+    pub(crate) skills_new_desc: Entity<TextareaState>,
+    /// "Ask Muse to write one" (A5) arms this: the next activated session
+    /// opens with the `/create-skill ` draft, never sent.
+    pub(crate) pending_create_skill: bool,
     /// The pulse rings' timebase: sampled phases count cycles since here, so
     /// every dot in a frame agrees and restarts never jump.
     pub(crate) pulse_epoch: std::time::Instant,
@@ -867,6 +874,8 @@ impl Harness {
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
         let commands_query = cx.new(|cx| composer_state_rows("Every command in this build", 1, 1, window, cx));
         let skills_query = cx.new(|cx| composer_state_rows("Search skills", 1, 1, window, cx));
+        let skills_new_name = cx.new(|cx| composer_state_rows("Skill name", 1, 1, window, cx));
+        let skills_new_desc = cx.new(|cx| composer_state_rows("What it does and when to use it", 3, 6, window, cx));
         // The sidebar column's own view: the weak handle
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
@@ -967,6 +976,9 @@ impl Harness {
             rename: rename.clone(),
             skills: crate::skills_page::SkillsPage::default(),
             skills_query: skills_query.clone(),
+            skills_new_name: skills_new_name.clone(),
+            skills_new_desc: skills_new_desc.clone(),
+            pending_create_skill: false,
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
             session_switch_pending: false,

@@ -290,6 +290,20 @@ impl Overlays {
         self.skills_by_root.get(root).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Replace one root's skills without touching its files: the Skills page
+    /// pushes each landed catalog here so the `/` menu follows the page
+    /// after any mutation (D64).
+    pub fn set_skills(&mut self, root: String, skills: Vec<crate::skills::Skill>) {
+        self.roots_order.retain(|cached| cached != &root);
+        self.roots_order.push(root.clone());
+        while self.roots_order.len() > MAX_CACHED_ROOTS {
+            let oldest = self.roots_order.remove(0);
+            self.files_by_root.remove(&oldest);
+            self.skills_by_root.remove(&oldest);
+        }
+        self.skills_by_root.insert(root, skills);
+    }
+
     /// Store a walked root's files and skills, evicting the least recently
     /// walked past [`MAX_CACHED_ROOTS`]. A re-walk counts as use: the root
     /// moves to the back of the queue.

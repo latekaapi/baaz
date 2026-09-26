@@ -31,7 +31,7 @@
               "tool_kind": {
                 "kind": "read"
               },
-              "verb": "Read skill",
+              "verb": "Loaded skill",
               "target": "bundled:plan",
               "status": "success",
               "duration_ms": null,

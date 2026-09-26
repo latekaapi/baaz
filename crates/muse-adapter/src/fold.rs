@@ -2409,9 +2409,13 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     match tool {
         "bash" | "shell" => (ToolKind::Shell, "Ran".to_owned(), field("command").unwrap_or_else(raw)),
         "read" | "read_file" | "view" | "cat" => (ToolKind::Read, "Read".to_owned(), path().unwrap_or_else(raw)),
+        // A skill load folds to the transcript's quiet row: "Loaded skill
+        // `name`", with the scope joined at render time (D63). The verb is
+        // what marks the card for that row — see `skill_load_name` on the
+        // Baaz side — so it reads loaded, never reading.
         "read_skill" => (
             ToolKind::Read,
-            "Read skill".to_owned(),
+            "Loaded skill".to_owned(),
             field("name").or_else(path).unwrap_or_else(raw),
         ),
         "write" | "write_file" | "create" | "create_file" => {

@@ -2560,8 +2560,20 @@ impl Harness {
         // `set` without `notify`: a parked view reuses its retained subtree
         // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
-        self.active = Some(view);
+        self.active = Some(view.clone());
         self.focus_composer = true;
+        // "Ask Muse to write one" (A5): the fresh session opens with the
+        // `/create-skill ` draft and the composer focused. Never sent. The
+        // arm survives a non-muse activation untouched — the draft is a muse
+        // skill prompt, so it waits for a muse session.
+        if self.pending_create_skill && view.read(cx).provider_kind() == crate::providers::ProviderId::Muse {
+            self.pending_create_skill = false;
+            let draft = crate::skills_page::create_skill_draft().to_owned();
+            view.update(cx, |view, cx| {
+                view.set_draft(draft, window, cx);
+                view.focus_composer(window, cx);
+            });
+        }
         self.send_scripted(window, cx);
         // No `maybe_run_steps` here: activations fire on every swap,
         // including swaps the script itself causes, and draining the list
@@ -3045,6 +3057,14 @@ impl Harness {
                         this.run_window_command(command, window, cx);
                     });
                 }));
+            }
+            // A transcript skill row's tap (D63): open the Skills page on
+            // that skill. The open re-lists behind the previous catalog, so
+            // the selection lands on what the page already shows.
+            SessionEvent::OpenSkill { name } => {
+                let name = name.clone();
+                self.open_skills(cx);
+                self.select_skill(name, cx);
             }
         }
         cx.notify();
