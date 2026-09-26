@@ -65,13 +65,32 @@ pub fn path() -> PathBuf {
 }
 
 /// Read the store. Blocking; call it off the UI thread.
+///
+/// Under `BAAZ_DETERMINISTIC=1` (the visual probe's captures) the store reads
+/// empty, the same rule the keymap applies to the user file: a capture must
+/// not paint the owner's real sessions into the sidebar, or every baseline
+/// depends on whatever that machine happened to run.
 pub fn read() -> ProviderSessionStore {
+    if deterministic() {
+        return ProviderSessionStore::new();
+    }
     crate::store::read_json(&path())
+}
+
+/// Whether this is a deterministic capture (see [`read`]).
+fn deterministic() -> bool {
+    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
 /// Write the store, atomically. Best-effort like [`crate::sessions::write`]:
 /// a store that cannot be written loses a row, never a session.
+///
+/// A deterministic capture never writes: its sessions are scripted, and they
+/// must not land in the owner's store.
 pub fn write(store: &ProviderSessionStore) {
+    if deterministic() {
+        return;
+    }
     if let Ok(text) = serde_json::to_vec_pretty(store) {
         let _ = crate::store::write_atomic(&path(), &text);
     }
