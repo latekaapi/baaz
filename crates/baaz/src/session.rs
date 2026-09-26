@@ -204,6 +204,7 @@ mod clocks;
 mod commands;
 mod composer;
 mod events;
+mod lane;
 mod questions;
 mod render;
 mod scripting;
@@ -427,6 +428,10 @@ pub struct SessionView {
     replay: bool,
     /// `meta`, or `echo` under `BAAZ_PROVIDER=echo`.
     provider_id: String,
+    /// Which lane owns this view for its whole life: the muse pump or a
+    /// provider task. Set at construction and never reassigned — there is no
+    /// setter, so no code path can attach a second writer.
+    lane: lane::Lane,
     /// Approvals from a new provider (Claude Code / Codex) waiting on the
     /// person. The legacy lane has no room for them, so they live here and
     /// render on the same approvals surface.
@@ -435,6 +440,10 @@ pub struct SessionView {
     /// `DecideApproval` commands the provider lane drains, oldest first.
     /// The card waits on them; it never settles on the press.
     external_outbox: Vec<ProviderCommand>,
+    /// Questions a new provider raised, waiting on the person. The full
+    /// prompt arrived as a delta; this is the tap on the shoulder, kept so
+    /// the question surface can answer it.
+    external_questions: lane::ExternalQuestions,
     /// The workspace the session runs in, for the header and the empty state.
     workspace: String,
     /// The session's project display name for the empty state ("<provider>
@@ -721,6 +730,21 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::new_unowned(session_id, host, window, cx);
+        this.client = client;
+        this
+    }
+
+    /// The shared half of both lane constructors: every field except the
+    /// lane itself and the lane's subscription. The muse constructor runs
+    /// this and hands over its child; the provider constructor runs this,
+    /// records its session in the fold, and spawns its drain task.
+    fn new_unowned(
+        session_id: String,
+        host: SessionHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let SessionHost { provider_id, workspace, overlays, capture } = host;
         // The empty composer names the session's own provider: the person
         // is asking whoever this session runs on, never a hardcoded Muse.
@@ -753,11 +777,13 @@ impl SessionView {
         Self {
             session_id,
             fold: MuseFold::new(),
-            client,
+            client: None,
             replay: false,
             provider_id,
+            lane: lane::Lane::Muse,
             external_approvals: ExternalApprovalStore::empty(),
             external_outbox: Vec::new(),
+            external_questions: lane::ExternalQuestions::default(),
             workspace,
             project_name: None,
             composer,
@@ -1117,6 +1143,13 @@ impl SessionView {
     /// `session.forkedFrom` — would never reach the transcript, and the new
     /// session would open with no sign of where it came from.
     pub fn seed_session(&mut self, session: serde_json::Value, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            crate::baaz_log!(
+                "seed_session refused: session {} rides the provider lane",
+                self.session_id
+            );
+            return;
+        }
         if session.is_null() {
             return;
         }
@@ -1135,6 +1168,13 @@ impl SessionView {
     /// the transcript are untouched: the resume streamed only the suffix.
     /// Notifies: the cached centre reuses a clean view.
     pub fn reconnected(&mut self, client: Arc<MuseClient>, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            crate::baaz_log!(
+                "reconnected refused: session {} rides the provider lane",
+                self.session_id
+            );
+            return;
+        }
         self.client = Some(client);
         // A reconnect can have missed an `approval/request`, and the server does
         // not re-issue one it has already sent. The pull dual closes that hole.
@@ -1165,6 +1205,13 @@ impl SessionView {
     /// no child and no wire, so screenshots can be produced without touching a
     /// real connection, and it costs nothing at all.
     pub fn load_replay(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            crate::baaz_log!(
+                "load_replay refused: session {} rides the provider lane",
+                self.session_id
+            );
+            return;
+        }
         self.replay = true;
         let (events, sent) = match parse_replay_file(path) {
             Ok(parsed) => parsed,

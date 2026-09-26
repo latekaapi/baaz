@@ -262,6 +262,50 @@ impl MuseFold {
         self.last_touched.as_deref()
     }
 
+    /// Ensure a session entry exists for a provider-lane session, recording
+    /// who drives it and where it runs. A no-op when the entry already
+    /// exists: the lane that created it owns it, and a later caller never
+    /// re-labels it.
+    pub fn ensure_session(
+        &mut self,
+        session_id: &str,
+        provider: Provider,
+        model: impl Into<String>,
+        cwd: impl Into<String>,
+    ) {
+        self.last_touched = Some(session_id.to_owned());
+        self.touch(session_id);
+        self.sessions
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Folded::new_with_provider(session_id, provider, model.into(), cwd.into()));
+    }
+
+    /// The provider-lane entry point: fold render-ready
+    /// [`aui_protocol::Delta`]s into the session, in order, and return the
+    /// ones that landed. A delta naming a turn or block that is gone is
+    /// ignored ([`Session::apply`] reports it unlanded), never an error.
+    ///
+    /// The entry is created on first use with the fold's default shape, so a
+    /// provider lane calls [`MuseFold::ensure_session`] first to record its
+    /// provider, model and cwd. `SideState` stays default for such sessions:
+    /// nothing on the provider lane reports context usage, queue rows or
+    /// cursors into it.
+    ///
+    /// One-writer rule: a session is folded either through [`MuseFold::apply`]
+    /// (muse lane) or through here (provider lane), never both. The session
+    /// view owns its lane at construction and refuses the other lane's
+    /// events, so the two entry points can never both drive one session.
+    pub fn apply_deltas(&mut self, session_id: &str, deltas: Vec<Delta>) -> Vec<Delta> {
+        let folded = self.folded(session_id);
+        let mut landed = Vec::with_capacity(deltas.len());
+        for delta in deltas {
+            if folded.session.apply(delta.clone()) {
+                landed.push(delta);
+            }
+        }
+        landed
+    }
+
     /// Record what a command was submitted with, so a later `turn/retracted` or
     /// `turn/unqueued` can hand the prompt back to the composer.
     ///
@@ -425,7 +469,11 @@ impl MuseFold {
 
 impl Folded {
     fn new(session_id: &str) -> Self {
-        let mut session = Session::new(session_id, Provider::Muse, String::new(), String::new());
+        Self::new_with_provider(session_id, Provider::Muse, String::new(), String::new())
+    }
+
+    fn new_with_provider(session_id: &str, provider: Provider, model: String, cwd: String) -> Self {
+        let mut session = Session::new(session_id, provider, model, cwd);
         session.mode = PermissionMode::OnRequest;
         Self {
             session,
@@ -3227,5 +3275,109 @@ mod tests {
             ),
             block => panic!("expected a tool card, drew {block:?}"),
         }
+    }
+
+    /// The canned provider turn: the person's turn, one assistant turn with
+    /// one text block, and its footer — the same shape
+    /// `provider::scripted::ScriptedProvider` emits.
+    fn scripted_deltas(text: &str) -> Vec<Delta> {
+        let turn_id = "a-1".to_owned();
+        vec![
+            Delta::TurnStarted {
+                turn: Turn::User {
+                    id: "u-1".to_owned(),
+                    text: text.to_owned(),
+                    attachments: Vec::new(),
+                    mentions: Vec::new(),
+                    timestamp: None,
+                },
+            },
+            Delta::TurnStarted {
+                turn: Turn::Assistant {
+                    id: turn_id.clone(),
+                    blocks: Vec::new(),
+                    meta: TurnMeta::default(),
+                    timestamp: None,
+                },
+            },
+            Delta::BlockAdded {
+                turn_id: turn_id.clone(),
+                block: Block::Text { text: format!("echo: {text}"), streaming: false },
+            },
+            Delta::TurnFinished { turn_id, meta: TurnMeta::default() },
+        ]
+    }
+
+    #[test]
+    fn apply_deltas_creates_the_session_with_the_caller_provider() {
+        let mut fold = MuseFold::new();
+        assert!(fold.session("s-9").is_none());
+        fold.ensure_session("s-9", Provider::Codex, "scripted", "/tmp");
+        let session = fold.session("s-9").expect("ensure creates the entry");
+        assert_eq!(session.agent, Provider::Codex, "the lane's provider is recorded");
+        assert_eq!(session.model, "scripted");
+        assert_eq!(session.cwd, "/tmp");
+        assert!(session.turns.is_empty());
+        assert_eq!(
+            fold.side("s-9"),
+            Some(&SideState::default()),
+            "the provider lane reports nothing into side state"
+        );
+        // A second caller never re-labels another lane's session.
+        fold.ensure_session("s-9", Provider::Muse, "other", "/elsewhere");
+        assert_eq!(
+            fold.session("s-9").expect("still there").agent,
+            Provider::Codex,
+            "the first lane keeps the session"
+        );
+    }
+
+    #[test]
+    fn apply_deltas_folds_a_turn_in_order() {
+        let mut fold = MuseFold::new();
+        fold.ensure_session("s-1", Provider::Codex, String::new(), String::new());
+        let landed = fold.apply_deltas("s-1", scripted_deltas("hello"));
+        assert_eq!(landed.len(), 4, "every canned delta lands");
+        let session = fold.session("s-1").expect("the lane folded a session");
+        assert_eq!(session.turns.len(), 2, "the user turn and the assistant turn");
+        let texts: Vec<&str> = session
+            .turns
+            .iter()
+            .flat_map(|turn| turn.blocks())
+            .filter_map(|block| match block {
+                Block::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text.contains("echo: hello")), "the scripted reply text folded");
+        assert_eq!(
+            fold.side("s-1"),
+            Some(&SideState::default()),
+            "folding deltas leaves side state alone"
+        );
+    }
+
+    #[test]
+    fn apply_deltas_ignores_a_delta_for_an_unknown_turn() {
+        let mut fold = MuseFold::new();
+        fold.ensure_session("s-1", Provider::Codex, String::new(), String::new());
+        fold.apply_deltas("s-1", scripted_deltas("hello"));
+        let turns_before = fold.session("s-1").expect("folded").turns.len();
+        let landed = fold.apply_deltas(
+            "s-1",
+            vec![
+                Delta::BlockAdded {
+                    turn_id: "ghost".to_owned(),
+                    block: Block::Text { text: "late".to_owned(), streaming: false },
+                },
+                Delta::TurnFinished { turn_id: "ghost".to_owned(), meta: TurnMeta::default() },
+            ],
+        );
+        assert!(landed.is_empty(), "a late delta for a gone turn lands nowhere");
+        assert_eq!(
+            fold.session("s-1").expect("folded").turns.len(),
+            turns_before,
+            "the transcript is unchanged"
+        );
     }
 }

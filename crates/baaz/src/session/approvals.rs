@@ -252,11 +252,8 @@ impl SessionView {
     /// server's notification.
     /// Park a new provider's approval request on this surface.
     ///
-    /// No production caller yet: the provider lane decoders call this the
-    /// moment they land, the way the legacy pump calls the fold today.
-    /// It ships as dead code until then rather than as a second copy
-    /// typed at each future call site.
-    #[allow(dead_code)]
+    /// The provider lane task calls this the moment an `ApprovalRequested`
+    /// lands, the way the legacy pump calls the fold today.
     pub fn inject_external_approval(&mut self, approval: ExternalApproval, cx: &mut Context<Self>) {
         let id = approval.id.clone();
         // Loud, not silent: an external approval on a legacy-pump session
