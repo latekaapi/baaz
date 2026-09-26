@@ -80,6 +80,26 @@ pub struct InitFrame {
     pub tools: Vec<String>,
 }
 
+/// Token usage inside a stored `assistant` line's message: the same keys
+/// the stream `result` frame carries (`input_tokens`,
+/// `cache_creation_input_tokens`, `cache_read_input_tokens`,
+/// `output_tokens`, `output_tokens_details.thinking_tokens`). The stored
+/// transcript carries no `result` frame, so this is what closes a replayed
+/// turn's footer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AssistantUsage {
+    /// Billed input tokens (`usage.input_tokens`).
+    pub input_tokens: u64,
+    /// Billed completion tokens (`usage.output_tokens`).
+    pub output_tokens: u64,
+    /// Cache-read tokens, when reported.
+    pub cache_read_tokens: Option<u64>,
+    /// Cache-creation tokens, when reported.
+    pub cache_write_tokens: Option<u64>,
+    /// Reasoning tokens, when reported.
+    pub reasoning_tokens: u64,
+}
+
 /// One decoded CLI stdout line.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
@@ -97,6 +117,13 @@ pub enum Frame {
         uuid: String,
         /// The completed blocks, in order.
         blocks: Vec<ContentBlock>,
+        /// The model (`message.model`), present on stored lines only: the
+        /// stream carries the model on `init` instead.
+        model: Option<String>,
+        /// The usage (`message.usage`), present on stored lines only: the
+        /// stored transcript carries no `result` frame, so this closes a
+        /// replayed turn's footer.
+        usage: Option<AssistantUsage>,
         /// The enclosing tool call when this message comes from a
         /// sub-agent (`Agent`/`Task`): the parent `tool_use` id whose card
         /// nests these blocks. Empty on the main thread.
@@ -353,8 +380,54 @@ fn text_parts(content: &Value) -> String {
     }
 }
 
+/// The session a line belongs to: the stream spells `session_id`, the
+/// stored transcript `sessionId` (captured live 2026-09-26,
+/// `fixtures/claude-code/stored-history.jsonl`).
+fn session_str(value: &Value) -> String {
+    value
+        .get("session_id")
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The enclosing tool call (`Agent`/`Task`): `parent_tool_use_id`, empty
+/// on the main thread. Stored lines carry `parentUuid` instead, but that
+/// is the message chain (user → attachments → assistant), not a tool-use
+/// link — mapping it here routed every stored answer into a sub-agent
+/// card (captured live 2026-09-26, `stored-history.jsonl`: the whole file
+/// is `isSidechain: false`). So this reads the stream key only; stored
+/// sub-agent threads render inline, unverified.
+fn parent_str(value: &Value) -> String {
+    value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The usage inside a stored `assistant` line's message, under the same
+/// keys the stream `result` frame carries. `None` when the message
+/// carries no usage object at all (every stream line).
+fn assistant_usage(message: Option<&Value>) -> Option<AssistantUsage> {
+    let usage = message?.get("usage")?.as_object()?;
+    let uint = |key: &str| usage.get(key).and_then(Value::as_u64);
+    Some(AssistantUsage {
+        input_tokens: uint("input_tokens").unwrap_or(0),
+        output_tokens: uint("output_tokens").unwrap_or(0),
+        cache_read_tokens: uint("cache_read_input_tokens"),
+        cache_write_tokens: uint("cache_creation_input_tokens"),
+        reasoning_tokens: usage
+            .get("output_tokens_details")
+            .and_then(|details| details.get("thinking_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
 fn decode_assistant(value: &Value) -> Frame {
-    let session_id = value.get("session_id").and_then(Value::as_str).unwrap_or_default();
+    let session_id = session_str(value);
     let message = value.get("message");
     let message_id = message
         .and_then(|message| message.get("id"))
@@ -391,16 +464,17 @@ fn decode_assistant(value: &Value) -> Frame {
         message_id: message_id.to_owned(),
         uuid: uuid.to_owned(),
         blocks,
-        parent_tool_use_id: value
-            .get("parent_tool_use_id")
+        parent_tool_use_id: parent_str(value),
+        model: message
+            .and_then(|message| message.get("model"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
+            .map(str::to_owned),
+        usage: assistant_usage(message),
     }
 }
 
 fn decode_user(value: &Value) -> Frame {
-    let session_id = value.get("session_id").and_then(Value::as_str).unwrap_or_default();
+    let session_id = session_str(value);
     let uuid = value.get("uuid").and_then(Value::as_str).unwrap_or_default();
     let raw_detail = value.get("tool_use_result").cloned();
     let mut results = Vec::new();
@@ -446,11 +520,7 @@ fn decode_user(value: &Value) -> Frame {
             }
         }
     }
-    let parent_tool_use_id = value
-        .get("parent_tool_use_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let parent_tool_use_id = parent_str(value);
     if results.is_empty() {
         // No tool result: this is the `--replay-user-messages` echo of the
         // submitted prompt (or an empty frame) — the person's bubble.
@@ -548,7 +618,7 @@ fn decode_turn_result(value: &Value) -> Frame {
         .map(|items| items.iter().map(decode_denial).collect::<Vec<_>>())
         .unwrap_or_default();
     Frame::TurnResult {
-        session_id: value.get("session_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        session_id: session_str(value),
         text: value.get("result").and_then(Value::as_str).unwrap_or_default().to_owned(),
         input_tokens: uint("input_tokens").unwrap_or(0),
         output_tokens: uint("output_tokens").unwrap_or(0),
@@ -697,6 +767,7 @@ mod tests {
             "approval-default.jsonl",
             "error.jsonl",
             "image.jsonl",
+            "stored-history.jsonl",
         ] {
             for (index, line) in fixture(name).iter().enumerate() {
                 decode_line(line)

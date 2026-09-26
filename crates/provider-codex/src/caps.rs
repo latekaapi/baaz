@@ -36,6 +36,8 @@ pub fn codex_version_supported(version: &str) -> bool {
 pub fn capabilities() -> CapabilitySet {
     CapabilitySet::new([
         // thread/start mints the thread; the session mapping stores it.
+        // thread/resume rejoins it with its turns[] history, executed
+        // live 2026-09-26 (`fixtures/codex/resume.jsonl`).
         (Capability::SessionLifecycle, CapabilityState::Native),
         // `thread/fork` exists; no fixture forks. Do not upgrade blind.
         (Capability::ForkSession, CapabilityState::Unverified),

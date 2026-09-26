@@ -385,27 +385,59 @@ impl ClaudeCodeAdapter {
 
     fn find_stored(&self, session_id: &str) -> Option<PathBuf> {
         // The doc §3 rule: resolve the session's own workspace cwd, slug
-        // it, look in that one directory. No workspace on record, an
-        // unresolvable cwd, an absent slug directory, or a missing file
-        // all degrade to None — the callers answer honest unavailable.
-        // Never scan other directories: that would serve one workspace's
+        // it, look in that one directory. An unresolvable cwd, an absent
+        // slug directory, or a missing file all degrade to None — the
+        // callers answer honest unavailable. Never scan other directories
+        // when the workspace is known: that would serve one workspace's
         // transcript inside another.
-        let workspace = self.workspace.lock().expect("workspace mutex").clone()?;
         let home = self.home()?;
-        history::stored_transcript_path(&workspace, session_id, Some(&home))
-            .filter(|candidate| candidate.is_file())
+        let workspace = self.workspace.lock().expect("workspace mutex").clone();
+        match workspace {
+            Some(workspace) => history::stored_transcript_path(&workspace, session_id, Some(&home))
+                .filter(|candidate| candidate.is_file()),
+            // A fresh adapter after a restart holds no workspace (resume
+            // carries no cwd): fall back to an exact-id scan over every
+            // slug directory. The session id is a UUID and the match is
+            // the exact `<id>.jsonl` filename — zero or several matches
+            // still refuse — so this locates the session's own file
+            // without ever serving a neighbor's.
+            None => Self::scan_stored(&home, session_id),
+        }
+    }
+
+    /// The stored transcript for `session_id` by exact filename, over
+    /// every slug directory under `~/.claude/projects`. `Some` only on
+    /// exactly one match: none — or two files claiming one id — refuses.
+    fn scan_stored(home: &std::path::Path, session_id: &str) -> Option<PathBuf> {
+        if session_id.is_empty() || session_id.contains('/') {
+            return None;
+        }
+        let projects = home.join(".claude").join("projects");
+        let entries = std::fs::read_dir(&projects).ok()?;
+        let file_name = format!("{session_id}.jsonl");
+        let mut hits = Vec::new();
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let candidate = entry.path().join(&file_name);
+            if candidate.is_file() {
+                hits.push(candidate);
+            }
+        }
+        match hits.len() {
+            1 => hits.pop(),
+            _ => None,
+        }
     }
 
     /// Best-effort resume seeding: mark every user echo uuid the stored
     /// transcript already carries, so the resumed child's stream cannot
     /// re-bubble history the adapter already showed. Returns the marked
-    /// count. Zero when the workspace is unknown, the slug directory is
-    /// absent, or the file is missing or unreadable — the same
-    /// honest-unavailable cases as [`Self::find_stored`] — in which case
-    /// no disk history exists to collide with, and the fold still
-    /// dedupes within the stream itself. A fresh adapter resuming
-    /// without a workspace cannot locate the file; that limit is
-    /// documented, never guessed around.
+    /// count. Zero when no file is found, the file is unreadable, or the
+    /// scan is ambiguous — the same honest-unavailable cases as
+    /// [`Self::find_stored`] — in which case no disk history exists to
+    /// collide with, and the fold still dedupes within the stream itself.
+    /// A fresh adapter resuming without a workspace locates the file by
+    /// exact `<id>.jsonl` match (see [`Self::scan_stored`]), never by
+    /// guessing a neighbor's.
     fn seed_history_echoes(&self, session_id: &str) -> usize {
         let Some(path) = self.find_stored(session_id) else { return 0 };
         let Ok(text) = std::fs::read_to_string(&path) else { return 0 };
@@ -427,6 +459,17 @@ impl ClaudeCodeAdapter {
     }
 
     fn stored_deltas(&self, session_id: &str) -> Result<Vec<Delta>, ProviderError> {
+        self.stored_history(session_id).map(|(deltas, _)| deltas)
+    }
+
+    /// The stored transcript folded to deltas plus the session's model:
+    /// what a reopen shows before any live delta. Still-open turns close
+    /// with their stored footers (the file carries no `result` frame), so
+    /// a reopened view settles instead of hanging on "working".
+    fn stored_history(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<Delta>, Option<String>), ProviderError> {
         let Some(path) = self.find_stored(session_id) else {
             return Err(ProviderError::Unavailable {
                 reason: format!(
@@ -447,7 +490,8 @@ impl ClaudeCodeAdapter {
             let Ok(frame) = frame::decode_line(line) else { continue };
             deltas.extend(fold.apply(&frame));
         }
-        Ok(deltas)
+        deltas.extend(fold.finish_stored_turns());
+        Ok((deltas, fold.stored_model().map(str::to_owned)))
     }
 }
 
@@ -510,6 +554,24 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // history already shown must not bubble again off the
                 // resumed child's stream.
                 self.seed_history_echoes(&session_id);
+                // The resumed child replays no transcript on stdout, so
+                // the lane shows the stored file instead: folded here and
+                // emitted before any live delta, exactly once per resume
+                // (the emission below is the only history source — the
+                // child never repeats it). No file, no history: the lane
+                // opens empty and the next turn still appends.
+                if let Ok((deltas, model)) = self.stored_history(&session_id) {
+                    if let Some(model) = model {
+                        *self.model.lock().expect("model mutex") = Some(model.clone());
+                        self.fold.lock().expect("fold mutex").set_model(&model);
+                    }
+                    if !deltas.is_empty() {
+                        let _ = self.tx.send(provider::ProviderEvent::Deltas {
+                            session_id: Some(session_id.clone()),
+                            deltas,
+                        });
+                    }
+                }
                 Ok(ack)
             }
             Command::ForkSession { request_id, session_id, .. } => {
@@ -919,10 +981,30 @@ mod tests {
         }
         // Missing file and unknown workspace: zero, honestly.
         assert_eq!(adapter.seed_history_echoes("no-such-session"), 0);
+        // No workspace (a fresh adapter after a restart — resume carries
+        // no cwd): the exact `<id>.jsonl` filename still locates the
+        // session's own file, never a neighbor's.
         let bare = ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(home.clone());
-        assert_eq!(bare.seed_history_echoes("sess-9"), 0, "no workspace, no guess");
+        assert_eq!(bare.seed_history_echoes("sess-9"), 1, "no workspace, exact id still seeds");
+        assert_eq!(bare.seed_history_echoes("no-such-session"), 0);
+        // But two files claiming one id refuse: an ambiguous scan is not
+        // an answer.
+        let other_workspace = std::env::temp_dir().join("cc-seed-test-other-work");
+        let _ = std::fs::remove_dir_all(&other_workspace);
+        std::fs::create_dir_all(&other_workspace).expect("other workspace");
+        let other_slug = crate::history::slug_for_cwd(
+            &crate::history::resolve_cwd(&other_workspace).expect("other resolves"),
+        );
+        let other_dir = home.join(".claude").join("projects").join(other_slug);
+        std::fs::create_dir_all(&other_dir).expect("other slug dir");
+        std::fs::write(other_dir.join("sess-9.jsonl"), "{}\n").expect("plant twin");
+        assert_eq!(bare.seed_history_echoes("sess-9"), 0, "twins refuse, never pick one");
+        // The workspace-known adapter still reads its own file: the scan
+        // never overrides an exact slug path.
+        assert_eq!(adapter.seed_history_echoes("sess-9"), 1, "the slug path wins over twins");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&other_workspace);
     }
 
     #[test]

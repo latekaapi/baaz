@@ -223,6 +223,19 @@ pub fn turn_start_request(
     json!({"id": id, "method": "turn/start", "params": Value::Object(params)})
 }
 
+/// The `thread/resume` call rejoining a stored thread by id. Per
+/// `ThreadResumeParams` only `threadId` is required; the response carries
+/// the thread (with its `turns[]` history, per the `Thread.turns`
+/// description) plus the effective `model` (see [`resume_ids`]).
+/// Captured live 2026-09-26 in `fixtures/codex/resume.jsonl`.
+pub fn thread_resume_request(id: u64, thread_id: &str) -> Value {
+    json!({
+        "id": id,
+        "method": "thread/resume",
+        "params": {"threadId": thread_id}
+    })
+}
+
 /// The `turn/steer` call injecting input into the running turn.
 /// `expected_turn_id` closes the race where the turn changes under us.
 pub fn turn_steer_request(id: u64, thread_id: &str, expected_turn_id: &str, text: &str) -> Value {
@@ -362,6 +375,33 @@ pub fn thread_ids(result: &Value) -> Option<(String, String)> {
         thread.get("id").and_then(Value::as_str)?.to_owned(),
         thread.get("sessionId").and_then(Value::as_str)?.to_owned(),
     ))
+}
+
+/// The resumed `(thread_id, session_id, model)` out of a `thread/resume`
+/// response: `result.thread.id`, `result.thread.sessionId`, and the
+/// top-level `result.model`. `None` when any of the three is missing —
+/// never a defaulted guess. On a fresh thread the two ids are equal;
+/// Baaz stores both rather than assuming either.
+pub fn resume_ids(result: &Value) -> Option<(String, String, String)> {
+    let thread = result.get("thread")?;
+    Some((
+        thread.get("id").and_then(Value::as_str)?.to_owned(),
+        thread.get("sessionId").and_then(Value::as_str)?.to_owned(),
+        result.get("model").and_then(Value::as_str)?.to_owned(),
+    ))
+}
+
+/// The history turns out of a `thread/resume` response:
+/// `result.thread.turns[]`, each carrying its own `items[]` (see `Turn`
+/// in the v2 schema bundle). Empty (not missing-is-an-error) when the
+/// thread has no turns yet — an untouched thread resumes with no history.
+pub fn resume_turns(result: &Value) -> Vec<Value> {
+    result
+        .get("thread")
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The started turn id out of a `turn/start` response.

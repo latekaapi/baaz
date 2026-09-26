@@ -200,13 +200,21 @@ same defect stage 3 found, in a new place.** Not yet probed. S4.2 owns it.
 | `ClientTools` | **Unverified** | `item/tool/call` exists; registration path unidentified (§4) |
 | `Cost` | **Unavailable** | no cost field anywhere in the protocol. `thread/tokenUsage/updated` gives tokens, never money |
 | `Fork` | **Native** | `thread/fork`; `thread.forkedFromId` is in the thread object |
-| `Resume` | **Native** | `thread/resume`, `thread/list`, `thread/read`, `thread/loaded/list` |
+| `Resume` | **Native** | `thread/resume` executed live 2026-09-26 (`fixtures/codex/resume.jsonl`: response carries `thread.turns[]` history plus `model`); `thread/list`, `thread/read`, `thread/loaded/list` still method-present, not executed |
 
 Three cells say *(method present; not executed)*. Those are **`Unverified`
 until a fixture exists** under the stage-2 rule — reading a method name off a
 generated schema is exactly the "reading a flag off `--help` is not evidence"
 mistake the handoff warns about. They are listed as Native *proposals*; S4.1 must
 either capture the fixture or downgrade the cell. **Do not ship the table as-is.**
+
+W5b settles one of them: `thread/resume` is executed (fixture above) and
+stays `Native` with evidence. The adapter replays the response's
+`thread.turns[]` through the same item lane the live `item/completed`
+notifications take, with the response's `model` in the finish footers —
+history once, the next live turn appended after it. `thread/fork`,
+`thread/compact/start` and the question shapes are still unexecuted, and
+the table still says so.
 
 ## 6. The ledger gets better input than it has ever had
 

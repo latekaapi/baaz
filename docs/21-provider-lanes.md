@@ -388,6 +388,17 @@ Each task compiles and leaves the app working; muse sessions stay on
   `crates/baaz/src/store.rs`, `crates/baaz/src/titles.rs`,
   `crates/baaz/src/byline.rs`, `crates/baaz/src/usage.rs`.
   Verification: `cargo test -p baaz sidebar`.
+  - **W5b (2026-09-26): reopened sessions show history.** Both adapters
+    replay history as the lane's first event on `ResumeSession`: Claude
+    Code folds its `~/.claude` jsonl (the stored file is not the stream
+    frames — no `init`/`result`, camelCase ids, model+usage on the
+    message; the finish is synthesised, `docs/18-claude-code.md` §3),
+    Codex folds the `thread/resume` response's `thread.turns[]`
+    (`fixtures/codex/resume.jsonl`, `docs/19-codex.md` §5). The chip
+    reads the last finished turn's model, so a reopen names the session
+    instead of the provider. A record with no settled turns holds no
+    history: it opens fresh and the stale record leaves with it. The
+    refusal that stood in for Codex resume is gone.
   - **Built 2026-09-26:** `provider-sessions.json` in the support dir
     records each lane session (provider, session id, workspace, project,
     created/updated, turns, ack title, first prompt) — written on open,

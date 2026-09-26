@@ -318,6 +318,14 @@ impl SessionView {
                         self.completed_turns.clear();
                     }
                     self.completed_turns.insert(turn_id.clone());
+                    // The chip's fallback: the last finished turn's model.
+                    // Replayed history lands here first, so a reopened
+                    // session names its model before any live turn runs —
+                    // and a refused pick (see `pick_model`) never clears
+                    // it, because that path touches `pending_model` only.
+                    if !meta.model.is_empty() {
+                        self.history_model = Some(meta.model.clone());
+                    }
                     if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {
                         self.clear_running();
                     }
@@ -1636,6 +1644,150 @@ mod tests {
             assert!(
                 view.capability_strip_rows().is_empty(),
                 "codex refuses nothing: no strip at all"
+            );
+        });
+    }
+
+    /// W5b: a reopened view shows replayed history, appends the next
+    /// turn after it, and names the history's model on the chip. History
+    /// arrives as one `Deltas` event — what a real `ResumeSession`
+    /// replays before any live delta — and the next turn as another; the
+    /// transcript keeps arrival order, and the chip reads the last
+    /// finished turn's model until a pick or a live catalog row wins.
+    #[gpui::test]
+    fn a_reopened_view_shows_history_then_appends_and_names_its_model(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use aui_protocol::{Block, Delta, Turn, TurnMeta};
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).model().as_ref(),
+                "Claude Code",
+                "no model known yet: the chip names the provider"
+            );
+        });
+        // History lands the way a real resume replays it: one event with
+        // the prior turns, closed, carrying the session's model.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::User {
+                            id: "u-old".to_owned(),
+                            text: "Restore the header".to_owned(),
+                            attachments: Vec::new(),
+                            mentions: Vec::new(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "a-old".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::BlockAdded {
+                        turn_id: "a-old".to_owned(),
+                        block: Block::Text {
+                            text: "The header is restored".to_owned(),
+                            streaming: false,
+                        },
+                    },
+                    Delta::TurnFinished {
+                        turn_id: "a-old".to_owned(),
+                        meta: TurnMeta {
+                            model: "hist-model".to_owned(),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.model().as_ref(),
+                "hist-model",
+                "the chip names the history's model, never the provider"
+            );
+            assert!(!view.busy(), "the replayed finish settles the view");
+        });
+        // The next turn arrives after history and appends after it.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::User {
+                            id: "u-new".to_owned(),
+                            text: "Now the footer".to_owned(),
+                            attachments: Vec::new(),
+                            mentions: Vec::new(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "a-new".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::BlockAdded {
+                        turn_id: "a-new".to_owned(),
+                        block: Block::Text {
+                            text: "The footer is done".to_owned(),
+                            streaming: false,
+                        },
+                    },
+                    Delta::TurnFinished {
+                        turn_id: "a-new".to_owned(),
+                        meta: TurnMeta {
+                            model: "new-model".to_owned(),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            let texts: Vec<String> = view
+                .session()
+                .map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .flat_map(|turn| turn.blocks())
+                        .filter_map(|block| match block {
+                            Block::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                texts,
+                ["The header is restored", "The footer is done"],
+                "history first, the new turn appended after it: {texts:?}"
+            );
+            assert_eq!(
+                view.model().as_ref(),
+                "new-model",
+                "the chip follows the latest finished turn"
             );
         });
     }

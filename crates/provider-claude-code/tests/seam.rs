@@ -4,7 +4,7 @@
 //! exercised by planting a fixture copy under a fake `$HOME`.
 
 use provider::{
-    Ack, Command, Provider, ProviderAdapter, ProviderError, QuestionAnswer,
+    Ack, Command, Provider, ProviderAdapter, ProviderError, ProviderEvent, QuestionAnswer,
 };
 use provider_claude_code::ClaudeCodeAdapter;
 
@@ -148,6 +148,170 @@ fn stored_history_serves_read_and_page_but_never_guesses() {
         })
         .expect_err("another workspace's file must not page here");
     assert!(matches!(error, ProviderError::Unavailable { .. }));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Resume replays the stored transcript exactly once and names the model.
+///
+/// Plants the live-captured `stored-history.jsonl` (one "Say R1" turn, no
+/// `result` frame in the file) as the stored transcript, then:
+/// * `PageTranscript` folds it to one user bubble, one assistant answer,
+///   and one finish — the finish synthesised from the stored usage, so a
+///   reopened view settles instead of hanging on "working";
+/// * the finish carries the stored model (`message.model`);
+/// * `ResumeSession` (over a stub child — `/usr/bin/true` exits at once,
+///   so no `claude` ever runs) emits the same deltas as a `Deltas` event
+///   before any live delta;
+/// * a NEW stream echo (fresh uuid) still bubbles afterwards — the W4d
+///   seeding swallows only the stored uuid, never the next turn.
+#[test]
+fn resume_replays_stored_history_once_with_its_model() {
+    use provider_claude_code::{fold::ClaudeFold, frame::decode_line, history};
+
+    let root = std::env::temp_dir().join("cc-seam-test-resume");
+    let _ = std::fs::remove_dir_all(&root);
+    let cwd = root.join("work");
+    let home = root.join("home");
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let resolved = history::resolve_cwd(&cwd).expect("resolves");
+    let slug = history::slug_for_cwd(&resolved);
+    let dir = home.join(".claude").join("projects").join(&slug);
+    std::fs::create_dir_all(&dir).expect("slug dir");
+    let session_id = "af18b5bb-1ff5-4ba2-825c-94804b78834e";
+    let fixture = std::fs::read_to_string(format!(
+        "{}/../../fixtures/claude-code/stored-history.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("fixture reads");
+    assert!(
+        fixture.contains(session_id),
+        "the fixture must carry the session the test reopens"
+    );
+    std::fs::write(dir.join(format!("{session_id}.jsonl")), &fixture).expect("plant");
+
+    let adapter =
+        ClaudeCodeAdapter::new("claude").with_home(home.clone()).with_workspace(cwd.clone());
+
+    // The page a reopen shows: bubble, answer, finish — each exactly once.
+    let ack = adapter
+        .dispatch(Command::PageTranscript {
+            session_id: session_id.into(),
+            after: None,
+            limit: 100,
+            backward: false,
+        })
+        .expect("stored transcript pages");
+    let (deltas, next) = match ack {
+        Ack::TranscriptPage { deltas, next_cursor } => (deltas, next_cursor),
+        other => panic!("expected a page, got {other:?}"),
+    };
+    assert!(next.is_none(), "one page holds the whole turn");
+    let bubbles: Vec<&str> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            aui_protocol::Delta::TurnStarted {
+                turn: aui_protocol::Turn::User { text, .. },
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bubbles, ["Say R1 and nothing else"], "the prior prompt renders once: {bubbles:?}");
+    let answers: Vec<&str> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            aui_protocol::Delta::BlockAdded {
+                block: aui_protocol::Block::Text { text, .. },
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, ["R1"], "the prior answer renders once: {answers:?}");
+    let finishes: Vec<&aui_protocol::TurnMeta> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            aui_protocol::Delta::TurnFinished { meta, .. } => Some(meta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finishes.len(), 1, "the stored turn closes once, or the view hangs working");
+    assert_eq!(finishes[0].model, "claude-opus-5", "the chip's model comes from history");
+    assert!(finishes[0].tokens_in > 0, "the footer keeps the stored usage: {:?}", finishes[0]);
+
+    // Resume over a stub child replays the same history as an event
+    // (`/usr/bin/true` exits at once with no stdout: the pump ends, the
+    // replay below is the only history source).
+    let resumed = ClaudeCodeAdapter::new("/usr/bin/true")
+        .with_home(home)
+        .with_workspace(cwd);
+    let ack = resumed
+        .dispatch(Command::ResumeSession {
+            request_id: "r-1".into(),
+            session_id: session_id.into(),
+            cursor: None,
+            metadata_only: false,
+        })
+        .expect("resume lands over the stub");
+    assert!(
+        matches!(ack, Ack::Session { session_id: ref held, .. } if held == session_id),
+        "resume keeps the id: {ack:?}"
+    );
+    let replayed = resumed
+        .events()
+        .try_iter()
+        .filter_map(|event| match event {
+            ProviderEvent::Deltas { deltas, .. } => Some(deltas),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(replayed, deltas, "resume replays what the page serves — one copy");
+
+    // The next turn still bubbles: seeding swallowed the stored uuid only.
+    let mut fold = ClaudeFold::new();
+    for line in fixture.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(frame) = decode_line(line) else { continue };
+        if let provider_claude_code::frame::Frame::UserText { uuid, .. } = &frame {
+            fold.mark_user_echo_seen(uuid);
+        }
+    }
+    let echo = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say R2"}]},"session_id":"SES","uuid":"u-fresh-2"}"#
+        .replace("SES", session_id);
+    let frame = decode_line(&echo).expect("stream echo decodes");
+    let next: Vec<_> = {
+        let mut live = fold.apply(&frame).into_iter().collect::<Vec<_>>();
+        // A second arrival of the STORED echo stays silent.
+        let stored_echo = fixture
+            .lines()
+            .find_map(|line| {
+                decode_line(line).ok().filter(|frame| {
+                    matches!(
+                        frame,
+                        provider_claude_code::frame::Frame::UserText { uuid, .. }
+                        if uuid == "6aeb89c4-f5f1-422e-98fc-fd78222e37e3"
+                    )
+                })
+            })
+            .expect("the fixture carries its user echo");
+        live.extend(fold.apply(&stored_echo));
+        live
+    };
+    assert_eq!(
+        next.iter()
+            .filter_map(|delta| match delta {
+                aui_protocol::Delta::TurnStarted {
+                    turn: aui_protocol::Turn::User { text, .. },
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["Say R2"],
+        "the new turn bubbles; the stored echo does not repeat"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

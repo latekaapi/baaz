@@ -2057,7 +2057,9 @@ impl Harness {
     /// child through the factory and `ResumeSession` it there, then land
     /// it like any lane open. The adapter replays the transcript's deltas
     /// (Claude Code its `~/.claude` jsonl, Codex its thread), which the
-    /// lane folds into the view. A refusal dialogs with the reason and
+    /// lane folds into the view — except a record with no settled turns,
+    /// which holds no history anywhere: it opens fresh and the stale
+    /// record leaves with it. A refusal dialogs with the reason and
     /// opens nothing — never a silent muse fallback, never a fresh empty
     /// session under the old id.
     pub(crate) fn reopen_provider(
@@ -2082,6 +2084,23 @@ impl Harness {
                     archive_target: None,
                 },
             );
+            return;
+        }
+        // An untouched draft — a record with no settled turns — holds no
+        // history anywhere: resuming it would replay nothing, so it opens
+        // fresh instead, and the stale record leaves with it so the
+        // sidebar never accumulates dead rows. (A restarted draft that
+        // never sent is the only record with `turns == 0`.)
+        if record.turns == 0 {
+            crate::baaz_log!(
+                "provider reopen: {} has no turns, opening fresh",
+                record.session_id
+            );
+            crate::provider_sessions::remove(&mut self.provider_sessions, &record.session_id);
+            crate::provider_sessions::write(&self.provider_sessions);
+            self.merge_provider_rows();
+            let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+            self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
@@ -3670,6 +3689,17 @@ mod tests {
             baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
         });
         assert_eq!(open_id, "s-open");
+        // One turn settles, so the record counts history: a reopened
+        // draft with no turns opens fresh instead (see the next test).
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                crate::provider_sessions::note_settled_turn(
+                    &mut harness.provider_sessions,
+                    &open_id,
+                );
+                crate::provider_sessions::write(&harness.provider_sessions);
+            });
+        });
         // The restart: the harness forgets its views (active and parked
         // alike) and its rows, but the record the open wrote survives on
         // disk. The forgotten views stay alive in this local: dropping
@@ -3755,6 +3785,94 @@ mod tests {
             assert_eq!(kept.provider, "codex");
             assert_eq!(kept.cost_usd, 0.04);
             assert_eq!(crate::usage::count_for_session(&connection, &open_id), 1);
+        });
+        lane_restore(state);
+    }
+
+    /// The W5b draft arm: a record with no settled turns holds no history
+    /// anywhere, so clicking it opens fresh (`OpenSession`, never
+    /// `ResumeSession`) and the stale record leaves with it — the sidebar
+    /// never accumulates dead rows. Resuming it would replay nothing.
+    #[gpui::test]
+    fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("draft-reopen");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let open_id = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        assert_eq!(open_id, "s-open");
+        // The restart, with no turn ever settling: the record counts zero.
+        let mut forgotten = Vec::new();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                if let Some(view) = harness.active.take() {
+                    forgotten.push(view);
+                }
+                forgotten.extend(harness.session_cache.drain(..).map(|(_, view)| view));
+                harness.sessions.clear();
+                harness.provider_sessions = crate::provider_sessions::read();
+                harness.merge_provider_rows();
+            });
+        });
+        let _forgotten = forgotten;
+        vc.update(|_, cx| {
+            assert_eq!(
+                baaz.read(cx).provider_sessions.get(&open_id).map(|record| record.turns),
+                Some(0),
+                "the untouched draft counts no turns"
+            );
+        });
+        // The click: the draft opens fresh, it is never resumed.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet(open_id.clone(), window, cx));
+        });
+        vc.run_until_parked();
+        let sent = commands.lock().expect("commands").clone();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                provider::Command::OpenSession { .. }
+            )),
+            "the draft opens fresh, drew {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|command| matches!(
+                command,
+                provider::Command::ResumeSession { .. }
+            )),
+            "nothing is resumed for a draft with no history, drew {sent:?}"
+        );
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the fresh lane is open");
+            assert!(view.read(cx).is_provider_lane(), "a lane opens, not a muse view");
+            assert!(
+                harness.overlays.read(cx).dialog.is_none(),
+                "no failure dialog on a fresh open"
+            );
+            assert_eq!(
+                harness.provider_sessions.get(&open_id).map(|record| record.turns),
+                Some(0),
+                "the reopened record is the fresh one"
+            );
         });
         lane_restore(state);
     }

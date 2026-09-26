@@ -490,6 +490,14 @@ pub struct ClaudeFold {
     /// the same message id continues the index sequence (and a later
     /// `BlockUpdated` for a tool result addresses the right card).
     emitted: HashMap<String, usize>,
+    /// Footer facts per message from stored `assistant` lines
+    /// (`message.model`, `message.usage`): what closes a replayed turn,
+    /// since the stored transcript carries no `result` frame. Stream
+    /// lines carry neither and record nothing here.
+    stored_meta: HashMap<String, TurnMeta>,
+    /// The last stored line's model, in file order: the session's model
+    /// when history exists, `None` on a stream-only fold.
+    stored_model: Option<String>,
     model: Option<String>,
     session_id: Option<String>,
     account: AccountSnapshot,
@@ -592,7 +600,37 @@ impl ClaudeFold {
                 self.model = Some(init.model.clone());
                 Vec::new()
             }
-            Frame::Assistant { message_id, blocks, parent_tool_use_id, .. } => {
+            Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, .. } => {
+                // Stored lines carry the turn's footer facts on the
+                // message itself (the stored transcript has no `result`
+                // frame): remembered per message so the history path can
+                // close the turn. Stream lines carry neither and record
+                // nothing, so live sessions gain no state here.
+                if model.is_some() || usage.is_some() {
+                    let usage = usage.clone().unwrap_or_default();
+                    self.stored_meta.insert(message_id.clone(), TurnMeta {
+                        model: model.clone().unwrap_or_default(),
+                        duration_ms: 0,
+                        tokens_in: usage.input_tokens.saturating_add(
+                            usage.cache_read_tokens.unwrap_or(0),
+                        ).saturating_add(
+                            usage.cache_write_tokens.unwrap_or(0),
+                        ),
+                        tokens_out: usage.output_tokens,
+                        reasoning_tokens: usage.reasoning_tokens,
+                        // The stored file carries no cost: 0.0 is the
+                        // neutral unknown default, never a measurement.
+                        cost_usd: 0.0,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_write_tokens: usage.cache_write_tokens,
+                        cached_tokens: 0,
+                    });
+                    if let Some(model) = model {
+                        if !model.is_empty() {
+                            self.stored_model = Some(model.clone());
+                        }
+                    }
+                }
                 if parent_tool_use_id.is_empty() {
                     self.apply_blocks(message_id, blocks)
                 } else {
@@ -781,6 +819,32 @@ impl ClaudeFold {
                 ContentBlock::Other { .. } => {}
             }
         }
+        deltas
+    }
+
+    /// The session's model from stored history: the last stored
+    /// `assistant` line's `message.model`, in file order. `None` when no
+    /// stored line carried one — a stream-only fold, or a history of
+    /// user turns alone.
+    pub fn stored_model(&self) -> Option<&str> {
+        self.stored_model.as_deref()
+    }
+
+    /// Close every still-open turn with its stored footer, oldest first.
+    /// STORED-HISTORY ONLY: the adapter calls this once on the throwaway
+    /// fold that replayed the stored file, never on the live fold — a
+    /// live turn is still running, and finishing it here would settle the
+    /// stop button mid-turn. A turn with no stored footer still closes
+    /// (with a default meta) so a reopened view never shows a stuck
+    /// "working" indicator for a turn that settled before the restart.
+    pub fn finish_stored_turns(&mut self) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        self.flush_agents(&mut deltas);
+        let open = std::mem::take(&mut self.open);
+        deltas.extend(open.into_iter().map(|turn_id| {
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            Delta::TurnFinished { turn_id, meta }
+        }));
         deltas
     }
 
