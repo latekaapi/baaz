@@ -49,17 +49,18 @@
 //! * everything else: no deltas (`init` records identity; `rate_limit`
 //!   updates the account snapshot).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Block, Delta,
-    ThinkingState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Attachment,
+    AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, Hunk, ThinkingState, TodoItem,
+    TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
 
 use crate::account::AccountSnapshot;
-use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame};
+use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame, ToolResult};
 
 /// Where a tool call lives, and what it was, so its result can complete it.
 #[derive(Clone, Debug)]
@@ -71,6 +72,332 @@ struct ToolSite {
     target: String,
     name: String,
     params: Vec<(String, String)>,
+}
+
+/// Where a nested (sub-agent) tool call lives inside its `Agent` card's
+/// buffer, and what it was, so the nested result can complete it there.
+#[derive(Clone, Debug)]
+struct NestedSite {
+    /// Index in the agent card's buffered blocks.
+    index: usize,
+    kind: ToolKind,
+    verb: String,
+    target: String,
+    name: String,
+    params: Vec<(String, String)>,
+}
+
+/// The tool names that manage the agent's task list rather than doing
+/// work: TaskCreate/TaskUpdate (live on this wire) and the legacy
+/// TodoWrite (same list shape, older spelling).
+fn is_todo_tool(name: &str) -> bool {
+    matches!(name, "TaskCreate" | "TaskUpdate" | "TodoWrite")
+}
+
+/// The provider's task status vocabulary onto the transcript's.
+fn map_todo_state(status: &str) -> TodoState {
+    match status {
+        "in_progress" => TodoState::Running,
+        "completed" => TodoState::Done,
+        _ => TodoState::Pending,
+    }
+}
+
+/// The task number out of a creation/update confirmation
+/// (`Task #1 created successfully: …`, `Updated task #1 status`): what
+/// the result names when its detail is absent.
+fn task_number_from(text: &str) -> Option<&str> {
+    let hash = text.find('#')?;
+    let rest = &text[hash + 1..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if end == 0 { None } else { Some(&rest[..end]) }
+}
+
+/// Fold one todo-call's input into the card's list: TaskCreate appends a
+/// pending row, TaskUpdate moves a row's state, legacy TodoWrite replaces
+/// the whole list. Unknown shapes leave the list alone — a call the fold
+/// does not understand must not rewrite the transcript.
+fn apply_todo_input(
+    items: &mut Vec<TodoEntry>,
+    tool_id: &str,
+    name: &str,
+    input: &serde_json::Value,
+) {
+    let str_field = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+    match name {
+        "TaskCreate" => {
+            let label = str_field("subject");
+            let label = if label.is_empty() { str_field("description") } else { label };
+            if !items.iter().any(|entry| entry.key == tool_id) {
+                items.push(TodoEntry {
+                    key: tool_id.to_owned(),
+                    label: label.to_owned(),
+                    state: TodoState::Pending,
+                });
+            }
+        }
+        "TaskUpdate" => {
+            let id = str_field("taskId");
+            if let Some(entry) = items.iter_mut().find(|entry| entry.key == id) {
+                entry.state = map_todo_state(str_field("status"));
+            }
+        }
+        _ => {
+            // Legacy TodoWrite: the whole list, in order.
+            if let Some(todos) = input.get("todos").and_then(serde_json::Value::as_array) {
+                items.clear();
+                for (index, todo) in todos.iter().enumerate() {
+                    let label = todo
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let state = todo
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(map_todo_state)
+                        .unwrap_or(TodoState::Pending);
+                    items.push(TodoEntry {
+                        key: format!("legacy-{index}"),
+                        label: label.to_owned(),
+                        state,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The completed `Agent` card: the delegation header plus one nested
+/// assistant turn carrying every block the sub-agent produced.
+fn agent_block(id: &str, site: &ToolSite, status: ToolStatus, blocks: &[Block]) -> Block {
+    Block::ToolCall {
+        id: id.to_owned(),
+        kind: ToolKind::SubAgent,
+        verb: site.verb.clone(),
+        target: site.target.clone(),
+        status,
+        duration_ms: None,
+        body: ToolBody::SubAgent {
+            turns: vec![Turn::Assistant {
+                id: format!("{id}/subagent"),
+                blocks: blocks.to_vec(),
+                meta: TurnMeta::default(),
+                timestamp: None,
+            }],
+        },
+        diff_stat: None,
+    }
+}
+
+/// The CLI's `Exit code N` result prefix onto the card's exit code. The
+/// success path carries no prefix (its detail is bare streams), so
+/// `None` there means "ran, code unreported" — never 0 by assumption.
+fn parse_exit_code(text: &str) -> Option<i32> {
+    let first = text.lines().next()?;
+    let rest = first.strip_prefix("Exit code ")?;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Complete any tool card from its result: the one place shell output,
+/// MCP payloads, file diffs, read counts and the generic fallback are
+/// decided, shared by the main transcript and nested sub-agent buffers
+/// so the two cannot disagree.
+fn finish_tool_block(
+    kind: &ToolKind,
+    verb: &str,
+    target: &str,
+    name: &str,
+    params: &[(String, String)],
+    tool_use_id: &str,
+    result: &ToolResult,
+) -> Block {
+    let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
+    match kind {
+        ToolKind::Shell => Block::ToolCall {
+            id: tool_use_id.to_owned(),
+            kind: kind.clone(),
+            verb: verb.to_owned(),
+            target: target.to_owned(),
+            status,
+            duration_ms: None,
+            body: ToolBody::Shell {
+                output_lines: result.text.lines().map(str::to_owned).collect(),
+                exit_code: parse_exit_code(&result.text),
+                live: false,
+            },
+            diff_stat: None,
+        },
+        ToolKind::Mcp { .. } => Block::ToolCall {
+            id: tool_use_id.to_owned(),
+            kind: kind.clone(),
+            verb: verb.to_owned(),
+            target: target.to_owned(),
+            status,
+            duration_ms: None,
+            body: ToolBody::Mcp { params: params.to_vec(), result_json: result.text.clone() },
+            diff_stat: None,
+        },
+        ToolKind::Edit | ToolKind::Write => {
+            let (body, diff_stat) = edit_body(target, result);
+            Block::ToolCall {
+                id: tool_use_id.to_owned(),
+                kind: kind.clone(),
+                verb: verb.to_owned(),
+                target: target.to_owned(),
+                status,
+                duration_ms: None,
+                body,
+                diff_stat,
+            }
+        }
+        ToolKind::Read => Block::ToolCall {
+            id: tool_use_id.to_owned(),
+            kind: kind.clone(),
+            verb: verb.to_owned(),
+            target: target.to_owned(),
+            status,
+            duration_ms: None,
+            body: ToolBody::Read { lines: read_line_count(result) },
+            diff_stat: None,
+        },
+        _ => Block::Generic {
+            kind: name.to_owned(),
+            status: if result.is_error { "error".into() } else { "completed".into() },
+            text: result.text.clone(),
+        },
+    }
+}
+
+/// The Read card's line count: the wire's own `numLines` when the detail
+/// carries it, else the echoed text's lines. Never 0 for a non-empty
+/// read — but 0 when there is genuinely nothing to count.
+fn read_line_count(result: &ToolResult) -> usize {
+    result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("file"))
+        .and_then(|file| file.get("numLines"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|lines| usize::try_from(lines).ok())
+        .unwrap_or_else(|| result.text.lines().count())
+}
+
+/// The Edit/Write card body from the result detail: the wire's own
+/// `structuredPatch` hunks for an edit, the created content as an
+/// all-addition diff for a write. `None` detail (or an unrecognised one)
+/// leaves the card header-only rather than forging a diff.
+fn edit_body(target: &str, result: &ToolResult) -> (ToolBody, Option<aui_protocol::DiffStat>) {
+    let detail = match result.detail.as_ref() {
+        Some(detail) => detail,
+        None => return (ToolBody::None, None),
+    };
+    let path = detail
+        .get("filePath")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(target)
+        .to_owned();
+    if let Some(patch) = detail.get("structuredPatch").and_then(serde_json::Value::as_array) {
+        if !patch.is_empty() {
+            let (diff, stat) = diff_from_structured_patch(&path, patch);
+            return (ToolBody::Edit { diff }, Some(stat));
+        }
+    }
+    if let Some(content) = detail.get("content").and_then(serde_json::Value::as_str) {
+        let lines: Vec<&str> = content.lines().collect();
+        let added = lines.len();
+        let diff = Diff {
+            path,
+            hunks: vec![Hunk {
+                header: format!("@@ -0,0 +1,{added} @@"),
+                lines: lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| DiffLine {
+                        kind: DiffKind::Add,
+                        old_no: None,
+                        new_no: Some(index as u32 + 1),
+                        text: (*line).to_owned(),
+                    })
+                    .collect(),
+            }],
+            added: added as u32,
+            removed: 0,
+        };
+        let stat =
+            aui_protocol::DiffStat { added: added as u64, removed: 0, files: 1 };
+        return (ToolBody::Edit { diff }, Some(stat));
+    }
+    (ToolBody::None, None)
+}
+
+/// The wire's `structuredPatch` entries onto one [`Diff`] plus its chip
+/// counts: `+`/`-` lines counted, `\ No newline` markers and `+++`/`---`
+/// headers skipped, anything unprefixed read as context.
+fn diff_from_structured_patch(
+    path: &str,
+    patch: &[serde_json::Value],
+) -> (Diff, aui_protocol::DiffStat) {
+    let mut hunks = Vec::new();
+    let mut added: u64 = 0;
+    let mut removed: u64 = 0;
+    for entry in patch {
+        let old_start = entry.get("oldStart").and_then(serde_json::Value::as_u64).unwrap_or(1);
+        let old_lines = entry.get("oldLines").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let new_start = entry.get("newStart").and_then(serde_json::Value::as_u64).unwrap_or(1);
+        let new_lines = entry.get("newLines").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let mut old_no = old_start as u32;
+        let mut new_no = new_start as u32;
+        let mut lines = Vec::new();
+        for line in entry
+            .get("lines")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            let text = line.as_str().unwrap_or("");
+            if text.starts_with('\\') {
+                continue;
+            }
+            if let Some(stripped) = text.strip_prefix('+') {
+                if stripped.starts_with('+') {
+                    continue;
+                }
+                added += 1;
+                lines.push(DiffLine { kind: DiffKind::Add, old_no: None, new_no: Some(new_no), text: stripped.to_owned() });
+                new_no += 1;
+            } else if let Some(stripped) = text.strip_prefix('-') {
+                if stripped.starts_with('-') {
+                    continue;
+                }
+                removed += 1;
+                lines.push(DiffLine { kind: DiffKind::Del, old_no: Some(old_no), new_no: None, text: stripped.to_owned() });
+                old_no += 1;
+            } else {
+                let text = text.strip_prefix(' ').unwrap_or(text);
+                lines.push(DiffLine {
+                    kind: DiffKind::Context,
+                    old_no: Some(old_no),
+                    new_no: Some(new_no),
+                    text: text.to_owned(),
+                });
+                old_no += 1;
+                new_no += 1;
+            }
+        }
+        hunks.push(Hunk {
+            header: format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"),
+            lines,
+        });
+    }
+    let files = u64::from(!patch.is_empty());
+    let diff = Diff {
+        path: path.to_owned(),
+        hunks,
+        added: added as u32,
+        removed: removed as u32,
+    };
+    (diff, aui_protocol::DiffStat { added, removed, files })
 }
 
 /// A `control_request` whose subtype this adapter does not know, held for
@@ -86,6 +413,54 @@ pub struct UnknownControlRequest {
     pub raw: serde_json::Value,
 }
 
+/// One row of the per-turn todo card: a task the agent tracks, keyed by
+/// the provider's task id (`Task #N`) once the creation result names it,
+/// by the `tool_use` id before that.
+#[derive(Clone, Debug)]
+struct TodoEntry {
+    /// The provider task id when known, else the creating `tool_use` id.
+    key: String,
+    /// The human task text (`subject`, or the legacy `content`).
+    label: String,
+    /// The latest status seen for this task.
+    state: TodoState,
+}
+
+/// The per-turn todo card: one card per turn no matter how many
+/// TaskCreate/TaskUpdate/TodoWrite calls refine it, so the transcript
+/// shows a list, not a call log.
+#[derive(Clone, Debug)]
+struct TodoCard {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for wholesale updates.
+    block_index: usize,
+    /// The list as last rendered.
+    items: Vec<TodoEntry>,
+}
+
+/// One sub-agent invocation: the `Agent` card plus the blocks its own
+/// messages (`parent_tool_use_id` set) accumulate, flushed into the card
+/// when the agent's result lands — or at turn end, when the agent is still
+/// running async and the turn finished first.
+#[derive(Clone, Debug)]
+struct AgentCard {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for wholesale updates.
+    block_index: usize,
+    /// The card's current status (Running until the agent answers).
+    status: ToolStatus,
+    /// The nested blocks, in arrival order.
+    blocks: Vec<Block>,
+    /// Nested tool-use id → site in `blocks`, so nested results complete
+    /// their own cards.
+    nested_tools: HashMap<String, NestedSite>,
+    /// Whether the card already carries the current buffer (set when the
+    /// agent's own result lands; the turn-end flush covers the async rest).
+    flushed: bool,
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: message id → turn (many
@@ -96,6 +471,16 @@ pub struct ClaudeFold {
     started: HashMap<String, ()>,
     open: Vec<String>,
     tools: HashMap<String, ToolSite>,
+    /// Echo uuids already rendered as user turns, so a replayed fixture
+    /// never mints the same bubble twice.
+    user_echoes: HashSet<String>,
+    /// `tool_use` ids of todo-list calls (TaskCreate/TaskUpdate/TodoWrite):
+    /// their results refine the turn's todo card, never a tool card.
+    todo_tool_ids: HashSet<String>,
+    /// Turn id → its todo card, while the turn is open.
+    todos: HashMap<String, TodoCard>,
+    /// `Agent` tool-use id → its nesting card, while the turn is open.
+    agents: HashMap<String, AgentCard>,
     /// Blocks already emitted per turn, so a second `assistant` frame with
     /// the same message id continues the index sequence (and a later
     /// `BlockUpdated` for a tool result addresses the right card).
@@ -202,10 +587,22 @@ impl ClaudeFold {
                 self.model = Some(init.model.clone());
                 Vec::new()
             }
-            Frame::Assistant { message_id, blocks, .. } => self.apply_blocks(message_id, blocks),
-            Frame::UserResult { results, .. } => {
-                results.iter().filter_map(|result| self.apply_result(result)).collect()
+            Frame::Assistant { message_id, blocks, parent_tool_use_id, .. } => {
+                if parent_tool_use_id.is_empty() {
+                    self.apply_blocks(message_id, blocks)
+                } else {
+                    self.apply_subagent_blocks(parent_tool_use_id, blocks)
+                }
             }
+            Frame::UserResult { results, parent_tool_use_id, .. } => {
+                if parent_tool_use_id.is_empty() {
+                    results.iter().filter_map(|result| self.apply_result(result)).collect()
+                } else {
+                    results.iter().for_each(|result| self.apply_nested_result(parent_tool_use_id, result));
+                    Vec::new()
+                }
+            }
+            Frame::UserText { uuid, text, images, .. } => self.apply_user_text(uuid, text, images),
             Frame::TurnResult {
                 input_tokens,
                 output_tokens,
@@ -218,10 +615,18 @@ impl ClaudeFold {
                 permission_denials,
                 ..
             } => {
+                // `tokens_in` is the whole billed prompt: the wire splits
+                // it into bare input plus cache creation and cache read,
+                // and the muse lane's `promptTokens` arrives whole, so a
+                // bare `input_tokens` here would show 93 for a 30k prompt.
+                // The cache fields stay informational (never add them on
+                // top — that double-counts); the ledger reads `tokens_in`.
                 let meta = TurnMeta {
                     model: model.clone().or_else(|| self.model.clone()).unwrap_or_default(),
                     duration_ms: *duration_ms,
-                    tokens_in: *input_tokens,
+                    tokens_in: input_tokens
+                        .saturating_add(cache_read_tokens.unwrap_or(0))
+                        .saturating_add(cache_write_tokens.unwrap_or(0)),
                     tokens_out: *output_tokens,
                     reasoning_tokens: *reasoning_tokens,
                     cost_usd: *total_cost_usd,
@@ -230,6 +635,10 @@ impl ClaudeFold {
                     cached_tokens: 0,
                 };
                 let mut deltas = Vec::new();
+                // Async sub-agents may still be streaming when the turn
+                // ends: flush whatever they buffered into their cards
+                // before the finish, or their work vanishes silently.
+                self.flush_agents(&mut deltas);
                 // After-the-fact refusals, on the transcript before the
                 // finish: decoded, visible, and never a substitute for
                 // answering the request itself.
@@ -329,21 +738,40 @@ impl ClaudeFold {
                     self.emitted.insert(message_id.to_owned(), block_index + 1);
                 }
                 ContentBlock::ToolUse { id, name, input } => {
-                    let site = tool_card(id, name, input);
-                    self.tools.insert(id.clone(), ToolSite {
-                        turn_id: message_id.to_owned(),
-                        block_index,
-                        kind: site.kind.clone(),
-                        verb: site.verb.clone(),
-                        target: site.target.clone(),
-                        name: name.clone(),
-                        params: site.params.clone(),
-                    });
-                    deltas.push(Delta::BlockAdded {
-                        turn_id: message_id.to_owned(),
-                        block: site.block,
-                    });
-                    self.emitted.insert(message_id.to_owned(), block_index + 1);
+                    if is_todo_tool(name) {
+                        // The agent's task list, not a tool card: one card
+                        // per turn, refined by every call (see
+                        // `apply_todo_call`). Never a `ToolSite`, so its
+                        // result routes to the card, not to a card update.
+                        self.todo_tool_ids.insert(id.clone());
+                        self.apply_todo_call(message_id, block_index, id, name, input, &mut deltas);
+                    } else {
+                        let site = tool_card(id, name, input);
+                        if site.kind == ToolKind::SubAgent {
+                            self.agents.insert(id.clone(), AgentCard {
+                                turn_id: message_id.to_owned(),
+                                block_index,
+                                status: ToolStatus::Running,
+                                blocks: Vec::new(),
+                                nested_tools: HashMap::new(),
+                                flushed: false,
+                            });
+                        }
+                        self.tools.insert(id.clone(), ToolSite {
+                            turn_id: message_id.to_owned(),
+                            block_index,
+                            kind: site.kind.clone(),
+                            verb: site.verb.clone(),
+                            target: site.target.clone(),
+                            name: name.clone(),
+                            params: site.params.clone(),
+                        });
+                        deltas.push(Delta::BlockAdded {
+                            turn_id: message_id.to_owned(),
+                            block: site.block,
+                        });
+                        self.emitted.insert(message_id.to_owned(), block_index + 1);
+                    }
                 }
                 ContentBlock::Other { .. } => {}
             }
@@ -351,41 +779,323 @@ impl ClaudeFold {
         deltas
     }
 
+    /// The echoed prompt (`--replay-user-messages`) as the person's own
+    /// turn: the bubble the pre-replay CLI never sent. Exactly once per
+    /// echo uuid — a replayed fixture must not mint the bubble twice.
+    fn apply_user_text(
+        &mut self,
+        uuid: &str,
+        text: &str,
+        images: &[crate::frame::UserImage],
+    ) -> Vec<Delta> {
+        if uuid.is_empty() || !self.user_echoes.insert(uuid.to_owned()) {
+            return Vec::new();
+        }
+        let attachments = images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| Attachment {
+                name: format!("image-{}", index + 1),
+                kind: AttachmentKind::Image,
+                size_bytes: Some(image.data_len as u64),
+                meta: Some(image.media_type.clone()),
+                state: UploadState::Ready,
+            })
+            .collect();
+        vec![Delta::TurnStarted {
+            turn: Turn::User {
+                id: uuid.to_owned(),
+                text: text.to_owned(),
+                attachments,
+                mentions: Vec::new(),
+                timestamp: None,
+            },
+        }]
+    }
+
     fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Option<Delta> {
+        if self.todo_tool_ids.contains(&result.tool_use_id) {
+            return self.apply_todo_result(result);
+        }
         let site = self.tools.get(&result.tool_use_id)?.clone();
         let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
-        let block = match &site.kind {
-            ToolKind::Shell => Block::ToolCall {
-                id: result.tool_use_id.clone(),
-                kind: site.kind.clone(),
-                verb: site.verb.clone(),
-                target: site.target.clone(),
-                status,
-                duration_ms: None,
-                body: ToolBody::Shell {
-                    output_lines: result.text.lines().map(str::to_owned).collect(),
-                    exit_code: None,
-                    live: false,
-                },
-                diff_stat: None,
-            },
-            ToolKind::Mcp { .. } => Block::ToolCall {
-                id: result.tool_use_id.clone(),
-                kind: site.kind.clone(),
-                verb: site.verb.clone(),
-                target: site.target.clone(),
-                status,
-                duration_ms: None,
-                body: ToolBody::Mcp { params: site.params.clone(), result_json: result.text.clone() },
-                diff_stat: None,
-            },
-            _ => Block::Generic {
-                kind: site.name.clone(),
-                status: if result.is_error { "error".into() } else { "completed".into() },
-                text: result.text.clone(),
-            },
-        };
+        if site.kind == ToolKind::SubAgent {
+            return self.apply_agent_result(&result.tool_use_id, &site, status, result);
+        }
+        let block = finish_tool_block(
+            &site.kind,
+            &site.verb,
+            &site.target,
+            &site.name,
+            &site.params,
+            &result.tool_use_id,
+            result,
+        );
         Some(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block })
+    }
+
+    /// Refine the turn's todo card from one TaskCreate/TaskUpdate/TodoWrite
+    /// call: the first call opens the card, every later call rewrites it
+    /// wholesale. Only the opening call consumes a block index — updates
+    /// address the recorded one.
+    ///
+    /// The card spans the CLI turn's many assistant messages: a call
+    /// refines this message's card when one exists, else any card on a
+    /// still-open turn (a `BlockUpdated` to an earlier turn is exactly how
+    /// tool results already address older cards). A new CLI turn has no
+    /// open turns left — its first call always opens a fresh card.
+    fn apply_todo_call(
+        &mut self,
+        message_id: &str,
+        block_index: usize,
+        tool_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        deltas: &mut Vec<Delta>,
+    ) {
+        // The card to refine: this message's own, else any card on a
+        // still-open turn (a `BlockUpdated` to an earlier turn is exactly
+        // how tool results already address older cards). `None` means no
+        // card is open anywhere — this call opens one.
+        let key = if self.todos.contains_key(message_id) {
+            Some(message_id.to_owned())
+        } else {
+            self.todos
+                .iter()
+                .find(|(_, card)| self.open.iter().any(|turn| turn == &card.turn_id))
+                .map(|(key, _)| key.clone())
+        };
+        let (key, is_new) = match key {
+            Some(key) => (key, false),
+            None => {
+                self.todos.insert(message_id.to_owned(), TodoCard {
+                    turn_id: message_id.to_owned(),
+                    block_index,
+                    items: Vec::new(),
+                });
+                (message_id.to_owned(), true)
+            }
+        };
+        if let Some(card) = self.todos.get_mut(&key) {
+            apply_todo_input(&mut card.items, tool_id, name, input);
+        }
+        let card = self.todos.get(&key).expect("inserted above");
+        let block = Block::Todo {
+            items: card
+                .items
+                .iter()
+                .map(|entry| TodoItem {
+                    label: entry.label.clone(),
+                    state: entry.state,
+                    elapsed_ms: None,
+                })
+                .collect(),
+        };
+        if is_new {
+            deltas.push(Delta::BlockAdded { turn_id: card.turn_id.clone(), block });
+            self.emitted.insert(message_id.to_owned(), block_index + 1);
+        } else {
+            deltas.push(Delta::BlockUpdated {
+                turn_id: card.turn_id.clone(),
+                block_index: card.block_index,
+                block,
+            });
+        }
+    }
+
+    /// Refine the turn's todo card from one todo-call result: TaskCreate
+    /// names the task's real id, TaskUpdate moves its state. A result for
+    /// a call the fold never saw refines nothing.
+    fn apply_todo_result(&mut self, result: &ToolResult) -> Option<Delta> {
+        let detail = result.detail.as_ref();
+        // The card this call belongs to: the one still holding its
+        // provisional tool-use key, or the one already holding its task id.
+        let task_id = detail
+            .and_then(|detail| detail.get("task"))
+            .and_then(|task| task.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                detail
+                    .and_then(|detail| detail.get("taskId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .or_else(|| task_number_from(&result.text).map(|number| number.to_owned()));
+        let mut found = None;
+        for card in self.todos.values_mut() {
+            if let Some(entry) =
+                card.items.iter_mut().find(|entry| Some(entry.key.as_str()) == task_id.as_deref())
+            {
+                if entry.key == result.tool_use_id {
+                    if let Some(id) = task_id.clone() {
+                        entry.key = id;
+                    }
+                }
+                if let Some(change) =
+                    detail.and_then(|detail| detail.get("statusChange")).and_then(|change| {
+                        change.get("to").and_then(serde_json::Value::as_str)
+                    })
+                {
+                    entry.state = map_todo_state(change);
+                }
+                found = Some((card.turn_id.clone(), card.block_index));
+                break;
+            }
+            // A creation result whose provisional key is still the
+            // `tool_use` id: claim it for this task id.
+            if let Some(entry) =
+                card.items.iter_mut().find(|entry| entry.key == result.tool_use_id)
+            {
+                if let Some(id) = task_id.clone() {
+                    entry.key = id;
+                }
+                found = Some((card.turn_id.clone(), card.block_index));
+                break;
+            }
+        }
+        let (turn_id, block_index) = found?;
+        let card = self.todos.values().find(|card| card.turn_id == turn_id)?;
+        Some(Delta::BlockUpdated {
+            turn_id,
+            block_index,
+            block: Block::Todo {
+                items: card
+                    .items
+                    .iter()
+                    .map(|entry| TodoItem {
+                        label: entry.label.clone(),
+                        state: entry.state,
+                        elapsed_ms: None,
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    /// Buffer one sub-agent message's blocks into its `Agent` card: no
+    /// deltas yet — the card refreshes when the agent answers, or at turn
+    /// end when the agent is still running async.
+    fn apply_subagent_blocks(
+        &mut self,
+        agent_id: &str,
+        blocks: &[ContentBlock],
+    ) -> Vec<Delta> {
+        if !self.agents.contains_key(agent_id) {
+            // Frames out of order (or a fixture starting mid-agent): a
+            // card shell so the blocks land somewhere owned.
+            self.agents.insert(agent_id.to_owned(), AgentCard {
+                turn_id: agent_id.to_owned(),
+                block_index: 0,
+                status: ToolStatus::Running,
+                blocks: Vec::new(),
+                nested_tools: HashMap::new(),
+                flushed: false,
+            });
+        }
+        if let Some(card) = self.agents.get_mut(agent_id) {
+            for block in blocks {
+                match block {
+                    ContentBlock::Thinking { text } => {
+                        card.blocks.push(Block::Thinking {
+                            text: text.clone(),
+                            elapsed_ms: 0,
+                            summary: None,
+                            state: ThinkingState::Done,
+                        });
+                    }
+                    ContentBlock::Text { text } => {
+                        card.blocks.push(Block::Text { text: text.clone(), streaming: false });
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        let site = tool_card(id, name, input);
+                        card.nested_tools.insert(id.clone(), NestedSite {
+                            index: card.blocks.len(),
+                            kind: site.kind.clone(),
+                            verb: site.verb.clone(),
+                            target: site.target.clone(),
+                            name: name.clone(),
+                            params: site.params.clone(),
+                        });
+                        card.blocks.push(site.block);
+                    }
+                    ContentBlock::Other { .. } => {}
+                }
+            }
+            card.flushed = false;
+        }
+        Vec::new()
+    }
+
+    /// Complete one nested tool card inside its `Agent` card's buffer. An
+    /// id the buffer never saw completes nothing — it is not promoted to
+    /// the main transcript, or a stray id would forge a card there.
+    fn apply_nested_result(&mut self, agent_id: &str, result: &ToolResult) {
+        let Some(card) = self.agents.get_mut(agent_id) else { return };
+        let Some(site) = card.nested_tools.get(&result.tool_use_id) else { return };
+        let block = finish_tool_block(
+            &site.kind,
+            &site.verb,
+            &site.target,
+            &site.name,
+            &site.params,
+            &result.tool_use_id,
+            result,
+        );
+        if let Some(slot) = card.blocks.get_mut(site.index) {
+            *slot = block;
+        }
+        card.flushed = false;
+    }
+
+    /// Complete the `Agent` card with its buffered nested transcript: one
+    /// nested assistant turn carrying every block the sub-agent produced.
+    /// Marks the buffer flushed, so the turn-end pass leaves it alone.
+    fn apply_agent_result(
+        &mut self,
+        tool_id: &str,
+        site: &ToolSite,
+        status: ToolStatus,
+        _result: &ToolResult,
+    ) -> Option<Delta> {
+        let card = self.agents.get_mut(tool_id)?;
+        card.status = status;
+        card.flushed = true;
+        let block = agent_block(tool_id, site, status, &card.blocks);
+        Some(Delta::BlockUpdated {
+            turn_id: card.turn_id.clone(),
+            block_index: card.block_index,
+            block,
+        })
+    }
+
+    /// Flush every unflushed non-empty agent buffer into its card, ahead
+    /// of the turn finish: the async agent outlives the turn, and without
+    /// this its buffered work would never render.
+    fn flush_agents(&mut self, deltas: &mut Vec<Delta>) {
+        let mut pending = Vec::new();
+        for (id, card) in self.agents.iter_mut() {
+            if !card.flushed && !card.blocks.is_empty() {
+                card.flushed = true;
+                pending.push((
+                    id.clone(),
+                    card.turn_id.clone(),
+                    card.block_index,
+                    card.status,
+                    card.blocks.clone(),
+                ));
+            }
+        }
+        for (id, turn_id, block_index, status, blocks) in pending {
+            if let Some(site) = self.tools.get(&id) {
+                let site = site.clone();
+                deltas.push(Delta::BlockUpdated {
+                    turn_id,
+                    block_index,
+                    block: agent_block(&id, &site, status, &blocks),
+                });
+            }
+        }
     }
 
     /// Queue a `can_use_tool` request as pending and card it. The card rides
@@ -616,6 +1326,58 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             diff_stat: None,
         };
         ToolCard { kind: ToolKind::Shell, verb: "Ran".into(), target, params, block }
+    } else if matches!(name, "Write" | "Edit" | "Read") {
+        // File cards: the header names the path; the body (diff, line
+        // count) lands when the result's structured detail arrives.
+        let (kind, verb) = match name {
+            "Write" => (ToolKind::Write, "Wrote"),
+            "Edit" => (ToolKind::Edit, "Edited"),
+            _ => (ToolKind::Read, "Read"),
+        };
+        let target = input
+            .get("file_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(name)
+            .to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: kind.clone(),
+            verb: verb.into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        ToolCard { kind, verb: verb.into(), target, params, block }
+    } else if name == "Agent" {
+        // A sub-agent delegation: the card nests the agent's own blocks
+        // (routed by `parent_tool_use_id`) once they arrive.
+        let agent_type = input
+            .get("subagent_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let target = match (agent_type.is_empty(), description.is_empty()) {
+            (false, false) => format!("{agent_type}: {description}"),
+            (false, true) => agent_type.to_owned(),
+            (true, false) => description.to_owned(),
+            (true, true) => name.to_owned(),
+        };
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::SubAgent,
+            verb: "Delegated".into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::SubAgent { turns: Vec::new() },
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::SubAgent, verb: "Delegated".into(), target, params, block }
     } else if let Some((server, tool)) = mcp_split(name) {
         let target = format!("{server} · {tool}");
         let block = Block::ToolCall {
@@ -735,6 +1497,404 @@ mod tests {
             Block::Text { text, .. } => Some(text),
             _ => None,
         }
+    }
+
+    fn replay(name: &str) -> (ClaudeFold, Vec<Delta>) {
+        fold_lines(&fixture_lines(name))
+    }
+
+    fn user_turns(deltas: &[Delta]) -> Vec<(&str, usize)> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted {
+                    turn: Turn::User { text, attachments, .. },
+                    ..
+                } => Some((text.as_str(), attachments.len())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn finished_metas(deltas: &[Delta]) -> Vec<TurnMeta> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnFinished { meta, .. } => Some(meta.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_updates(deltas: &[Delta]) -> Vec<Block> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Defect 1, pinned on `edit.jsonl`: the replayed prompt echo folds
+    /// to exactly one user turn carrying the submitted text. Removing the
+    /// `UserText` arm (or the `--replay-user-messages` flag that produces
+    /// the echo) fails this — the turn would show tools and reply with no
+    /// bubble for what the person sent.
+    #[test]
+    fn user_echo_folds_to_exactly_one_user_turn() {
+        let (_, deltas) = replay("edit.jsonl");
+        let users = user_turns(&deltas);
+        assert_eq!(users.len(), 1, "one submitted prompt, one bubble");
+        assert!(users[0].0.contains("greet.txt"), "the prompt text: {}", users[0].0);
+        assert_eq!(users[0].1, 0, "no attachments on this turn");
+    }
+
+    /// Defect 4, pinned on `basic.jsonl` (a pre-replay capture, so no
+    /// bubble is involved): the billed prompt is bare input PLUS both
+    /// cache legs. `input_tokens` alone reads 10 for a ~30k prompt; the
+    /// fold sums all three into `tokens_in` while keeping the cache legs
+    /// informational (never added on top — that double-counts).
+    #[test]
+    fn tokens_in_sums_bare_input_and_both_cache_legs() {
+        let (_, deltas) = replay("basic.jsonl");
+        let metas = finished_metas(&deltas);
+        assert!(!metas.is_empty(), "the turn finishes with a footer");
+        for meta in &metas {
+            assert_eq!(meta.tokens_in, 10 + 21448 + 8165, "the whole billed prompt");
+            assert_eq!(meta.cache_read_tokens, Some(21448));
+            assert_eq!(meta.cache_write_tokens, Some(8165));
+            assert_eq!(meta.tokens_out, 57);
+        }
+    }
+
+    /// `edit.jsonl`: Write then Edit fold to file cards with server-honest
+    /// diff chips — `+1/−0` for the creation, `+2/−1` for the edit — and
+    /// both approvals on the wire precede their runs.
+    #[test]
+    fn edit_fixture_folds_write_and_edit_cards_with_diff_stats() {
+        let (fold, deltas) = replay("edit.jsonl");
+        assert_eq!(fold.pending_approvals().len(), 2, "Write asked, Edit asked");
+        let updated = tool_updates(&deltas);
+        let write = updated.iter().find_map(|block| match block {
+            Block::ToolCall { kind: ToolKind::Write, target, status, body, diff_stat, .. } => {
+                Some((target.clone(), *status, body.clone(), *diff_stat))
+            }
+            _ => None,
+        }).expect("the Write card completes");
+        assert!(write.0.ends_with("greet.txt"), "target: {}", write.0);
+        assert_eq!(write.1, ToolStatus::Success);
+        assert!(matches!(write.2, ToolBody::Edit { .. }), "created content as a diff");
+        assert_eq!(
+            write.3.map(|stat| (stat.added, stat.removed, stat.files)),
+            Some((1, 0, 1)),
+            "one line created"
+        );
+        let edit = updated.iter().find_map(|block| match block {
+            Block::ToolCall { kind: ToolKind::Edit, target, status, body, diff_stat, .. } => {
+                Some((target.clone(), *status, body.clone(), *diff_stat))
+            }
+            _ => None,
+        }).expect("the Edit card completes");
+        assert!(edit.0.ends_with("greet.txt"), "target: {}", edit.0);
+        assert_eq!(edit.1, ToolStatus::Success);
+        match &edit.2 {
+            ToolBody::Edit { diff } => {
+                let rows: Vec<String> = diff
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| hunk.lines.iter())
+                    .map(|line| {
+                        let prefix = match line.kind {
+                            DiffKind::Add => "+",
+                            DiffKind::Del => "-",
+                            DiffKind::Context => " ",
+                        };
+                        format!("{prefix}{}", line.text)
+                    })
+                    .collect();
+                assert!(rows.contains(&"-hi there".to_owned()), "rows: {rows:?}");
+                assert!(rows.contains(&"+hello there".to_owned()), "rows: {rows:?}");
+                assert!(rows.contains(&"+bye".to_owned()), "rows: {rows:?}");
+            }
+            other => panic!("the Edit body is a diff, got {other:?}"),
+        }
+        assert_eq!(
+            edit.3.map(|stat| (stat.added, stat.removed, stat.files)),
+            Some((2, 1, 1)),
+            "+2/−1 chip"
+        );
+    }
+
+    /// `read-search.jsonl`: the Read card counts the wire's own `numLines`
+    /// and the grep run keeps its output on a shell card.
+    #[test]
+    fn read_search_fixture_folds_read_card_and_shell_search() {
+        let (_, deltas) = replay("read-search.jsonl");
+        let updated = tool_updates(&deltas);
+        let read = updated.iter().find_map(|block| match block {
+            Block::ToolCall { kind: ToolKind::Read, target, body, .. } => {
+                Some((target.clone(), body.clone()))
+            }
+            _ => None,
+        }).expect("the Read card completes");
+        assert!(read.0.ends_with("notes.txt"), "target: {}", read.0);
+        assert!(
+            matches!(read.1, ToolBody::Read { lines: 3 }),
+            "the wire's own line count: {read:?}"
+        );
+        let shell = updated.iter().find_map(|block| match block {
+            Block::ToolCall {
+                kind: ToolKind::Shell, target, status, body, ..
+            } => Some((target.clone(), *status, body.clone())),
+            _ => None,
+        }).expect("the grep run completes");
+        assert!(shell.0.contains("grep"), "the model's command: {}", shell.0);
+        assert_eq!(shell.1, ToolStatus::Success);
+        match &shell.2 {
+            ToolBody::Shell { output_lines, exit_code, .. } => {
+                assert_eq!(output_lines, &["3:gamma"]);
+                assert_eq!(*exit_code, None, "success carries no exit prefix");
+            }
+            other => panic!("a shell body, got {other:?}"),
+        }
+    }
+
+    /// `error.jsonl`: the failing run folds to an `Error` card with the
+    /// CLI's own exit code parsed off its `Exit code N` prefix, and the
+    /// turn still finishes.
+    #[test]
+    fn error_fixture_marks_shell_error_with_exit_code() {
+        let (_, deltas) = replay("error.jsonl");
+        let updated = tool_updates(&deltas);
+        let shell = updated.iter().find_map(|block| match block {
+            Block::ToolCall {
+                kind: ToolKind::Shell, target, status, body, ..
+            } => Some((target.clone(), *status, body.clone())),
+            _ => None,
+        }).expect("the failed run completes its card");
+        assert_eq!(shell.0, "ls /nonexistent-dir-xyz-123");
+        assert_eq!(shell.1, ToolStatus::Error);
+        match &shell.2 {
+            ToolBody::Shell { output_lines, exit_code, .. } => {
+                assert!(output_lines.iter().any(|line| line.contains("No such file")),
+                    "stderr survives: {output_lines:?}");
+                assert_eq!(*exit_code, Some(1), "parsed off the Exit code prefix");
+            }
+            other => panic!("a shell body, got {other:?}"),
+        }
+        assert!(!finished_metas(&deltas).is_empty(), "the turn still finishes");
+    }
+
+    /// `todo.jsonl`: three TaskCreate calls plus their status moves fold
+    /// to exactly one `Todo` card — opened once, rewritten after — ending
+    /// with all three rows done.
+    #[test]
+    fn todo_fixture_keeps_one_todo_card_with_three_done_items() {
+        let (_, deltas) = replay("todo.jsonl");
+        let added = deltas
+            .iter()
+            .filter(|delta| matches!(
+                delta, Delta::BlockAdded { block: Block::Todo { .. }, .. }
+            ))
+            .count();
+        assert_eq!(added, 1, "one card no matter how many calls refine it");
+        let todos: Vec<Vec<TodoItem>> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Todo { items }, .. }
+                | Delta::BlockUpdated { block: Block::Todo { items }, .. } => {
+                    Some(items.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!todos.is_empty(), "the card renders");
+        let last = todos.last().expect("a card rendered");
+        assert_eq!(last.len(), 3, "three tracked tasks");
+        for item in last {
+            assert_eq!(item.state, TodoState::Done, "row done: {}", item.label);
+        }
+        let labels: Vec<&str> = last.iter().map(|item| item.label.as_str()).collect();
+        for want in ["List files", "Read notes.txt", "Summarize contents"] {
+            assert!(labels.contains(&want), "row present: {labels:?}");
+        }
+        // And the work itself still cards: the list-files Bash run and
+        // the notes Read completed beside the plan.
+        assert!(
+            tool_updates(&deltas).iter().any(|block| matches!(
+                block, Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. }
+            )),
+            "the plan's work still renders"
+        );
+    }
+
+    /// `subagent.jsonl`: the `Agent` delegation nests the sub-agent's own
+    /// blocks — its Read of notes.txt, completed — inside one `SubAgent`
+    /// card, flushed before the turn finishes (the agent still runs
+    /// async when the turn ends).
+    #[test]
+    fn subagent_fixture_nests_transcript_in_agent_card() {
+        let (_, deltas) = replay("subagent.jsonl");
+        let agents: Vec<Block> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated {
+                    block: nested @ Block::ToolCall { kind: ToolKind::SubAgent, .. },
+                    ..
+                } => Some(nested.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!agents.is_empty(), "the delegation card completes");
+        let last = agents.last().expect("a card completed");
+        match last {
+            Block::ToolCall { verb, target, body: ToolBody::SubAgent { turns }, .. } => {
+                assert_eq!(verb, "Delegated");
+                assert!(target.contains("Explore"), "target: {target}");
+                assert_eq!(turns.len(), 1, "one nested turn");
+                let nested_read = turns[0].blocks().iter().any(|block| matches!(
+                    block,
+                    Block::ToolCall { kind: ToolKind::Read, status: ToolStatus::Success, .. }
+                ));
+                assert!(nested_read, "the nested Read completed inside the card");
+            }
+            other => panic!("a SubAgent card, got {other:?}"),
+        }
+        // The flush lands before the finish: without it the async
+        // agent's buffered work would never render.
+        let finish_at = deltas
+            .iter()
+            .position(|delta| matches!(delta, Delta::TurnFinished { .. }))
+            .expect("the turn finishes");
+        let agent_update_at = deltas
+            .iter()
+            .position(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block: Block::ToolCall { kind: ToolKind::SubAgent, .. },
+                    ..
+                }
+            ))
+            .expect("the card flushed");
+        assert!(agent_update_at < finish_at, "nested work renders before the finish");
+    }
+
+    /// `thinking.jsonl` (sonnet, 8-puzzle): the thinking block folds, and
+    /// the footer counts the reasoning the wire reports — 262 thinking
+    /// tokens — with the whole billed prompt in `tokens_in`. The thinking
+    /// *text* is signature-only on this wire (empty here), so the block
+    /// carries presence, and the count carries the evidence.
+    #[test]
+    fn thinking_fixture_folds_thinking_block_and_reasoning_tokens() {
+        let (_, deltas) = replay("thinking.jsonl");
+        let thinking =
+            deltas.iter().filter(|delta| matches!(
+                delta, Delta::BlockAdded { block: Block::Thinking { .. }, .. }
+            )).count();
+        assert!(thinking >= 1, "the reasoning trace folds to a block");
+        let metas = finished_metas(&deltas);
+        assert!(!metas.is_empty());
+        for meta in &metas {
+            assert_eq!(meta.reasoning_tokens, 262, "the wire's thinking count");
+            assert_eq!(meta.tokens_in, 2 + 44200, "bare input plus cache creation");
+            assert_eq!(meta.cache_write_tokens, Some(44200));
+        }
+    }
+
+    /// `approval-default.jsonl`: the Write approval cards as pending with
+    /// its own allow/deny choices, and after the allow the write runs to
+    /// a completed card — the transcript shows ask-then-run, not just run.
+    #[test]
+    fn approval_default_fixture_cards_pending_approval_then_runs() {
+        let (fold, deltas) = replay("approval-default.jsonl");
+        // The replay folds the child's frames; the capture's answers ride
+        // the `host->cli` envelope lines, which decode as noise — so the
+        // request is still pending here, exactly as the live child waits.
+        // Deciding it must mint the same answer the capture sent.
+        assert_eq!(fold.pending_approvals().len(), 1, "the Write ask waits");
+        let request = fold.pending_approvals()[0].clone();
+        assert_eq!(request.tool_name, "Write");
+        let minted = crate::fold::decide_approval(&request, "allow", None)
+            .expect("allow is the card's own choice");
+        let sent = fixture_lines("approval-default.jsonl")
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| line.get("frame").cloned())
+            .find(|frame| {
+                frame
+                    .get("response")
+                    .and_then(|response| response.get("request_id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(request.request_id.as_str())
+            })
+            .expect("the capture answered this request");
+        let minted_value: serde_json::Value =
+            serde_json::from_str(&minted).expect("the minted answer is JSON");
+        assert_eq!(&minted_value, &sent, "the decision matches the live answer");
+        let approvals: Vec<Block> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => {
+                    Some(card.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(approvals.len(), 1, "one asked approval, one card");
+        match &approvals[0] {
+            Block::Approval { tool, state, choices, .. } => {
+                assert_eq!(tool, "Write");
+                assert_eq!(*state, ApprovalState::Pending);
+                assert!(
+                    choices.iter().any(|choice| choice.id == "allow")
+                        && choices.iter().any(|choice| choice.id == "deny"),
+                    "the card's own choices"
+                );
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+        let write_done = tool_updates(&deltas).iter().any(|block| matches!(
+            block,
+            Block::ToolCall {
+                kind: ToolKind::Write, status: ToolStatus::Success, diff_stat: Some(_), ..
+            }
+        ));
+        assert!(write_done, "the allowed write completed with its chip");
+    }
+
+    /// `image.jsonl`: the echoed image part folds into the user turn as
+    /// an image attachment, and the turn answers what it saw.
+    #[test]
+    fn image_fixture_accepts_image_part_on_user_turn() {
+        let (_, deltas) = replay("image.jsonl");
+        let users = user_turns(&deltas);
+        assert_eq!(users.len(), 1);
+        assert!(users[0].0.contains("three words"), "the prompt text: {}", users[0].0);
+        let attachments: Vec<Attachment> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::User { attachments, .. } } => {
+                    Some(attachments.clone())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(attachments.len(), 1, "the attached PNG rides the turn");
+        assert_eq!(attachments[0].name, "image-1");
+        assert!(matches!(attachments[0].kind, AttachmentKind::Image));
+        let rendered: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block, .. } => text_of(block),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rendered.iter().any(|text| text.contains("Bright green square")),
+            "the turn saw the image: {rendered:?}"
+        );
     }
 
     /// THE AGREEMENT TEST. `partial.jsonl` carries both lanes (deltas plus

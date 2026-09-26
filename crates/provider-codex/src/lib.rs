@@ -182,7 +182,10 @@ impl CodexAdapter {
                 SubmissionPart::Text(chunk) => text.push_str(chunk),
                 SubmissionPart::Image { .. } => {
                     return Err(ProviderError::Rejected {
-                        reason: "no image input shape was probed on turn/start".into(),
+                        reason: "turn/start takes a local image path (`localImage`, probed live \
+                                 2026-09-26 in fixtures/codex/image.jsonl) but the seam carries \
+                                 bytes; stage the bytes to a file first"
+                            .into(),
                     });
                 }
             }

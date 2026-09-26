@@ -48,6 +48,23 @@ pub struct ToolResult {
     pub text: String,
     /// The wire `is_error` flag, defaulting to false when absent.
     pub is_error: bool,
+    /// The frame-level `tool_use_result` payload, when the frame carries
+    /// exactly one result so the detail unambiguously belongs to it: the
+    /// structured diff for Edit/Write, the file for Read, the streams for
+    /// Bash. `None` on multi-result frames, where one detail cannot be
+    /// dealt to several results without guessing.
+    pub detail: Option<serde_json::Value>,
+}
+
+/// One image part of a `user` text echo (`--replay-user-messages`): what
+/// the person attached, echoed back without a path — the wire carries the
+/// bytes' media type and length, never a filename.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserImage {
+    /// The part's media type, e.g. `image/png`.
+    pub media_type: String,
+    /// Length of the base64 payload in bytes (the chip's size hint).
+    pub data_len: usize,
 }
 
 /// The `init` frame: session identity plus the turn's tool surface.
@@ -80,6 +97,10 @@ pub enum Frame {
         uuid: String,
         /// The completed blocks, in order.
         blocks: Vec<ContentBlock>,
+        /// The enclosing tool call when this message comes from a
+        /// sub-agent (`Agent`/`Task`): the parent `tool_use` id whose card
+        /// nests these blocks. Empty on the main thread.
+        parent_tool_use_id: String,
     },
     /// A `user` frame: tool results (plus the sibling `tool_use_result`
     /// payload, kept raw — its shape varies by tool).
@@ -90,6 +111,24 @@ pub enum Frame {
         results: Vec<ToolResult>,
         /// The raw `tool_use_result` object, when present.
         raw_detail: Option<Value>,
+        /// The enclosing tool call when this result comes from a
+        /// sub-agent: the parent `tool_use` id. Empty on the main thread.
+        parent_tool_use_id: String,
+    },
+    /// A `user` frame echoing the submitted prompt
+    /// (`--replay-user-messages`): the person's own text, which the
+    /// transcript renders as their bubble. The pre-replay CLI never sends
+    /// this — no echo, no bubble — which is exactly the defect that hid
+    /// every Claude Code prompt.
+    UserText {
+        /// Session this belongs to.
+        session_id: String,
+        /// The frame's own uuid, for exactly-once counting.
+        uuid: String,
+        /// The echoed prompt text (joined text parts).
+        text: String,
+        /// The echoed image parts, in order.
+        images: Vec<UserImage>,
     },
     /// A `stream_event` frame (only with `--include-partial-messages`).
     /// Carried minimally: the fold renders nothing from it (see the lane
@@ -262,6 +301,7 @@ impl Frame {
             Frame::Init(init) => Some(&init.session_id),
             Frame::Assistant { session_id, .. }
             | Frame::UserResult { session_id, .. }
+            | Frame::UserText { session_id, .. }
             | Frame::Stream { session_id, .. }
             | Frame::TurnResult { session_id, .. } => Some(session_id),
             Frame::RateLimit(_)
@@ -351,34 +391,95 @@ fn decode_assistant(value: &Value) -> Frame {
         message_id: message_id.to_owned(),
         uuid: uuid.to_owned(),
         blocks,
+        parent_tool_use_id: value
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
     }
 }
 
 fn decode_user(value: &Value) -> Frame {
     let session_id = value.get("session_id").and_then(Value::as_str).unwrap_or_default();
+    let uuid = value.get("uuid").and_then(Value::as_str).unwrap_or_default();
+    let raw_detail = value.get("tool_use_result").cloned();
     let mut results = Vec::new();
+    let mut text = String::new();
+    let mut images = Vec::new();
     if let Some(items) =
         value.get("message").and_then(|message| message.get("content")).and_then(Value::as_array)
     {
         for item in items {
-            if item.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
+            match item.get("type").and_then(Value::as_str) {
+                Some("tool_result") => {
+                    results.push(ToolResult {
+                        tool_use_id: item
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        text: text_parts(item.get("content").unwrap_or(&Value::Null)),
+                        is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                        // Set below, once the frame's result count is known.
+                        detail: None,
+                    });
+                }
+                Some("text") => {
+                    text.push_str(item.get("text").and_then(Value::as_str).unwrap_or_default());
+                }
+                Some("image") => {
+                    let source = item.get("source").unwrap_or(&Value::Null);
+                    images.push(UserImage {
+                        media_type: source
+                            .get("media_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_owned(),
+                        data_len: source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .map(str::len)
+                            .unwrap_or(0),
+                    });
+                }
+                _ => {}
             }
-            results.push(ToolResult {
-                tool_use_id: item
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                text: text_parts(item.get("content").unwrap_or(&Value::Null)),
-                is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-            });
         }
+    }
+    let parent_tool_use_id = value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if results.is_empty() {
+        // No tool result: this is the `--replay-user-messages` echo of the
+        // submitted prompt (or an empty frame) — the person's bubble.
+        if text.is_empty() && images.is_empty() {
+            return Frame::UserResult {
+                session_id: session_id.to_owned(),
+                results,
+                raw_detail,
+                parent_tool_use_id,
+            };
+        }
+        return Frame::UserText {
+            session_id: session_id.to_owned(),
+            uuid: uuid.to_owned(),
+            text,
+            images,
+        };
+    }
+    // One frame-level detail belongs to exactly one result; on
+    // multi-result frames no arm deals it out, or parallel calls would
+    // wear each other's diffs.
+    if results.len() == 1 {
+        results[0].detail = raw_detail.clone();
     }
     Frame::UserResult {
         session_id: session_id.to_owned(),
         results,
-        raw_detail: value.get("tool_use_result").cloned(),
+        raw_detail,
+        parent_tool_use_id,
     }
 }
 
@@ -581,7 +682,21 @@ mod tests {
 
     #[test]
     fn every_fixture_line_decodes_without_error() {
-        for name in ["basic.jsonl", "partial.jsonl", "mcp.jsonl", "resume.jsonl", "bidi.jsonl"] {
+        for name in [
+            "basic.jsonl",
+            "partial.jsonl",
+            "mcp.jsonl",
+            "resume.jsonl",
+            "bidi.jsonl",
+            "edit.jsonl",
+            "read-search.jsonl",
+            "thinking.jsonl",
+            "todo.jsonl",
+            "subagent.jsonl",
+            "approval-default.jsonl",
+            "error.jsonl",
+            "image.jsonl",
+        ] {
             for (index, line) in fixture(name).iter().enumerate() {
                 decode_line(line)
                     .unwrap_or_else(|error| panic!("{name}:{index}: {error}"));
@@ -800,5 +915,131 @@ mod tests {
     #[test]
     fn non_json_is_the_only_error() {
         assert!(decode_line("not json at all").is_err());
+    }
+
+    fn child_lines(name: &str) -> Vec<String> {
+        // Child frames only: `host->cli` envelopes carry the submission
+        // and answers, which decode as noise (`Ignored`) rather than
+        // frames — the fold tests rely on the same split.
+        fixture(name)
+            .into_iter()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .and_then(|value| value.get("_dir").and_then(Value::as_str).map(str::to_owned))
+                    .is_none()
+            })
+            .collect()
+    }
+
+    /// The `--replay-user-messages` echo decodes to the person's own
+    /// text: the bubble the pre-replay CLI never sent (defect 1).
+    #[test]
+    fn user_echo_decodes_to_user_text() {
+        let echoes: Vec<Frame> = child_lines("edit.jsonl")
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .filter(|frame| matches!(frame, Frame::UserText { .. }))
+            .collect();
+        assert_eq!(echoes.len(), 1, "one submitted prompt, one echo");
+        match &echoes[0] {
+            Frame::UserText { uuid, text, images, .. } => {
+                assert!(!uuid.is_empty(), "the echo carries its uuid");
+                assert!(text.contains("greet.txt"), "the prompt text: {text}");
+                assert!(images.is_empty(), "no images on this turn");
+            }
+            other => panic!("expected UserText, got {other:?}"),
+        }
+        // And the pre-replay captures genuinely have no echo: `basic`
+        // was recorded before the flag, so no bubble can fold from it.
+        let old: Vec<Frame> = child_lines("basic.jsonl")
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .filter(|frame| matches!(frame, Frame::UserText { .. }))
+            .collect();
+        assert!(old.is_empty(), "pre-replay captures echo nothing");
+    }
+
+    /// The image turn echoes its image part with media type and length —
+    /// the attachment chip's whole input (never a filename: the wire
+    /// sends none).
+    #[test]
+    fn image_echo_carries_image_part() {
+        let echoes: Vec<Frame> = child_lines("image.jsonl")
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .filter(|frame| matches!(frame, Frame::UserText { .. }))
+            .collect();
+        assert_eq!(echoes.len(), 1);
+        match &echoes[0] {
+            Frame::UserText { text, images, .. } => {
+                assert!(text.contains("three words"), "the prompt text: {text}");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].media_type, "image/png");
+                assert!(images[0].data_len > 0, "bytes were attached");
+            }
+            other => panic!("expected UserText, got {other:?}"),
+        }
+    }
+
+    /// Tool results carry their frame's structured detail 1:1 — the
+    /// Edit's `structuredPatch`, the Write's created content — so the
+    /// fold can chip the diff. Multi-result frames deal nothing out.
+    #[test]
+    fn tool_results_carry_detail_1_to_1() {
+        let results: Vec<ToolResult> = child_lines("edit.jsonl")
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .filter_map(|frame| match frame {
+                Frame::UserResult { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(results.len(), 2, "Write result plus Edit result");
+        let write = results.iter().find(|result| {
+            result.detail.as_ref().and_then(|detail| detail.get("type")).and_then(Value::as_str)
+                == Some("create")
+        }).expect("the Write result carries its created content");
+        assert!(write.text.contains("created successfully"));
+        let edit = results.iter().find(|result| {
+            result
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.get("structuredPatch"))
+                .and_then(serde_json::Value::as_array)
+                .map(|patch| !patch.is_empty())
+                .unwrap_or(false)
+        }).expect("the Edit result carries its structured patch");
+        assert!(edit.text.contains("updated successfully"));
+    }
+
+    /// Sub-agent frames arrive linked: assistant frames and tool results
+    /// with `parent_tool_use_id` set route into the `Agent` card, while
+    /// main-thread frames leave it empty.
+    #[test]
+    fn subagent_frames_carry_parent_link() {
+        let frames: Vec<Frame> = child_lines("subagent.jsonl")
+            .iter()
+            .filter_map(|line| decode_line(line).ok())
+            .collect();
+        let linked_assistant =
+            frames.iter().filter(|frame| matches!(
+                frame, Frame::Assistant { parent_tool_use_id, .. }
+                if !parent_tool_use_id.is_empty()
+            )).count();
+        assert!(linked_assistant >= 2, "the agent's thinking and Read link up");
+        let linked_results =
+            frames.iter().filter(|frame| matches!(
+                frame, Frame::UserResult { parent_tool_use_id, .. }
+                if !parent_tool_use_id.is_empty()
+            )).count();
+        assert_eq!(linked_results, 1, "the nested Read result links up");
+        let main_results =
+            frames.iter().filter(|frame| matches!(
+                frame, Frame::UserResult { parent_tool_use_id, results, .. }
+                if parent_tool_use_id.is_empty() && !results.is_empty()
+            )).count();
+        assert_eq!(main_results, 1, "the agent's own answer stays main-thread");
     }
 }
