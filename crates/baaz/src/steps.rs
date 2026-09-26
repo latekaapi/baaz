@@ -124,7 +124,7 @@
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `baaz: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `baaz: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
-//! | `skills:<fixture>` (`page`, `empty`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; an unknown payload fails, free |
+//! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
 //!

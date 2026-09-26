@@ -104,7 +104,10 @@ these never reach the composer.
 | Space | Flip the selected skill on / off |
 | Enter | Focus the skill detail |
 | ⌘F | Focus the skills search field |
-| Esc | Leave the Skills page |
+| Esc | Close dialog, then menu, then the page |
+
+The Add menu and the New / Install / Import / Remove dialogs add no keys —
+everything in them is a click (docs/16-keymap.md §3.4).
 
 ## Play buttons
 

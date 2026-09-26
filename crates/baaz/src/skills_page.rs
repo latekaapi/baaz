@@ -19,10 +19,12 @@
 use aui::data::button;
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::skills::{
-    cost_meter, format_tokens, scope_section_header, segmented, skill_detail, skill_row, switch, CostSegment,
-    InkLevel, SkillChip, SkillDetailIntent, SkillMode, SkillRowModel, SkillState, SwitchIntent,
-    ChipTone, DetailAction,
+    added_tokens, cost_meter, format_tokens, import_preview, menu_row_two_line,
+    scope_section_header, segmented, selected_rows, skill_detail, skill_row, switch, CostSegment,
+    ImportPreviewIntent, ImportRow, ImportStatus as LibraryImportStatus, InkLevel, SkillChip,
+    SkillDetailIntent, SkillMode, SkillRowModel, SkillState, SwitchIntent, ChipTone, DetailAction,
 };
+use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use aui::transcript::{prose, ProseStyle};
 use gpui::{div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window};
@@ -32,7 +34,7 @@ use gpui_kit::component::input::Textarea;
 use crate::app::{
     Harness, SkillsClose, SkillsDown, SkillsEnter, SkillsFind, SkillsToggle, SkillsUp,
 };
-use crate::skills::{self, Activation, ScopeSection, Skill, SkillsCatalog};
+use crate::skills::{self, scope_word, Activation, ScopeSection, Skill, SkillsCatalog};
 use crate::wire::WireCall;
 
 /// The key context the page wears, so ↑/↓/Space/↩/⌘F/Escape reach the
@@ -93,6 +95,209 @@ pub enum VisibleRow {
     Overridden(usize),
 }
 
+/// Where a New skill or an install preview lands (D61).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TargetScope {
+    /// `<root>/.agents/skills/<name>/`.
+    #[default]
+    Project,
+    /// A scratch folder installed with `install --scope user`.
+    Personal,
+}
+
+impl TargetScope {
+    /// Both scopes, in segmented order.
+    pub const ALL: [TargetScope; 2] = [TargetScope::Project, TargetScope::Personal];
+
+    /// The segmented label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TargetScope::Project => "This project",
+            TargetScope::Personal => "Personal",
+        }
+    }
+}
+
+/// The "Add skill ▾" menu's import trails, counted when the menu opens and
+/// cached for the menu's life (A1): how many candidates per source are new.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportCounts {
+    /// New Claude Code candidates.
+    pub claude: usize,
+    /// New Codex candidates.
+    pub codex: usize,
+}
+
+/// One import-preview row: a dry-run candidate classified against the landed
+/// catalog (D61).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportDialogRow {
+    /// The skill name, from the source SKILL.md's frontmatter.
+    pub name: String,
+    /// The frontmatter description.
+    pub description: String,
+    /// Startup tokens, estimated from the SKILL.md bytes.
+    pub tokens: u32,
+    /// The candidate's SKILL.md on disk, for the per-skill `install`.
+    pub source_path: String,
+    /// New / Replaces yours / Already installed.
+    pub status: skills::ImportStatus,
+    /// Picked for import. Installed rows are never picked.
+    pub checked: bool,
+}
+
+impl ImportDialogRow {
+    /// Whether the preview's checkbox is live.
+    pub fn selectable(&self) -> bool {
+        !matches!(self.status, skills::ImportStatus::Installed)
+    }
+
+    /// The library preview row: installed rows draw unchecked and dead.
+    pub fn library_row(&self) -> ImportRow {
+        let status = match self.status {
+            skills::ImportStatus::New => LibraryImportStatus::New,
+            skills::ImportStatus::Replaces => LibraryImportStatus::Replaces,
+            skills::ImportStatus::Installed => LibraryImportStatus::Installed,
+        };
+        let description = if self.description.trim().is_empty() {
+            "No description.".to_owned()
+        } else {
+            self.description.clone()
+        };
+        let row = ImportRow::new(
+            self.name.clone(),
+            self.name.clone(),
+            description,
+            status,
+            format_tokens(self.tokens),
+            self.tokens,
+        );
+        if self.checked { row } else { row.unchecked() }
+    }
+}
+
+/// The page's modal layer: one dialog at a time, above the list (A2–A6).
+/// Plain data on [`SkillsPage`]; every mutation still runs `muse skills …`
+/// on a background thread and re-lists (D55).
+#[derive(Clone, Debug, Default)]
+pub enum SkillsDialog {
+    /// No dialog.
+    #[default]
+    Closed,
+    /// New skill…: the name and description live in the page's fields
+    /// ([`Harness::skills_new_name`](crate::app::Harness::skills_new_name));
+    /// the scope and the inline error live here.
+    New {
+        /// This project or Personal.
+        scope: TargetScope,
+        /// The inline error under the fields, if the last Create failed.
+        error: Option<String>,
+    },
+    /// Install from folder…: the validated preview (D61).
+    InstallPreview {
+        /// The picked folder.
+        dir: String,
+        /// The frontmatter name, else the folder name.
+        name: String,
+        /// The frontmatter description.
+        description: String,
+        /// Estimated startup tokens.
+        tokens: u32,
+        /// Files under the folder, relative to it.
+        files: Vec<String>,
+        /// The `validate` verdict, in full.
+        diagnostics: String,
+        /// Where Install lands.
+        scope: TargetScope,
+        /// The first Install press on an occupied name arms Replace; the
+        /// second runs it with `--force` (D61).
+        armed_replace: bool,
+    },
+    /// Import from Claude Code / Codex: the library preview over the
+    /// dry-run (D61).
+    Import {
+        /// Which source the dry-run read.
+        source: skills::ImportSource,
+        /// Classified candidates; invalid ones never reach the rows (their
+        /// count rides the subtitle instead).
+        rows: Vec<ImportDialogRow>,
+        /// Candidates the dry-run reported that carry no SKILL.md.
+        skipped: usize,
+        /// The dry-run is still in flight.
+        loading: bool,
+        /// The dry-run failed: the dialog shows this instead of rows.
+        error: Option<String>,
+    },
+    /// Remove…: the confirm naming what goes (D62).
+    Remove {
+        /// The row's selection key.
+        key: String,
+        /// The skill name.
+        name: String,
+        /// The confirm's heading.
+        headline: String,
+        /// The confirm's body: the path for project rows.
+        detail: String,
+        /// Personal removes through `uninstall`; project rows move to the
+        /// Trash. Bundled and plugin rows never open this dialog.
+        personal: bool,
+    },
+}
+
+/// The draft "Ask Muse to write one" prepares (A5): a new **muse** session
+/// with this in the composer, focused, never sent.
+pub fn create_skill_draft() -> &'static str {
+    "/create-skill "
+}
+
+/// The import preview's summary note: what the picked rows add (D59, D61).
+pub fn import_summary_text(rows: &[ImportRow]) -> String {
+    let tokens = added_tokens(rows);
+    let selected = selected_rows(rows).len();
+    let noun = if selected == 1 { "skill" } else { "skills" };
+    format!("Adds {} tokens · {selected} {noun}", format_tokens(tokens))
+}
+
+/// The deterministic import rows the scripted capture draws (S3): no CLI.
+pub fn fixture_import_rows() -> Vec<ImportDialogRow> {
+    vec![
+        ImportDialogRow {
+            name: "decoction".to_owned(),
+            description: "Spec-anchored orchestration for long-running coding projects.".to_owned(),
+            tokens: 640,
+            source_path: "/tmp/k3-fixture/decoction/SKILL.md".to_owned(),
+            status: skills::ImportStatus::New,
+            checked: true,
+        },
+        ImportDialogRow {
+            name: "relay".to_owned(),
+            description: "Plan work, hand the implementation to Muse Code, verify it.".to_owned(),
+            tokens: 1120,
+            source_path: "/tmp/k3-fixture/relay/SKILL.md".to_owned(),
+            status: skills::ImportStatus::Replaces,
+            checked: true,
+        },
+        ImportDialogRow {
+            name: "taste".to_owned(),
+            description: "Mandatory preflight for web frontend visual design.".to_owned(),
+            tokens: 470,
+            source_path: "/tmp/k3-fixture/taste/SKILL.md".to_owned(),
+            status: skills::ImportStatus::Installed,
+            checked: false,
+        },
+    ]
+}
+
+/// Names taken in a New skill's target scope, for the inline collision
+/// check (D61).
+pub fn taken_names(catalog: &SkillsCatalog, scope: TargetScope) -> Vec<String> {
+    let section = match scope {
+        TargetScope::Project => ScopeSection::Project,
+        TargetScope::Personal => ScopeSection::Personal,
+    };
+    catalog.section_rows(section).iter().map(|row| row.name.clone()).collect()
+}
+
 /// The page's state. Plain data on [`Harness`]; the library components are
 /// stateless and read it each frame.
 pub struct SkillsPage {
@@ -125,6 +330,14 @@ pub struct SkillsPage {
     pub(crate) detail_body: Option<(String, String)>,
     /// A virtual skill's body is being inspected.
     pub(crate) detail_loading: bool,
+    /// Whether the "Add skill ▾" menu stands open.
+    pub(crate) add_menu_open: bool,
+    /// The menu's import trails, counted on open and cached while it lives.
+    pub(crate) import_counts: Option<ImportCounts>,
+    /// The menu's counts are still being dry-run.
+    pub(crate) import_loading: bool,
+    /// The modal layer: New, Install preview, Import preview, Remove (A2–A6).
+    pub(crate) dialog: SkillsDialog,
 }
 
 impl Default for SkillsPage {
@@ -143,6 +356,10 @@ impl Default for SkillsPage {
             window_focused: false,
             detail_body: None,
             detail_loading: false,
+            add_menu_open: false,
+            import_counts: None,
+            import_loading: false,
+            dialog: SkillsDialog::Closed,
         }
     }
 }
@@ -180,17 +397,7 @@ fn section_hint(section: ScopeSection, root: &str) -> Option<SharedString> {
     }
 }
 
-/// A scope name for the override chips: "built-in" for bundled, so the
-/// winner wears "Overrides built-in git" (D58).
-fn scope_word(scope: &str) -> &str {
-    match scope {
-        "bundled" => "built-in",
-        "user" => "personal",
-        "project" => "this project",
-        "plugin" => "plugin",
-        _ => scope,
-    }
-}
+
 
 /// The row's startup-tokens cell: mono tokens, or "—" at zero.
 fn tokens_cell(skill: &Skill) -> String {
@@ -317,8 +524,19 @@ impl Harness {
         cx.notify();
     }
 
-    /// Esc or selecting a session returns (D54).
+    /// Esc peels one layer at a time: a dialog, then the menu, then the
+    /// page itself (D54). Selecting a session returns outright.
     pub(crate) fn close_skills(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.skills.dialog, SkillsDialog::Closed) {
+            self.skills.dialog = SkillsDialog::Closed;
+            cx.notify();
+            return;
+        }
+        if self.skills.add_menu_open {
+            self.skills.add_menu_open = false;
+            cx.notify();
+            return;
+        }
         if self.skills.open {
             self.skills.open = false;
             self.skills.detail_focused = false;
@@ -343,6 +561,7 @@ impl Harness {
                 let selected = this.skills.selected.clone();
                 this.skills.catalog = catalog;
                 this.skills.error = None;
+                this.sync_menu_skills(cx);
                 if selected.as_ref().is_some_and(|id| this.skills_lookup(id).is_none()) {
                     this.skills.selected = None;
                     this.skills.detail_body = None;
@@ -452,6 +671,7 @@ impl Harness {
                 } else if catalog.errors.is_empty() {
                     this.skills.catalog = catalog;
                     this.skills.error = None;
+                    this.sync_menu_skills(cx);
                 } else {
                     this.skills.error = catalog.errors.first().cloned();
                 }
@@ -514,14 +734,679 @@ impl Harness {
         window.focus(&self.skills_query.focus_handle(cx), cx);
     }
 
-    /// `skills[:page|empty]`: open the page on a fixture catalog — no CLI,
-    /// deterministic, offline (S3). An unknown payload records a step
-    /// failure instead of capturing a window where nothing happened.
-    pub(crate) fn step_skills(&mut self, rest: &str, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Push the landed catalog into the `/` menu's cache for this root, so
+    /// the menu follows the page after any mutation (D64).
+    fn sync_menu_skills(&mut self, cx: &mut Context<Self>) {
+        let root = self.skills_root();
+        let rows = self.skills.catalog.rows.clone();
+        self.overlays.update(cx, |overlays, _| overlays.set_skills(root, rows));
+    }
+
+    /// Toggle the "Add skill ▾" menu (A1). Opening dry-runs both sources
+    /// for the import trails; the counts cache for the menu's life.
+    pub(crate) fn toggle_add_menu(&mut self, cx: &mut Context<Self>) {
+        if self.skills.add_menu_open {
+            self.skills.add_menu_open = false;
+            cx.notify();
+            return;
+        }
+        self.skills.add_menu_open = true;
+        self.skills.dialog = SkillsDialog::Closed;
+        self.skills.import_counts = None;
+        self.skills.import_loading = true;
+        let program = self.args.program.clone();
+        let catalog = self.skills.catalog.clone();
+        self.wire_call(
+            cx,
+            move || {
+                let count = |source: skills::ImportSource| {
+                    skills::import_dry_run(&program, source)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|candidate| {
+                            !candidate.source_path.is_empty()
+                                && matches!(
+                                    skills::import_status(&candidate.name, &candidate.source_path, &catalog),
+                                    skills::ImportStatus::New
+                                )
+                        })
+                        .count()
+                };
+                ImportCounts { claude: count(skills::ImportSource::ClaudeCode), codex: count(skills::ImportSource::Codex) }
+            },
+            |this, counts, cx| {
+                this.skills.import_loading = false;
+                this.skills.import_counts = Some(counts);
+                cx.notify();
+            },
+        );
+        cx.notify();
+    }
+
+    /// The menu's import trailing: "N new", "none", or "…" while counting.
+    fn add_menu_trail(&self, source: skills::ImportSource) -> String {
+        if self.skills.import_loading {
+            return "…".to_owned();
+        }
+        let count = self
+            .skills
+            .import_counts
+            .map(|counts| match source {
+                skills::ImportSource::ClaudeCode => counts.claude,
+                skills::ImportSource::Codex => counts.codex,
+            })
+            .unwrap_or(0);
+        if count == 0 { "none".to_owned() } else { format!("{count} new") }
+    }
+
+    /// Open New skill… (A2): fresh fields, This project, no error.
+    pub(crate) fn open_new_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.skills.add_menu_open = false;
+        self.skills_new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.skills_new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.skills.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
+        cx.notify();
+    }
+
+    /// Move New skill… / the install preview between scopes.
+    pub(crate) fn set_target_scope(&mut self, scope: TargetScope, cx: &mut Context<Self>) {
+        match &mut self.skills.dialog {
+            SkillsDialog::New { scope: current, .. } => *current = scope,
+            SkillsDialog::InstallPreview { scope: current, armed_replace, .. } => {
+                *current = scope;
+                *armed_replace = false;
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    /// Close the dialog, if one stands open.
+    pub(crate) fn close_skills_dialog(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.skills.dialog, SkillsDialog::Closed) {
+            self.skills.dialog = SkillsDialog::Closed;
+            cx.notify();
+        }
+    }
+
+    /// Create the New skill (A2): validate inline, write or install, then
+    /// `validate`, re-list, select the new row and open it in the editor.
+    pub(crate) fn create_new_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (scope, name, description) = match &self.skills.dialog {
+            SkillsDialog::New { scope, .. } => {
+                (*scope, self.skills_new_name.read(cx).value().trim().to_owned(), self.skills_new_desc.read(cx).value().trim().to_owned())
+            }
+            _ => return,
+        };
+        let taken = taken_names(&self.skills.catalog, scope);
+        let error = skills::validate_skill_name(&name, &taken)
+            .err()
+            .or_else(|| skills::validate_skill_description(&description).err());
+        if let Some(error) = error {
+            if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+                *slot = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+        let root = self.skills_root();
+        let program = self.args.program.clone();
+        let select = name.clone();
+        match scope {
+            TargetScope::Project => {
+                let file = match skills::create_project_skill(&root, &name, &description) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+                            *slot = Some(error);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+                self.skills.dialog = SkillsDialog::Closed;
+                let dir = file.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| file.clone());
+                self.wire_call(
+                    cx,
+                    move || {
+                        let verdict = skills::validate_skill(&program, &dir);
+                        let catalog = skills::list_catalog(&program, &root);
+                        (verdict, catalog, file)
+                    },
+                    move |this, (verdict, catalog, file), cx| {
+                        this.skills.loading = false;
+                        if catalog.errors.is_empty() {
+                            this.skills.catalog = catalog;
+                            this.skills.error = None;
+                            this.sync_menu_skills(cx);
+                        } else {
+                            this.skills.error = catalog.errors.first().cloned();
+                        }
+                        this.skills.selected = Some(select.clone());
+                        this.load_selected_body(cx);
+                        let (title, detail) = match verdict {
+                            Ok(verdict) => ("Skill created", verdict),
+                            Err(message) => ("Skill created, validate failed", message),
+                        };
+                        this.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
+                        if std::process::Command::new("open").arg(&file).spawn().is_err() {
+                            crate::baaz_log!("could not open {}", file.display());
+                        }
+                        cx.notify();
+                    },
+                );
+                self.skills.loading = true;
+            }
+            TargetScope::Personal => {
+                let tmp = std::env::temp_dir().join(format!("baaz-new-skill-{name}"));
+                let _ = std::fs::remove_dir_all(&tmp);
+                if let Err(error) = std::fs::create_dir_all(&tmp)
+                    .map_err(|e| format!("Could not create {}: {e}", tmp.display()))
+                    .and_then(|_| {
+                        std::fs::write(tmp.join("SKILL.md"), skills::scaffold_skill_md(&name, &description))
+                            .map_err(|e| format!("Could not write the scaffold: {e}"))
+                    })
+                {
+                    if let SkillsDialog::New { error: slot, .. } = &mut self.skills.dialog {
+                        *slot = Some(error);
+                    }
+                    cx.notify();
+                    return;
+                }
+                self.skills.dialog = SkillsDialog::Closed;
+                self.wire_call(
+                    cx,
+                    move || {
+                        let installed = skills::install_skill_dir(&program, &tmp, false)
+                            .and_then(|_| skills::validate_skill(&program, &tmp).map(|_| ()));
+                        let catalog = skills::list_catalog(&program, &root);
+                        (installed, catalog)
+                    },
+                    move |this, (installed, catalog), cx| {
+                        this.skills.loading = false;
+                        match installed {
+                            Ok(()) => {
+                                if catalog.errors.is_empty() {
+                                    this.skills.catalog = catalog;
+                                    this.skills.error = None;
+                                    this.sync_menu_skills(cx);
+                                } else {
+                                    this.skills.error = catalog.errors.first().cloned();
+                                }
+                                this.skills.selected = Some(select.clone());
+                                this.load_selected_body(cx);
+                                // The installed copy is the row's file now;
+                                // open it, falling back to the scaffold.
+                                let root = this.skills_root();
+                                let path = this
+                                    .skills
+                                    .catalog
+                                    .find(&select)
+                                    .and_then(|row| row.disk_path(&root))
+                                    .filter(|path| path.is_file());
+                                if let Some(path) = path {
+                                    if std::process::Command::new("open").arg(&path).spawn().is_err() {
+                                        crate::baaz_log!("could not open {}", path.display());
+                                    }
+                                }
+                                this.overlays.update(cx, |overlays, _| {
+                                    overlays.toast("Skill created", format!("Personal skill `{select}` installed."));
+                                });
+                            }
+                            Err(message) => {
+                                this.skills.error = Some(message.clone());
+                                this.overlays.update(cx, |overlays, _| {
+                                    overlays.toast("Create failed", message);
+                                });
+                            }
+                        }
+                        cx.notify();
+                    },
+                );
+                self.skills.loading = true;
+            }
+        }
+        // The New dialog's fields clear only on open, so a failed Create
+        // keeps what was typed.
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Load the selected row's SKILL.md the way selection does: disk reads
+    /// land synchronously, virtual skills inspect off the UI thread.
+    fn load_selected_body(&mut self, cx: &mut Context<Self>) {
+        let key = match self.skills.selected.clone() {
+            Some(key) => key,
+            None => return,
+        };
+        let root = self.skills_root();
+        let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) else { return };
+        let skill = self.skills.catalog.rows[index].clone();
+        if skill.is_virtual() {
+            self.skills.detail_body = None;
+            self.skills.detail_loading = true;
+            let program = self.args.program.clone();
+            self.wire_call(
+                cx,
+                move || skills::skill_body(&program, &skill, &root),
+                move |this, body, cx| {
+                    this.skills.detail_loading = false;
+                    if this.skills.selected.as_deref() == Some(key.as_str()) {
+                        this.skills.detail_body = body.map(|text| (key.clone(), text));
+                    }
+                    cx.notify();
+                },
+            );
+        } else if let Some(body) = skills::skill_body(&self.args.program, &skill, &root) {
+            self.skills.detail_body = Some((skill.id.clone(), body));
+        }
+    }
+
+    /// Install from folder… (A3): the native picker, then `validate` and
+    /// the preview modal.
+    pub(crate) fn choose_install_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.skills.add_menu_open = false;
+        cx.notify();
+        cx.activate(true);
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let picked = match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => {
+                    crate::baaz_log!("install folder: panel cancelled");
+                    return;
+                }
+                Ok(Err(error)) => {
+                    crate::baaz_log!("install folder: panel errored: {error:#}");
+                    return;
+                }
+                Err(_) => {
+                    crate::baaz_log!("install folder: panel future dropped");
+                    return;
+                }
+            };
+            let Some(dir) = picked else { return };
+            let _ = this.update(cx, |this, cx| this.preview_install_folder(dir, cx));
+        }));
+        let _ = window;
+    }
+
+    /// Validate a picked folder and open the install preview over it.
+    fn preview_install_folder(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
+        let program = self.args.program.clone();
+        self.wire_call(
+            cx,
+            move || {
+                let verdict = skills::validate_skill(&program, &dir);
+                let file = dir.join("SKILL.md");
+                let (name, description) = if file.is_file() {
+                    skills::candidate_meta(&file.to_string_lossy())
+                } else {
+                    (
+                        dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        String::new(),
+                    )
+                };
+                let tokens = std::fs::metadata(&file).map(|m| skills::estimate_tokens(m.len())).unwrap_or(0);
+                let files = walk_skill_dir(&dir);
+                (dir, name, description, tokens, files, verdict)
+            },
+            |this, (dir, name, description, tokens, files, verdict), cx| {
+                let diagnostics = match verdict {
+                    Ok(verdict) => verdict,
+                    Err(message) => message,
+                };
+                this.skills.dialog = SkillsDialog::InstallPreview {
+                    dir: dir.to_string_lossy().into_owned(),
+                    name,
+                    description,
+                    tokens,
+                    files,
+                    diagnostics,
+                    scope: TargetScope::Personal,
+                    armed_replace: false,
+                };
+                cx.notify();
+            },
+        );
+    }
+
+    /// Install the previewed folder (A3): Personal installs through the
+    /// CLI (`--force` only after the explicit Replace arm); This project
+    /// copies into `.agents/skills`. Then re-list.
+    pub(crate) fn confirm_install_preview(&mut self, cx: &mut Context<Self>) {
+        let (dir, name, scope, armed) = match &self.skills.dialog {
+            SkillsDialog::InstallPreview { dir, name, scope, armed_replace, .. } => {
+                (dir.clone(), name.clone(), *scope, *armed_replace)
+            }
+            _ => return,
+        };
+        let taken = taken_names(&self.skills.catalog, scope);
+        if taken.iter().any(|other| other == &name) && !armed {
+            if let SkillsDialog::InstallPreview { armed_replace, .. } = &mut self.skills.dialog {
+                *armed_replace = true;
+            }
+            cx.notify();
+            return;
+        }
+        let root = self.skills_root();
+        let program = self.args.program.clone();
+        let dir_path = std::path::PathBuf::from(&dir);
+        let select = name.clone();
+        self.skills.dialog = SkillsDialog::Closed;
+        self.wire_call(
+            cx,
+            move || {
+                let outcome = match scope {
+                    TargetScope::Personal => skills::install_skill_dir(&program, &dir_path, armed),
+                    TargetScope::Project => {
+                        let dest = skills::project_skill_dir(&root, &name);
+                        if dest.exists() && !armed {
+                            Err(format!("A skill named `{name}` already exists here."))
+                        } else {
+                            skills::copy_skill_dir(&dir_path, &dest)
+                        }
+                    }
+                };
+                let catalog = skills::list_catalog(&program, &root);
+                (outcome, catalog)
+            },
+            move |this, (outcome, catalog), cx| {
+                this.skills.loading = false;
+                match outcome {
+                    Ok(()) => {
+                        if catalog.errors.is_empty() {
+                            this.skills.catalog = catalog;
+                            this.skills.error = None;
+                            this.sync_menu_skills(cx);
+                        } else {
+                            this.skills.error = catalog.errors.first().cloned();
+                        }
+                        this.skills.selected = Some(select.clone());
+                        this.load_selected_body(cx);
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Skill installed", format!("`{}` is ready.", select.as_str()));
+                        });
+                    }
+                    Err(message) => {
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Install failed", message);
+                        });
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.skills.loading = true;
+        cx.notify();
+    }
+
+    /// Open the import preview for a source (A4): the dry-run, classified
+    /// against the landed catalog.
+    pub(crate) fn open_import(&mut self, source: skills::ImportSource, cx: &mut Context<Self>) {
+        self.skills.add_menu_open = false;
+        self.skills.dialog = SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None };
+        let program = self.args.program.clone();
+        let catalog = self.skills.catalog.clone();
+        self.wire_call(
+            cx,
+            move || skills::import_dry_run(&program, source),
+            move |this, outcome, cx| {
+                match outcome {
+                    Ok(candidates) => {
+                        let mut rows = Vec::new();
+                        let mut skipped = 0;
+                        for candidate in candidates {
+                            if candidate.source_path.is_empty() || !std::path::Path::new(&candidate.source_path).is_file() {
+                                skipped += 1;
+                                continue;
+                            }
+                            let status = skills::import_status(&candidate.name, &candidate.source_path, &catalog);
+                            rows.push(ImportDialogRow {
+                                name: candidate.name,
+                                description: candidate.description,
+                                tokens: candidate.tokens,
+                                source_path: candidate.source_path,
+                                status,
+                                checked: !matches!(status, skills::ImportStatus::Installed),
+                            });
+                        }
+                        this.skills.dialog =
+                            SkillsDialog::Import { source, rows, skipped, loading: false, error: None };
+                    }
+                    Err(message) => {
+                        this.skills.dialog =
+                            SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: false, error: Some(message) };
+                    }
+                }
+                cx.notify();
+            },
+        );
+        cx.notify();
+    }
+
+    /// Flip one import row's checkbox. Installed rows are dead (A4).
+    pub(crate) fn toggle_import_row(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let SkillsDialog::Import { rows, .. } = &mut self.skills.dialog {
+            if let Some(row) = rows.iter_mut().find(|row| row.name == name).filter(|row| row.selectable()) {
+                row.checked = !row.checked;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Run the import (A4): all selected and nothing replaced imports the
+    /// source whole; otherwise each chosen skill installs on its own
+    /// (`--force` only for checked "Replaces yours" rows). Then re-list
+    /// and toast "Imported k skills".
+    pub(crate) fn run_import(&mut self, cx: &mut Context<Self>) {
+        let (source, picked) = match &self.skills.dialog {
+            SkillsDialog::Import { source, rows, loading: false, error: None, .. } => {
+                let picked: Vec<ImportDialogRow> =
+                    rows.iter().filter(|row| row.checked && row.selectable()).cloned().collect();
+                (*source, picked)
+            }
+            _ => return,
+        };
+        if picked.is_empty() {
+            return;
+        }
+        let whole = {
+            let selectable = match &self.skills.dialog {
+                SkillsDialog::Import { rows, .. } => rows.iter().filter(|row| row.selectable()).count(),
+                _ => 0,
+            };
+            picked.len() == selectable && picked.iter().all(|row| row.status == skills::ImportStatus::New)
+        };
+        let count = picked.len();
+        let root = self.skills_root();
+        let program = self.args.program.clone();
+        self.skills.dialog = SkillsDialog::Closed;
+        self.wire_call(
+            cx,
+            move || {
+                let outcome = if whole {
+                    skills::import_source(&program, source)
+                } else {
+                    let mut first_error = None;
+                    for row in &picked {
+                        let force = row.status == skills::ImportStatus::Replaces;
+                        if let Err(error) =
+                            skills::install_skill_dir(&program, std::path::Path::new(&row.source_path), force)
+                        {
+                            first_error = Some(error);
+                            break;
+                        }
+                    }
+                    first_error.map_or(Ok(()), Err)
+                };
+                let catalog = skills::list_catalog(&program, &root);
+                (outcome, catalog)
+            },
+            move |this, (outcome, catalog), cx| {
+                this.skills.loading = false;
+                match outcome {
+                    Ok(()) => {
+                        if catalog.errors.is_empty() {
+                            this.skills.catalog = catalog;
+                            this.skills.error = None;
+                            this.sync_menu_skills(cx);
+                        } else {
+                            this.skills.error = catalog.errors.first().cloned();
+                        }
+                        let noun = if count == 1 { "skill" } else { "skills" };
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Import done", format!("Imported {count} {noun}."));
+                        });
+                    }
+                    Err(message) => {
+                        this.overlays.update(cx, |overlays, _| {
+                            overlays.toast("Import failed", message);
+                        });
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.skills.loading = true;
+        cx.notify();
+    }
+
+    /// "Ask Muse to write one" (A5): a new session in the current project —
+    /// always on the **muse** lane, whatever the remembered provider — with
+    /// the `/create-skill ` draft in the composer, focused, never sent.
+    pub(crate) fn ask_muse_to_write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.skills.add_menu_open = false;
+        self.skills.dialog = SkillsDialog::Closed;
+        self.new_provider = crate::providers::ProviderId::Muse.as_str().to_owned();
+        self.pending_create_skill = true;
+        self.new_session(window, cx);
+    }
+
+    /// Open Remove… for a row (A6). Bundled and plugin rows have no Remove
+    /// — only Off — so they never reach this dialog.
+    pub(crate) fn open_remove_dialog(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(VisibleRow::Live(index)) = self.skills_lookup(key) else { return };
+        let row = self.skills.catalog.rows[index].clone();
+        let personal = row.section() == ScopeSection::Personal;
+        if !personal && row.section() != ScopeSection::Project {
+            return;
+        }
+        let (headline, detail) = if personal {
+            (format!("Remove {} from your personal skills?", row.name), format!("`{}` leaves every project.", row.id))
+        } else {
+            let root = self.skills_root();
+            let path = row
+                .disk_path(&root)
+                .and_then(|file| file.parent().map(|dir| dir.to_path_buf()))
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_else(|| skills::project_skill_dir(&root, &row.name).to_string_lossy().into_owned());
+            (format!("Remove {} from this project?", row.name), format!("Moves {path} to the Trash."))
+        };
+        self.skills.dialog = SkillsDialog::Remove {
+            key: key.to_owned(),
+            name: row.name,
+            headline,
+            detail,
+            personal,
+        };
+        cx.notify();
+    }
+
+    /// Run the confirmed Remove (A6): Personal uninstalls through the CLI;
+    /// project rows move the folder to the Trash, never `rm`. Then re-list.
+    pub(crate) fn confirm_remove(&mut self, cx: &mut Context<Self>) {
+        let (key, name, personal) = match &self.skills.dialog {
+            SkillsDialog::Remove { key, name, personal, .. } => (key.clone(), name.clone(), *personal),
+            _ => return,
+        };
+        self.skills.dialog = SkillsDialog::Closed;
+        let root = self.skills_root();
+        let program = self.args.program.clone();
+        if personal {
+            let id = self.skills.catalog.rows.iter().find(|row| row.name == name).map(|row| row.id.clone()).unwrap_or(name.clone());
+            self.wire_call(
+                cx,
+                move || {
+                    let outcome = skills::uninstall_skill(&program, &id);
+                    let catalog = skills::list_catalog(&program, &root);
+                    (outcome, catalog)
+                },
+                move |this, (outcome, catalog), cx| {
+                    this.skills.loading = false;
+                    match outcome {
+                        Ok(()) => {
+                            if catalog.errors.is_empty() {
+                                this.skills.catalog = catalog;
+                                this.skills.error = None;
+                                this.sync_menu_skills(cx);
+                            } else {
+                                this.skills.error = catalog.errors.first().cloned();
+                            }
+                            this.overlays.update(cx, |overlays, _| {
+                                overlays.toast("Skill removed", format!("`{name}` is gone."));
+                            });
+                        }
+                        Err(message) => {
+                            this.overlays.update(cx, |overlays, _| {
+                                overlays.toast("Remove failed", message);
+                            });
+                        }
+                    }
+                    let _ = key;
+                    cx.notify();
+                },
+            );
+            self.skills.loading = true;
+        } else {
+            let dir = self
+                .skills
+                .catalog
+                .find(&name)
+                .and_then(|row| row.disk_path(&root))
+                .and_then(|file| file.parent().map(|dir| dir.to_path_buf()))
+                .unwrap_or_else(|| skills::project_skill_dir(&root, &name));
+            match skills::move_to_trash_dir(&dir, &skills::trash_dir()) {
+                Ok(_) => {
+                    self.overlays.update(cx, |overlays, _| {
+                        overlays.toast("Skill removed", format!("`{name}` moved to the Trash."));
+                    });
+                }
+                Err(message) => {
+                    self.overlays.update(cx, |overlays, _| {
+                        overlays.toast("Remove failed", message);
+                    });
+                    cx.notify();
+                    return;
+                }
+            }
+            self.relist_skills(cx);
+        }
+        cx.notify();
+    }
+
+    /// `skills[:page|empty|add-menu|import-preview|new]`: open the page on
+    /// a fixture catalog — no CLI, deterministic, offline (S3). The K3
+    /// fixtures open the Add menu, the import preview and the New dialog
+    /// over the page fixture, idempotently: they set the state rather than
+    /// toggling it, so both settle shots agree. An unknown payload records
+    /// a step failure instead of capturing a window where nothing happened.
+    pub(crate) fn step_skills(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let which = rest.trim();
-        if !which.is_empty() && which != "page" && which != "empty" {
+        if !which.is_empty()
+            && which != "page"
+            && which != "empty"
+            && which != "add-menu"
+            && which != "import-preview"
+            && which != "new"
+        {
             crate::steps::record_step_failure(&format!("skills:{rest}"));
-            crate::baaz_log!("unknown skills fixture `{rest}`; `page` and `empty` open the Skills page");
+            crate::baaz_log!("unknown skills fixture `{rest}`; the page fixtures open the Skills page");
             return;
         }
         let which = if which.is_empty() { "page" } else { which };
@@ -529,7 +1414,35 @@ impl Harness {
         self.skills.detail_focused = false;
         self.skills.loading = false;
         self.skills.error = None;
-        self.skills.catalog = fixture_catalog(which);
+        self.skills.add_menu_open = false;
+        self.skills.dialog = SkillsDialog::Closed;
+        self.skills.import_counts = None;
+        self.skills.import_loading = false;
+        self.skills.catalog = fixture_catalog(if which == "empty" { "empty" } else { "page" });
+        // The K3 captures layer their dialog over the page fixture: the
+        // menu with its cached trails, the import preview over
+        // deterministic rows, the New dialog with empty fields.
+        match rest.trim() {
+            "add-menu" => {
+                self.skills.add_menu_open = true;
+                self.skills.import_counts = Some(ImportCounts { claude: 1, codex: 0 });
+            }
+            "import-preview" => {
+                self.skills.dialog = SkillsDialog::Import {
+                    source: skills::ImportSource::ClaudeCode,
+                    rows: fixture_import_rows(),
+                    skipped: 1,
+                    loading: false,
+                    error: None,
+                };
+            }
+            "new" => {
+                self.skills_new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+                self.skills_new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+                self.skills.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
+            }
+            _ => {}
+        }
         // The capture shows the detail with the list: select the first live
         // row, with its disk body when it has one.
         let root = self.skills_root();
@@ -572,11 +1485,12 @@ impl Harness {
         let project_name =
             self.current_project().map(|project| project.name.clone()).unwrap_or_else(|| "Unfiled".to_owned());
 
-        // The header: "Skills · [project crumb ▾]", search (⌘F), and the
-        // empty slot package 2's "Add skill ▾" will fill — held open as a
-        // fixed spacer so the layout does not move when it lands.
+        // The header: "Skills · [project crumb ▾]", search (⌘F), "Add skill ▾".
         let open_menu = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.open_project_menu(this.current_project.clone(), true, cx);
+        });
+        let add_skill = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.toggle_add_menu(cx);
         });
         let header = h_flex()
             .flex_none()
@@ -622,9 +1536,16 @@ impl Harness {
                             .into_any_element(),
                     ),
             )
-            .child(div().flex_none().w(px(120.0)));
+            .child(
+                button("skills-add", "Add skill ▾")
+                    .accessibility_label("Add skill")
+                    .on_click(add_skill),
+            );
 
         let mut column = v_flex().size_full().child(header);
+        if self.skills.add_menu_open {
+            column = column.child(self.render_add_menu(cx));
+        }
 
         // Provider sessions still open the page; the line under the header
         // says whose skills these are.
@@ -803,17 +1724,477 @@ impl Harness {
 
         column = column.child(body);
 
-        div()
-            .size_full()
-            .key_context(SKILLS_CONTEXT)
+        // The modal layer stands above the list, centred on a scrim.
+        let overlay = self.render_skills_dialog(window, cx);
+        let mut root = div().size_full().relative().child(column);
+        if let Some(overlay) = overlay {
+            root = root.child(overlay);
+        }
+        root.key_context(SKILLS_CONTEXT)
             .on_action(cx.listener(|this, _: &SkillsUp, _, cx| this.skills_move(-1, cx)))
             .on_action(cx.listener(|this, _: &SkillsDown, _, cx| this.skills_move(1, cx)))
             .on_action(cx.listener(|this, _: &SkillsToggle, _, cx| this.skills_toggle_selected(cx)))
             .on_action(cx.listener(|this, _: &SkillsEnter, _, cx| this.skills_focus_detail(cx)))
             .on_action(cx.listener(|this, _: &SkillsFind, window, cx| this.skills_focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &SkillsClose, _, cx| this.close_skills(cx)))
-            .child(column)
             .into_any_element()
+    }
+
+    /// The "Add skill ▾" menu (A1): the library two-line rows in order —
+    /// New skill…, Install from folder…, Import from Claude Code / Codex
+    /// with their "N new" trails, Ask Muse to write one. Right-aligned
+    /// under the header; every row carries its menu role and label from
+    /// the library component.
+    fn render_add_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        // One listener per row: the rows share nothing, so no handler
+        // moves twice.
+        let new = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.open_new_dialog(window, cx));
+        let install =
+            cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.choose_install_folder(window, cx));
+        let import_claude = cx.listener(|this: &mut Self, _: &SharedString, _, cx| {
+            this.open_import(skills::ImportSource::ClaudeCode, cx);
+        });
+        let import_codex = cx.listener(|this: &mut Self, _: &SharedString, _, cx| {
+            this.open_import(skills::ImportSource::Codex, cx);
+        });
+        let ask = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.ask_muse_to_write(window, cx));
+        let p = cx.aui().colors;
+        h_flex()
+            .flex_none()
+            .w_full()
+            .px(px(12.0))
+            .justify_end()
+            .child(
+                v_flex()
+                    .id("skills-add-menu")
+                    .flex_none()
+                    .w(px(380.0))
+                    .py(px(6.0))
+                    .rounded(px(scale::R_SM))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(p.surface_1)
+                    .role(gpui::Role::Menu)
+                    .aria_label("Add skill")
+                    .child(
+                        menu_row_two_line(
+                            "skills-add-new",
+                            IconName::Plus,
+                            "New skill…",
+                            "Scaffold a skill, here or personal",
+                        )
+                        .key("new")
+                        .on_activate(move |key, window, cx| new(key, window, cx)),
+                    )
+                    .child(
+                        menu_row_two_line(
+                            "skills-add-install",
+                            IconName::Folder,
+                            "Install from folder…",
+                            "Validate and preview a skill folder",
+                        )
+                        .key("install")
+                        .on_activate(move |key, window, cx| install(key, window, cx)),
+                    )
+                    .child(div().flex_none().w_full().h(px(1.0)).my(px(6.0)).bg(p.line))
+                    .child(
+                        menu_row_two_line(
+                            "skills-add-import-claude",
+                            IconName::Copy,
+                            "Import from Claude Code",
+                            "~/.claude/skills",
+                        )
+                        .key("import-claude")
+                        .subtitle_mono()
+                        .trailing(self.add_menu_trail(skills::ImportSource::ClaudeCode))
+                        .on_activate(move |key, window, cx| import_claude(key, window, cx)),
+                    )
+                    .child(
+                        menu_row_two_line(
+                            "skills-add-import-codex",
+                            IconName::Copy,
+                            "Import from Codex",
+                            "~/.codex/skills",
+                        )
+                        .key("import-codex")
+                        .subtitle_mono()
+                        .trailing(self.add_menu_trail(skills::ImportSource::Codex))
+                        .on_activate(move |key, window, cx| import_codex(key, window, cx)),
+                    )
+                    .child(div().flex_none().w_full().h(px(1.0)).my(px(6.0)).bg(p.line))
+                    .child(
+                        menu_row_two_line(
+                            "skills-add-ask",
+                            IconName::Sparkle,
+                            "Ask Muse to write one",
+                            "Drafts /create-skill in a new muse session",
+                        )
+                        .key("ask")
+                        .trailing("uses a turn")
+                        .on_activate(move |key, window, cx| ask(key, window, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The modal layer (A2–A6), centred over a scrim above the list.
+    /// Every control carries its role and label.
+    fn render_skills_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        match self.skills.dialog.clone() {
+            SkillsDialog::Closed => None,
+            SkillsDialog::New { scope, error } => Some(self.render_new_dialog(window, cx, scope, error)),
+            SkillsDialog::InstallPreview { dir, name, description, tokens, files, diagnostics, scope, armed_replace } => {
+                Some(self.render_install_preview(cx, dir, name, description, tokens, files, diagnostics, scope, armed_replace))
+            }
+            SkillsDialog::Import { source, rows, skipped, loading, error } => {
+                Some(self.render_import_dialog(cx, source, rows, skipped, loading, error))
+            }
+            SkillsDialog::Remove { headline, detail, .. } => Some(self.render_remove_dialog(cx, headline, detail)),
+        }
+    }
+
+    /// The scrim-and-card shell every custom dialog draws through: a full
+    /// overlay with a dim scrim and a centred 520 px card wearing the
+    /// dialog role and its name.
+    fn dialog_shell(&self, name: &str, card: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        div()
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size_full()
+            .child(div().absolute().top(px(0.0)).left(px(0.0)).size_full().bg(gpui::rgba(0x0000_0066)))
+            .child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .id("skills-dialog-card")
+                            .flex_none()
+                            .w(px(520.0))
+                            .p(px(16.0))
+                            .gap(px(scale::SP_3))
+                            .rounded(px(scale::R_SM))
+                            .border_1()
+                            .border_color(p.line)
+                            .bg(p.surface_1)
+                            .role(gpui::Role::Dialog)
+                            .aria_label(name.to_owned())
+                            .child(card),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// New skill… (A2): name and description fields with inline errors, the
+    /// scope segmented, Cancel and Create.
+    fn render_new_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        scope: TargetScope,
+        error: Option<String>,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        let labels: Vec<SharedString> =
+            TargetScope::ALL.iter().map(|scope| SharedString::from(scope.label())).collect();
+        let active = TargetScope::ALL.iter().position(|kept| *kept == scope).unwrap_or(0);
+        let pick_scope = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+            if let Some(scope) = TargetScope::ALL.get(*index).copied() {
+                this.set_target_scope(scope, cx);
+            }
+        });
+        let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_skills_dialog(cx));
+        let create = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.create_new_skill(window, cx));
+        let mut card = v_flex()
+            .w_full()
+            .gap(px(scale::SP_3))
+            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("New skill"))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(4.0))
+                    .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Name"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(scale::R_SM))
+                            .border_1()
+                            .border_color(p.line)
+                            .bg(p.surface_2)
+                            .child(
+                                Textarea::new(&self.skills_new_name)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .text_size(aui_tokens::scaled(scale::FS_13))
+                                    .h_auto()
+                                    .whitespace_nowrap()
+                                    .into_any_element(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child("Lowercase letters, digits, hyphens · up to 64."),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(4.0))
+                    .child(div().flex_none().ui(scale::FS_12).text_color(p.ink_3).child("Description"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(scale::R_SM))
+                            .border_1()
+                            .border_color(p.line)
+                            .bg(p.surface_2)
+                            .child(
+                                Textarea::new(&self.skills_new_desc)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .text_size(aui_tokens::scaled(scale::FS_13))
+                                    .h_auto()
+                                    .into_any_element(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child("Say what it does and when to use it."),
+                    ),
+            )
+            .child(
+                segmented("skills-new-scope", labels, active)
+                    .accessibility_label("Where the skill lives")
+                    .on_select(move |index, window, cx| pick_scope(&index, window, cx)),
+            );
+        if let Some(error) = error {
+            card = card.child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.warning).child(error));
+        }
+        card = card.child(
+            h_flex()
+                .flex_none()
+                .w_full()
+                .justify_end()
+                .gap(px(scale::SP_2))
+                .child(button("skills-new-cancel", "Cancel").accessibility_label("Cancel new skill").on_click(cancel))
+                .child(
+                    button("skills-new-create", "Create skill")
+                        .accessibility_label("Create skill")
+                        .on_click(create),
+                ),
+        );
+        let _ = window;
+        self.dialog_shell("New skill", card.into_any_element(), cx)
+    }
+
+    /// Install from folder…'s preview (A3): name, description, startup
+    /// tokens, files, diagnostics, the scope segmented, Cancel and Install
+    /// (Replace once armed on an occupied name).
+    #[allow(clippy::too_many_arguments)]
+    fn render_install_preview(
+        &mut self,
+        cx: &mut Context<Self>,
+        dir: String,
+        name: String,
+        description: String,
+        tokens: u32,
+        files: Vec<String>,
+        diagnostics: String,
+        scope: TargetScope,
+        armed_replace: bool,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        let labels: Vec<SharedString> =
+            TargetScope::ALL.iter().map(|scope| SharedString::from(scope.label())).collect();
+        let active = TargetScope::ALL.iter().position(|kept| *kept == scope).unwrap_or(0);
+        let pick_scope = cx.listener(|this: &mut Self, index: &usize, _, cx| {
+            if let Some(scope) = TargetScope::ALL.get(*index).copied() {
+                this.set_target_scope(scope, cx);
+            }
+        });
+        let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_skills_dialog(cx));
+        let install = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.confirm_install_preview(cx));
+        let file_list = if files.is_empty() { "No files found.".to_owned() } else { files.join("\n") };
+        let primary = if armed_replace { "Replace" } else { "Install" };
+        let hint = match scope {
+            TargetScope::Project => "Copies into this project's .agents/skills.",
+            TargetScope::Personal => "Installs to your personal skills.",
+        };
+        let mut install_button =
+            button("skills-install-confirm", primary).accessibility_label(format!("{primary} skill"));
+        if armed_replace {
+            install_button = install_button.danger();
+        }
+        let card = v_flex()
+            .w_full()
+            .gap(px(scale::SP_3))
+            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("Install skill"))
+            .child(div().flex_none().w_full().ui(scale::FS_13).medium().text_color(p.ink).child(name))
+            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink_3).child(description))
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .mono(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .child(format!("~{} tokens at startup · {}", format_tokens(tokens), dir)),
+            )
+            .child(
+                div().flex_none().w_full().mono(scale::FS_12).text_color(p.ink_3).child(file_list),
+            )
+            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(diagnostics))
+            .child(
+                segmented("skills-install-scope", labels, active)
+                    .accessibility_label("Where the skill lands")
+                    .on_select(move |index, window, cx| pick_scope(&index, window, cx)),
+            )
+            .child(div().flex_none().w_full().ui(scale::FS_12).text_color(p.ink_3).child(hint))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .justify_end()
+                    .gap(px(scale::SP_2))
+                    .child(
+                        button("skills-install-cancel", "Cancel")
+                            .accessibility_label("Cancel install")
+                            .on_click(cancel),
+                    )
+                    .child(install_button.on_click(install)),
+            );
+        self.dialog_shell("Install skill", card.into_any_element(), cx)
+    }
+
+    /// Import from Claude Code / Codex (A4): the library preview over the
+    /// dry-run rows, with the "Adds N tokens" note and the "Nothing is
+    /// copied until you import" action row.
+    fn render_import_dialog(
+        &mut self,
+        cx: &mut Context<Self>,
+        source: skills::ImportSource,
+        rows: Vec<ImportDialogRow>,
+        skipped: usize,
+        loading: bool,
+        error: Option<String>,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        if loading {
+            let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_skills_dialog(cx));
+            let card = v_flex()
+                .w_full()
+                .gap(px(scale::SP_3))
+                .child(
+                    div()
+                        .flex_none()
+                        .ui(17.6)
+                        .semibold()
+                        .text_color(p.ink)
+                        .child(format!("Import from {}", source.label())),
+                )
+                .child(div().flex_none().ui(scale::FS_13).text_color(p.ink_3).child("Reading skills…"))
+                .child(
+                    h_flex().flex_none().w_full().justify_end().child(
+                        button("skills-import-cancel", "Cancel")
+                            .accessibility_label("Cancel import")
+                            .on_click(cancel),
+                    ),
+                );
+            return self.dialog_shell(&format!("Import from {}", source.label()), card.into_any_element(), cx);
+        }
+        if let Some(error) = error {
+            let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_skills_dialog(cx));
+            let card = v_flex()
+                .w_full()
+                .gap(px(scale::SP_3))
+                .child(
+                    div()
+                        .flex_none()
+                        .ui(17.6)
+                        .semibold()
+                        .text_color(p.ink)
+                        .child(format!("Import from {}", source.label())),
+                )
+                .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.warning).child(error))
+                .child(
+                    h_flex().flex_none().w_full().justify_end().child(
+                        button("skills-import-close", "Close")
+                            .accessibility_label("Close import")
+                            .on_click(cancel),
+                    ),
+                );
+            return self.dialog_shell(&format!("Import from {}", source.label()), card.into_any_element(), cx);
+        }
+        let library_rows: Vec<ImportRow> = rows.iter().map(ImportDialogRow::library_row).collect();
+        let mut subtitle = format!("{} from {}", if rows.len() == 1 { "1 skill".to_owned() } else { format!("{} skills", rows.len()) }, source.label());
+        if skipped > 0 {
+            subtitle.push_str(&format!(" · {skipped} skipped"));
+        }
+        let summary = import_summary_text(&library_rows);
+        let toggle = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
+            this.toggle_import_row(id, cx);
+        });
+        let cancel = cx.listener(|this: &mut Self, _: &ImportPreviewIntent, _, cx| this.close_skills_dialog(cx));
+        let run = cx.listener(|this: &mut Self, _: &ImportPreviewIntent, _, cx| this.run_import(cx));
+        import_preview(format!("skills-import-{}", source.arg()), format!("Import from {}", source.label()))
+            .subtitle(subtitle)
+            .summary(summary)
+            .hint("Nothing is copied until you import.")
+            .on_intent(move |intent, window, cx| match intent {
+                ImportPreviewIntent::ToggleRow(id) => toggle(&id, window, cx),
+                ImportPreviewIntent::Cancel => cancel(&intent, window, cx),
+                ImportPreviewIntent::Import => run(&intent, window, cx),
+            })
+            .into_any_element()
+    }
+
+    /// Remove…'s confirm (A6): the heading names the skill; project rows
+    /// name the folder path that moves to the Trash.
+    fn render_remove_dialog(&mut self, cx: &mut Context<Self>, headline: String, detail: String) -> AnyElement {
+        let p = cx.aui().colors;
+        let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_skills_dialog(cx));
+        let remove = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.confirm_remove(cx));
+        let card = v_flex()
+            .w_full()
+            .gap(px(scale::SP_3))
+            .child(div().flex_none().ui(17.6).semibold().text_color(p.ink).child("Remove skill"))
+            .child(div().flex_none().w_full().ui(scale::FS_13).text_color(p.ink).child(headline))
+            .child(div().flex_none().w_full().mono(scale::FS_12).text_color(p.ink_3).child(detail))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .justify_end()
+                    .gap(px(scale::SP_2))
+                    .child(
+                        button("skills-remove-cancel", "Cancel")
+                            .accessibility_label("Keep skill")
+                            .on_click(cancel),
+                    )
+                    .child(
+                        button("skills-remove-confirm", "Remove")
+                            .accessibility_label("Remove skill")
+                            .danger()
+                            .on_click(remove),
+                    ),
+            );
+        self.dialog_shell("Remove skill", card.into_any_element(), cx)
     }
 
     /// One live row: name, chips, description, tokens, mode chip, switch.
@@ -956,7 +2337,10 @@ impl Harness {
             }
             _ => div().w_full().ui(scale::FS_13).text_color(p.ink_3).child("No preview available.").into_any_element(),
         };
-        detail = detail.section("SKILL.md", body_element);
+        // Virtual skills read through `inspect`, which carries no body —
+        // the section says whose preview it is (D60, K2 gap).
+        let body_title = if skill.is_virtual() { "SKILL.md · read-only preview" } else { "SKILL.md" };
+        detail = detail.section(body_title, body_element);
 
         // The file list.
         if !files.is_empty() {
@@ -1021,6 +2405,22 @@ impl Harness {
             menu = menu.child(
                 button("skill-copy-path", "Copy path").accessibility_label(format!("Copy {} path", skill.name)).on_click(copy),
             );
+            // ⋯ → Remove… (A6): project and personal rows only. Bundled
+            // and plugin rows have no Remove — only Off.
+            if matches!(skill.section(), ScopeSection::Project | ScopeSection::Personal) {
+                let key = skill.id.clone();
+                let name = skill.name.clone();
+                let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    this.skills.overflow_open = false;
+                    this.open_remove_dialog(&key, cx);
+                });
+                menu = menu.child(
+                    button("skill-remove", "Remove…")
+                        .accessibility_label(format!("Remove {name}"))
+                        .danger()
+                        .on_click(remove),
+                );
+            }
             detail = detail.section("More actions", menu);
         }
 
@@ -1100,6 +2500,31 @@ impl Harness {
             .child(div().ui(scale::FS_13).text_color(p.ink_3).child(copy))
             .into_any_element()
     }
+}
+
+/// Files under an arbitrary folder, relative to it, capped: the install
+/// preview's file list (A3). Missing folders answer empty.
+fn walk_skill_dir(dir: &std::path::Path) -> Vec<String> {
+    const CAP: usize = 200;
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(top) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&top) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(relative) = path.strip_prefix(dir) {
+                files.push(relative.to_string_lossy().into_owned());
+                if files.len() >= CAP {
+                    files.sort();
+                    return files;
+                }
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 /// The plugin name out of a `plugin://<name>/…` virtual path.
@@ -1211,5 +2636,37 @@ mod tests {
     fn plugin_paths_name_their_plugin() {
         assert_eq!(plugin_name("plugin://threejs/skills/threejs/SKILL.md"), Some("threejs"));
         assert_eq!(plugin_name("bundled://x/SKILL.md"), None);
+    }
+
+    #[test]
+    fn taken_names_follow_the_target_scope() {
+        let catalog = catalog();
+        assert_eq!(taken_names(&catalog, TargetScope::Project), vec!["git", "decoction"]);
+        assert_eq!(taken_names(&catalog, TargetScope::Personal), vec!["mine"]);
+    }
+
+    #[test]
+    fn the_create_skill_draft_is_unsent() {
+        assert_eq!(create_skill_draft(), "/create-skill ");
+    }
+
+    #[test]
+    fn import_rows_classify_and_summarise() {
+        let rows = fixture_import_rows();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].selectable());
+        assert!(rows[1].selectable());
+        assert!(!rows[2].selectable());
+        let library: Vec<ImportRow> = rows.iter().map(ImportDialogRow::library_row).collect();
+        assert_eq!(selected_rows(&library).len(), 2);
+        assert_eq!(added_tokens(&library), 640 + 1120);
+        assert_eq!(import_summary_text(&library), "Adds 1.8k tokens · 2 skills");
+    }
+
+    #[test]
+    fn target_scopes_label_themselves() {
+        assert_eq!(TargetScope::ALL, [TargetScope::Project, TargetScope::Personal]);
+        assert_eq!(TargetScope::Project.label(), "This project");
+        assert_eq!(TargetScope::Personal.label(), "Personal");
     }
 }

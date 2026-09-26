@@ -140,12 +140,43 @@ pub struct Folds {
     /// runnable fences ("Run"), and honoured under `--replay` — the request
     /// is entirely local, never a turn, never the wire.
     pub terminal_run: Option<TerminalRunHandler>,
+    /// Skill loads, by skill name: the scope the landed catalog reports, so
+    /// the quiet row reads "Loaded skill `name` · scope" (D63). Empty when
+    /// the catalog knows no such skill — the scope is omitted, never
+    /// guessed.
+    pub skill_scopes: Rc<HashMap<String, String>>,
+    /// A skill row's tap: the skill name, out to the Skills page. `None`
+    /// renders the row read-only.
+    pub open_skill: Option<SkillOpenHandler>,
+}
+
+/// Whether a tool card is a skill load: a Read card whose verb is the
+/// "Loaded skill" both folds mint (D63). The name is the card's target.
+pub fn skill_load_name(call: &ToolCall) -> Option<&str> {
+    match (&call.kind, call.verb.as_str(), call.target.trim()) {
+        (ToolKind::Read, "Loaded skill", target) if !target.is_empty() => Some(target),
+        _ => None,
+    }
+}
+
+/// The quiet row's text: "Loaded skill `name`", with the scope joined when
+/// the catalog reported one (D63).
+pub fn skill_load_text(name: &str, scope: Option<&str>) -> String {
+    match scope.filter(|scope| !scope.trim().is_empty()) {
+        Some(scope) => format!("Loaded skill `{name}` · {scope}"),
+        None => format!("Loaded skill `{name}`"),
+    }
 }
 
 /// A play button press: the resolved command and whether Enter follows the
 /// paste. The view emits it as [`crate::session::SessionEvent::RunInTerminal`];
 /// the application owns the dock.
 pub type TerminalRunHandler = Rc<dyn Fn(RunRequest, &mut Window, &mut App)>;
+
+/// A skill row's tap: the skill name, out. The view emits it as
+/// [`crate::session::SessionEvent::OpenSkill`]; the application opens the
+/// Skills page on that skill.
+pub type SkillOpenHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
 /// The header action id of "Run in terminal" on shell tool cards.
 pub const RUN_IN_TERMINAL_ACTION_ID: &str = "run-in-terminal";
@@ -646,7 +677,10 @@ fn block(
             activity_card(id, key, steps, summary, *elapsed_ms, *state, folds)
         }
         Block::ToolCall { .. } => match block.as_tool_call() {
-            Some(call) => tool_call_card(key, id, &call, folds),
+            Some(call) => match skill_load_name(&call) {
+                Some(name) => skill_load_row(id, name, folds, cx),
+                None => tool_call_card(key, id, &call, folds),
+            },
             None => generic_item_card(id, "tool", "done", String::new()).into_any_element(),
         },
         Block::ToolGroup { .. } => tool_group_card(id, key, block, folds),
@@ -676,6 +710,39 @@ fn block(
             generic_item_card(id, kind.clone(), status.clone(), text.clone()).into_any_element()
         }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
+    }
+}
+
+/// A skill load's quiet one-line row (D63): muted text, no card chrome, no
+/// fold toggle — a load is a fact, not a conversation. Tapping it opens the
+/// Skills page on that skill; without a handler it reads as plain text.
+fn skill_load_row(id: ElementId, name: &str, folds: &Folds, cx: &mut App) -> AnyElement {
+    use aui_tokens::{ActiveAui, AuiStyled};
+    let p = cx.aui().colors;
+    let text = skill_load_text(name, folds.skill_scopes.get(name).map(String::as_str));
+    let row = h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(scale::SP_2))
+        .py(px(2.0))
+        .ui(scale::FS_13)
+        .text_color(p.ink_3)
+        .child(text);
+    match &folds.open_skill {
+        Some(open) => {
+            let open = open.clone();
+            let skill = name.to_owned();
+            let label = format!("Open skill {skill} in the Skills page.");
+            row.id(id)
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .on_click(move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                    open(skill.clone(), window, cx);
+                })
+                .into_any_element()
+        }
+        None => row.into_any_element(),
     }
 }
 
@@ -1621,11 +1688,36 @@ mod tests {
             span_event: None,
             tool_group: None,
             terminal_run: None,
+            skill_scopes: Rc::new(HashMap::new()),
+            open_skill: None,
         }
     }
 
     fn thinking_id() -> ElementId {
         ElementId::from(SharedString::from("thought"))
+    }
+
+    #[test]
+    fn skill_loads_are_named_but_other_reads_are_not() {
+        use aui_protocol::{ToolBody, ToolStatus};
+        let load = ToolCall {
+            id: "i-1".into(),
+            kind: ToolKind::Read,
+            verb: "Loaded skill".into(),
+            target: "bundled:plan".into(),
+            status: ToolStatus::Success,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        assert_eq!(skill_load_name(&load), Some("bundled:plan"));
+        let read = ToolCall { verb: "Read".into(), target: "notes.md".into(), ..load.clone() };
+        assert_eq!(skill_load_name(&read), None);
+        let blank = ToolCall { target: "  ".into(), ..load.clone() };
+        assert_eq!(skill_load_name(&blank), None);
+        assert_eq!(skill_load_text("plan", Some("built-in")), "Loaded skill `plan` · built-in");
+        assert_eq!(skill_load_text("plan", None), "Loaded skill `plan`");
+        assert_eq!(skill_load_text("plan", Some(" ")), "Loaded skill `plan`");
     }
 
     /// W7b: a trace with no text earns no card — redacted (signature-only)

@@ -96,6 +96,17 @@ ENTRIES = {
                                       "--steps", "skills:page"]},
     "skills-empty":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:empty"]},
+    # The K3 dialogs over the page fixture (no CLI, deterministic,
+    # offline): the Add menu with its cached trails, the import preview
+    # over fixed rows, and the New dialog with empty fields. Each steps
+    # verb sets its state rather than toggling it, so both settle shots
+    # agree.
+    "skills-add-menu":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills:add-menu"]},
+    "skills-import-preview": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills:import-preview"]},
+    "skills-new":           {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills:new"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},

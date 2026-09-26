@@ -364,6 +364,25 @@ impl SessionView {
                     },
                 ))
             },
+            // A skill row's tap (D63): the name goes to the application as
+            // an event, and the scope beside it comes from the `/` menu's
+            // own cache for this workspace — the same catalog the page
+            // shows, omitted when it knows no such skill.
+            skill_scopes: {
+                let mut scopes = std::collections::HashMap::new();
+                for row in self.overlays.read(cx).skills_for(&self.workspace) {
+                    scopes.insert(row.name.clone(), crate::skills::scope_word(row.scope()).to_owned());
+                }
+                Rc::new(scopes)
+            },
+            open_skill: {
+                let open = cx.listener(|_: &mut Self, name: &String, _, cx| {
+                    cx.emit(crate::session::SessionEvent::OpenSkill { name: name.clone() });
+                });
+                Some(Rc::new(move |name: String, window: &mut Window, cx: &mut gpui::App| {
+                    open(&name, window, cx)
+                }))
+            },
         }
     }
 

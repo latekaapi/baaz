@@ -152,11 +152,19 @@ installed into gpui, not a real keystroke firing.
 The Skills page wears its own context, `HarnessSkills`, so its six keys
 never collide with the composer's: ↑/↓ move the row selection, Space flips
 the selected skill, Enter focuses the detail pane, ⌘F focuses search, Esc
-leaves the page. All six live in the keymap table (`category: skills`) with
+peels one layer. All six live in the keymap table (`category: skills`) with
 human labels, so the Settings UI and the generated sheet (docs/08-keymap.md)
 pick them up with the rest.
 
-### 3.4 Deliberately not doing
+### 3.4 The Skills dialogs (K3, 2026-09-27)
+
+The Add menu and the New / Install / Import / Remove dialogs add no keys:
+everything in them is a click, and Esc peels one layer at a time — a dialog,
+then the menu, then the page itself. The Skills context table in
+`crates/baaz/src/keymap.rs` is unchanged; the layering lives in
+`Harness::close_skills`.
+
+### 3.5 Deliberately not doing
 
 - **No base-keymap presets** (VS Code, JetBrains, …). Zed can afford eight
   because people arrive at an editor with muscle memory; for a session harness

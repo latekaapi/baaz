@@ -1907,6 +1907,24 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             diff_stat: None,
         };
         ToolCard { kind, verb: verb.into(), target, params, block }
+    } else if name == "Skill" {
+        // A skill invocation: the quiet "Loaded skill `name`" row, the same
+        // one `read_skill` folds to on the muse lane (D63). The tool's input
+        // names the skill under `skill`; without one the card names the tool
+        // rather than guessing.
+        let target =
+            input.get("skill").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::Read,
+            verb: "Loaded skill".into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::Read, verb: "Loaded skill".into(), target, params, block }
     } else if name == "Agent" {
         // A sub-agent delegation: the card nests the agent's own blocks
         // (routed by `parent_tool_use_id`) once they arrive.
@@ -3648,5 +3666,25 @@ mod tests {
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "msg-1");
         assert_eq!(done[0].1.reasoning_tokens, 87, "the count lands on the same turn");
+    }
+
+    #[test]
+    fn a_skill_call_folds_to_the_quiet_row() {
+        // Claude Code's `Skill` tool invokes a skill by name under `skill`:
+        // it folds to the same quiet row `read_skill` folds to (D63).
+        let card = tool_card("t-1", "Skill", &serde_json::json!({"skill": "decoction"}));
+        assert_eq!(card.kind, ToolKind::Read);
+        assert_eq!(card.verb, "Loaded skill");
+        assert_eq!(card.target, "decoction");
+        match card.block {
+            Block::ToolCall { kind: ToolKind::Read, verb, target, .. } => {
+                assert_eq!(verb, "Loaded skill");
+                assert_eq!(target, "decoction");
+            }
+            block => panic!("a Skill call folded to {block:?}"),
+        }
+        // Without a skill name the card names the tool, never a guess.
+        let card = tool_card("t-2", "Skill", &serde_json::json!({}));
+        assert_eq!(card.target, "Skill");
     }
 }

@@ -873,3 +873,37 @@ fn a_group_forms_incrementally_while_streaming() {
     }
     assert_eq!(staged, 2, "the streaming stages never ran");
 }
+
+/// A `read_skill` call folds to the transcript's quiet row: a Read card
+/// reading "Loaded skill" with the skill name as its target (D63). The
+/// scope joins at render time from the landed catalog, so the fold carries
+/// none.
+#[test]
+fn a_skill_load_folds_to_the_quiet_row() {
+    use aui_protocol::{ToolKind, ToolStatus};
+    let fold = replay(&fixtures_dir().join("transcript-phase3.jsonl"));
+    let id = fold.session_ids().next().expect("one session").to_owned();
+    let session = fold.session(&id).expect("session exists");
+    let mut calls: Vec<aui_protocol::ToolCall> = Vec::new();
+    for turn in &session.turns {
+        for block in turn.blocks() {
+            match block {
+                aui_protocol::Block::ToolCall { .. } => {
+                    calls.extend(block.as_tool_call());
+                }
+                aui_protocol::Block::ToolGroup { calls: members, .. } => {
+                    calls.extend(members.iter().cloned());
+                }
+                _ => {}
+            }
+        }
+    }
+    let load = calls.iter().find(|call| call.verb == "Loaded skill").expect("the skill load folded");
+    assert_eq!(load.kind, ToolKind::Read);
+    assert_eq!(load.target, "bundled:manage-settings");
+    assert_eq!(load.status, ToolStatus::Success);
+    assert!(
+        calls.iter().all(|call| call.verb != "Read skill"),
+        "no skill load still reads \"Read skill\""
+    );
+}

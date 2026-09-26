@@ -212,7 +212,8 @@ impl Skill {
     }
 
     /// Whether the row's path is virtual (`bundled://…`, `plugin://…`):
-    /// no reveal, no editor, read-only preview from `inspect` (D60).
+    /// no reveal, no editor, read-only preview from `inspect` (D60, see
+    /// [`inspect_preview`]).
     pub fn is_virtual(&self) -> bool {
         self.path.as_deref().is_some_and(|p| p.contains("://"))
     }
@@ -282,6 +283,19 @@ impl ScopeSection {
         }
     }
 
+}
+
+/// A scope name for chips and quiet rows: "built-in" for bundled, so the
+/// winner wears "Overrides built-in git" (D58) and a skill row reads
+/// "Loaded skill `git` · built-in" (D63).
+pub(crate) fn scope_word(scope: &str) -> &str {
+    match scope {
+        "bundled" => "built-in",
+        "user" => "personal",
+        "project" => "this project",
+        "plugin" => "plugin",
+        _ => scope,
+    }
 }
 
 /// One shadowed skill: the loser's dimmed row (D58).
@@ -536,20 +550,6 @@ pub fn set_activation(program: &str, root: &str, id: &str, scope: &str, activati
     }
 }
 
-/// A virtual skill's SKILL.md through `muse skills inspect --json`: the body
-/// text when the payload carries one, `None` when it does not.
-pub fn inspect_body(program: &str, id: &str) -> Option<String> {
-    let stdout = run_cli(program, &["skills", "inspect", "--json", id], None)?;
-    let payload: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
-    let skill = payload.get("skill").unwrap_or(&payload);
-    for key in ["body", "markdown", "content", "skill_md", "text"] {
-        if let Some(text) = skill.get(key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-            return Some(text.to_owned());
-        }
-    }
-    None
-}
-
 /// Validate a skill folder: `muse skills validate <dir> --json`. `Ok` carries
 /// the one-line verdict for the toast; `Err` carries the CLI's message.
 pub fn validate_skill(program: &str, dir: &std::path::Path) -> Result<String, String> {
@@ -588,14 +588,400 @@ pub fn strip_frontmatter(body: &str) -> &str {
     body
 }
 
-/// A skill's SKILL.md body: the file for real paths, `inspect` for virtual
-/// ones (D60). Frontmatter stripped.
+/// A skill's SKILL.md body: the file for real paths, the read-only
+/// `inspect` preview for virtual ones (D60, see [`inspect_preview`]).
+/// Frontmatter stripped.
 pub fn skill_body(program: &str, skill: &Skill, root: &str) -> Option<String> {
     if skill.is_virtual() {
-        return inspect_body(program, &skill.id).map(|body| strip_frontmatter(&body).to_owned());
+        return inspect_preview(program, &skill.id);
     }
     let path = skill.disk_path(root)?;
     std::fs::read_to_string(path).ok().map(|body| strip_frontmatter(&body).to_owned())
+}
+
+// Add, import and remove (K3, docs/15-skills.md §5, D61–D62): the page's
+// mutations behind the "Add skill ▾" menu and the detail's ⋯ → Remove….
+//
+// Every mutation runs `muse skills …` and then re-lists; nothing moves
+// before the re-list lands (D55). The pure helpers below (validation,
+// scaffolding, import classification) are unit-tested; the thin CLI
+// runners reuse `run_cli` and carry the CLI's shape, not the page's.
+
+/// Where an import preview's candidates come from (D61).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportSource {
+    /// `~/.claude/skills`.
+    ClaudeCode,
+    /// `~/.codex/skills`.
+    Codex,
+}
+
+impl ImportSource {
+    /// The `--from` value the CLI takes.
+    pub fn arg(&self) -> &'static str {
+        match self {
+            ImportSource::ClaudeCode => "claude",
+            ImportSource::Codex => "codex",
+        }
+    }
+
+    /// The menu and dialog label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ImportSource::ClaudeCode => "Claude Code",
+            ImportSource::Codex => "Codex",
+        }
+    }
+}
+
+/// Whether an import candidate is new, replaces a personal skill, or is
+/// already installed (D61). Mirrors the library's preview rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportStatus {
+    /// Personal has no skill under this name: picked, live checkbox.
+    New,
+    /// Personal has the name with different content: picked, `--force`
+    /// only for rows the person leaves checked.
+    Replaces,
+    /// Byte-identical with the personal copy: unchecked, disabled.
+    Installed,
+}
+
+/// One `import --dry-run` candidate, enriched from its source SKILL.md.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportCandidate {
+    /// The dry-run's `id`.
+    pub id: String,
+    /// The frontmatter name, else the folder name.
+    pub name: String,
+    /// The frontmatter description, else "".
+    pub description: String,
+    /// Startup tokens, estimated from the SKILL.md bytes (see
+    /// [`estimate_tokens`]).
+    pub tokens: u32,
+    /// The dry-run's `source_path` (the candidate's SKILL.md on disk).
+    pub source_path: String,
+    /// The dry-run's `valid`.
+    pub valid: bool,
+    /// The dry-run's `diagnostics`, joined.
+    pub diagnostics: String,
+}
+
+/// Check a new skill's name: lowercase letters, digits and hyphens, at most
+/// 64 characters, and not taken in the target scope (D61). `Ok` is usable.
+pub fn validate_skill_name(name: &str, taken: &[String]) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the skill a name.".to_owned());
+    }
+    if name.len() > 64 {
+        return Err("Keep the name to 64 characters.".to_owned());
+    }
+    let ok = name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok {
+        return Err("Use lowercase letters, digits and hyphens.".to_owned());
+    }
+    if taken.iter().any(|other| other == name) {
+        return Err(format!("A skill named `{name}` already exists here."));
+    }
+    Ok(())
+}
+
+/// Check a new skill's description: required, at most 1024 characters
+/// (D61). `Ok` is usable.
+pub fn validate_skill_description(description: &str) -> Result<(), String> {
+    if description.trim().is_empty() {
+        return Err("Say what it does and when to use it.".to_owned());
+    }
+    if description.len() > 1024 {
+        return Err("Keep the description to 1024 characters.".to_owned());
+    }
+    Ok(())
+}
+
+/// The scaffold a new skill starts from: frontmatter `name` and
+/// `description`, then a short body template (D61).
+pub fn scaffold_skill_md(name: &str, description: &str) -> String {
+    format!(
+        "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nWhat this skill does, and when to use it.\n\n## Workflow\n\n1. One step at a time.\n2. Say what changed.\n"
+    )
+}
+
+/// The folder a This-project skill lives in: `<root>/.agents/skills/<name>`
+/// (D61; the discovery dirs in [`Skill::disk_path`] are read, not written).
+pub fn project_skill_dir(root: &str, name: &str) -> std::path::PathBuf {
+    std::path::Path::new(root).join(".agents/skills").join(name)
+}
+
+/// Create a This-project skill: write the scaffold and answer its SKILL.md.
+/// An existing name is refused, never overwritten.
+pub fn create_project_skill(root: &str, name: &str, description: &str) -> Result<std::path::PathBuf, String> {
+    validate_skill_name(name, &[])?;
+    validate_skill_description(description)?;
+    let dir = project_skill_dir(root, name);
+    let file = dir.join("SKILL.md");
+    if file.exists() {
+        return Err(format!("A skill named `{name}` already exists here."));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    std::fs::write(&file, scaffold_skill_md(name, description))
+        .map_err(|e| format!("Could not write {}: {e}", file.display()))?;
+    Ok(file)
+}
+
+/// Copy one skill folder over another, creating parents. Files only;
+/// symlinks are not followed.
+pub fn copy_skill_dir(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if !from.is_dir() {
+        return Err(format!("{} is not a folder.", from.display()));
+    }
+    let mut stack = vec![from.to_path_buf()];
+    while let Some(top) = stack.pop() {
+        let relative = top.strip_prefix(from).map_err(|_| "Cannot relativize.".to_owned())?;
+        let dest = to.join(relative);
+        if top.is_dir() {
+            std::fs::create_dir_all(&dest).map_err(|e| format!("Could not create {}: {e}", dest.display()))?;
+            let entries = std::fs::read_dir(&top).map_err(|e| format!("Could not read {}: {e}", top.display()))?;
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        } else if top.is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+            }
+            std::fs::copy(&top, &dest).map_err(|e| format!("Could not copy {}: {e}", top.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Move `path` into `trash_dir` (renaming past collisions), answering the
+/// new location. The Trash move itself — never `rm` (D62).
+pub fn move_to_trash_dir(path: &std::path::Path, trash_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let name = path.file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).ok_or_else(|| "Nothing to remove.".to_owned())?;
+    std::fs::create_dir_all(trash_dir).map_err(|e| format!("Could not open the Trash: {e}"))?;
+    let mut dest = trash_dir.join(name);
+    let mut n = 2u32;
+    while dest.exists() {
+        dest = trash_dir.join(format!("{name} {n}"));
+        n += 1;
+    }
+    std::fs::rename(path, &dest).map_err(|e| format!("Could not move {} to the Trash: {e}", path.display()))?;
+    Ok(dest)
+}
+
+/// This machine's Trash: `$HOME/.Trash`.
+pub fn trash_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/tmp")).join(".Trash")
+}
+
+/// A token estimate from SKILL.md bytes: four bytes a token, at least one.
+/// Muse reports estimates the same way applicants do — the import and
+/// install previews say what a candidate *adds*, and a heuristic labelled
+/// as one beats a blank cell.
+pub fn estimate_tokens(bytes: u64) -> u32 {
+    (bytes / 4).max(1).min(u32::MAX as u64) as u32
+}
+
+/// A SKILL.md's frontmatter `name` and `description`: single-line values
+/// with surrounding quotes stripped, plus indented continuation lines
+/// folded with spaces. Anything else answers `None`.
+pub fn frontmatter_meta(body: &str) -> (Option<String>, Option<String>) {
+    let mut lines = body.lines();
+    if lines.next().is_none_or(|first| first.trim() != "---") {
+        return (None, None);
+    }
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    // Which slot a continuation line folds into: 0 is name, 1 is
+    // description, `None` is nowhere. A continuation is an indented line —
+    // or, leniently, any colon-less line while a slot is open, because a
+    // wrapped description is still the description.
+    let mut current: Option<u8> = None;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let slot = if line.starts_with([' ', '\t']) || (current.is_some() && !line.contains(':')) {
+            current
+        } else {
+            None
+        };
+        if let Some(which) = slot {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let target = if which == 0 { &mut name } else { &mut description };
+                if let Some(text) = target {
+                    if text.is_empty() {
+                        *text = trimmed.to_owned();
+                    } else {
+                        text.push(' ');
+                        text.push_str(trimmed);
+                    }
+                }
+            }
+            continue;
+        }
+        current = None;
+        let Some((key, value)) = line.split_once(':') else { continue };
+        // A lone `>` / `|` is YAML's folded/literal marker: the value is
+        // the indented lines below, not the marker itself.
+        let value = value.trim();
+        let stored = if value == ">" || value == "|" { String::new() } else { unquote(value) };
+        match key.trim() {
+            "name" => {
+                name = Some(stored);
+                current = Some(0);
+            }
+            "description" => {
+                description = Some(stored);
+                current = Some(1);
+            }
+            _ => {}
+        }
+    }
+    // Quotes can straddle the first line and its continuations (`'Does` …
+    // `things.'`), so strip one layer at the end as well as at assignment.
+    (name.map(|n| unquote(n.trim())), description.map(|d| unquote(d.trim())))
+}
+
+/// Strip one layer of surrounding single or double quotes.
+fn unquote(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+/// A candidate's display name and description from its source SKILL.md:
+/// frontmatter first, folder name and "" when unreadable.
+pub fn candidate_meta(source_path: &str) -> (String, String) {
+    let fallback = std::path::Path::new(source_path)
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source_path.to_owned());
+    let Ok(body) = std::fs::read_to_string(source_path) else {
+        return (fallback, String::new());
+    };
+    let (name, description) = frontmatter_meta(&body);
+    (name.filter(|n| !n.trim().is_empty()).unwrap_or(fallback), description.unwrap_or_default())
+}
+
+/// Classify one import candidate against the landed catalog (D61): a
+/// personal skill under the same name with byte-identical content is
+/// Already installed; the same name with different content Replaces yours;
+/// anything else is New.
+pub fn import_status(name: &str, source_path: &str, catalog: &SkillsCatalog) -> ImportStatus {
+    let personal = catalog.rows.iter().find(|row| row.name == name && row.section() == ScopeSection::Personal);
+    let Some(row) = personal else { return ImportStatus::New };
+    let root = catalog.project_root.clone();
+    let same = row
+        .disk_path(&root)
+        .filter(|installed| installed.is_file())
+        .and_then(|installed| std::fs::read(installed).ok())
+        .zip(std::fs::read(source_path).ok())
+        .is_some_and(|(installed, source)| installed == source);
+    if same { ImportStatus::Installed } else { ImportStatus::Replaces }
+}
+
+/// The dry-run behind the import preview (D61): `import --from <src>
+/// --dry-run --json`, enriched from each candidate's source SKILL.md.
+/// Read-only: nothing is copied.
+pub fn import_dry_run(program: &str, source: ImportSource) -> Result<Vec<ImportCandidate>, String> {
+    let from = source.arg().to_owned();
+    let args = ["skills", "import", "--from", from.as_str(), "--dry-run", "--json"];
+    let stdout = run_cli(program, &args, None).ok_or_else(|| "`muse skills import --dry-run` did not answer. Try again.".to_owned())?;
+    parse_dry_run(&stdout)
+}
+
+/// Parse one `import --dry-run --json` payload. Pure, so the preview pins
+/// the shape without a CLI.
+pub fn parse_dry_run(stdout: &[u8]) -> Result<Vec<ImportCandidate>, String> {
+    let payload: serde_json::Value =
+        serde_json::from_slice(stdout).map_err(|_| "`muse skills import --dry-run` answered something this build cannot parse.".to_owned())?;
+    let mut out = Vec::new();
+    let candidates = payload.get("candidates").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for candidate in candidates {
+        let id = candidate.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let source_path = candidate.get("source_path").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let valid = candidate.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        out.push((id, source_path, valid, candidate));
+    }
+    Ok(out
+        .into_iter()
+        .map(|(id, source_path, valid, candidate)| {
+            let (name, description) = if source_path.is_empty() {
+                (id.clone(), String::new())
+            } else {
+                candidate_meta(&source_path)
+            };
+            let tokens = std::fs::metadata(&source_path).map(|m| estimate_tokens(m.len())).unwrap_or(0);
+            let diagnostics = candidate
+                .get("diagnostics")
+                .and_then(|v| v.as_array())
+                .map(|ds| ds.iter().filter_map(|d| d.as_str().or_else(|| d.get("message").and_then(|m| m.as_str()))).collect::<Vec<_>>().join("; "))
+                .unwrap_or_default();
+            ImportCandidate { id, name, description, tokens, source_path, valid, diagnostics }
+        })
+        .collect())
+}
+
+/// Install one folder as a personal skill: `install <dir> --scope user
+/// [--force] --json`. `force` only after an explicit Replace confirm (D61).
+pub fn install_skill_dir(program: &str, dir: &std::path::Path, force: bool) -> Result<(), String> {
+    let dir = dir.to_string_lossy().into_owned();
+    let mut owned = vec!["skills".to_owned(), "install".to_owned(), dir, "--scope".to_owned(), "user".to_owned()];
+    if force {
+        owned.push("--force".to_owned());
+    }
+    owned.push("--json".to_owned());
+    let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+    run_cli(program, &args, None).map(|_| ()).ok_or_else(|| "`muse skills install` did not answer. Try again.".to_owned())
+}
+
+/// Import every candidate from a source: `import --from <src> --json` (D61).
+/// A partial selection installs per chosen skill instead (see
+/// [`install_skill_dir`); `import` takes no filter (PS3).
+pub fn import_source(program: &str, source: ImportSource) -> Result<(), String> {
+    let from = source.arg();
+    run_cli(program, &["skills", "import", "--from", from, "--json"], None)
+        .map(|_| ())
+        .ok_or_else(|| "`muse skills import` did not answer. Try again.".to_owned())
+}
+
+/// Remove a personal skill: `uninstall <id> --json` (D62). Import and
+/// install copy, never link, so this never touches `~/.claude/skills` or
+/// `~/.codex/skills` (PS6).
+pub fn uninstall_skill(program: &str, id: &str) -> Result<(), String> {
+    run_cli(program, &["skills", "uninstall", id, "--json"], None)
+        .map(|_| ())
+        .ok_or_else(|| "`muse skills uninstall` did not answer. Try again.".to_owned())
+}
+
+/// A virtual skill's read-only SKILL.md preview (D60, K2 gap): `inspect
+/// --json`, frontmatter stripped, rendered with the library markdown by the
+/// caller.
+///
+/// muse 1.4.0's `inspect --json` carries no body — only metadata — so the
+/// preview is the description it does carry. A body under a future key is
+/// preferred when one appears.
+pub fn inspect_preview(program: &str, id: &str) -> Option<String> {
+    let stdout = run_cli(program, &["skills", "inspect", "--json", id], None)?;
+    let payload: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
+    let skill = payload.get("skill").unwrap_or(&payload);
+    for key in ["body", "markdown", "content", "skill_md", "text", "readme", "skillMd"] {
+        if let Some(text) = skill.get(key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            return Some(strip_frontmatter(text).to_owned());
+        }
+    }
+    let description = skill.get("description").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty())?;
+    Some(strip_frontmatter(description).to_owned())
 }
 
 /// The files under a skill's folder, relative to the folder, for the detail
@@ -765,5 +1151,153 @@ mod tests {
         assert_eq!(row.disk_path("/root"), None);
         row.path = Some(".agents/skills/git/SKILL.md".to_owned());
         assert!(!row.is_virtual());
+    }
+
+    #[test]
+    fn names_take_lowercase_hyphens_and_no_collisions() {
+        assert!(validate_skill_name("my-skill-2", &[]).is_ok());
+        assert!(validate_skill_name("", &[]).is_err());
+        assert!(validate_skill_name("Has Caps", &[]).is_err());
+        assert!(validate_skill_name("has space", &[]).is_err());
+        assert!(validate_skill_name("has_underscore", &[]).is_err());
+        assert!(validate_skill_name(&"n".repeat(64), &[]).is_ok());
+        assert!(validate_skill_name(&"n".repeat(65), &[]).is_err());
+        assert!(validate_skill_name("taken", &["taken".to_owned()]).is_err());
+        assert!(validate_skill_name("  trimmed  ", &["trimmed".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn descriptions_are_required_and_bounded() {
+        assert!(validate_skill_description("Does things.").is_ok());
+        assert!(validate_skill_description("   ").is_err());
+        assert!(validate_skill_description(&"d".repeat(1024)).is_ok());
+        assert!(validate_skill_description(&"d".repeat(1025)).is_err());
+    }
+
+    #[test]
+    fn the_scaffold_carries_frontmatter_then_a_template() {
+        let body = scaffold_skill_md("demo", "Does demo things.");
+        assert!(body.starts_with("---\nname: demo\ndescription: Does demo things.\n---\n"));
+        let (name, description) = frontmatter_meta(&body);
+        assert_eq!(name.as_deref(), Some("demo"));
+        assert_eq!(description.as_deref(), Some("Does demo things."));
+    }
+
+    #[test]
+    fn frontmatter_reads_quotes_and_continuations() {
+        let (name, description) = frontmatter_meta("---\nname: \"demo\"\ndescription: 'Does\ndemo things.'\n---\n# Demo\n");
+        assert_eq!(name.as_deref(), Some("demo"));
+        assert_eq!(description.as_deref(), Some("Does demo things."));
+        assert_eq!(frontmatter_meta("# No frontmatter\n"), (None, None));
+    }
+
+    #[test]
+    fn creating_a_project_skill_writes_its_file() {
+        let root = std::env::temp_dir().join(format!("baaz-k3-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch root");
+        let file = create_project_skill(root.to_str().expect("utf8"), "demo", "Does demo things.").expect("creates");
+        assert_eq!(file, root.join(".agents/skills/demo/SKILL.md"));
+        let body = std::fs::read_to_string(&file).expect("readable");
+        assert!(body.contains("name: demo"));
+        assert!(create_project_skill(root.to_str().expect("utf8"), "demo", "Other.").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_dry_run_parses_and_enriches() {
+        let dir = std::env::temp_dir().join(format!("baaz-k3-dry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill_dir = dir.join("alpha");
+        std::fs::create_dir_all(&skill_dir).expect("scratch skill");
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: alpha\ndescription: Alpha skill.\n---\n# Alpha\n").expect("write");
+        let payload = serde_json::json!({
+            "candidates": [
+                {"id": "alpha", "source_path": skill_dir.join("SKILL.md").to_string_lossy(), "valid": true, "diagnostics": []},
+                {"id": "ghost", "source_path": dir.join("ghost/SKILL.md").to_string_lossy(), "valid": false,
+                 "diagnostics": [{"message": "no SKILL.md"}]}
+            ]
+        });
+        let candidates = parse_dry_run(serde_json::to_vec(&payload).expect("json").as_slice()).expect("parses");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "alpha");
+        assert_eq!(candidates[0].description, "Alpha skill.");
+        assert!(candidates[0].tokens >= 1);
+        assert!(candidates[0].valid);
+        assert_eq!(candidates[1].name, "ghost");
+        assert_eq!(candidates[1].description, "");
+        assert_eq!(candidates[1].tokens, 0);
+        assert!(!candidates[1].valid);
+        assert_eq!(candidates[1].diagnostics, "no SKILL.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_status_names_new_replaces_and_installed() {
+        let dir = std::env::temp_dir().join(format!("baaz-k3-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let personal = dir.join("personal");
+        std::fs::create_dir_all(&personal).expect("scratch");
+        let installed = personal.join("SKILL.md");
+        std::fs::write(&installed, "---\nname: mine\ndescription: Mine.\n---\n").expect("write");
+        let source_same = dir.join("same.md");
+        let source_diff = dir.join("diff.md");
+        std::fs::write(&source_same, "---\nname: mine\ndescription: Mine.\n---\n").expect("write");
+        std::fs::write(&source_diff, "---\nname: mine\ndescription: Changed.\n---\n").expect("write");
+        let catalog = build_catalog(
+            "/root",
+            serde_json::json!({"skills": [
+                {"id": "mine", "name": "mine", "scope": "user",
+                 "path": installed.to_string_lossy(), "activation": "on"}
+            ], "diagnostics": []}),
+        );
+        assert_eq!(import_status("fresh", source_diff.to_str().expect("utf8"), &catalog), ImportStatus::New);
+        assert_eq!(
+            import_status("mine", source_diff.to_str().expect("utf8"), &catalog),
+            ImportStatus::Replaces
+        );
+        assert_eq!(
+            import_status("mine", source_same.to_str().expect("utf8"), &catalog),
+            ImportStatus::Installed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_trash_move_renames_past_collisions() {
+        let dir = std::env::temp_dir().join(format!("baaz-k3-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let trash = dir.join("Trash");
+        let first = dir.join("demo");
+        let second = dir.join("work/demo");
+        std::fs::create_dir_all(second.parent().expect("parent")).expect("scratch");
+        std::fs::create_dir_all(&first).expect("scratch");
+        std::fs::create_dir_all(&second).expect("scratch");
+        let moved_first = move_to_trash_dir(&first, &trash).expect("moves");
+        assert_eq!(moved_first, trash.join("demo"));
+        let moved_second = move_to_trash_dir(&second, &trash).expect("moves");
+        assert_eq!(moved_second, trash.join("demo 2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copying_a_skill_folder_reaches_nested_files() {
+        let dir = std::env::temp_dir().join(format!("baaz-k3-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let from = dir.join("from");
+        std::fs::create_dir_all(from.join("refs")).expect("scratch");
+        std::fs::write(from.join("SKILL.md"), "# Demo\n").expect("write");
+        std::fs::write(from.join("refs/notes.md"), "notes\n").expect("write");
+        copy_skill_dir(&from, &dir.join("to")).expect("copies");
+        assert!(dir.join("to/SKILL.md").is_file());
+        assert!(dir.join("to/refs/notes.md").is_file());
+        assert!(copy_skill_dir(&dir.join("missing"), &dir.join("nowhere")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_estimates_scale_with_bytes() {
+        assert_eq!(estimate_tokens(0), 1);
+        assert_eq!(estimate_tokens(400), 100);
     }
 }
