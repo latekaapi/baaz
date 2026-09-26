@@ -973,7 +973,14 @@ pub fn uninstall_skill(program: &str, id: &str) -> Result<(), String> {
 /// preferred when one appears.
 pub fn inspect_preview(program: &str, id: &str) -> Option<String> {
     let stdout = run_cli(program, &["skills", "inspect", "--json", id], None)?;
-    let payload: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
+    parse_inspect_preview(&stdout)
+}
+
+/// Parse one `skills inspect --json` payload into the read-only preview.
+/// Pure, so the scripted captures read the same shape the live path does
+/// (the offline fixture stands in for the CLI).
+pub fn parse_inspect_preview(stdout: &[u8]) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_slice(stdout).ok()?;
     let skill = payload.get("skill").unwrap_or(&payload);
     for key in ["body", "markdown", "content", "skill_md", "text", "readme", "skillMd"] {
         if let Some(text) = skill.get(key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
@@ -1299,5 +1306,23 @@ mod tests {
     fn token_estimates_scale_with_bytes() {
         assert_eq!(estimate_tokens(0), 1);
         assert_eq!(estimate_tokens(400), 100);
+    }
+
+    #[test]
+    fn inspect_prefers_a_body_but_falls_back_to_the_description() {
+        // A future body key wins over the description.
+        let with_body = serde_json::json!({
+            "skill": {"id": "bundled:demo", "description": "Does demo things.", "body": "---\nname: demo\n---\n\n# Demo\n"}
+        });
+        assert_eq!(
+            parse_inspect_preview(&serde_json::to_vec(&with_body).expect("json")),
+            Some("\n# Demo\n".to_owned())
+        );
+        // muse 1.4.0's `inspect --json` carries no body: the preview is
+        // the description it does carry — never `None` on a live skill.
+        let text = include_str!("../tests/fixtures/skills/inspect-browser-app-delivery.json");
+        let body = parse_inspect_preview(text.as_bytes()).expect("the fixture previews");
+        assert!(body.contains("browser app"), "unexpected preview: {body:.80}");
+        assert_eq!(parse_inspect_preview(b"not json"), None);
     }
 }

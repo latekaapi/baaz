@@ -1,0 +1,21 @@
+{
+  "skill": {
+    "id": "bundled:browser-app-delivery",
+    "name": "browser-app-delivery",
+    "display_name": "browser-app-delivery",
+    "description": "Deliver a runnable local browser app so the user can operate it on the first handoff. This delivery skill does not choose whether a requested local system should be a browser app. On a current turn that explicitly says to implement a brand-new browser project now, load bundled:greenfield-project-scaffolding before project work only after no-peek or permitted top-level placement facts prove that no named or suitable current-folder target resolves the root; never hand off from planning or answer-only turns, existing work, a named or suitable target, or standalone or single-file delivery. Resolve user-blocking product or interface choices with an available interaction surface; resolving those choices alone never authorizes implementation. Always call read_skill for bundled:browser-app-delivery before creating or materially changing a local browser app that owns its start path or a playable browser game. Also load it when the user requests a paste-ready, single-file, offline, or immediately playable browser artifact, even if no local start path should remain, unless the user says they will open or check it themselves or explicitly declines verification. On completed local-server delivery, include exact start commands, a concrete local URL, and explicit browser-open wording. On completed standalone delivery, hand off the exact artifact path or paste URL and smoke result without inventing a server. Do not load it for a self-contained static file that has no owned start path if the user either says they will open or check it themselves or explicitly declines verification. Do not load it for component/style-only edits, deployed sites, backend/API-only work, browser QA, review, explanation, plan-only, or explicit stop/no-tool turns.",
+    "short_description": null,
+    "scope": "bundled",
+    "source": {
+      "type": "local"
+    },
+    "path": "bundled://muse-core/skills/browser-app-delivery/SKILL.md",
+    "activation": "on",
+    "diagnostics": [],
+    "provenance": null,
+    "frontmatter": {
+      "known": {},
+      "unknown": {}
+    }
+  }
+}

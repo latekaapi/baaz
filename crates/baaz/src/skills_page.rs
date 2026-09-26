@@ -18,6 +18,7 @@
 
 use aui::data::button;
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
+use aui::overlay::popover_layer;
 use aui::skills::{
     added_tokens, cost_meter, format_tokens, import_preview, menu_row_two_line,
     scope_section_header, segmented, selected_rows, skill_detail, skill_row, switch, CostSegment,
@@ -1444,12 +1445,20 @@ impl Harness {
             _ => {}
         }
         // The capture shows the detail with the list: select the first live
-        // row, with its disk body when it has one.
+        // row, with its disk body when it has one. A virtual first row
+        // (the page fixture opens on a bundled skill) reads the inspect
+        // fixture through the live parse, so the read-only preview draws
+        // instead of "No preview available" — there is no CLI offline.
         let root = self.skills_root();
         if let Some(first) = self.skills.catalog.rows.first().cloned() {
             self.skills.selected = Some(first.id.clone());
             if !first.is_virtual() {
                 if let Some(body) = skills::skill_body(&self.args.program, &first, &root) {
+                    self.skills.detail_body = Some((first.id.clone(), body));
+                }
+            } else {
+                let text = include_str!("../tests/fixtures/skills/inspect-browser-app-delivery.json");
+                if let Some(body) = skills::parse_inspect_preview(text.as_bytes()) {
                     self.skills.detail_body = Some((first.id.clone(), body));
                 }
             }
@@ -1542,10 +1551,10 @@ impl Harness {
                     .on_click(add_skill),
             );
 
+        // The "Add skill ▾" menu never joins this column: it floats in the
+        // popover layer above the page (see `render_add_menu`), so opening
+        // it cannot move the meter, the filter row or the list.
         let mut column = v_flex().size_full().child(header);
-        if self.skills.add_menu_open {
-            column = column.child(self.render_add_menu(cx));
-        }
 
         // Provider sessions still open the page; the line under the header
         // says whose skills these are.
@@ -1724,9 +1733,14 @@ impl Harness {
 
         column = column.child(body);
 
-        // The modal layer stands above the list, centred on a scrim.
+        // The popover layer stands above the page: the Add menu, then the
+        // modal layer centred on a scrim. Neither joins the column, so
+        // neither moves the page's layout.
         let overlay = self.render_skills_dialog(window, cx);
         let mut root = div().size_full().relative().child(column);
+        if self.skills.add_menu_open {
+            root = root.child(self.render_add_menu(cx));
+        }
         if let Some(overlay) = overlay {
             root = root.child(overlay);
         }
@@ -1742,9 +1756,10 @@ impl Harness {
 
     /// The "Add skill ▾" menu (A1): the library two-line rows in order —
     /// New skill…, Install from folder…, Import from Claude Code / Codex
-    /// with their "N new" trails, Ask Muse to write one. Right-aligned
-    /// under the header; every row carries its menu role and label from
-    /// the library component.
+    /// with their "N new" trails, Ask Muse to write one. It floats in the
+    /// popover layer, right-aligned under the header — never in the page
+    /// column, so opening it cannot move the page's layout. Every row
+    /// carries its menu role and label from the library component.
     fn render_add_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         // One listener per row: the rows share nothing, so no handler
         // moves twice.
@@ -1759,13 +1774,13 @@ impl Harness {
         });
         let ask = cx.listener(|this: &mut Self, _: &SharedString, window, cx| this.ask_muse_to_write(window, cx));
         let p = cx.aui().colors;
-        h_flex()
-            .flex_none()
-            .w_full()
-            .px(px(12.0))
-            .justify_end()
-            .child(
-                v_flex()
+        // A click outside the card closes the menu. The catcher is
+        // transparent, so the page behind it captures unchanged.
+        let dismiss = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.skills.add_menu_open = false;
+            cx.notify();
+        });
+        let card = v_flex()
                     .id("skills-add-menu")
                     .flex_none()
                     .w(px(380.0))
@@ -1832,9 +1847,17 @@ impl Harness {
                         .key("ask")
                         .trailing("uses a turn")
                         .on_activate(move |key, window, cx| ask(key, window, cx)),
-                    ),
-            )
-            .into_any_element()
+                    );
+        // The popover layer, never the column: the menu floats right-
+        // aligned under the header and the page's layout does not move.
+        popover_layer(
+            div()
+                .absolute()
+                .inset_0()
+                .child(div().id("skills-add-scrim").occlude().absolute().inset_0().on_click(dismiss))
+                .child(div().absolute().top(px(52.0)).right(px(12.0)).child(card)),
+        )
+        .into_any_element()
     }
 
     /// The modal layer (A2–A6), centred over a scrim above the list.
@@ -2152,10 +2175,17 @@ impl Harness {
         });
         let cancel = cx.listener(|this: &mut Self, _: &ImportPreviewIntent, _, cx| this.close_skills_dialog(cx));
         let run = cx.listener(|this: &mut Self, _: &ImportPreviewIntent, _, cx| this.run_import(cx));
-        import_preview(format!("skills-import-{}", source.arg()), format!("Import from {}", source.label()))
+        // One checkbox row per candidate (D61): each skill with its New /
+        // Replaces yours / Already installed chip and tokens. The primary
+        // label defaults to the picked count, so it follows the checkboxes.
+        let mut preview = import_preview(format!("skills-import-{}", source.arg()), format!("Import from {}", source.label()))
             .subtitle(subtitle)
             .summary(summary)
-            .hint("Nothing is copied until you import.")
+            .hint("Nothing is copied until you import.");
+        for row in library_rows {
+            preview = preview.row(row);
+        }
+        preview
             .on_intent(move |intent, window, cx| match intent {
                 ImportPreviewIntent::ToggleRow(id) => toggle(&id, window, cx),
                 ImportPreviewIntent::Cancel => cancel(&intent, window, cx),
