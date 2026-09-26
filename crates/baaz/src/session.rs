@@ -272,6 +272,17 @@ pub enum SessionEvent {
         /// draw the `ForkedFrom` marker its `forkedFrom` carries.
         session: serde_json::Value,
     },
+    /// `ForkSession` on a provider lane succeeded: open the fork as a new
+    /// provider-lane view on the same provider. The application connects
+    /// a fresh child and resumes the fork there, so the source view's
+    /// lane is never disturbed.
+    ForkedOnProvider {
+        /// The fork's session id, as the `ForkSession` ack minted it.
+        session_id: String,
+        /// The backend the fork runs on — the source view's own provider,
+        /// never a switch.
+        provider: ProviderId,
+    },
     /// `/logout`.
     Logout,
     /// `/status` or `/usage`: the application owns the dialog stack.
@@ -941,20 +952,58 @@ impl SessionView {
         std::mem::take(&mut self.external_outbox)
     }
 
-    /// The model id the session is actually on, for the composer chip. The
-    /// provider lane's pick wins while it stands: no server echo flows
-    /// back into this fold for those sessions, so the chip reads the
-    /// recorded pick rather than going stale.
-    pub fn model(&self) -> SharedString {
+    /// The session's effective model id: the wire spelling, never display.
+    /// The provider lane's pick wins while it stands: no server echo flows
+    /// back into this fold for those sessions, so the id reads the
+    /// recorded pick rather than going stale. On a provider lane the
+    /// catalog's active row counts too — a fresh Codex open flags its
+    /// effective model there, with no pick yet. The muse fallback is the
+    /// provider id, exactly as it always was.
+    pub(crate) fn model_id(&self) -> String {
         if let Some(pending) = self.pending_model.as_deref() {
-            return SharedString::from(pending.to_owned());
+            return pending.to_owned();
         }
-        self.fold
+        if let Some(id) = self
+            .fold
             .side(&self.session_id)
             .and_then(|s| s.model.as_ref().map(|m| m.model_id.clone()))
-            .or_else(|| self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()))
-            .map(SharedString::from)
-            .unwrap_or_else(|| SharedString::from(self.provider_id.clone()))
+        {
+            return id;
+        }
+        if let Some(id) = self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()) {
+            return id;
+        }
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+            if let Some(id) =
+                self.models.iter().find(|m| m.is_active).map(|m| m.model_id.clone())
+            {
+                return id;
+            }
+            return String::new();
+        }
+        self.provider_id.clone()
+    }
+
+    /// What the composer model chip reads. The muse lane shows the id,
+    /// exactly as it always did. A provider lane shows the effective
+    /// model's human name from the live catalog — never the provider's
+    /// wire id (`claude-code` is not a model); with no model known yet,
+    /// the provider's human label.
+    pub fn model(&self) -> SharedString {
+        if crate::providers::uses_legacy_pump(self.provider_kind()) {
+            return SharedString::from(self.model_id());
+        }
+        let id = self.model_id();
+        if id.is_empty() {
+            return SharedString::from(self.provider_kind().label().to_owned());
+        }
+        let label = self
+            .models
+            .iter()
+            .find(|m| m.model_id == id)
+            .map(|m| m.display_label.clone())
+            .unwrap_or(id);
+        SharedString::from(label)
     }
 
     /// The context meter's state, from `session/contextUsage` joined with the
@@ -962,8 +1011,14 @@ impl SessionView {
     ///
     /// A session that has not reported context yet still gets a meter: the
     /// cumulative totals are real, and a meter that appeared only after the
-    /// first turn would move the toolbar under the person's hand.
+    /// first turn would move the toolbar under the person's hand. The muse
+    /// lane reads this path, exactly as it always did; a provider lane
+    /// never receives `session/contextUsage`, so it reads the folded
+    /// transcript's `TurnMeta` instead (see [`Self::provider_context`]).
     pub fn context(&self) -> ContextMeterState {
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+            return self.provider_context();
+        }
         let side = self.fold.side(&self.session_id);
         let cumulative = side.map(|s| s.cumulative.clone()).unwrap_or_default();
         let usage = self.fake_context.clone().or_else(|| side.and_then(|s| s.context.clone()));
@@ -979,6 +1034,63 @@ impl SessionView {
             output_tokens: cumulative.output_tokens,
             total_tokens: cumulative.total_tokens,
         }
+    }
+
+    /// A provider lane's meter, folded from the transcript: every finished
+    /// assistant turn's `TurnMeta` summed into prompt/output totals. No
+    /// adapter reports a context window — `TurnMeta` carries none — so the
+    /// meter reads "N tokens", never a percentage, and pressure stays
+    /// `Normal`: only the server owns those thresholds. Cache tokens are
+    /// deliberately excluded from the sums: `TurnMeta` warns they may sit
+    /// inside `tokens_in` depending on the provider's convention, so adding
+    /// them double-counts.
+    fn provider_context(&self) -> ContextMeterState {
+        let mut prompt_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        if let Some(session) = self.session() {
+            for turn in session.turns.iter() {
+                if let Turn::Assistant { meta, .. } = turn {
+                    prompt_tokens += meta.tokens_in;
+                    output_tokens += meta.tokens_out;
+                }
+            }
+        }
+        let total_tokens = prompt_tokens + output_tokens;
+        ContextMeterState {
+            used_tokens: total_tokens,
+            window_tokens: None,
+            pressure: ContextPressure::Normal,
+            prompt_tokens,
+            output_tokens,
+            total_tokens,
+        }
+    }
+
+    /// The capability strip's rows: one `(label, reason)` per `Unavailable`
+    /// capability with a user-facing control. `Unverified` capabilities are
+    /// attempted everywhere and never advertised — the strip is the refusal
+    /// list, not the ignorance list. muse has no strip at all.
+    pub(super) fn capability_strip_rows(&self) -> Vec<(String, String)> {
+        let kind = self.provider_kind();
+        if crate::providers::uses_legacy_pump(kind) {
+            return Vec::new();
+        }
+        [
+            ("Steer into the running turn", provider::Capability::SteerTurn),
+            ("Stop the running turn", provider::Capability::TurnControl),
+            ("Answer questions", provider::Capability::Questions),
+            ("Run shell commands", provider::Capability::SessionShell),
+            ("Compact the context", provider::Capability::CompactSession),
+            ("Fork this session", provider::Capability::ForkSession),
+        ]
+        .into_iter()
+        .filter_map(|(label, capability)| match crate::providers::capability_state(kind, capability) {
+            provider::CapabilityState::Unavailable { reason } => {
+                Some((label.to_owned(), reason))
+            }
+            _ => None,
+        })
+        .collect()
     }
 
     /// The approval mode chip's label.

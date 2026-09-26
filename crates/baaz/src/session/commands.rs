@@ -125,6 +125,12 @@ impl SessionView {
     /// attachments as one `SubmitInput`. `display_text` is what the person
     /// typed, verbatim — what the transcript shows — while the model-visible
     /// parts carry the files inline and the images by value.
+    ///
+    /// Effort stays client-side here on purpose: neither adapter's turn
+    /// carries one — Codex's `turn/start` takes thread, model and text
+    /// only (`provider-codex/src/child.rs::turn_start_request`), and Claude
+    /// Code's stdin line takes text only — so the picked effort rides the
+    /// chip and the project default, never an invented wire field.
     fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
@@ -477,22 +483,47 @@ impl SessionView {
 
     /// Switch the session's model. On the muse lane that is the existing
     /// `session/setModel` path, and the chip moves only on
-    /// `session/modelChanged`, never here. On the provider lane (Claude
-    /// Code / Codex) the pick travels as a neutral `SelectModel` on the
-    /// outbox the lane drains — never past the seam to the muse wire —
-    /// and the chip reads the recorded pick at once, since no echo flows
-    /// back into this fold for those sessions. Both lanes apply to a
-    /// session with turns in it exactly as to a fresh one: model is
-    /// switchable, provider is not, and nothing here counts turns.
+    /// `session/modelChanged`, never here. On a provider kind (Claude
+    /// Code / Codex) the pick travels as a neutral `SelectModel` — never
+    /// past the seam to the muse wire — and the chip reads the recorded
+    /// pick at once, since no echo flows back into this fold for those
+    /// sessions. A live lane sends it now through the dispatch point; with
+    /// no lane attached the command parks on the outbox the lane drains,
+    /// so an offline pick still records. Both lanes apply to a session
+    /// with turns in it exactly as to a fresh one: model is switchable,
+    /// provider is not, and nothing here counts turns.
     pub(crate) fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
         if !crate::providers::uses_legacy_pump(self.provider_kind()) {
-            self.external_outbox.push(ProviderCommand::SelectModel {
+            let command = ProviderCommand::SelectModel {
                 request_id: new_command_id(),
                 session_id: self.session_id.clone(),
                 model: model_id.to_owned(),
                 model_provider: None,
-            });
+            };
+            let previous = self.pending_model.clone();
             self.apply_model_selected(model_id, cx);
+            if self.is_provider_lane() {
+                let picked = model_id.to_owned();
+                self.provider_send(command, cx, move |this, result, cx| {
+                    if let Err(error) = result {
+                        // The pick never landed: drop the recording so the
+                        // chip stops claiming a model the child never took,
+                        // and banner the reason — never silence.
+                        if this.pending_model.as_deref() == Some(picked.as_str()) {
+                            this.pending_model = previous;
+                            for row in &mut this.models {
+                                row.is_active = this
+                                    .pending_model
+                                    .as_deref()
+                                    .is_some_and(|pending| pending == row.model_id);
+                            }
+                        }
+                        this.report_provider_error(&error, cx);
+                    }
+                });
+            } else {
+                self.external_outbox.push(command);
+            }
             return;
         }
         let model = self.model_selection_for(model_id);
@@ -593,8 +624,26 @@ impl SessionView {
     }
 
     /// `session/setApprovalMode`. The chip and the marker both come from
-    /// `session/approvalModeChanged`.
+    /// `session/approvalModeChanged`. On a provider lane the mode travels
+    /// as a neutral `SelectApprovalMode` — the seam's closed mode set,
+    /// mapped one-to-one, never reinterpreted — and a refusal banners its
+    /// reason: neither new adapter accepts a mid-session switch (Claude
+    /// Code takes `--permission-mode` at spawn; Codex takes its profile
+    /// at open), so the pick is attempted and the reason surfaces.
     pub(super) fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            let command = ProviderCommand::SelectApprovalMode {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                mode,
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            return;
+        }
         let params = SessionSetApprovalModeParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
@@ -609,7 +658,37 @@ impl SessionView {
     }
 
     /// `session/compact`. An ack of `noop` is a success, and says why.
+    /// On a provider lane the request travels as a neutral
+    /// `CompactSession` where the capability is anything but `Unavailable`
+    /// — and a refusal banners its reason rather than going quiet (Claude
+    /// Code has no compact-now over `--print`; Codex never executed one).
     pub(crate) fn compact(&mut self, cx: &mut Context<Self>) {
+        if self.is_provider_lane() {
+            if !crate::providers::capability_state(self.provider_kind(), provider::Capability::CompactSession)
+                .allows_attempt()
+            {
+                let reason = crate::providers::gate(
+                    self.provider_kind(),
+                    provider::Capability::CompactSession,
+                )
+                .unwrap_or_else(|| "Compacting is not available on this provider.".into());
+                self.banner = Some(reason);
+                self.banner_action = None;
+                cx.notify();
+                return;
+            }
+            let command = ProviderCommand::CompactSession {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                through_turn: None,
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            return;
+        }
         let params = SessionCompactParams {
             command_id: new_command_id(),
             session_id: self.session_id.clone(),
@@ -631,20 +710,26 @@ impl SessionView {
     ///
     /// Per lane: muse lists over its own wire; Claude Code folds Baaz's
     /// supplied alias list (the `Emulated` cell — no fixture enumerates
-    /// them, so Baaz owns them); Codex answers `model/list` from its
-    /// session child, which this view does not hold, so the picker says
-    /// why instead of opening empty. Whatever cannot answer explains
-    /// itself in the picker's typed-reason row — never a dead click and
-    /// never a silently empty menu.
+    /// them, so Baaz owns them); Codex asks its session child with
+    /// `ListModels` after open, and the menu lists what the child returns
+    /// — with no lane attached the picker says why instead of opening
+    /// empty. Whatever cannot answer explains itself in the picker's
+    /// typed-reason row — never a dead click and never a silently empty
+    /// menu. A background fetch that fails stays quiet apart from that
+    /// row: it never banners (see `request_provider_models`).
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
         match self.provider_kind() {
             ProviderId::ClaudeCode => {
-                let current = self.model().to_string();
+                let current = self.model_id();
                 let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
                 let provider = self.provider_id.clone();
                 self.apply_model_catalog(rows, &provider, cx);
             }
             ProviderId::Codex => {
+                if self.is_provider_lane() {
+                    self.request_provider_models(cx);
+                    return;
+                }
                 self.models_error = Some(
                     "Codex lists models from its own session child, and this view holds none: \
                      reopen the session on its lane to list them"
@@ -744,6 +829,33 @@ impl SessionView {
     /// says it did.
     pub fn set_plan(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.plan == on {
+            return;
+        }
+        // A provider lane has no plan-mode channel: turning it on would
+        // need `DenyUnmatched`, which both adapters refuse (spawn-time /
+        // open-time config only). Attempt it honestly through the mode
+        // switch and stand the flag back down on refusal, so the pill
+        // never claims enforcement the child never took.
+        if self.is_provider_lane() {
+            self.plan = on;
+            let restore = if on {
+                self.plan_previous_mode = Some(self.mode());
+                PermissionMode::DenyUnmatched
+            } else {
+                self.plan_previous_mode.take().unwrap_or_default()
+            };
+            let command = ProviderCommand::SelectApprovalMode {
+                request_id: new_command_id(),
+                session_id: self.session_id.clone(),
+                mode: restore,
+            };
+            self.provider_send(command, cx, move |this, result, cx| {
+                if let Err(error) = result {
+                    this.plan = !on;
+                    this.report_provider_error(&error, cx);
+                }
+            });
+            cx.notify();
             return;
         }
         self.plan = on;
@@ -1030,10 +1142,10 @@ mod tests {
                 assert!(view.models.iter().all(|m| !m.is_active));
             });
             // The pick routes through the seam (outbox `SelectModel`) and
-            // the chip updates at once.
+            // the chip updates at once, with the human name.
             view.update(cx, |view, cx| view.set_model("opus", cx));
             view.update(cx, |view, cx| {
-                assert_eq!(view.model().as_ref(), "opus");
+                assert_eq!(view.model().as_ref(), "Claude Opus");
                 assert!(view.take_external_outbox().iter().any(|command| matches!(
                     command,
                     ProviderCommand::SelectModel { model, .. } if model == "opus"
@@ -1110,7 +1222,7 @@ mod tests {
             // turns in the session exactly as without.
             view.update(cx, |view, cx| view.set_model("gpt-5.6-terra", cx));
             view.update(cx, |view, _| {
-                assert_eq!(view.model().as_ref(), "gpt-5.6-terra");
+                assert_eq!(view.model().as_ref(), "GPT-5.6-Terra");
                 let active: Vec<&str> = view
                     .models
                     .iter()

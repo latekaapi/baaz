@@ -1969,24 +1969,21 @@ fn wheel_capture(cx: &mut Context<SessionView>) -> gpui::AnyElement {
 }
 
 impl SessionView {
-    /// The capability strip: what this session's provider cannot do (or
-    /// has not proven), with the typed reason beside each gated control.
+    /// The capability strip: what this session's provider cannot do, with
+    /// the typed reason beside each refusal — one short line each, in
+    /// plain words.
     ///
     /// This is the point of the seam made visible: the same screen
-    /// renders differently per provider — Claude Code shows steering and
-    /// interruption as unverified and questions as unavailable-in-prose,
-    /// Codex shows steering as native, and muse shows no strip at all.
-    /// `None` is the muse answer: nothing gated, nothing shown.
+    /// renders differently per provider — Claude Code shows questions as
+    /// unavailable-in-prose, Codex and muse show no strip at all.
+    /// `Unverified` capabilities are attempted everywhere and never
+    /// advertised here. `None` is the muse answer: nothing refused,
+    /// nothing shown.
     pub(super) fn render_capability_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kind = self.provider_kind();
-        let rows: Vec<(String, String)> = [
-            ("Steer into the running turn", self.steer_gate()),
-            ("Stop the running turn", self.turn_gate()),
-            ("Answer questions", self.questions_gate()),
-        ]
-        .into_iter()
-        .filter_map(|(label, gate)| gate.map(|reason| (label.to_owned(), reason)))
-        .collect();
+        // The refusal list, never the ignorance list: `Unverified`
+        // capabilities are attempted everywhere and unadvertised.
+        let rows = self.capability_strip_rows();
         if rows.is_empty() {
             return None;
         }

@@ -175,17 +175,19 @@ the run it names.
 
 ### The gate, visible
 
-`providers::gate` is what the screen reads. `Unavailable` refuses, so
+`providers::gate` is what disabled controls read. `Unavailable` refuses, so
 the control is disabled with the provider's own reason (`steer_text`
 and `interrupt` banner and keep the words rather than send a command
 the seam would refuse). `Unverified` is attempted everywhere — the seam
-never refuses it — so it stays offered but visibly marked. The
-capability strip above the composer is the same screen rendering
-differently per provider: Claude Code shows steering and interruption
-as unverified and questions as unavailable-in-prose; Codex shows
-steering as native; muse shows no strip at all. If the strip ever reads
-the same for two providers, the spec is decoration and the task is not
-done.
+never refuses it — so it stays offered and unmarked. The capability
+strip above the composer names only `Unavailable` capabilities, each
+with its human reason in plain words, one short line (`On <Provider>
+in this session: …`). `Unverified` capabilities are attempted and not
+advertised: the strip is the refusal list, never the ignorance list.
+Today that means Claude Code shows questions as unavailable-in-prose
+and nothing else; Codex and muse show no strip at all. If the strip
+ever explains an `Unverified` cell — the old "nobody has probed it
+live" wording — the spec is decoration and the task is not done.
 
 ### Approvals on the existing surface
 
