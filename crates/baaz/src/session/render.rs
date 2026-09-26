@@ -1501,8 +1501,18 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         skill_rows
                             .iter()
                             .map(|s| {
+                                // D64: Only / skills are marked with their
+                                // mode; the rest wear their scope.
+                                let tag = if matches!(
+                                    s.activation,
+                                    crate::skills::Activation::UserInvocableOnly
+                                ) {
+                                    format!("Only /{}", s.name)
+                                } else {
+                                    s.scope().to_owned()
+                                };
                                 CommandItem::new(s.id.clone(), format!("/{}", s.name), s.summary())
-                                    .source_tag(s.scope().to_owned())
+                                    .source_tag(tag)
                             })
                             .collect(),
                     ));
@@ -1567,16 +1577,21 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .into_iter()
             .filter(|c| c.slash().trim_start_matches('/').to_lowercase().starts_with(&needle))
             .collect();
+        // D64: the menu shares the page's catalog — Off hidden — then the
+        // menu's own prefix match and the F7 command-name shadow rule.
         let skill_rows: Vec<skills::Skill> = self
             .overlays
             .read(cx)
             .skills_for(&self.workspace)
             .iter()
+            .filter(|s| s.in_slash_menu())
             .filter(|s| s.name.to_lowercase().starts_with(&needle))
             // F7: a skill whose name is already a client command is hidden.
             // Muse ships `plan`, and the menu offering both `/plan` the mode and
             // `/plan` the skill — which do different things — was a trap.
             .filter(|s| !Command::ALL.iter().any(|c| c.slash().trim_start_matches('/') == s.name))
+            // D64: the menu shares the page's catalog — Off hidden.
+            .filter(|s| s.in_slash_menu())
             .take(SKILL_ROWS)
             .cloned()
             .collect();

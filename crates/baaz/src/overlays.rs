@@ -358,6 +358,8 @@ pub enum Command {
     Logout,
     /// Show this menu, unfiltered.
     Help,
+    /// Open the Skills page.
+    Skills,
     /// Show the browser in the right pane.
     RightBrowser,
     /// Review the diff in the right pane.
@@ -378,7 +380,7 @@ impl Command {
     /// The six window-level commands sit together just before `Help`: the
     /// four right-pane commands as one group, then the two terminal commands
     /// as another, with `Help` still closing the list.
-    pub const ALL: [Command; 23] = [
+    pub const ALL: [Command; 24] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -401,6 +403,7 @@ impl Command {
         Command::RightFiles,
         Command::Terminal,
         Command::NewTerminalCmd,
+        Command::Skills,
         Command::Help,
     ];
 
@@ -430,6 +433,7 @@ impl Command {
             Command::RightFiles => "/files",
             Command::Terminal => "/terminal",
             Command::NewTerminalCmd => "/new-terminal",
+            Command::Skills => "/skills",
         }
     }
 
@@ -459,6 +463,7 @@ impl Command {
             Command::RightFiles => "Show the file tree in the right pane",
             Command::Terminal => "Toggle the terminal dock",
             Command::NewTerminalCmd => "Open a new terminal tab",
+            Command::Skills => "Open the Skills page",
         }
     }
 
@@ -615,7 +620,7 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
-        assert_eq!(Command::ALL.len(), 23, "the palette lists every command");
+        assert_eq!(Command::ALL.len(), 24, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
             assert_eq!(Command::parse_line(command.slash()), Some((command, "")));

@@ -70,6 +70,7 @@ mod shot;
 mod sidebar;
 mod sidebar_view;
 mod skills;
+mod skills_page;
 mod steps;
 mod store;
 mod terminal;

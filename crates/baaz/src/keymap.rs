@@ -123,6 +123,12 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "NoAction", keystroke: "cmd-u", context: Some("BaazTerminal"), category: "terminal", label: "Terminal takes the key" },
     KeymapEntry { action: "NoAction", keystroke: "cmd-enter", context: Some("BaazTerminal"), category: "terminal", label: "Terminal takes the key" },
     KeymapEntry { action: "NoAction", keystroke: "shift-tab", context: Some("BaazTerminal"), category: "terminal", label: "Terminal takes the key" },
+    KeymapEntry { action: "SkillsUp", keystroke: "up", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Previous skill" },
+    KeymapEntry { action: "SkillsDown", keystroke: "down", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Next skill" },
+    KeymapEntry { action: "SkillsToggle", keystroke: "space", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Toggle the selected skill" },
+    KeymapEntry { action: "SkillsEnter", keystroke: "enter", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Focus the skill detail" },
+    KeymapEntry { action: "SkillsFind", keystroke: "cmd-f", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Search skills" },
+    KeymapEntry { action: "SkillsClose", keystroke: "escape", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Leave the Skills page" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
@@ -185,6 +191,12 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             context,
         )),
         "TerminalSigint" => Some(gpui::KeyBinding::new(keystroke, crate::app::TerminalSigint, context)),
+        "SkillsUp" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsUp, context)),
+        "SkillsDown" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsDown, context)),
+        "SkillsToggle" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsToggle, context)),
+        "SkillsEnter" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsEnter, context)),
+        "SkillsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsFind, context)),
+        "SkillsClose" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsClose, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
@@ -836,7 +848,7 @@ mod tests {
     fn every_row_has_a_category_and_label() {
         let categories: HashSet<&str> = [
             "composer", "turn", "session", "project", "picker", "palette", "search", "window", "settings",
-            "sidebar", "transcript", "terminal", "pane",
+            "sidebar", "transcript", "terminal", "pane", "skills",
         ]
         .into_iter()
         .collect();

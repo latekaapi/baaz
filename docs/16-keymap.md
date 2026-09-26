@@ -147,7 +147,16 @@ does, the only way to set a binding is to hand-edit `keymap.json` — and
 nothing here opens a window or presses a key, so the tests assert what was
 installed into gpui, not a real keystroke firing.
 
-### 3.3 Deliberately not doing
+### 3.3 The Skills context (K2, 2026-09-27)
+
+The Skills page wears its own context, `HarnessSkills`, so its six keys
+never collide with the composer's: ↑/↓ move the row selection, Space flips
+the selected skill, Enter focuses the detail pane, ⌘F focuses search, Esc
+leaves the page. All six live in the keymap table (`category: skills`) with
+human labels, so the Settings UI and the generated sheet (docs/08-keymap.md)
+pick them up with the rest.
+
+### 3.4 Deliberately not doing
 
 - **No base-keymap presets** (VS Code, JetBrains, …). Zed can afford eight
   because people arrive at an editor with muscle memory; for a session harness

@@ -93,6 +93,19 @@ rows above. The composer's Enter, paste, history and ⇧Tab keys, and the
 turn's ⌃C, are nulled in `BaazTerminal` so they never fire while the dock
 holds the keyboard.
 
+## Skills
+
+The page wears the `HarnessSkills` context (docs/16-keymap.md §3.3), so
+these never reach the composer.
+
+| Key | What it does |
+|---|---|
+| ↑ / ↓ | Previous / next skill row |
+| Space | Flip the selected skill on / off |
+| Enter | Focus the skill detail |
+| ⌘F | Focus the skills search field |
+| Esc | Leave the Skills page |
+
 ## Play buttons
 
 No binding — both are clicks, and no click means no execution. Every shell

@@ -186,6 +186,18 @@ actions!(
         EditPaste,
         /// Select all (Edit menu, for OS recognition; the focused field owns the keys).
         EditSelectAll,
+        /// Move the Skills page selection up (↑).
+        SkillsUp,
+        /// Move the Skills page selection down (↓).
+        SkillsDown,
+        /// Flip the selected skill on or off (Space).
+        SkillsToggle,
+        /// Focus the Skills page detail pane (Enter).
+        SkillsEnter,
+        /// Focus the Skills page search field (⌘F).
+        SkillsFind,
+        /// Leave the Skills page (Escape).
+        SkillsClose,
     ]
 );
 
@@ -708,6 +720,11 @@ pub struct Harness {
     /// The session whose row is being renamed in place, and the field doing it.
     pub(crate) renaming: Option<String>,
     pub(crate) rename: Entity<TextareaState>,
+    /// The Skills page state: open flag, catalog, filter, search and
+    /// selection (docs/15-skills.md §4).
+    pub(crate) skills: crate::skills_page::SkillsPage,
+    /// The Skills page search field (⌘F on the page; name and description).
+    pub(crate) skills_query: Entity<TextareaState>,
     /// The pulse rings' timebase: sampled phases count cycles since here, so
     /// every dot in a frame agrees and restarts never jump.
     pub(crate) pulse_epoch: std::time::Instant,
@@ -849,6 +866,7 @@ impl Harness {
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
         let commands_query = cx.new(|cx| composer_state_rows("Every command in this build", 1, 1, window, cx));
+        let skills_query = cx.new(|cx| composer_state_rows("Search skills", 1, 1, window, cx));
         // The sidebar column's own view: the weak handle
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
@@ -947,6 +965,8 @@ impl Harness {
             search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
+            skills: crate::skills_page::SkillsPage::default(),
+            skills_query: skills_query.clone(),
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
             session_switch_pending: false,
@@ -2115,12 +2135,17 @@ impl Harness {
         // header answers on the click's own frame, before any page arrives.
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
-        let label = target.and_then(|id| {
-            self.sessions.iter().find(|e| e.id == id).map(|e| {
-                let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                crate::sidebar::display_label(&e.label, pending).to_owned()
+        // The Skills page names itself after the crumb: "Skills · [project]".
+        let label = if self.skills.open {
+            Some("Skills".to_owned())
+        } else {
+            target.and_then(|id| {
+                self.sessions.iter().find(|e| e.id == id).map(|e| {
+                    let pending = e.title_pending || self.titles_pending.contains(&e.id);
+                    crate::sidebar::display_label(&e.label, pending).to_owned()
+                })
             })
-        });
+        };
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         // The project crumb: name and chevron as one click target that opens
@@ -2423,7 +2448,11 @@ impl Harness {
         // overlay would keep asking for the next frame while its exit runs.
         // `render_no_session` stays inline — there is no view to cache on,
         // and the screen is static.
-        let body = match self.active.clone() {
+        // Route::Skills: the page replaces the transcript area while open.
+        let body = if self.skills.open {
+            self.render_skills_page(window, cx)
+        } else {
+            match self.active.clone() {
             Some(view) => {
                 let transcript = view
                     .clone()
@@ -2451,6 +2480,7 @@ impl Harness {
                     .into_any_element()
             }
             None => self.render_no_session(window, cx),
+            }
         };
         let dock = self.render_terminal_dock(window, cx);
         v_flex()

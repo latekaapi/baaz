@@ -198,8 +198,10 @@ impl Harness {
         }
         let program = self.args.program.clone();
         let work = move || {
-            let skills = skills::list_in(&program, Some(&root));
-            let files = files::walk(&root);
+            // The `/` menu reads the page's catalog (D64): one list with
+            // `--workspace --trust-workspace`, fully parsed.
+            let catalog = skills::list_catalog(&program, &root.to_string_lossy());
+            let (skills, files, root) = (catalog.rows, files::walk(&root), root);
             (skills, files, root)
         };
         self.wire_call(cx, work, |this, (skills, files, root), cx| {
@@ -541,13 +543,19 @@ impl Harness {
     /// Run one window-level ⌘K command, returning whether it was one.
     ///
     /// Window commands act on the window itself — the right pane, the
-    /// terminal dock — so they run here on [`Harness`], before the session
-    /// delegation in [`Self::run_palette_row`], which does nothing when no
-    /// session is open. Session commands return `false` and keep their old
-    /// path. Both sides list their variants explicitly, with no `_` arm:
-    /// adding command 24 must force a decision about which side it is on.
+    /// terminal dock, the Skills page — so they run here on [`Harness`],
+    /// before the session delegation in [`Self::run_palette_row`], which
+    /// does nothing when no session is open. Session commands return
+    /// `false` and keep their old path. Both sides list their variants
+    /// explicitly, with no `_` arm: adding a command must force a decision
+    /// about which side it is on.
     pub(crate) fn run_window_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match command {
+            Command::Skills => {
+                let _ = window;
+                self.open_skills(cx);
+                true
+            }
             Command::RightBrowser => {
                 self.show_right(RightKind::Browser, cx);
                 true
@@ -1353,12 +1361,13 @@ mod tests {
                     | Command::RightGit
                     | Command::RightFiles
                     | Command::Terminal
+                    | Command::Skills
                     | Command::NewTerminalCmd
             );
             assert_eq!(handled, is_window, "{command:?} is classified on the wrong side");
             window_count += usize::from(handled);
         }
-        assert_eq!(window_count, 6, "exactly the six new commands are window-level");
+        assert_eq!(window_count, 7, "exactly the seven window commands are window-level");
         restore_state(state);
     }
 
@@ -1686,8 +1695,8 @@ mod tests {
         assert_eq!(filter_commands("BROW"), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("reasoning"), vec![Command::Effort]);
         assert!(filter_commands("zzz-no-such-command").is_empty());
-        assert_eq!(filter_commands("").len(), 23, "an empty query lists every command");
-        assert_eq!(filter_commands("   ").len(), 23, "whitespace is an empty query");
+        assert_eq!(filter_commands("").len(), 24, "an empty query lists every command");
+        assert_eq!(filter_commands("   ").len(), 24, "whitespace is an empty query");
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
@@ -1706,7 +1715,7 @@ mod tests {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
         });
-        assert_eq!(empty, 23, "an empty query lists every command");
+        assert_eq!(empty, 24, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));

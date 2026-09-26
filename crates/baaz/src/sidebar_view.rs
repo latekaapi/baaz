@@ -384,18 +384,22 @@ impl Harness {
         let new_session = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_session(window, cx));
         let add_project =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.open_projects(false, window, cx));
+        let open_skills = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_skills(cx));
         let automations = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.overlays.update(cx, |overlays, _| {
                 overlays.toast("Automations", "Automations are not wired up yet.");
             });
             cx.notify();
         });
+        // The Skills row wears the on-count (D54): how many skills are on.
+        let on = self.skills.catalog.on_count();
         v_flex()
             .w_full()
             .flex_none()
             .pt(px(scale::SP_2))
             .child(nav_item("nav-new", IconName::Plus, "New session").on_click(new_session))
             .child(nav_item("nav-projects", IconName::Folder, "Add project").on_click(add_project))
+            .child(nav_item("nav-skills", IconName::Slash, "Skills").count(format!("{on}")).on_click(open_skills))
             .child(nav_item("nav-automations", IconName::Zap, "Automations").count("Soon").on_click(automations))
             .into_any_element()
     }
