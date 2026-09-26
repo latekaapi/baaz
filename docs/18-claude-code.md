@@ -341,6 +341,27 @@ Named so nobody reads a table cell as a promise:
   about long transcripts, compaction, or a turn that exceeds the window.
 - No Baaz UI has ever rendered one of these frames.
 
+## 9. One user turn is one assistant turn (W8, 2026-09-27)
+
+A Claude Code turn spans several `assistant` messages (one per model
+response between tool runs); the `result` frame closes the turn. The fold
+used to open one transcript turn per message and finish every open turn
+off the same `result` frame — so a Write → Edit → DONE turn rendered
+three meta rows, triple-counted the token chip, wrote three ledger rows
+keyed by `msg_…`, and left the running state unsettled. Now the turn's
+first message opens the transcript turn (the id IS that message's id)
+and the `result` frame finishes it with the frame's totals, once. The
+same first message opens the same turn on the history replay (whose only
+turn boundary is the next prompt echo — the stored file has no `result`
+frame), so a reopen replays the same `(session_id, turn_id)` key and the
+ledger's no-op-on-replay insert adds nothing. Evidenced by
+`edit.jsonl` / `approval-default.jsonl` / `todo.jsonl` /
+`subagent.jsonl` (one finish each, totals equal the `result` frame) and
+`resume-replay.jsonl` (three turns, three finishes with their own
+totals). A side effect worth knowing: turns whose thinking rendered keep
+the library's plain `N reasoning` footer cell; only genuinely redacted
+turns read the silent variant.
+
 ---
 
 # Addendum 2026-09-24 — how client tools get permission. SETTLED, by probe.

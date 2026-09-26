@@ -1051,7 +1051,17 @@ impl SessionView {
             .iter()
             .find(|m| m.model_id == id)
             .map(|m| m.display_label.clone())
-            .unwrap_or(id);
+            .unwrap_or_else(|| {
+                // No catalog row names this id (Claude Code reports full
+                // ids the supplied alias menu never lists): humanise it
+                // for the chip rather than wearing the raw wire id. Other
+                // lanes keep today's raw fallback.
+                if self.provider_kind() == crate::providers::ProviderId::ClaudeCode {
+                    crate::providers::claude_code_model_label(&id)
+                } else {
+                    id.clone()
+                }
+            });
         SharedString::from(label)
     }
 

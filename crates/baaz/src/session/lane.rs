@@ -2226,4 +2226,80 @@ mod tests {
             "the resolution settles the card to allowed"
         );
     }
+
+    /// W8: a folded multi-message Claude Code turn settles the view once.
+    /// The whole `edit.jsonl` fold (Write, Edit, DONE — one user bubble,
+    /// one assistant turn, one finish) arrives as lane events: the
+    /// transcript holds exactly one assistant turn, the view is not busy
+    /// (the stop button drops, no `Working` left behind), and the meter
+    /// counts the turn's totals once. Folding one turn per message held
+    /// three assistant turns here and tripled the meter.
+    #[gpui::test]
+    fn a_folded_claude_turn_settles_the_view_with_single_totals(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        let text = std::fs::read_to_string(format!(
+            "{}/../../fixtures/claude-code/edit.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture reads");
+        let mut fold = provider_claude_code::fold::ClaudeFold::new();
+        let mut deltas = Vec::new();
+        for line in text.lines() {
+            let frame = provider_claude_code::frame::decode_line(line).expect("decodes");
+            deltas.extend(fold.apply(&frame));
+        }
+        // The result frame's own totals, read off the raw JSON.
+        let (want_in, want_out) = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            })
+            .map(|value| {
+                let usage = value.get("usage").cloned().unwrap_or(serde_json::Value::Null);
+                let uint =
+                    |key: &str| usage.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                (
+                    uint("input_tokens")
+                        + uint("cache_read_input_tokens")
+                        + uint("cache_creation_input_tokens"),
+                    uint("output_tokens"),
+                )
+            })
+            .expect("the fixture carries a result frame");
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas,
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            let assistants = view
+                .session()
+                .map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .filter(|turn| {
+                            matches!(turn, aui_protocol::Turn::Assistant { .. })
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            assert_eq!(assistants, 1, "one user turn is one assistant turn");
+            assert!(!view.busy(), "the result settles the running state");
+            let meter = view.context();
+            assert_eq!(meter.prompt_tokens, want_in, "prompt tokens counted once");
+            assert_eq!(meter.output_tokens, want_out, "output tokens counted once");
+            assert_eq!(meter.total_tokens, want_in + want_out);
+        });
+    }
 }

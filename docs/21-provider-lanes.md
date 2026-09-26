@@ -513,3 +513,14 @@ Each task compiles and leaves the app working; muse sessions stay on
 - **Gate honesty for this doc.** The verification below proves the file exists
   with sections. It does NOT prove any anchor, fixture claim, or the §6
   hypothesis correct.
+- **W8 — one Claude Code turn is one turn.** The fold opened one transcript
+  turn per `assistant` message and finished them all off the `result` frame:
+  three meta rows, a triple-counted token chip, three ledger rows keyed by
+  `msg_…`, and a stuck `Working` row. Now the turn's first message opens the
+  one assistant turn and the `result` frame finishes it with the frame's
+  totals, once; history replays under the same id (prompt echo is the only
+  replay boundary), so a reopen adds no ledger rows. The composer chip
+  humanises full model ids the alias menu never lists (`claude-opus-5[1m]`
+  → `Opus 5 · 1M`); the menu keeps the id in the row detail. Turns whose
+  thinking rendered keep the plain `N reasoning` footer cell. Proven on
+  captures only — the window is unverified by the gate.

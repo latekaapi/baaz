@@ -359,6 +359,49 @@ pub fn claude_code_catalog(current: Option<&str>) -> Vec<provider::ModelSummary>
         .collect()
 }
 
+/// The human name the composer chip shows for a Claude Code model id the
+/// catalog has no row for. The wire reports full ids (`claude-opus-5[1m]`,
+/// `claude-opus-5`, dated `claude-sonnet-4-5-…`) while the supplied menu
+/// only names aliases — so without this the chip falls back to the raw
+/// id. The menu keeps the id in the row detail; the chip shows this label
+/// instead (W8: the chip read `claude-opus-5[1m]`).
+///
+/// Aliases resolve through the menu's own labels; full ids prettify to
+/// family plus version plus context (`claude-opus-5[1m]` → `Opus 5 · 1M`).
+/// Anything unrecognised passes through unchanged — an honest raw id, not
+/// a mangled guess.
+pub fn claude_code_model_label(id: &str) -> String {
+    if let Some(row) = claude_code_models().into_iter().find(|row| row.id == id) {
+        return row.label.to_owned();
+    }
+    let body = id.strip_prefix("claude-").unwrap_or(id);
+    let (body, context) = match body.strip_suffix(']') {
+        Some(inner) => match inner.split_once('[') {
+            Some((base, context)) => (base, Some(context)),
+            None => (body, None),
+        },
+        None => (body, None),
+    };
+    let (family, version) =
+        body.split_once('-').map_or((body, ""), |(family, rest)| (family, rest));
+    let family_label = match family {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        _ => return id.to_owned(),
+    };
+    let mut label = family_label.to_owned();
+    if !version.is_empty() {
+        label.push(' ');
+        label.push_str(version);
+    }
+    if let Some(context) = context.filter(|context| !context.is_empty()) {
+        label.push_str(" · ");
+        label.push_str(&context.to_uppercase());
+    }
+    label
+}
+
 // ------------------------------------------------- the last-chosen provider
 
 /// What the store remembers: the backend new sessions start on.
@@ -671,6 +714,23 @@ mod tests {
             assert!(!id.label().contains('-') || id == ProviderId::ClaudeCode);
             assert_ne!(id.label(), id.as_str());
         }
+    }
+
+    /// W8, defect 6: the chip humanises full Claude Code model ids the
+    /// alias menu never lists — `claude-opus-5[1m]` reads `Opus 5 · 1M`,
+    /// never the raw id — while aliases keep the menu's own labels and
+    /// unknown ids pass through unmangled.
+    #[test]
+    fn claude_code_chip_names_full_model_ids() {
+        assert_eq!(claude_code_model_label("claude-opus-5[1m]"), "Opus 5 · 1M");
+        assert_eq!(claude_code_model_label("claude-opus-5"), "Opus 5");
+        assert_eq!(claude_code_model_label("claude-sonnet-4-5"), "Sonnet 4-5");
+        assert_eq!(claude_code_model_label("claude-haiku-4-5"), "Haiku 4-5");
+        assert_eq!(claude_code_model_label("opus"), "Claude Opus");
+        assert_eq!(claude_code_model_label("sonnet"), "Claude Sonnet");
+        assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");
+        assert_eq!(claude_code_model_label("future-model-9"), "future-model-9");
+        assert_eq!(claude_code_model_label("claude-unknownthing"), "claude-unknownthing");
     }
 
     #[test]
