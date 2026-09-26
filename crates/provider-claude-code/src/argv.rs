@@ -34,6 +34,8 @@ pub struct SessionLaunch {
     pub session_id: String,
     /// The model flag, when one was requested.
     pub model: Option<String>,
+    /// The effort flag, when one was requested.
+    pub effort: Option<String>,
 }
 
 /// The flags every session child carries.
@@ -71,16 +73,19 @@ fn with_model(mut argv: Vec<String>, model: Option<&str>) -> Vec<String> {
     argv
 }
 
-/// Why a Claude Code session offers no reasoning-effort picker: the launch
-/// argv carries `--model` but no effort flag, no per-turn channel was ever
-/// probed over stream-json stdin, and no captured transcript
-/// (`fixtures/claude-code/*.jsonl`) shows an effort surface — the one
-/// `effort` string on record is a slash-command name in the init payload,
-/// not a level list. Guessing a menu from that would invent support, so
-/// the picker renders this reason instead.
-pub fn reasoning_effort_unavailable_reason() -> &'static str {
-    "Claude Code sessions expose no reasoning-effort control: the launch argv carries \
-     `--model` but no effort flag, and no captured transcript shows an effort surface"
+/// The effort levels the installed CLI accepts (`claude --help`):
+/// `--effort <level>`, one of these five. Effort is a launch flag, not a
+/// per-turn channel — there is no effort surface over stream-json stdin —
+/// so a mid-session change relaunches the child with `--resume` plus the
+/// new flag (see the adapter's `SubmitInput` arm).
+pub const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn with_effort(mut argv: Vec<String>, effort: Option<&str>) -> Vec<String> {
+    if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
+        argv.push("--effort".into());
+        argv.push(effort.to_owned());
+    }
+    argv
 }
 
 fn with_mcp(mut argv: Vec<String>, mcp_config: Option<&str>) -> Vec<String> {
@@ -103,36 +108,45 @@ pub fn argv_for_open(
     workspace: Option<&str>,
     model: Option<&str>,
     mcp_config: Option<&str>,
+    effort: Option<&str>,
 ) -> SessionLaunch {
     let mut argv = base_argv();
     argv.push("--session-id".into());
     argv.push(request_id.to_owned());
     argv = with_model(argv, model);
+    argv = with_effort(argv, effort);
     argv = with_mcp(argv, mcp_config);
     SessionLaunch {
         argv,
         cwd: workspace.map(str::to_owned),
         session_id: request_id.to_owned(),
         model: model.map(str::to_owned),
+        effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
     }
 }
 
 /// Re-attach to a stored session. `--resume` keeps the same id (doc §3).
+/// `effort` re-applies the level: the adapter's `SubmitInput` arm builds
+/// this shape when the picked effort differs from the running child's, so
+/// the next turn relaunches with `--resume <id> --effort <new>`.
 pub fn argv_for_resume(
     session_id: &str,
     model: Option<&str>,
     mcp_config: Option<&str>,
+    effort: Option<&str>,
 ) -> SessionLaunch {
     let mut argv = base_argv();
     argv.push("--resume".into());
     argv.push(session_id.to_owned());
     argv = with_model(argv, model);
+    argv = with_effort(argv, effort);
     argv = with_mcp(argv, mcp_config);
     SessionLaunch {
         argv,
         cwd: None,
         session_id: session_id.to_owned(),
         model: model.map(str::to_owned),
+        effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
     }
 }
 
@@ -145,6 +159,7 @@ pub fn argv_for_fork(
     session_id: &str,
     model: Option<&str>,
     mcp_config: Option<&str>,
+    effort: Option<&str>,
 ) -> SessionLaunch {
     let mut argv = base_argv();
     argv.push("--resume".into());
@@ -153,12 +168,14 @@ pub fn argv_for_fork(
     argv.push("--session-id".into());
     argv.push(request_id.to_owned());
     argv = with_model(argv, model);
+    argv = with_effort(argv, effort);
     argv = with_mcp(argv, mcp_config);
     SessionLaunch {
         argv,
         cwd: None,
         session_id: request_id.to_owned(),
         model: model.map(str::to_owned),
+        effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
     }
 }
 
@@ -208,7 +225,7 @@ mod tests {
 
     #[test]
     fn open_chooses_the_session_id() {
-        let launch = argv_for_open("req-1", Some("/work"), Some("haiku"), None);
+        let launch = argv_for_open("req-1", Some("/work"), Some("haiku"), None, None);
         assert!(launch.argv.contains(&"--session-id".to_owned()));
         assert!(launch.argv.contains(&"req-1".to_owned()));
         assert!(!launch.argv.iter().any(|arg| arg == "--resume"));
@@ -217,44 +234,57 @@ mod tests {
     }
 
     #[test]
-    fn no_effort_flag_anywhere_on_the_lane() {
-        // The evidence behind `reasoning_effort_unavailable_reason`: every
-        // launch shape carries `--model` and none carries an effort flag,
-        // so Baaz must not offer effort levels it cannot send.
+    fn effort_rides_the_launch_flag_when_set_and_nowhere_when_not() {
+        // `claude --help` lists `--effort <level>`; every launch shape
+        // carries it when an effort is set and omits it when none is, so
+        // the default session spawns exactly today's argv.
+        for launch in [
+            argv_for_open("req-1", Some("/work"), Some("haiku"), None, Some("high")),
+            argv_for_resume("sess-9", None, None, Some("high")),
+            argv_for_fork("branch-2", "sess-9", None, None, Some("high")),
+        ] {
+            let position =
+                launch.argv.iter().position(|arg| arg == "--effort").expect("effort flag");
+            assert_eq!(launch.argv.get(position + 1).map(String::as_str), Some("high"));
+            assert_eq!(launch.effort.as_deref(), Some("high"));
+        }
         for argv in [
-            argv_for_open("req-1", Some("/work"), Some("haiku"), None).argv,
-            argv_for_resume("sess-9", None, None).argv,
-            argv_for_fork("branch-2", "sess-9", None, None).argv,
+            argv_for_open("req-1", Some("/work"), Some("haiku"), None, None).argv,
+            argv_for_resume("sess-9", None, None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None, None).argv,
             base_argv(),
         ] {
-            assert!(argv.contains(&"--model".to_owned()) || !argv.contains(&"haiku".to_owned()));
             assert!(
-                !argv.iter().any(|arg| arg.contains("effort")),
-                "no effort flag on this lane: {argv:?}"
+                !argv.iter().any(|arg| arg == "--effort"),
+                "no effort flag without a level: {argv:?}"
             );
         }
-        assert!(!reasoning_effort_unavailable_reason().is_empty());
+    }
+
+    #[test]
+    fn the_menu_lists_what_the_cli_accepts() {
+        assert_eq!(CLAUDE_EFFORT_LEVELS, ["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]
     fn resume_keeps_the_id_and_fork_adds_the_flag() {
-        let resume = argv_for_resume("sess-9", None, None);
+        let resume = argv_for_resume("sess-9", None, None, None);
         assert!(resume.argv.contains(&"--resume".to_owned()));
         assert!(resume.argv.contains(&"sess-9".to_owned()));
         assert!(!resume.argv.iter().any(|arg| arg == "--fork-session"));
 
-        let fork = argv_for_fork("branch-2", "sess-9", None, None);
+        let fork = argv_for_fork("branch-2", "sess-9", None, None, None);
         assert!(fork.argv.contains(&"--resume".to_owned()));
         assert!(fork.argv.contains(&"--fork-session".to_owned()));
     }
 
     #[test]
     fn mcp_config_always_brings_strict() {
-        let launch = argv_for_open("req-1", None, None, Some("/tmp/mcp.json"));
+        let launch = argv_for_open("req-1", None, None, Some("/tmp/mcp.json"), None);
         let argv = launch.argv;
         assert!(argv.contains(&"--mcp-config".to_owned()));
         assert!(argv.contains(&"--strict-mcp-config".to_owned()));
-        let plain = argv_for_open("req-1", None, None, None);
+        let plain = argv_for_open("req-1", None, None, None, None);
         assert!(!plain.argv.iter().any(|arg| arg == "--strict-mcp-config"));
     }
 
@@ -282,9 +312,9 @@ mod tests {
         assert!(prompts < tool, "ordering discipline: prompts before prompt-tool");
         // Every launcher shares the lane, so open/resume/fork all route
         // permissions to the host.
-        assert!(argv_for_open("req-1", None, None, None).argv.contains(&"stdio".to_owned()));
-        assert!(argv_for_resume("sess-9", None, None).argv.contains(&"stdio".to_owned()));
-        assert!(argv_for_fork("branch-2", "sess-9", None, None).argv.contains(&"stdio".to_owned()));
+        assert!(argv_for_open("req-1", None, None, None, None).argv.contains(&"stdio".to_owned()));
+        assert!(argv_for_resume("sess-9", None, None, None).argv.contains(&"stdio".to_owned()));
+        assert!(argv_for_fork("branch-2", "sess-9", None, None, None).argv.contains(&"stdio".to_owned()));
     }
 
     #[test]
@@ -304,9 +334,9 @@ mod tests {
             "every launcher echoes the prompt"
         );
         for argv in [
-            argv_for_open("req-1", None, None, None).argv,
-            argv_for_resume("sess-9", None, None).argv,
-            argv_for_fork("branch-2", "sess-9", None, None).argv,
+            argv_for_open("req-1", None, None, None, None).argv,
+            argv_for_resume("sess-9", None, None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None, None).argv,
         ] {
             assert!(
                 argv.contains(&"--replay-user-messages".to_owned()),

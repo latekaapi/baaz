@@ -285,8 +285,8 @@ is gone.
 | provider | effort source | select path |
 |---|---|---|
 | muse | the whole closed enum, unchanged (`overlays::muse_efforts`) | the existing `turn/start` `reasoningEffort`, read off the pick on the next turn |
-| codex | the selected model's `supportedReasoningEfforts` from its `model/list` row (`provider-codex/src/child.rs`), with the provider's own `description` on each level | the stored pick, like model: client-side until the lane migration carries it further, and applied to a session with turns exactly as to a fresh one |
-| claude-code | none evidenced — the launch argv carries `--model` but no effort flag, and no captured transcript shows an effort surface (`provider-claude-code/src/argv.rs`) | no control: the picker renders the adapter's reason instead of a guessed menu |
+| codex | the selected model's `supportedReasoningEfforts` from its `model/list` row (`provider-codex/src/child.rs`), with the provider's own `description` on each level | the chip's pick rides `SubmitInput.effort` into `turn/start`'s `effort` for that turn (`child::turn_start_request`), and applied to a session with turns exactly as to a fresh one |
+| claude-code | the five levels the installed CLI's `--effort` flag accepts (`argv::CLAUDE_EFFORT_LEVELS`: `low, medium, high, xhigh, max`) | the chip's pick rides `SubmitInput.effort` onto the launch flag: spawned with `--effort` when set, and a mid-session change relaunches the child with `--resume <session-id> --effort <new>` before the turn (`lib.rs::resume_launch_for_effort`) |
 
 The per-model point is load-bearing on Codex: two models on the same
 provider differ (`gpt-5.6-sol` reaches `ultra`, `gpt-5.5` stops at
@@ -304,3 +304,22 @@ existing-session case: a session with turns changes effort and the chip
 follows at once. The mutation check that holds it: serving the old
 hardcoded list from the Codex arm must fail the per-model test, because
 `gpt-5.5` would wrongly keep `max` and `ultra`.
+
+## W4c — the pick reaches the turn on both new lanes
+
+W4 left effort client-side only: no adapter turn carried it, so the chip
+did nothing on Claude Code or Codex. The seam now carries an optional
+neutral `effort` on `Command::SubmitInput` — the level id (`"high"`),
+`None` for Default — and each adapter maps it onto its own channel:
+muse onto `turn/start` `reasoningEffort` (identical when `None`),
+Codex onto `turn/start` `effort` (omitted when `None`; `turn/steer`
+admits no such field), Claude Code onto its `--effort` launch flag.
+Effort is launch-scoped on that lane, so a changed pick relaunches the
+child with `--resume <session-id> --effort <new>` before the turn's
+text; the fold outlives the swap and a resumed child replays no
+history, so the transcript neither loses nor duplicates. The Claude
+Code menu lists `low, medium, high, xhigh, max` — `claude --help`'s own
+list, confirmed with one real `--effort high` turn — and Codex keeps
+its per-model levels. What the gate proves is argv, params and routing;
+it does not prove the model reasons harder, nor that a mid-session
+relaunch is seamless in the window.

@@ -195,6 +195,7 @@ mod tests {
                         session_id: "s-scripted".into(),
                         parts: vec![SubmissionPart::Text("hello".into())],
                         display_text: None,
+                        effort: None,
                     },
                     |probe, result, _| {
                         probe.seen = Some(match result {

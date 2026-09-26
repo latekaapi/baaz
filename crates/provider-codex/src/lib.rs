@@ -193,7 +193,7 @@ impl CodexAdapter {
         Ok(text)
     }
 
-    fn submit_text(&self, session_id: &str, text: &str) -> Result<Ack, ProviderError> {
+    fn submit_text(&self, session_id: &str, text: &str, effort: Option<&str>) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
         let turn = self
@@ -203,6 +203,7 @@ impl CodexAdapter {
                     &thread_id,
                     &model,
                     text,
+                    effort,
                 ))
             })?
             .map_err(Self::unavailable)?;
@@ -450,9 +451,9 @@ impl ProviderAdapter for CodexAdapter {
                 reason: "no out-of-turn shell surface was captured; the shell runs inside turns"
                     .into(),
             }),
-            Command::SubmitInput { session_id, parts, .. } => {
+            Command::SubmitInput { session_id, parts, effort, .. } => {
                 let text = Self::join_text(&parts)?;
-                self.submit_text(&session_id, &text)
+                self.submit_text(&session_id, &text, effort.as_deref())
             }
             Command::SteerInput { session_id, expected_turn, parts, .. } => {
                 self.check_session(&session_id)?;
@@ -691,6 +692,7 @@ mod tests {
             session_id: "s".into(),
             parts: vec![SubmissionPart::Text("hi".into())],
             display_text: None,
+            effort: None,
         });
         assert!(
             matches!(ack, Err(ProviderError::Unavailable { .. })),

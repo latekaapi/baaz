@@ -74,6 +74,10 @@ pub struct ClaudeCodeAdapter {
     child: Mutex<Option<RunningChild>>,
     session_id: Mutex<Option<String>>,
     model: Mutex<Option<String>>,
+    /// The `--effort` level the running child was launched with, when one
+    /// was. Effort is a launch flag — a `SubmitInput` carrying a different
+    /// level relaunches the child with `--resume` plus the new flag.
+    effort: Mutex<Option<String>>,
     workspace: Mutex<Option<PathBuf>>,
     home_override: Option<PathBuf>,
     connected: Mutex<bool>,
@@ -94,6 +98,7 @@ impl ClaudeCodeAdapter {
             child: Mutex::new(None),
             session_id: Mutex::new(None),
             model: Mutex::new(None),
+            effort: Mutex::new(None),
             workspace: Mutex::new(None),
             home_override: None,
             connected: Mutex::new(false),
@@ -148,6 +153,10 @@ impl ClaudeCodeAdapter {
         if let Some(model) = &launch.model {
             *self.model.lock().expect("model mutex") = Some(model.clone());
         }
+        // The launch's `--effort`, whatever it was — including none: the
+        // next `SubmitInput` compares against this, so clearing back to
+        // Default relaunches without the flag.
+        *self.effort.lock().expect("effort mutex") = launch.effort.clone();
         // Remember the session's own workspace cwd for stored-history
         // lookup. Only a stated cwd counts: resume/fork launches carry
         // none, and an unknown cwd stays unknown (honest unavailable)
@@ -276,6 +285,57 @@ impl ClaudeCodeAdapter {
             let line = fold::decide_unknown_approval(&request, choice, feedback)?;
             Ok(ClaimedApproval::Unknown(request, line))
         }
+    }
+
+    /// The relaunch a `SubmitInput` needs when its effort differs from the
+    /// running child's launch flag: `--resume <session-id>` plus the new
+    /// `--effort`, carrying the recorded `--model` along. `None` means the
+    /// running child already flies this level and the turn goes straight to
+    /// stdin. Pure — no spawn — so tests drive this without a CLI.
+    ///
+    /// The fold (and its transcript) outlives the swap: it lives on the
+    /// adapter, not the child. And a resumed child does not replay history,
+    /// so nothing already folded is emitted twice.
+    fn resume_launch_for_effort(
+        &self,
+        session_id: &str,
+        effort: Option<&str>,
+    ) -> Option<SessionLaunch> {
+        let wanted = effort.filter(|effort| !effort.is_empty()).map(str::to_owned);
+        if *self.effort.lock().expect("effort mutex") == wanted {
+            return None;
+        }
+        let model = self.model.lock().expect("model mutex").clone();
+        Some(argv::argv_for_resume(session_id, model.as_deref(), None, wanted.as_deref()))
+    }
+
+    /// Swap the running child for `launch`: hang up the old one first, then
+    /// spawn. The old child's pump ends with its stdout; its folded
+    /// transcript stays on the adapter.
+    fn relaunch(&self, launch: &SessionLaunch) -> Result<(), ProviderError> {
+        if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
+            running.shutdown();
+        }
+        *self.child.lock().expect("child mutex") = None;
+        let running = RunningChild::spawn(
+            &self.program,
+            launch,
+            Arc::clone(&self.fold),
+            self.tx.clone(),
+        )
+        .map_err(|error| ProviderError::Unavailable {
+            reason: format!("could not respawn claude: {error}"),
+        })?;
+        *self.child.lock().expect("child mutex") = Some(running);
+        *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
+        if let Some(model) = &launch.model {
+            *self.model.lock().expect("model mutex") = Some(model.clone());
+        }
+        *self.effort.lock().expect("effort mutex") = launch.effort.clone();
+        if let Some(cwd) = &launch.cwd {
+            *self.workspace.lock().expect("workspace mutex") = Some(PathBuf::from(cwd));
+        }
+        Ok(())
     }
 
     /// Split neutral submission parts into the turn's text plus its image
@@ -409,15 +469,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
             Command::OpenSession { request_id, workspace, model, .. } => {
-                let launch = argv::argv_for_open(&request_id, workspace.as_deref(), model.as_deref(), None);
+                let launch =
+                    argv::argv_for_open(&request_id, workspace.as_deref(), model.as_deref(), None, None);
                 self.spawn_launch(&launch)
             }
             Command::ResumeSession { session_id, .. } => {
-                let launch = argv::argv_for_resume(&session_id, None, None);
+                let launch = argv::argv_for_resume(&session_id, None, None, None);
                 self.spawn_launch(&launch)
             }
             Command::ForkSession { request_id, session_id, .. } => {
-                let launch = argv::argv_for_fork(&request_id, &session_id, None, None);
+                let launch = argv::argv_for_fork(&request_id, &session_id, None, None, None);
                 self.spawn_launch(&launch)
             }
             Command::ListSessions { workspace, .. } => {
@@ -492,7 +553,16 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "no out-of-turn shell surface was probed over stream-json stdin; the Bash tool \
                  runs inside turns",
             )),
-            Command::SubmitInput { request_id, session_id, parts, .. } => {
+            Command::SubmitInput { request_id, session_id, parts, effort, .. } => {
+                // Effort is a launch flag: when the pick differs from the
+                // running child's, the next turn relaunches with
+                // `--resume <session-id> --effort <new>` before the text
+                // goes to stdin. Same level — or none anywhere — skips the
+                // swap and the turn goes straight in.
+                if let Some(launch) = self.resume_launch_for_effort(&session_id, effort.as_deref()) {
+                    self.check_session(&session_id)?;
+                    self.relaunch(&launch)?;
+                }
                 let (text, images) = Self::split_parts(&parts);
                 self.submit_parts(&session_id, &text, &images, request_id)
             }
@@ -727,6 +797,49 @@ mod tests {
             .expect_err("a foreign session is refused");
         assert!(matches!(refused, ProviderError::Rejected { .. }), "got {refused:?}");
         assert_eq!(adapter.fold.lock().expect("fold mutex").model(), Some("sonnet"));
+    }
+
+    #[test]
+    fn a_changed_effort_relaunches_with_resume_and_the_new_flag() {
+        // Offline throughout: `resume_launch_for_effort` is pure — the
+        // decision `SubmitInput` acts on — so no `claude` process spawns.
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-9");
+        // Same level (none anywhere): no swap, the turn goes straight in.
+        assert!(
+            adapter.resume_launch_for_effort("sess-9", None).is_none(),
+            "no effort anywhere means no relaunch"
+        );
+        // A pick the child was not launched with: `--resume <id>` plus the
+        // new `--effort`, carrying the recorded `--model` along.
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        let launch = adapter
+            .resume_launch_for_effort("sess-9", Some("high"))
+            .expect("a changed effort relaunches");
+        let argv = &launch.argv;
+        let resume = argv.iter().position(|arg| arg == "--resume").expect("--resume");
+        assert_eq!(argv.get(resume + 1).map(String::as_str), Some("sess-9"));
+        let effort = argv.iter().position(|arg| arg == "--effort").expect("--effort");
+        assert_eq!(argv.get(effort + 1).map(String::as_str), Some("high"));
+        let model = argv.iter().position(|arg| arg == "--model").expect("--model");
+        assert_eq!(argv.get(model + 1).map(String::as_str), Some("sonnet"));
+        assert_eq!(launch.session_id, "sess-9");
+        // Once the child flies that level, the same pick is a no-op: the
+        // turn must not pay a relaunch every send.
+        *adapter.effort.lock().expect("effort mutex") = Some("high".into());
+        assert!(
+            adapter.resume_launch_for_effort("sess-9", Some("high")).is_none(),
+            "the launched level needs no swap"
+        );
+        // And clearing back to Default relaunches without the flag.
+        let launch = adapter
+            .resume_launch_for_effort("sess-9", None)
+            .expect("clearing the effort relaunches");
+        assert!(
+            !launch.argv.iter().any(|arg| arg == "--effort"),
+            "default relaunches flagless: {:?}",
+            launch.argv
+        );
     }
 
     #[test]

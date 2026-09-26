@@ -244,6 +244,7 @@ mod tests {
                 session_id: session_id.clone(),
                 parts: vec![SubmissionPart::Text("hello".into())],
                 display_text: None,
+                effort: None,
             })
             .expect("submit")
         else {

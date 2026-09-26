@@ -511,6 +511,7 @@ mod tests {
                     session_id: "s-1".into(),
                     parts: vec![provider::SubmissionPart::Text(text.to_owned())],
                     display_text: None,
+                    effort: None,
                 })
                 .expect("scripted providers take input");
             for event in guard.events().try_iter() {
@@ -724,6 +725,7 @@ mod tests {
             session_id: "s-1".into(),
             parts: vec![provider::SubmissionPart::Text("too late".into())],
             display_text: None,
+            effort: None,
         }) {
             Err(provider::ProviderError::Unavailable { reason }) => {
                 assert!(reason.contains("shut down"), "the child hung up, not something else: {reason}");
@@ -1431,6 +1433,34 @@ mod tests {
                 assert_eq!(display_text.as_deref(), Some("try me"));
             }
             other => panic!("a retry must travel as SubmitInput, travelled as {other:?}"),
+        }
+    }
+
+    /// W4c: the composer's effort chip rides the next turn as a neutral
+    /// `SubmitInput` effort — the level the adapters map onto their own
+    /// channel — and Default omits it. A lane that dropped the field would
+    /// send every turn at the provider default whatever the chip says.
+    #[gpui::test]
+    fn the_chips_effort_rides_submit_input(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx)
+            });
+        });
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("push hard".to_owned(), cx)));
+        vc.run_until_parked();
+        let submits = handle.commands_of("submit-input");
+        assert_eq!(submits.len(), 1, "one SubmitInput leaves the lane, drew {submits:?}");
+        match &submits[0] {
+            provider::Command::SubmitInput { effort, display_text, .. } => {
+                assert_eq!(effort.as_deref(), Some("high"), "the chip's level rides the turn");
+                assert_eq!(display_text.as_deref(), Some("push hard"));
+            }
+            other => panic!("a send must travel as SubmitInput, travelled as {other:?}"),
         }
     }
 
