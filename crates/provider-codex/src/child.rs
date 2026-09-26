@@ -772,6 +772,19 @@ impl RunningChild {
                             }
                         }
                         Frame::Request { id, method, params } => {
+                            // Approval requests card their pending approval
+                            // on the transcript first, through the same
+                            // decode-and-fold the fixture tests exercise —
+                            // then the request itself is routed below (the
+                            // answerable record and the tap), never answered
+                            // here.
+                            if ApprovalKind::from_method(&method).is_some() {
+                                if let Ok(mut fold) = fold.lock() {
+                                    crate::fold::step_line(&mut fold, &line, &mut |event| {
+                                        let _ = events.send(event);
+                                    });
+                                }
+                            }
                             let write = |value: Value| {
                                 let _ = write_value(&pump_stdin, &value);
                             };

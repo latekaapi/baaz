@@ -61,13 +61,14 @@
 use std::collections::{HashMap, HashSet};
 
 use aui_protocol::{
-    Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat, Hunk,
-    ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
-    UploadState,
+    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Attachment,
+    AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat, Hunk, ThinkingState,
+    TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::ProviderEvent;
 use serde_json::Value;
 
+use crate::child::{ApprovalKind, FileChangeApprovalParams, PermissionsApprovalParams};
 use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Notification, TokenCounts};
 
 /// The model's command with the runner unwrapped: the server wraps what
@@ -344,6 +345,59 @@ fn map_plan_state(status: &str) -> TodoState {
     }
 }
 
+/// Where a pending approval card lives, carrying its own pending face so
+/// the item's completion can settle it without rebuilding anything.
+#[derive(Clone, Debug)]
+struct CodexApprovalSite {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for wholesale updates.
+    block_index: usize,
+    /// The pending card itself: the completion only flips its state.
+    card: Block,
+}
+
+/// The four plain decision tokens the command and file-change lanes
+/// answer — allow once, allow for this session, deny, deny and stop.
+/// The ids ride `DecideApproval` verbatim: the adapter answers exactly
+/// these four on both lanes, so the card declares exactly these four.
+fn codex_choices() -> Vec<ApprovalChoice> {
+    vec![
+        ApprovalChoice {
+            id: "accept".into(),
+            label: "Allow once".into(),
+            decision: ApprovalDecision::Once,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+        ApprovalChoice {
+            id: "accept-for-session".into(),
+            label: "Allow for this session".into(),
+            decision: ApprovalDecision::ApprovedForSession,
+            scope: ApprovalScope::ThisSession,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+        ApprovalChoice {
+            id: "decline".into(),
+            label: "Deny".into(),
+            decision: ApprovalDecision::Deny,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+        ApprovalChoice {
+            id: "cancel".into(),
+            label: "Deny and stop".into(),
+            decision: ApprovalDecision::Abort,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+    ]
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: turn id → started turn (many
@@ -377,6 +431,12 @@ pub struct CodexFold {
     /// a second resume folds nothing twice. Live turns never land here —
     /// a resumed turn is completed, and the server never re-emits it.
     resumed_turns: HashSet<String>,
+    /// Wire item id → where its pending approval card lives, so the
+    /// item's own completion can settle the card: allowed when the item
+    /// ran, denied when it completed declined. Deciding queues the
+    /// answer through `DecideApproval`; only the completing item moves
+    /// the card — never the press.
+    approval_sites: HashMap<String, CodexApprovalSite>,
 }
 
 impl CodexFold {
@@ -454,16 +514,264 @@ impl CodexFold {
         deltas
     }
 
-    /// Fold one decoded frame into render-ready deltas. Only notifications
-    /// render: requests and responses are the pump's routing business (see
-    /// [`crate::child`]), and contribute nothing here.
+    /// Fold one decoded frame into render-ready deltas. Notifications
+    /// render as the transcript; a server approval request cards its
+    /// pending approval (the pump still routes the request itself — the
+    /// answerable record and the tap — through [`crate::child`]).
+    /// Anything else contributes nothing here.
     pub fn apply(&mut self, frame: &Frame) -> Vec<Delta> {
         match frame {
             Frame::Notification(notification) => self.apply_notification(notification),
-            Frame::Request { .. } | Frame::Response { .. } | Frame::ResponseError { .. } => {
-                Vec::new()
+            Frame::Request { method, params, .. } => self.apply_request(method, params),
+            Frame::Response { .. } | Frame::ResponseError { .. } => Vec::new(),
+        }
+    }
+
+    /// Fold one server approval request into its pending approval card.
+    /// Non-approval requests contribute nothing: our own calls are the
+    /// pump's routing business, never the transcript's.
+    pub fn apply_request(&mut self, method: &str, params: &Value) -> Vec<Delta> {
+        match ApprovalKind::from_method(method) {
+            Some(ApprovalKind::Command) => self.apply_command_approval(params),
+            Some(ApprovalKind::FileChange) => self.apply_file_change_approval(params),
+            Some(ApprovalKind::Permissions) => self.apply_permissions_approval(params),
+            Some(ApprovalKind::Unknown) => self.apply_unknown_approval(method, params),
+            None => Vec::new(),
+        }
+    }
+
+    /// Card one approval request: ensure its turn, push the pending card,
+    /// and record the site its completing item settles. A repeat request
+    /// for an already-carded item cards nothing twice — the card moves
+    /// only on the item's completion, never on a re-request.
+    fn card_approval(&mut self, item_id: &str, turn_id: &str, card: Block, deltas: &mut Vec<Delta>) {
+        if item_id.is_empty() || self.approval_sites.contains_key(item_id) {
+            return;
+        }
+        self.ensure_assistant(turn_id, deltas);
+        let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+        self.push_block(turn_id, card.clone(), deltas);
+        self.approval_sites.insert(
+            item_id.to_owned(),
+            CodexApprovalSite { turn_id: turn_id.to_owned(), block_index, card },
+        );
+    }
+
+    /// Settle one carded approval to its decided state: the only thing that
+    /// ever moves the card after the press. A repeat resolution for an
+    /// already-settled item is a no-op.
+    fn resolve_approval(&mut self, item_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
+        let Some(site) = self.approval_sites.remove(item_id) else { return };
+        let mut card = site.card;
+        if let Block::Approval { state: slot, .. } = &mut card {
+            *slot = state;
+        }
+        deltas.push(Delta::BlockUpdated {
+            turn_id: site.turn_id,
+            block_index: site.block_index,
+            block: card,
+        });
+    }
+
+    /// The owning turn of an approval request: the request's own turn, else
+    /// the latest turn seen. `None` means the request names no turn and no
+    /// turn ever opened — nothing to host the card.
+    fn approval_turn(&self, params: &Value) -> Option<String> {
+        let turn = params.get("turnId").and_then(Value::as_str).unwrap_or("");
+        if !turn.is_empty() {
+            return Some(turn.to_owned());
+        }
+        self.current_turn.clone()
+    }
+
+    /// `item/commandExecution/requestApproval`: the command with its cwd
+    /// and the model's reason — the command card's face, never raw JSON.
+    fn apply_command_approval(&mut self, params: &Value) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let item_id = params.get("itemId").and_then(Value::as_str).unwrap_or_default();
+        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        let command = params.get("command").and_then(Value::as_str).unwrap_or_default();
+        let target =
+            if command.trim().is_empty() { "a command".to_owned() } else { display_command(command) };
+        let cwd = params.get("cwd").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let reason = params.get("reason").and_then(Value::as_str).unwrap_or_default();
+        let reason =
+            if reason.trim().is_empty() { "The model did not say why.".to_owned() } else { reason.to_owned() };
+        self.card_approval(
+            item_id,
+            &turn_id,
+            Block::Approval {
+                id: item_id.to_owned(),
+                tool: "Bash".to_owned(),
+                command: target,
+                reason,
+                cwd,
+                capabilities: Vec::new(),
+                scope: ApprovalScope::ThisCommand,
+                state: ApprovalState::Pending,
+                rule: None,
+                choices: codex_choices(),
+                stages: Vec::new(),
+                current_stage: None,
+                badges: ApprovalBadges::default(),
+                feedback: None,
+                resolved_by: None,
+            },
+            &mut deltas,
+        );
+        deltas
+    }
+
+    /// `item/fileChange/requestApproval`: the request itself names no path
+    /// and no diff (both arrive on the completing item), so the pending
+    /// card carries the model's reason — or says it has none — and the
+    /// completion below it carries the path and the diff.
+    fn apply_file_change_approval(&mut self, params: &Value) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let decoded = FileChangeApprovalParams::decode(params);
+        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        let (item_id, reason) = match &decoded {
+            Some(decoded) => (
+                decoded.item_id.clone(),
+                decoded.reason.clone().unwrap_or_default(),
+            ),
+            None => (
+                params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                params.get("reason").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            ),
+        };
+        let grant = decoded
+            .as_ref()
+            .and_then(|decoded| decoded.grant_root.clone())
+            .unwrap_or_default();
+        let command =
+            if grant.trim().is_empty() { "File change".to_owned() } else { grant.trim().to_owned() };
+        let reason = if reason.trim().is_empty() {
+            if grant.trim().is_empty() {
+                "The model did not say why.".to_owned()
+            } else {
+                format!("Write access under {}", grant.trim())
+            }
+        } else {
+            reason
+        };
+        self.card_approval(
+            &item_id,
+            &turn_id,
+            Block::Approval {
+                id: item_id.clone(),
+                tool: "Edit".to_owned(),
+                command,
+                reason,
+                cwd: String::new(),
+                capabilities: Vec::new(),
+                scope: ApprovalScope::ThisCommand,
+                state: ApprovalState::Pending,
+                rule: None,
+                choices: codex_choices(),
+                stages: Vec::new(),
+                current_stage: None,
+                badges: ApprovalBadges::default(),
+                feedback: None,
+                resolved_by: None,
+            },
+            &mut deltas,
+        );
+        deltas
+    }
+
+    /// `item/permissions/requestApproval`: the lane takes no `decision`
+    /// token — only a JSON grant — so the card offers exactly the two
+    /// grants the adapter can answer: what was requested, scoped to this
+    /// turn or this session. The choice id IS the answer shape, riding
+    /// `DecideApproval` verbatim.
+    fn apply_permissions_approval(&mut self, params: &Value) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let Some(decoded) = PermissionsApprovalParams::decode(params) else { return deltas };
+        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        let mut lines = Vec::new();
+        if let Some(reason) = decoded.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            lines.push(reason.to_owned());
+        }
+        lines.push(format!("Applies to {}", decoded.cwd));
+        if let Some(object) = decoded.permissions.as_object() {
+            let mut keys: Vec<&str> =
+                object.keys().take(5).map(String::as_str).collect();
+            if object.len() > keys.len() {
+                keys.push("…");
+            }
+            if !keys.is_empty() {
+                lines.push(format!("Requests {}", keys.join(", ")));
             }
         }
+        let grant = |scope: &str| {
+            serde_json::json!({
+                "permissions": decoded.permissions,
+                "scope": scope,
+            })
+            .to_string()
+        };
+        self.card_approval(
+            &decoded.item_id,
+            &turn_id,
+            Block::Approval {
+                id: decoded.item_id.clone(),
+                tool: "Permissions".to_owned(),
+                command: "Permissions grant".to_owned(),
+                reason: lines.join("\n"),
+                cwd: decoded.cwd.clone(),
+                capabilities: Vec::new(),
+                scope: ApprovalScope::ThisCommand,
+                state: ApprovalState::Pending,
+                rule: None,
+                choices: vec![
+                    ApprovalChoice {
+                        id: grant("turn"),
+                        label: "Allow for this turn".into(),
+                        decision: ApprovalDecision::Once,
+                        scope: ApprovalScope::ThisCommand,
+                        rule_preview: None,
+                        accepts_feedback: false,
+                    },
+                    ApprovalChoice {
+                        id: grant("session"),
+                        label: "Allow for this session".into(),
+                        decision: ApprovalDecision::ApprovedForSession,
+                        scope: ApprovalScope::ThisSession,
+                        rule_preview: None,
+                        accepts_feedback: false,
+                    },
+                ],
+                stages: Vec::new(),
+                current_stage: None,
+                badges: ApprovalBadges::default(),
+                feedback: None,
+                resolved_by: None,
+            },
+            &mut deltas,
+        );
+        deltas
+    }
+
+    /// A future `*requestApproval` kind: surfaced as a pending marker, never
+    /// a forged approval — no choice shape exists for it, and inventing one
+    /// would answer blind. The pump's tap still records it answerable-side.
+    fn apply_unknown_approval(&mut self, method: &str, params: &Value) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        self.ensure_assistant(&turn_id, &mut deltas);
+        self.push_block(
+            &turn_id,
+            Block::Generic {
+                kind: "codex-approval".into(),
+                status: "pending".into(),
+                text: format!(
+                    "The server asked for an approval this client does not know how to answer ({method})."
+                ),
+            },
+            &mut deltas,
+        );
+        deltas
     }
 
     fn apply_notification(&mut self, notification: &Notification) -> Vec<Delta> {
@@ -676,13 +984,20 @@ impl CodexFold {
                     ("declined", _) => ToolStatus::Cancelled,
                     (_unknown, _) => ToolStatus::Error,
                 };
+                // A still-open execution reads pending; only a finished one
+                // reads done, and a declined one reads denied.
+                let verb = match status {
+                    ToolStatus::Running => "Run",
+                    ToolStatus::Cancelled => "Denied",
+                    _ => "Ran",
+                };
                 let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
                 self.push_block(
                     turn_id,
                     Block::ToolCall {
                         id: item.id().to_owned(),
                         kind: ToolKind::Shell,
-                        verb: "Ran".into(),
+                        verb: verb.into(),
                         target: display_command(item.command()),
                         status,
                         duration_ms: None,
@@ -700,6 +1015,19 @@ impl CodexFold {
                     },
                     &mut deltas,
                 );
+                // A terminal completion settles the approval that gated this
+                // item: allowed when it ran (even when it then failed), and
+                // denied when it completed declined without running.
+                if !matches!(status, ToolStatus::Running) {
+                    let state = match status {
+                        ToolStatus::Cancelled => ApprovalState::Denied,
+                        _ => ApprovalState::AllowedOnce {
+                            exit_code: exit_code.unwrap_or(0),
+                            duration_ms: 0,
+                        },
+                    };
+                    self.resolve_approval(item.id(), state, &mut deltas);
+                }
             }
             "fileChange" => {
                 self.ensure_assistant(turn_id, &mut deltas);
@@ -714,10 +1042,26 @@ impl CodexFold {
                 let changes = item.changes();
                 let is_write = !changes.is_empty()
                     && changes.iter().all(|change| change.kind == "add");
-                let (kind, verb) = if is_write {
-                    (ToolKind::Write, "Wrote")
-                } else {
-                    (ToolKind::Edit, "Edited")
+                let kind = if is_write { ToolKind::Write } else { ToolKind::Edit };
+                // Pending while open, done once finished, denied when the
+                // approval refused it — the same pending-until-ran rule as
+                // shell cards.
+                let verb = match status {
+                    ToolStatus::Running => {
+                        if is_write {
+                            "Write"
+                        } else {
+                            "Edit"
+                        }
+                    }
+                    ToolStatus::Cancelled => "Denied",
+                    _ => {
+                        if is_write {
+                            "Wrote"
+                        } else {
+                            "Edited"
+                        }
+                    }
                 };
                 let path = changes
                     .first()
@@ -738,6 +1082,15 @@ impl CodexFold {
                     },
                     &mut deltas,
                 );
+                // A terminal completion settles the approval that gated this
+                // change, the way executions settle theirs.
+                if !matches!(status, ToolStatus::Running) {
+                    let state = match status {
+                        ToolStatus::Cancelled => ApprovalState::Denied,
+                        _ => ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 },
+                    };
+                    self.resolve_approval(item.id(), state, &mut deltas);
+                }
             }
             "subAgentActivity" => {
                 self.ensure_assistant(turn_id, &mut deltas);
@@ -753,12 +1106,16 @@ impl CodexFold {
                 } else {
                     ToolStatus::Success
                 };
+                let verb = match status {
+                    ToolStatus::Running => "Delegate",
+                    _ => "Delegated",
+                };
                 self.push_block(
                     turn_id,
                     Block::ToolCall {
                         id: item.id().to_owned(),
                         kind: ToolKind::SubAgent,
-                        verb: "Delegated".into(),
+                        verb: verb.into(),
                         target: item.agent_path().to_owned(),
                         status,
                         duration_ms: None,
@@ -832,23 +1189,24 @@ impl CodexFold {
 
 /// Fold one raw live line: skip blanks and torn JSON, decode, fold, emit.
 ///
-/// Only notifications reach the fold here — the pump routes requests and
-/// responses before this runs. The per-line unit of the live pump, factored
-/// out so the fixture tests exercise the same decode-and-fold.
+/// Notifications render the transcript and server approval requests card
+/// their pending approvals; responses are the pump's routing business and
+/// contribute nothing. The per-line unit of the live pump, factored out so
+/// the fixture tests exercise the same decode-and-fold.
 pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(ProviderEvent)) {
     if line.trim().is_empty() {
         return;
     }
     let Ok(frame) = crate::frame::decode_line(line) else { return };
-    if !matches!(frame, Frame::Notification(_)) {
+    if !matches!(frame, Frame::Notification(_) | Frame::Request { .. }) {
         return;
     }
-    let session_id = fold.session_id().map(str::to_owned).or_else(|| {
-        if let Frame::Notification(notification) = &frame {
-            notification.thread_id().map(str::to_owned)
-        } else {
-            None
+    let session_id = fold.session_id().map(str::to_owned).or_else(|| match &frame {
+        Frame::Notification(notification) => notification.thread_id().map(str::to_owned),
+        Frame::Request { params, .. } => {
+            params.get("threadId").and_then(Value::as_str).map(str::to_owned)
         }
+        _ => None,
     });
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
@@ -1614,6 +1972,286 @@ mod tests {
         }
         assert!(count > 0, "the fixture must carry turn/diff/updated");
         assert!(deltas.is_empty(), "carried, never rendered");
+    }
+
+    /// Fold fixture lines up to (and including) the n-th server approval
+    /// request: the point where the ask waits and nothing later has
+    /// answered or run yet. Returns the fold, its deltas so far, and the
+    /// index the rest of the replay continues from.
+    fn fold_until_approval(lines: &[String], n: usize) -> (CodexFold, Vec<Delta>, usize) {
+        let mut fold = CodexFold::new();
+        let mut deltas = Vec::new();
+        let mut seen = 0;
+        for (index, line) in lines.iter().enumerate() {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            let is_ask = matches!(&frame, Frame::Request { method, .. } if method.contains("requestApproval"));
+            deltas.extend(fold.apply(&frame));
+            if is_ask {
+                seen += 1;
+                if seen == n {
+                    return (fold, deltas, index + 1);
+                }
+            }
+        }
+        panic!("fewer than {n} approval requests");
+    }
+
+    /// One pending approval card from `deltas`, when exactly one was added.
+    fn added_approval(deltas: &[Delta]) -> Block {
+        let mut cards: Vec<Block> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => {
+                    Some(card.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 1, "one asked approval, one card: {deltas:?}");
+        cards.pop().expect("counted")
+    }
+
+    /// `approval-default.jsonl`: the command approval cards as pending with
+    /// the four decision tokens — command + cwd + the model's reason, never
+    /// raw JSON, never an item id — and the accept settles it to allowed as
+    /// the write runs. Deciding settles nothing: only the completing item
+    /// moves the card.
+    #[test]
+    fn command_approval_cards_pending_face_then_settles_on_completion() {
+        let lines = fixture_lines("approval-default.jsonl");
+        let (mut fold, ask, rest_at) = fold_until_approval(&lines, 1);
+        match added_approval(&ask) {
+            Block::Approval { tool, command, reason, cwd, state, choices, .. } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(state, ApprovalState::Pending);
+                assert!(command.contains("outside-codex.txt"), "the inner command: {command}");
+                assert!(!command.contains("/bin/zsh"), "the wrapper stays out: {command}");
+                assert_eq!(cwd, "/tmp/w4b/work");
+                assert!(reason.contains("outside-codex.txt"), "the model's reason: {reason}");
+                assert!(!reason.contains("exec-"), "no item ids: {reason}");
+                assert!(!reason.contains('{'), "no raw JSON: {reason}");
+                let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["accept", "accept-for-session", "decline", "cancel"],
+                    "the full choice set the lane answers"
+                );
+                let labels: Vec<&str> =
+                    choices.iter().map(|choice| choice.label.as_str()).collect();
+                assert_eq!(
+                    labels,
+                    ["Allow once", "Allow for this session", "Deny", "Deny and stop"]
+                );
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+        assert!(
+            !ask.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { .. }, .. }
+            )),
+            "the ask moves no card"
+        );
+        let mut rest = Vec::new();
+        for line in &lines[rest_at..] {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            rest.extend(fold.apply(&frame));
+        }
+        let settled: Vec<&Delta> = rest
+            .iter()
+            .filter(|delta| {
+                matches!(
+                    delta,
+                    Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+                )
+            })
+            .collect();
+        assert_eq!(settled.len(), 1, "the completion settles the card, once");
+        let cards: Vec<&Delta> = ask
+            .iter()
+            .chain(rest.iter())
+            .filter(|delta| matches!(delta, Delta::BlockAdded { block: Block::Approval { .. }, .. }))
+            .collect();
+        assert_eq!(cards.len(), 1, "settling updates the card, never cards twice");
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
+                    ..
+                }
+            )),
+            "the approved write ran"
+        );
+    }
+
+    /// `edit.jsonl`: the `fileChange` request names no path and no diff,
+    /// so the pending card says so honestly — and the completing change
+    /// settles it to allowed with the path and the diff on the card below.
+    #[test]
+    fn file_change_approval_cards_honestly_then_settles_with_diff() {
+        let lines = fixture_lines("edit.jsonl");
+        let (mut fold, ask, rest_at) = fold_until_approval(&lines, 1);
+        match added_approval(&ask) {
+            Block::Approval { tool, command, reason, state, choices, .. } => {
+                assert_eq!(tool, "Edit");
+                assert_eq!(state, ApprovalState::Pending);
+                assert_eq!(command, "File change");
+                assert!(
+                    reason.contains("did not say why"),
+                    "no path is forged from a reasonless ask: {reason}"
+                );
+                assert_eq!(choices.len(), 4, "the full choice set the lane answers");
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+        let mut rest = Vec::new();
+        for line in &lines[rest_at..] {
+            let (_, frame) = decode_envelope(line).expect("fixture decodes");
+            rest.extend(fold.apply(&frame));
+        }
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the completing change settles the card to allowed"
+        );
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Write, status: ToolStatus::Success, .. },
+                    ..
+                }
+            )),
+            "the path and the diff land on the Wrote card below"
+        );
+    }
+
+    /// The fold contributes exactly one approval surface: `step_line` over
+    /// a `requestApproval` emits the card delta and never the tap — the
+    /// tap is the pump's routing business, and emitting both would double
+    /// every ask.
+    #[test]
+    fn folding_an_approval_request_emits_the_card_never_the_tap() {
+        let line = fixture_lines("approval-default.jsonl")
+            .into_iter()
+            .find(|line| line.contains("item/commandExecution/requestApproval"))
+            .expect("the ask on the wire");
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        step_line(&mut fold, &line, &mut |event| events.push(event));
+        let cards = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::Deltas { deltas, .. } => Some(deltas),
+                _ => None,
+            })
+            .flatten()
+            .filter(|delta| matches!(delta, Delta::BlockAdded { block: Block::Approval { .. }, .. }))
+            .count();
+        assert_eq!(cards, 1, "one ask, one card");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ApprovalRequested { .. }
+            )),
+            "the fold never taps: {events:?}"
+        );
+    }
+
+    /// A gated execution reads pending ("Run") while open, done ("Ran")
+    /// once finished, and denied ("Denied") when the approval refused it —
+    /// and each terminal state settles the card the ask opened.
+    #[test]
+    fn gated_executions_read_pending_until_finished_or_denied() {
+        fn request(item: &str) -> String {
+            serde_json::json!({
+                "id": 9,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "th", "turnId": "t-1", "itemId": item,
+                    "reason": "Run it?", "command": "make check", "cwd": "/tmp/work",
+                },
+            })
+            .to_string()
+        }
+        fn completed(item: &str, status: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th", "turnId": "t-1",
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": status},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic completion decodes")
+        }
+        // Still open: the card reads pending and the approval waits.
+        let mut fold = CodexFold::new();
+        let frame = crate::frame::decode_line(&request("exec-1")).expect("ask decodes");
+        let mut deltas = fold.apply(&frame);
+        deltas.extend(fold.apply(&completed("exec-1", "inProgress")));
+        let verbs: Vec<(&str, ToolStatus)> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, verb, status, .. },
+                    ..
+                } => Some((verb.as_str(), *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verbs, [("Run", ToolStatus::Running)], "pending while open: {verbs:?}");
+        assert!(
+            !deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { .. }, .. }
+            )),
+            "an open execution settles nothing"
+        );
+        // Finished: done verb, settled card.
+        deltas.extend(fold.apply(&completed("exec-1", "completed")));
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Success, .. },
+                    ..
+                } if verb == "Ran"
+            )),
+            "done reads done"
+        );
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the finish settles the card to allowed"
+        );
+        // Declined: denied verb and card, no run.
+        let mut fold = CodexFold::new();
+        let frame = crate::frame::decode_line(&request("exec-2")).expect("ask decodes");
+        let mut deltas = fold.apply(&frame);
+        deltas.extend(fold.apply(&completed("exec-2", "declined")));
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Cancelled, .. },
+                    ..
+                } if verb == "Denied"
+            )),
+            "a refused execution reads denied"
+        );
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
+            )),
+            "the decline settles the card to denied"
+        );
     }
 
     /// Approval fixture command executions fold to one shell card, completed

@@ -261,6 +261,12 @@ pub struct ApprovalRequest {
     pub mcp_server: Option<String>,
     /// The proposed tool input.
     pub input: Value,
+    /// The child's own short description (`description`), e.g. a path —
+    /// the human handle when the input is machine-shaped.
+    pub description: String,
+    /// Why the child is asking (`decision_reason`), e.g. which policy
+    /// tripped — the card's reason when nothing else says more.
+    pub decision_reason: String,
     /// The wire tool-use id (`toolu_…`) the result will join to.
     pub tool_use_id: String,
     /// Provider-authored persistence suggestions (`addRules`, …).
@@ -600,6 +606,8 @@ fn decode_approval(request_id: &str, request: Option<&Value>) -> ApprovalRequest
             .and_then(Value::as_str)
             .map(str::to_owned),
         input: get("input").cloned().unwrap_or(Value::Null),
+        description: get("description").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        decision_reason: get("decision_reason").and_then(Value::as_str).unwrap_or_default().to_owned(),
         tool_use_id: get("tool_use_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
         suggestions,
     }
