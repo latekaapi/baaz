@@ -2291,4 +2291,51 @@ mod tests {
             }
         }
     }
+
+    /// `reconnected` refuses on a provider lane: the view keeps no muse
+    /// child and arms no approval pull. Drives a real state change — without
+    /// the guard the view would hold the child and arm the pull.
+    #[gpui::test]
+    fn reconnected_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use provider::ProviderAdapter as _;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let mut adapter = provider::scripted::ScriptedProvider::new();
+        adapter
+            .connect(&provider::ConnectInfo::new("baaz", "0.0.0"))
+            .expect("a scripted provider connects");
+        let provider = provider::Provider::new(adapter);
+        let (_, rx) = futures::channel::mpsc::unbounded();
+        let view = vc.update(|window, cx| {
+            let host = SessionHost {
+                provider_id: "codex".to_owned(),
+                workspace: "/tmp/w2-lane".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+            };
+            cx.new(|cx| SessionView::new_on_provider("s-1".to_owned(), provider, rx, host, window, cx))
+        });
+        // A real child handle with no session behind it: `true` exits at
+        // once, so this spawns nothing that can answer — it only proves the
+        // view refuses to take it.
+        let client = std::sync::Arc::new(
+            MuseClient::spawn(&muse_client::MuseConfig {
+                program: std::path::PathBuf::from("true"),
+                trust_workspace: false,
+                no_session_log: false,
+                extra_args: Vec::new(),
+            })
+            .expect("a throwaway child spawns"),
+        );
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.reconnected(client, cx));
+        });
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.client.is_none(), "the refused reconnect hands over no child");
+            assert!(!view.refresh_pending, "the refused reconnect arms no approval pull");
+        });
+    }
 }

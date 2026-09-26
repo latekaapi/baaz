@@ -345,6 +345,27 @@ pub fn set_menus(cx: &mut App) {
                 return;
             }
         }
+        // Quitting for real: hang up every provider lane's child before the
+        // probes go and the process exits, so no `claude` or `codex` child
+        // outlives the app. Only after the confirm above — a cancelled quit
+        // must not kill live sessions.
+        for window in cx.windows() {
+            let _ = window
+                .downcast::<Root>()
+                .and_then(|handle| {
+                    handle
+                        .update(cx, |root, _, cx| {
+                            root.view()
+                                .clone()
+                                .downcast::<Harness>()
+                                .map(|harness| {
+                                    harness.update(cx, |this, cx| this.shutdown_provider_views(cx))
+                                })
+                                .unwrap_or(())
+                        })
+                        .ok()
+                });
+        }
         crate::tier::cleanup_probes();
         cx.quit();
     });
@@ -434,6 +455,11 @@ pub struct Harness {
     /// enforced capability gate. Set alongside `client` on connect and
     /// cleared with it on reconnect.
     pub(crate) provider: Option<SharedProvider>,
+    /// How a new Claude Code / Codex session connects: the production
+    /// factory spawns the real CLI child; tests inject a scripted provider.
+    /// Never touched on the UI thread — the open path runs it on the
+    /// background executor, where connecting and `OpenSession` may block.
+    pub(crate) provider_factory: crate::providers::ProviderFactory,
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
@@ -833,6 +859,7 @@ impl Harness {
             args,
             client: None,
             provider: None,
+            provider_factory: crate::providers::default_provider_factory(),
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
@@ -2532,6 +2559,20 @@ impl Harness {
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
         cx.notify();
+    }
+
+    /// Hang up every provider lane's child this window holds — the open view
+    /// and every parked one. What app quit calls so no `claude` or `codex`
+    /// child outlives the app; dropping the views would do the same through
+    /// [`Drop`](crate::session::SessionView), but quit should not rely on
+    /// teardown order.
+    pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, _| view.shutdown_lane());
+        }
+        for (_, view) in &self.session_cache {
+            view.update(cx, |view, _| view.shutdown_lane());
+        }
     }
 
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

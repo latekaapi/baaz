@@ -144,8 +144,10 @@ fn connect_with(
 }
 
 /// Move an adapter's event stream behind the gate's bridge: one forwarding
-/// thread onto a futures channel a gpui task can await.
-fn gate(provider: Provider) -> (Provider, UnboundedReceiver<ProviderEvent>) {
+/// thread onto a futures channel a gpui task can await. Shared with the
+/// provider-lane open path, whose freshly connected provider needs the same
+/// bridge before its view starts draining.
+pub(crate) fn gate(provider: Provider) -> (Provider, UnboundedReceiver<ProviderEvent>) {
     let events = bridge_events(provider.events());
     (provider, events)
 }
