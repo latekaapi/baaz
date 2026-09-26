@@ -29,8 +29,10 @@
 //! text instead of corrupting silently.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use provider::{Capability, CapabilityState};
+use provider::{Capability, CapabilityState, Provider, ProviderError};
 
 /// Which backend a session belongs to. Fixed at session creation; a live
 /// session never changes lanes.
@@ -215,6 +217,133 @@ pub fn gate(id: ProviderId, capability: Capability) -> Option<String> {
 /// session creation from the host's provider id and then not changed.
 pub fn uses_legacy_pump(id: ProviderId) -> bool {
     matches!(id, ProviderId::Muse)
+}
+
+// ------------------------------------------------- finding the CLIs
+
+/// The binary a provider lane spawns: `None` for muse, which rides the
+/// legacy pump and never spawns through here.
+fn binary_name(id: ProviderId) -> Option<&'static str> {
+    match id {
+        ProviderId::Muse => None,
+        ProviderId::ClaudeCode => Some("claude"),
+        ProviderId::Codex => Some("codex"),
+    }
+}
+
+/// The env override naming the binary, when the provider has one.
+fn env_override(id: ProviderId) -> Option<&'static str> {
+    match id {
+        ProviderId::Muse => None,
+        ProviderId::ClaudeCode => Some("BAAZ_CLAUDE"),
+        ProviderId::Codex => Some("BAAZ_CODEX"),
+    }
+}
+
+/// Where the `claude` / `codex` binary comes from, in order: the env
+/// override (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else a `PATH` lookup, else the
+/// fixed fallbacks. The fallbacks matter because the app also launches from
+/// the Dock with a minimal `PATH` that names almost nothing.
+///
+/// `None` for muse (no binary) and when nothing on the search path exists.
+pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let env = env_override(id).and_then(std::env::var_os).map(PathBuf::from);
+    resolve_program_with(id, env.as_deref(), &path_dirs, &fallback_dirs(&home))
+}
+
+/// The fixed fallbacks in search order: the home installs first, then the
+/// two system prefixes. Rooted at `home` so tests can point them at a temp
+/// dir instead of the real filesystem.
+fn fallback_dirs(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        home.join(".claude/local"),
+    ]
+}
+
+/// The search behind [`resolve_program`], pure so tests can drive it with a
+/// temp dir instead of the real `PATH` and `HOME`: pass an empty fallback
+/// list and nothing outside the given dirs can answer.
+fn resolve_program_with(
+    id: ProviderId,
+    env_override: Option<&Path>,
+    path_dirs: &[PathBuf],
+    fallback_dirs: &[PathBuf],
+) -> Option<PathBuf> {
+    let binary = binary_name(id)?;
+    if let Some(candidate) = env_override.filter(|p| !p.as_os_str().is_empty()) {
+        // An explicit override names the binary directly; a directory names
+        // the binary inside it. Either way it must exist to count.
+        let direct = candidate.to_path_buf();
+        if is_executable_file(&direct) {
+            return Some(direct);
+        }
+        let nested = candidate.join(binary);
+        if is_executable_file(&nested) {
+            return Some(nested);
+        }
+        return None;
+    }
+    if let Some(found) = path_dirs.iter().map(|dir| dir.join(binary)).find(|p| is_executable_file(p)) {
+        return Some(found);
+    }
+    fallback_dirs.iter().map(|dir| dir.join(binary)).find(|p| is_executable_file(p))
+}
+
+/// An existing file counts as a program. The executable bit is deliberately
+/// not checked: the unit tests seed plain files, and a missing bit surfaces
+/// as the spawn's own error rather than as "not installed".
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// How [`crate::app::Harness::open_on_provider`] connects: wrapped in a
+/// factory so tests can inject a scripted provider instead of spawning a
+/// real child. The default spawns nothing on the UI thread — resolving,
+/// spawning and shaking hands all block, so the caller runs this on the
+/// background executor.
+pub(crate) type ProviderFactory = Arc<dyn Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync>;
+
+/// The production factory: resolve the CLI, hold its adapter behind the
+/// gate, and shake hands. The session itself opens later, with
+/// `Command::OpenSession` on the same background turn.
+pub(crate) fn default_provider_factory() -> ProviderFactory {
+    Arc::new(open_provider)
+}
+
+/// Resolve, wrap, and connect one provider lane's child. `Err` when the
+/// binary is missing or the handshake fails — the caller surfaces it with
+/// the provider's name and opens nothing, never a silent muse fallback.
+fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
+    let program = resolve_program(id).ok_or_else(|| ProviderError::Unavailable {
+        reason: match binary_name(id) {
+            Some(binary) => format!(
+                "{binary} was not found on PATH or in the usual install locations ({} for an override)",
+                env_override(id).unwrap_or("BAAZ_CLAUDE")
+            ),
+            None => "muse sessions ride the legacy pump, never a spawned child".into(),
+        },
+    })?;
+    let program = program.to_string_lossy().into_owned();
+    let mut provider = match id {
+        ProviderId::ClaudeCode => {
+            Provider::new(provider_claude_code::ClaudeCodeAdapter::new(&program))
+        }
+        ProviderId::Codex => Provider::new(provider_codex::CodexAdapter::new(&program)),
+        ProviderId::Muse => {
+            return Err(ProviderError::Unavailable {
+                reason: "muse sessions ride the legacy pump, never a spawned child".into(),
+            });
+        }
+    };
+    provider.connect(&crate::conn::connect_info())?;
+    Ok(provider)
 }
 
 // ------------------------------------------------- the supplied model lists
@@ -691,6 +820,98 @@ mod tests {
         // Only the server's notification settles the card.
         assert!(store.resolve("appr-1"));
         assert!(!store.has_pending());
+    }
+
+    /// Seed `dir` with a fake binary and resolve against it alone: no
+    /// real `PATH` or `HOME` is read.
+    fn seeded_binary(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"fake").expect("seed a fake binary");
+        path
+    }
+
+    /// No `PATH` entries and no fallbacks: nothing outside the dirs the
+    /// test names can answer, on any machine this runs on.
+    fn empty_search() -> (Vec<PathBuf>, Vec<PathBuf>) {
+        (Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn muse_has_no_binary_to_resolve() {
+        let (paths, fallbacks) = empty_search();
+        assert_eq!(resolve_program_with(ProviderId::Muse, None, &paths, &fallbacks), None);
+    }
+
+    #[test]
+    fn path_lookup_finds_the_binary() {
+        let dir = std::env::temp_dir().join(format!("baaz-resolve-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let claude = seeded_binary(&dir, "claude");
+        let (_, fallbacks) = empty_search();
+        assert_eq!(
+            resolve_program_with(ProviderId::ClaudeCode, None, std::slice::from_ref(&dir), &fallbacks),
+            Some(claude)
+        );
+        // `codex` was never seeded, so only `claude` resolves here — and
+        // the empty fallback list keeps the real install locations out of
+        // the answer on any machine this runs on.
+        assert_eq!(
+            resolve_program_with(ProviderId::Codex, None, std::slice::from_ref(&dir), &fallbacks),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_env_override_wins_over_path() {
+        let path_dir = std::env::temp_dir().join(format!("baaz-resolve-env-path-{}", std::process::id()));
+        let env_dir = std::env::temp_dir().join(format!("baaz-resolve-env-over-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path_dir);
+        let _ = std::fs::remove_dir_all(&env_dir);
+        std::fs::create_dir_all(&path_dir).expect("temp dir");
+        std::fs::create_dir_all(&env_dir).expect("temp dir");
+        seeded_binary(&path_dir, "codex");
+        let preferred = seeded_binary(&env_dir, "codex");
+        let (_, fallbacks) = empty_search();
+        // A directory override names the binary inside it.
+        assert_eq!(
+            resolve_program_with(
+                ProviderId::Codex,
+                Some(&env_dir),
+                std::slice::from_ref(&path_dir),
+                &fallbacks
+            ),
+            Some(preferred)
+        );
+        // A missing override is a miss, not a fallthrough to PATH: an
+        // explicit but wrong path must not silently resolve elsewhere.
+        let missing = env_dir.join("no-such-dir");
+        assert_eq!(
+            resolve_program_with(ProviderId::Codex, Some(&missing), &[], &fallbacks),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&path_dir);
+        let _ = std::fs::remove_dir_all(&env_dir);
+    }
+
+    #[test]
+    fn dock_fallbacks_cover_a_minimal_path() {
+        let home = std::env::temp_dir().join(format!("baaz-resolve-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).expect("temp dir");
+        let claude = seeded_binary(&local_bin, "claude");
+        let claude_local = home.join(".claude/local");
+        std::fs::create_dir_all(&claude_local).expect("temp dir");
+        seeded_binary(&claude_local, "claude");
+        // No PATH entries at all, as from the Dock: the fallbacks still
+        // find it, `~/.local/bin` ahead of `~/.claude/local`.
+        assert_eq!(
+            resolve_program_with(ProviderId::ClaudeCode, None, &[], &fallback_dirs(&home)),
+            Some(claude)
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

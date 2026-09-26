@@ -294,6 +294,17 @@ Each task compiles and leaves the app working; muse sessions stay on
   lane view with shutdown. Globs: `crates/baaz/src/app/lifecycle.rs`,
   `crates/baaz/src/conn.rs`, `crates/baaz/src/session.rs`. Verification:
   `cargo test -p baaz --test seam_ratchet`.
+  - **Built 2026-09-26:** `Harness::open_on_provider` connects (background
+    `ProviderFactory`, default = resolved `claude`/`codex` binary → adapter →
+    `connect` → `OpenSession`) and lands a `new_on_provider` lane view with
+    drafts entry, project override, provisional sidebar row, and focus; the
+    pick routes there from `new_session_in`/`new_session_in_root`, a fresh
+    draft is replaced via `close_view`, failures dialog
+    `Couldn't start <provider>`, and view drop / quit shuts the child down.
+    Offline chrome opens the lane over a scripted provider and logs
+    `baaz: provider lane open provider=<id> session=<id>`. W1 findings fixed:
+    `apply_deltas` refuses unknown sessions, the drain loop stops after
+    `ConnectionLost`, and the three lane guards have tests.
 - **W3 — Send/steer/stop + approvals/questions.** Title: route submit, steer,
   interrupt, decide, answer through `Provider::send` with gate UI.
   Globs: `crates/baaz/src/session/*.rs`, `crates/baaz/src/app.rs`.

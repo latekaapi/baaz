@@ -71,8 +71,21 @@ impl ExternalQuestions {
 impl SessionView {
     /// Whether this view rides the provider lane. The muse entry points
     /// (`apply`, `seed_session`, `load_replay`, `reconnected`) refuse on it.
-    pub(super) fn is_provider_lane(&self) -> bool {
+    pub(crate) fn is_provider_lane(&self) -> bool {
         matches!(self.lane, Lane::Provider(_))
+    }
+
+    /// Hang up the lane's provider child, if this view owns one. Idempotent:
+    /// [`provider::Provider::shutdown`] is, and so is calling this twice.
+    /// Closing or replacing a provider-lane view calls this so no `claude`
+    /// or `codex` child outlives its view; dropping the view does the same
+    /// through [`Drop`].
+    pub(crate) fn shutdown_lane(&mut self) {
+        if let Lane::Provider(lane) = &self.lane {
+            if let Ok(mut provider) = lane.provider.lock() {
+                provider.shutdown();
+            }
+        }
     }
 
     /// A view over a provider session. Mirrors [`SessionView::new`] minus
@@ -80,8 +93,8 @@ impl SessionView {
     /// [`provider::Provider`] and its bridged event stream, and this spawns
     /// exactly one gpui task draining that stream for the view's whole life.
     ///
-    /// W2 constructs the real adapters; until then only tests call this.
-    #[allow(dead_code)]
+    /// W2's open path constructs the real adapters through this; tests
+    /// drive it with a scripted provider.
     pub fn new_on_provider(
         session_id: String,
         provider: provider::Provider,
@@ -98,7 +111,14 @@ impl SessionView {
         this.lane = Lane::Provider(ProviderLane { provider: Arc::new(Mutex::new(provider)) });
         this.tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
+                let lost = matches!(event, provider::ProviderEvent::ConnectionLost { .. });
                 if this.update(cx, |view, cx| view.on_provider_event(event, cx)).is_err() {
+                    return;
+                }
+                // The lane's provider is hung up and will never deliver
+                // again: stop draining so a late event cannot surface past
+                // the banner.
+                if lost {
                     return;
                 }
             }
@@ -106,6 +126,19 @@ impl SessionView {
         this
     }
 
+}
+
+impl Drop for SessionView {
+    /// A dropped view owns no child anymore: hang up the lane's provider so
+    /// no `claude` or `codex` process outlives the view that spawned it.
+    /// Idempotent — [`SessionView::shutdown_lane`] is — so an explicit close
+    /// beforehand changes nothing.
+    fn drop(&mut self) {
+        self.shutdown_lane();
+    }
+}
+
+impl SessionView {
     /// Fold one provider event: deltas into the transcript, approval and
     /// question taps onto their surfaces, a lost connection onto the banner.
     /// Only the lane task calls this, so `apply_deltas` has exactly one
@@ -361,6 +394,121 @@ mod tests {
                     .as_deref()
                     .is_some_and(|banner| banner.contains("child exited")),
                 "the lost connection shows the session error banner"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn seed_session_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        // The lane records an empty model at construction; a `session/started`
+        // seed carrying one would overwrite it if it ever folded.
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).session().map(|s| s.model.clone()), Some(String::new()));
+            view.update(cx, |view, cx| {
+                view.seed_session(
+                    serde_json::json!({
+                        "sessionId": "s-1",
+                        "modelId": "seeded-model",
+                        "createdAt": "2026-09-26T00:00:00Z",
+                        "path": "/tmp/w1-lane",
+                        "status": "idle",
+                        "turnCount": 0,
+                        "updatedAt": "2026-09-26T00:00:00Z",
+                    }),
+                    cx,
+                );
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).session().map(|s| s.model.clone()),
+                Some(String::new()),
+                "the refused seed changes nothing about the folded session"
+            );
+        });
+    }
+
+    // `reconnected`'s guard test lives beside the view in `session.rs`:
+    // driving it needs a real child handle, and this file must stay out of
+    // the seam ratchet's coupling list.
+
+    #[gpui::test]
+    fn load_replay_is_refused_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.load_replay(std::path::Path::new("/nonexistent/capture.jsonl"), cx)
+            });
+        });
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(!view.replay, "the refused replay leaves the live view live");
+            assert!(view.banner.is_none(), "the refused replay banners nothing");
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_the_view_shuts_its_child_down(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        // The lane's provider, held past the view so the shutdown below is
+        // observable: scripted providers share state across handles, and a
+        // shut one refuses every later command as shut down.
+        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        drop(view);
+        drop(tx);
+        vc.run_until_parked();
+        // Dropped entities are reclaimed at the end of the effect cycle, so
+        // the view's `Drop` — which hangs up the child — runs on the next
+        // update, not on the `drop` above.
+        vc.update(|_, _| {});
+        let guard = lane.lock().expect("lane provider");
+        match guard.send(provider::Command::SubmitInput {
+            request_id: "r-late".into(),
+            session_id: "s-1".into(),
+            parts: vec![provider::SubmissionPart::Text("too late".into())],
+            display_text: None,
+        }) {
+            Err(provider::ProviderError::Unavailable { reason }) => {
+                assert!(reason.contains("shut down"), "the child hung up, not something else: {reason}");
+            }
+            other => panic!("a dropped view's child must refuse, answered {other:?}"),
+        }
+    }
+
+    #[gpui::test]
+    fn nothing_surfaces_after_the_connection_is_lost(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = open_lane_view(vc, "s-1");
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "child exited".into() })
+                .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        // The drain loop is gone with the connection, so the receiver is
+        // dropped: a late tap may not even send, and must never surface.
+        let _ = tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+            session_id: "s-1".to_owned(),
+            approval_id: "ap-late".to_owned(),
+            headline: "a tap from after the hangup".to_owned(),
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("child exited")),
+                "the lost connection still shows the session error banner"
+            );
+            assert!(
+                view.external_approvals.get("ap-late").is_none(),
+                "an approval raised after ConnectionLost never reaches the surface"
             );
         });
     }

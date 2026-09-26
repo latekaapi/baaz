@@ -285,18 +285,22 @@ impl MuseFold {
     /// ones that landed. A delta naming a turn or block that is gone is
     /// ignored ([`Session::apply`] reports it unlanded), never an error.
     ///
-    /// The entry is created on first use with the fold's default shape, so a
+    /// A session id this fold has never seen is refused with no deltas: the
     /// provider lane calls [`MuseFold::ensure_session`] first to record its
-    /// provider, model and cwd. `SideState` stays default for such sessions:
-    /// nothing on the provider lane reports context usage, queue rows or
-    /// cursors into it.
+    /// provider, model and cwd, and folding for a stranger would silently
+    /// mint a `Provider::Muse` session that no lane owns. `SideState` stays
+    /// default for such sessions: nothing on the provider lane reports
+    /// context usage, queue rows or cursors into it.
     ///
     /// One-writer rule: a session is folded either through [`MuseFold::apply`]
     /// (muse lane) or through here (provider lane), never both. The session
     /// view owns its lane at construction and refuses the other lane's
     /// events, so the two entry points can never both drive one session.
     pub fn apply_deltas(&mut self, session_id: &str, deltas: Vec<Delta>) -> Vec<Delta> {
-        let folded = self.folded(session_id);
+        let Some(folded) = self.sessions.get_mut(session_id) else {
+            eprintln!("muse-adapter: apply_deltas refused: unknown session {session_id}");
+            return Vec::new();
+        };
         let mut landed = Vec::with_capacity(deltas.len());
         for delta in deltas {
             if folded.session.apply(delta.clone()) {
@@ -3378,6 +3382,23 @@ mod tests {
             fold.session("s-1").expect("folded").turns.len(),
             turns_before,
             "the transcript is unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_deltas_refuses_a_session_it_never_saw() {
+        let mut fold = MuseFold::new();
+        fold.ensure_session("s-1", Provider::Codex, String::new(), String::new());
+        let landed = fold.apply_deltas("stranger", scripted_deltas("hello"));
+        assert!(landed.is_empty(), "nothing lands for an unknown session id");
+        assert!(
+            fold.session("stranger").is_none(),
+            "refusing must not mint a session no lane owns"
+        );
+        assert_eq!(
+            fold.session("s-1").expect("folded").turns.len(),
+            0,
+            "the known session is untouched too"
         );
     }
 }

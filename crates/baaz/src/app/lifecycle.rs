@@ -55,6 +55,17 @@ pub(crate) fn evict_parked(
         .collect()
 }
 
+/// Everything one provider `OpenSession` admitted, carried from the
+/// background turn that connected it to the UI thread that opens its view.
+struct ProviderOpen {
+    provider_id: ProviderId,
+    provider: provider::Provider,
+    events: futures::channel::mpsc::UnboundedReceiver<provider::ProviderEvent>,
+    session_id: String,
+    project: Option<String>,
+    workspace: String,
+}
+
 /// What [`Harness::ensure_boot_session`] should do about the boot session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BootDecision {
@@ -1122,12 +1133,18 @@ impl Harness {
         if let Some(id) = current.clone() {
             match draft_decision(&self.drafts, &id, |candidate| self.is_live_draft(candidate, cx)) {
                 DraftDecision::Reuse(draft_id) => {
-                    if self.open_draft(&draft_id, window, cx) {
+                    // A draft serves only the lane it was created on: a muse
+                    // draft under a provider pick (or the reverse) is stale,
+                    // dropped below, and started fresh on the pick.
+                    let wanted = ProviderId::parse(&self.new_provider);
+                    if self.draft_serves(&draft_id, wanted, cx) && self.open_draft(&draft_id, window, cx)
+                    {
                         return;
                     }
-                    // Named but viewless: the MRU never evicts a draft, so
-                    // this is unreachable — drop the stale name and start
-                    // below rather than strand a retarget.
+                    // Named but viewless, or riding the wrong lane: the MRU
+                    // never evicts a draft, so a missing view is unreachable
+                    // — drop the stale name and start below rather than
+                    // strand a retarget.
                     self.drafts.remove(&id);
                 }
                 DraftDecision::Start { stale: Some(_) } => {
@@ -1135,6 +1152,18 @@ impl Harness {
                 }
                 DraftDecision::Start { stale: None } => {}
             }
+        }
+        // The switcher's pick is not muse: the session opens on the provider
+        // lane, and `session/start` to muse never fires for it.
+        let wanted = ProviderId::parse(&self.new_provider);
+        if wanted != ProviderId::Muse {
+            let workspace = current
+                .as_deref()
+                .and_then(|id| self.projects.find_available(id))
+                .map(|project| project.root.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.workspace());
+            self.open_on_provider(wanted, current.clone(), workspace, window, cx);
+            return;
         }
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`): no child to
@@ -1273,6 +1302,13 @@ impl Harness {
     /// session.
     pub(crate) fn new_session_in_root(&mut self, root: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
         let root = root.to_path_buf();
+        // Same lane branch as `new_session_in`: an unadopted root on a
+        // provider pick opens on the provider lane, never as `session/start`.
+        let wanted = ProviderId::parse(&self.new_provider);
+        if wanted != ProviderId::Muse {
+            self.open_on_provider(wanted, None, root.to_string_lossy().into_owned(), window, cx);
+            return;
+        }
         let Some(client) = self.client.clone() else {
             // Scripted chrome (`--no-connect` / `--replay`): no child to
             // start a session on, so the draft opens as a local view.
@@ -1360,6 +1396,20 @@ impl Harness {
             .map(|(_, view)| view.clone());
         let Some(view) = in_centre.or(parked) else { return false };
         view.read(cx).session().is_none_or(|session| session.turns.is_empty())
+    }
+
+    /// Whether the draft's view already rides `wanted`'s lane: a muse draft
+    /// serves a muse pick, and a provider draft serves its own provider's
+    /// pick. Anything else (or a view that is gone) is stale — the start
+    /// below drops the name and opens fresh on the pick rather than
+    /// reopening the wrong lane.
+    fn draft_serves(&self, draft_id: &str, wanted: ProviderId, cx: &gpui::App) -> bool {
+        let in_centre = self.active.clone().filter(|view| view.read(cx).session_id == draft_id);
+        let parked =
+            self.session_cache.iter().find(|(id, _)| id == draft_id).map(|(_, view)| view.clone());
+        let Some(view) = in_centre.or(parked) else { return false };
+        view.read(cx).provider_kind() == wanted
+            && view.read(cx).is_provider_lane() == (wanted != ProviderId::Muse)
     }
 
     /// Reopen a live draft's view: the active one when it is already open,
@@ -1702,6 +1752,218 @@ impl Harness {
         cx.notify();
     }
 
+    /// Open a new Claude Code / Codex session: connect and `OpenSession` on
+    /// the background executor (both block), then construct the lane view and
+    /// make it the visible session. What `new_session_in` calls when the
+    /// switcher's pick is not muse.
+    ///
+    /// A failure surfaces the same error dialog a failed `session/start`
+    /// gets, titled with the provider's name — and opens nothing, never a
+    /// silent muse fallback.
+    pub(crate) fn open_on_provider(
+        &mut self,
+        provider_id: ProviderId,
+        project: Option<String>,
+        workspace: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        // The switch lands on the round-trip below, like the muse path: the
+        // session verbs wait for it instead of acting on the session that is
+        // still open.
+        self.session_switch_pending = true;
+        // Scripted chrome (`--no-connect` / `--replay`): no child to spawn,
+        // so the lane opens over a connected scripted provider — the same
+        // stand-in `open_local_draft` uses for muse, and what lets
+        // `new;setprovider:claude-code` end on a provider lane offline.
+        if self.client.is_none() {
+            self.open_scripted_lane(provider_id, project, workspace, window, cx);
+            return;
+        }
+        let factory = self.provider_factory.clone();
+        let workspace_bg = workspace.clone();
+        let work = move || -> Result<ProviderOpen, provider::ProviderError> {
+            let provider = factory(provider_id)?;
+            let (provider, events) = conn::gate(provider);
+            let ack = provider.send(provider::Command::OpenSession {
+                request_id: new_command_id(),
+                workspace: Some(workspace_bg),
+                model: None,
+                model_provider: None,
+            })?;
+            match ack {
+                provider::Ack::Session { session_id, .. } => Ok(ProviderOpen {
+                    provider_id,
+                    provider,
+                    events,
+                    session_id,
+                    project,
+                    workspace,
+                }),
+                other => Err(provider::ProviderError::Rejected {
+                    reason: format!("OpenSession answered {other:?} instead of a session"),
+                }),
+            }
+        };
+        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+            Ok(open) => {
+                this.finish_provider_open(open, window, cx);
+            }
+            Err(error) => {
+                // No switch is coming: release the session verbs waiting on
+                // it, like the failed `session/start` arm does.
+                crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
+                this.session_switch_pending = false;
+                this.set_dialog(
+                    cx,
+                    Dialog {
+                        title: format!("Couldn't start {}", provider_id.label()),
+                        detail: error.to_string(),
+                        kind: DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    },
+                );
+            }
+        });
+    }
+
+    /// The `--no-connect` half of [`Self::open_on_provider`]: a connected
+    /// scripted provider stands in for the CLI child, synchronously — a
+    /// scripted provider never blocks, so no background turn is needed.
+    fn open_scripted_lane(
+        &mut self,
+        provider_id: ProviderId,
+        project: Option<String>,
+        workspace: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use provider::ProviderAdapter as _;
+        let mut adapter = provider::scripted::ScriptedProvider::new();
+        let bridged = adapter
+            .connect(&conn::connect_info())
+            .map_err(|error| error.to_string())
+            .and_then(|_| {
+                let provider = provider::Provider::new(adapter);
+                let ack = provider
+                    .send(provider::Command::OpenSession {
+                        request_id: new_command_id(),
+                        workspace: Some(workspace.clone()),
+                        model: None,
+                        model_provider: None,
+                    })
+                    .map_err(|error| error.to_string())?;
+                match ack {
+                    provider::Ack::Session { session_id, .. } => Ok((provider, session_id)),
+                    other => Err(format!("OpenSession answered {other:?} instead of a session")),
+                }
+            })
+            .map(|(provider, session_id)| {
+                let (provider, events) = conn::gate(provider);
+                (provider, events, session_id)
+            });
+        match bridged {
+            Ok((provider, events, session_id)) => {
+                self.finish_provider_open(
+                    ProviderOpen { provider_id, provider, events, session_id, project, workspace },
+                    window,
+                    cx,
+                );
+            }
+            Err(reason) => {
+                crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
+                self.session_switch_pending = false;
+                self.set_dialog(
+                    cx,
+                    Dialog {
+                        title: format!("Couldn't start {}", provider_id.label()),
+                        detail: reason,
+                        kind: DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Land a connected provider session: construct its lane view and
+    /// register it everywhere [`Self::open`] registers muse views — the
+    /// drafts map, the project override, a provisional sidebar row, and the
+    /// centre pane with the composer focused — so it becomes the visible
+    /// session.
+    fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
+        let ProviderOpen { provider_id, provider, events, session_id, project, workspace } = open;
+        self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        let overlays = self.overlays.clone();
+        let host = SessionHost {
+            provider_id: provider_id.as_str().to_owned(),
+            workspace: workspace.clone(),
+            overlays,
+            capture: self.capture.clone(),
+        };
+        let view = cx.new(|cx| {
+            SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
+        });
+        // Like the muse path: the session groups under the project it
+        // started in, and the drafts map names it while it is unsent so a
+        // repeated ⌘N reopens it instead of spawning another child.
+        if let Some(id) = project.clone() {
+            self.set_override(&session_id, |meta| meta.project = Some(id.clone()), cx);
+            self.drafts.insert(id, session_id.clone());
+        }
+        // A provisional sidebar row now, titled when the first turn lands:
+        // `session/list` only knows muse sessions, so nothing else would
+        // draw one for this lane.
+        let mut row = sidebar::local_started_row(
+            &session_id,
+            sidebar::UNNAMED.to_owned(),
+            project.clone(),
+            Some(workspace),
+            crate::clock::now_local(),
+        );
+        row.provisional = true;
+        self.sessions.retain(|entry| entry.id != session_id);
+        self.sessions.push(row);
+        self.invalidate_list();
+        // The swap that makes it the visible session: parks the outgoing
+        // view, points the event subscription at the new one, focuses the
+        // composer — everything `open` does for muse.
+        self.activate(view, false, window, cx);
+        // The scriptable check: a `--steps` run greps the log for this line
+        // to prove the pick ended on a provider lane, not a muse session.
+        crate::baaz_log!(
+            "baaz: provider lane open provider={} session={session_id}",
+            provider_id.as_str()
+        );
+    }
+
+    /// Forget `session_id`'s view wherever it lives — open or parked. A
+    /// provider lane's child is hung up first, so a discarded session leaves
+    /// no orphaned `claude` / `codex` process; a muse draft has no child to
+    /// hang up. What `SwitchProvider` calls for the empty draft it replaces,
+    /// so the replacement (not a parking) is what survives.
+    pub(crate) fn close_view(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // The next `activate` re-points the event subscription at the new
+        // view; the dropped view's subscription fires nothing after this,
+        // so this only hangs up children and forgets handles — never while
+        // an event for the closed view is still dispatching through them.
+        if self.active.clone().is_some_and(|view| view.read(cx).session_id == session_id) {
+            if let Some(view) = self.active.take() {
+                view.update(cx, |view, _| view.shutdown_lane());
+            }
+            self.pending_id = None;
+        }
+        if let Some(view) = self.cache_take(session_id) {
+            view.update(cx, |view, _| view.shutdown_lane());
+        }
+        cx.notify();
+    }
+
     /// The session's project display name, for the empty state: the row's
     /// project resolved to a name, so a rename shows without reopening.
     pub(crate) fn project_name_for(&self, session_id: &str) -> Option<String> {
@@ -1749,9 +2011,14 @@ impl Harness {
         view.update(cx, |view, _| view.set_project_name(project_name));
         self.park_active(cx);
         // A parked view's client predates a reconnect; the current child is
-        // the one that can page.
+        // the one that can page. Provider-lane views own their own child,
+        // so the muse reconnect refuses on them — skip it outright.
         if let Some(client) = self.client.clone() {
-            view.update(cx, |view, cx| view.reconnected(client, cx));
+            view.update(cx, |view, cx| {
+                if !view.is_provider_lane() {
+                    view.reconnected(client, cx);
+                }
+            });
         }
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
@@ -2043,14 +2310,17 @@ impl Harness {
             }
             // A fresh session's composer chip picked another provider:
             // nothing was ever sent, so the pick becomes the default and a
-            // new session starts on it. The abandoned session stays an
-            // empty session (hidden unless empty sessions are shown), but
-            // it stops being this project's draft — without that, the
-            // start below would reopen the very view the person just left.
+            // new session starts on it — on the provider lane when the pick
+            // is not muse. The abandoned draft's view is closed outright
+            // (hanging up its child when it owns one) so the replacement
+            // below never parks — and never leaks — the view just left; it
+            // also stops being this project's draft, without which the
+            // start below would reopen that very view.
             SessionEvent::SwitchProvider { provider } => {
                 let old = view.read(cx).session_id.clone();
                 self.select_new_provider(*provider, cx);
                 self.drafts.retain(|_, id| *id != old);
+                self.close_view(&old, cx);
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
                 }));
@@ -2353,5 +2623,288 @@ mod tests {
         assert_eq!(drain_steps(&mut holder), vec!["new".to_owned(), "wait:3000".to_owned()]);
         assert!(holder.is_empty());
         assert!(drain_steps(&mut holder).is_empty());
+    }
+
+    // ------------------------------------------------- W2 provider-lane open
+
+    /// A bootable [`crate::Args`] pointed at a hermetic state dir, mirroring
+    /// the app tests' helper: no store read or write escapes the temp dir.
+    fn lane_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            bench_out: None,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    fn lane_state(
+        name: &str,
+    ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-w2-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn lane_restore(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
+    ) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
+    /// A connected scripted provider through the [`crate::providers::ProviderFactory`]
+    /// seam: what the lane tests drive without spawning a child.
+    fn scripted_factory() -> crate::providers::ProviderFactory {
+        use provider::ProviderAdapter as _;
+        std::sync::Arc::new(|_: ProviderId| {
+            let mut adapter = provider::scripted::ScriptedProvider::new();
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        })
+    }
+
+    /// A factory that never connects: the failed-open path.
+    fn failing_factory(reason: &str) -> crate::providers::ProviderFactory {
+        let reason = reason.to_owned();
+        std::sync::Arc::new(move |_: ProviderId| {
+            Err(provider::ProviderError::Unavailable { reason: reason.clone() })
+        })
+    }
+
+    /// A real child handle with no session behind it: `true` exits at once,
+    /// so nothing can answer on it — which is exactly what proves the lane
+    /// path issues no muse `session/start`: had it tried, the dead child
+    /// would have failed it into a dialog instead of a lane view.
+    fn dead_client() -> std::sync::Arc<MuseClient> {
+        std::sync::Arc::new(
+            MuseClient::spawn(&muse_client::MuseConfig {
+                program: std::path::PathBuf::from("true"),
+                trust_workspace: false,
+                no_session_log: false,
+                extra_args: Vec::new(),
+            })
+            .expect("a throwaway child spawns"),
+        )
+    }
+
+    fn lane_harness(
+        vc: &mut gpui::VisualTestContext,
+        dir: &std::path::Path,
+    ) -> gpui::Entity<Harness> {
+        vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(lane_args(dir), crate::shot::CaptureToken::default(), window, cx))
+        })
+    }
+
+    #[gpui::test]
+    fn picking_a_non_muse_provider_opens_a_lane_and_starts_no_muse_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("open");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the provider session is open");
+            assert!(
+                view.read(cx).is_provider_lane(),
+                "the pick opens a provider lane, not a muse session"
+            );
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+            assert!(!harness.session_switch_pending, "the switch landed");
+            assert!(
+                harness.overlays.read(cx).dialog.is_none(),
+                "no failure dialog: no muse session/start was ever issued at the dead child"
+            );
+            let open_id = view.read(cx).session_id.clone();
+            assert!(
+                harness.sessions.iter().any(|entry| entry.id == open_id && entry.provisional),
+                "a provisional sidebar row names the lane session"
+            );
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn a_failed_provider_connect_surfaces_an_error_and_opens_no_view(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("fail");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = failing_factory("no child here");
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.active.is_none(), "a failed connect opens no view");
+            assert!(!harness.session_switch_pending, "the verbs waiting on the switch are released");
+            let dialog = harness.overlays.read(cx).dialog.as_ref().expect("the failure is dialogued");
+            assert_eq!(dialog.title, "Couldn't start Claude Code");
+            assert!(dialog.detail.contains("no child here"), "the reason survives: {}", dialog.detail);
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn new_session_in_routes_a_provider_pick_to_the_lane_offline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("route");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        // No client: scripted chrome. The pick alone must route past muse.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.select_new_provider(ProviderId::Codex, cx));
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session_in(None, window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("a session opened");
+            assert!(
+                view.read(cx).is_provider_lane(),
+                "`new` on a provider pick ends on a provider lane"
+            );
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn switch_provider_replaces_the_fresh_draft_without_leaking_its_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("switch");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        // A fresh muse draft first: scripted chrome opens it locally.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session_in(None, window, cx));
+        });
+        let old = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the draft opened");
+            assert!(!view.read(cx).is_provider_lane(), "the draft starts on the muse lane");
+            view.read(cx).session_id.clone()
+        });
+        // The `SwitchProvider` handler's own sequence: remember the pick,
+        // close the empty draft's view, start on the pick.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.drafts.retain(|_, id| *id != old);
+                harness.close_view(&old, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the replacement opened");
+            assert_ne!(view.read(cx).session_id, old, "the draft did not survive the switch");
+            assert!(view.read(cx).is_provider_lane(), "the replacement rides the provider lane");
+            assert!(
+                !harness.session_cache.iter().any(|(id, _)| id == &old),
+                "the discarded draft was closed, never parked"
+            );
+            assert!(
+                !harness.drafts.values().any(|id| id == &old),
+                "the discarded draft names no project's draft anymore"
+            );
+        });
+        lane_restore(state);
+    }
+
+    #[gpui::test]
+    fn closing_a_provider_view_hangs_up_its_child(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("close");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session_in(None, window, cx);
+            });
+        });
+        let open_id = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.close_view(&open_id, cx));
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.active.is_none(), "the closed view is gone from the centre");
+            assert!(
+                !harness.session_cache.iter().any(|(id, _)| id == &open_id),
+                "the closed view is gone from the MRU too"
+            );
+        });
+        // The shutdown itself is proven in the lane tests (dropping a lane
+        // view hangs up its child: a later command is refused as shut
+        // down); here the close path above called it outright.
+        lane_restore(state);
     }
 }
