@@ -346,10 +346,35 @@ impl CodexAdapter {
             ApprovalKind::Permissions => {
                 Self::decide_permissions(choice).map(ApprovalAnswer::Permissions)
             }
+            ApprovalKind::McpElicitation => {
+                Self::decide_elicitation(choice).map(ApprovalAnswer::McpElicitation)
+            }
             ApprovalKind::Unknown => Err(ProviderError::Rejected {
                 reason: "this approval arrived on an unknown requestApproval lane; \
                          not answered blind"
                     .into(),
+            }),
+        }
+    }
+
+    /// MCP tool-call elicitations take exactly the three wire actions —
+    /// `accept`, `decline` and `cancel`. There is no session-scoped
+    /// answer on this lane: `McpServerElicitationRequestResponse.json`
+    /// admits `{action, content?}` and nothing else, so
+    /// `accept-for-session` (either spelling) is refused rather than
+    /// answered as a silent one-shot — a press that promises persistence
+    /// must never travel as a choice the schema cannot carry.
+    fn decide_elicitation(choice: &str) -> Result<child::McpElicitationAction, ProviderError> {
+        use child::McpElicitationAction as A;
+        match choice {
+            "accept" => Ok(A::Accept),
+            "decline" => Ok(A::Decline),
+            "cancel" => Ok(A::Cancel),
+            _ => Err(ProviderError::Rejected {
+                reason: format!(
+                    "unknown MCP tool approval choice {choice:?}: offer accept, decline, \
+                     or cancel — this approval answers once, the schema carries no session scope"
+                ),
             }),
         }
     }
@@ -858,6 +883,34 @@ mod tests {
         assert!(CodexAdapter::decide(K::Permissions, r#"{"scope":"turn"}"#).is_err());
         // An unknown lane is never answered blind.
         assert!(CodexAdapter::decide(K::Unknown, "accept").is_err());
+    }
+
+    #[test]
+    fn elicitation_choices_decide_their_wire_actions() {
+        // The three answers the elicitation lane takes ride `DecideApproval`
+        // verbatim to the `{action, content?}` shape; anything else —
+        // notably `accept-for-session` in either spelling — is refused,
+        // never answered as a silent one-shot the schema cannot carry.
+        use ApprovalKind as K;
+        use child::{ApprovalAnswer, McpElicitationAction as A};
+        assert_eq!(
+            CodexAdapter::decide(K::McpElicitation, "accept"),
+            Ok(ApprovalAnswer::McpElicitation(A::Accept))
+        );
+        assert_eq!(
+            CodexAdapter::decide(K::McpElicitation, "decline"),
+            Ok(ApprovalAnswer::McpElicitation(A::Decline))
+        );
+        assert_eq!(
+            CodexAdapter::decide(K::McpElicitation, "cancel"),
+            Ok(ApprovalAnswer::McpElicitation(A::Cancel))
+        );
+        for refused in ["accept-for-session", "acceptForSession", "approved", ""] {
+            assert!(
+                CodexAdapter::decide(K::McpElicitation, refused).is_err(),
+                "{refused:?} must not decide an elicitation"
+            );
+        }
     }
 
     #[test]

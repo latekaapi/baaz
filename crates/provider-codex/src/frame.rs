@@ -187,6 +187,32 @@ pub enum Item {
         /// Wire status (`inProgress`, `completed`, …).
         status: String,
     },
+    /// An `mcpToolCall`: one MCP tool invocation and its outcome, per
+    /// `McpToolCallThreadItem` in the schema bundle. `arguments` is
+    /// whatever the model sent (an object for `terminal_run`, never
+    /// assumed a string); `result` is the tool's `McpToolCallResult`
+    /// when the call ran, `error` the refusal or failure when it did
+    /// not. Captured live 2026-09-27 in
+    /// `fixtures/codex/mcp-terminal.jsonl`.
+    McpToolCall {
+        /// The wire item id (`exec-…`, shared with nothing else — the
+        /// gating elicitation names no item id).
+        id: String,
+        /// The MCP server that served the call (`baaz`, …).
+        server: String,
+        /// The tool that was called (`terminal_run`, …).
+        tool: String,
+        /// Wire status (`inProgress`, `completed`, `failed`).
+        status: String,
+        /// The call's arguments, verbatim from the wire.
+        arguments: Value,
+        /// The refusal or failure message, when reported.
+        error: Option<String>,
+        /// The tool's result payload, when the call ran.
+        result: Option<Value>,
+        /// Wall-clock time in milliseconds, when reported.
+        duration_ms: Option<u64>,
+    },
     /// An item kind this decoder does not know. Carried, not dropped.
     Other {
         /// The wire `type` string.
@@ -533,6 +559,23 @@ fn decode_item(item: &Value) -> Item {
             tool: str_field(item, "tool"),
             status: str_field(item, "status"),
         },
+        "mcpToolCall" => Item::McpToolCall {
+            id,
+            server: str_field(item, "server"),
+            tool: str_field(item, "tool"),
+            status: str_field(item, "status"),
+            arguments: item.get("arguments").cloned().unwrap_or(Value::Null),
+            error: item
+                .get("error")
+                .and_then(|error| {
+                    error.get("message").and_then(Value::as_str).map(str::to_owned).or_else(|| {
+                        error.as_str().map(str::to_owned)
+                    })
+                })
+                .filter(|message| !message.trim().is_empty()),
+            result: item.get("result").cloned().filter(|result| !result.is_null()),
+            duration_ms: item.get("durationMs").and_then(Value::as_u64),
+        },
         other => Item::Other { item_type: other.to_owned(), id },
     }
 }
@@ -741,6 +784,7 @@ impl Item {
             | Item::FileChange { id, .. }
             | Item::SubAgentActivity { id, .. }
             | Item::CollabAgentToolCall { id, .. }
+            | Item::McpToolCall { id, .. }
             | Item::Other { id, .. } => id,
         }
     }
@@ -755,6 +799,7 @@ impl Item {
             Item::FileChange { .. } => "fileChange",
             Item::SubAgentActivity { .. } => "subAgentActivity",
             Item::CollabAgentToolCall { .. } => "collabAgentToolCall",
+            Item::McpToolCall { .. } => "mcpToolCall",
             Item::Other { .. } => "other",
         }
     }
@@ -770,6 +815,7 @@ impl Item {
             | Item::FileChange { .. }
             | Item::SubAgentActivity { .. }
             | Item::CollabAgentToolCall { .. }
+            | Item::McpToolCall { .. }
             | Item::Other { .. } => "",
         }
     }
@@ -795,8 +841,60 @@ impl Item {
         match self {
             Item::CommandExecution { status, .. }
             | Item::FileChange { status, .. }
-            | Item::CollabAgentToolCall { status, .. } => status,
+            | Item::CollabAgentToolCall { status, .. }
+            | Item::McpToolCall { status, .. } => status,
             _ => "",
+        }
+    }
+
+    /// The MCP server, for `mcpToolCall` items; empty otherwise.
+    pub fn mcp_server(&self) -> &str {
+        match self {
+            Item::McpToolCall { server, .. } => server,
+            _ => "",
+        }
+    }
+
+    /// The MCP tool name, for `mcpToolCall` items; empty otherwise.
+    pub fn mcp_tool(&self) -> &str {
+        match self {
+            Item::McpToolCall { tool, .. } => tool,
+            _ => "",
+        }
+    }
+
+    /// The call's arguments verbatim, for `mcpToolCall` items;
+    /// `Null` otherwise (and when the wire sent none).
+    pub fn mcp_arguments(&self) -> &Value {
+        match self {
+            Item::McpToolCall { arguments, .. } => arguments,
+            _ => &Value::Null,
+        }
+    }
+
+    /// The refusal or failure message, for `mcpToolCall` items;
+    /// `None` otherwise (and when the call reported none).
+    pub fn mcp_error(&self) -> Option<&str> {
+        match self {
+            Item::McpToolCall { error, .. } => error.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The tool's result payload, for `mcpToolCall` items that ran;
+    /// `None` otherwise.
+    pub fn mcp_result(&self) -> Option<&Value> {
+        match self {
+            Item::McpToolCall { result, .. } => result.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Wall-clock milliseconds, for `mcpToolCall` items that report it.
+    pub fn mcp_duration_ms(&self) -> Option<u64> {
+        match self {
+            Item::McpToolCall { duration_ms, .. } => *duration_ms,
+            _ => None,
         }
     }
 
@@ -1001,6 +1099,7 @@ mod tests {
             "approval-default.jsonl",
             "error.jsonl",
             "image.jsonl",
+            "mcp-terminal.jsonl",
         ] {
             for (index, line) in fixture_lines(name).iter().enumerate() {
                 decode_envelope(line)
@@ -1054,6 +1153,31 @@ mod tests {
                 diff: "hello there\nbye\n".into(),
             }]
         );
+    }
+
+    #[test]
+    fn mcp_tool_call_carries_server_tool_arguments_and_outcome() {
+        // `mcp-terminal.jsonl`: the live capture's completed `mcpToolCall`
+        // failed with the refusal. An arm that drops any field renders
+        // the T3b card: no command to name, success for a call that
+        // never ran.
+        let calls: Vec<_> = completed_items("mcp-terminal.jsonl")
+            .into_iter()
+            .filter(|item| item.kind() == "mcpToolCall")
+            .collect();
+        assert_eq!(calls.len(), 1, "one completed MCP call in the capture");
+        let call = &calls[0];
+        assert_eq!(call.mcp_server(), "baaz");
+        assert_eq!(call.mcp_tool(), "terminal_run");
+        assert_eq!(call.status(), "failed");
+        assert_eq!(
+            call.mcp_arguments().get("command").and_then(Value::as_str),
+            Some("echo hi-from-codex"),
+            "the command survives the decode: {:?}",
+            call.mcp_arguments()
+        );
+        assert_eq!(call.mcp_error(), Some("user rejected MCP tool call"));
+        assert!(call.mcp_result().is_none(), "a refused call reports no result");
     }
 
     #[test]

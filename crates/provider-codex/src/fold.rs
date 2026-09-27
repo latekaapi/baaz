@@ -68,17 +68,197 @@ use aui_protocol::{
 use provider::ProviderEvent;
 use serde_json::Value;
 
-use crate::child::{ApprovalKind, FileChangeApprovalParams, PermissionsApprovalParams};
+use crate::child::{
+    ApprovalKind, FileChangeApprovalParams, MCP_ELICITATION_ID_PREFIX,
+    PermissionsApprovalParams, elicitation_is_tool_approval,
+};
 use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Item, Notification, TokenCounts};
 
-/// The settled verb of a terminal tool card (D51): the decode drops the
-/// call's payload, so the open/running distinction is gone by the time the
-/// card folds — every `mcpToolCall` lands settled.
+/// The settled verb of a terminal tool card (D51).
 pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
 
-/// The header target of a terminal card whose command never survived the
-/// decode: what the card names when there is no command to name.
+/// The running verb of a terminal tool card: an `mcpToolCall` that
+/// completes still `inProgress` reads open, never done.
+pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
+
+/// The header target of a terminal card whose call names no command:
+/// what the card names when there is no command to name.
 pub const TERMINAL_TOOL_TARGET: &str = "terminal";
+
+/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
+/// §4). An `mcpToolCall` from the baaz server for one of these folds to a
+/// shell card with terminal verbs (D51) — the command from the call's
+/// arguments, the run's output as the body — never the raw item JSON.
+fn is_terminal_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "terminal_list"
+            | "terminal_open"
+            | "terminal_run"
+            | "terminal_read"
+            | "terminal_screen"
+            | "terminal_send"
+            | "terminal_close"
+    )
+}
+
+/// The model's command out of an `mcpToolCall`'s arguments: the `command`
+/// string of the observed object shape. `None` when the call names none
+/// (list, open, send, close) — the card then names the tool, never a
+/// guessed command.
+fn mcp_command(arguments: &Value) -> Option<String> {
+    arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_owned)
+}
+
+/// Whether an `mcpToolCall` error refuses the call rather than failing
+/// it: the wire reports a declined elicitation as a failed call with a
+/// rejection message (`user rejected MCP tool call`), and the card must
+/// read denied — never a success tick, never a forged run.
+fn is_mcp_rejection(message: &str) -> bool {
+    message.to_lowercase().contains("reject")
+}
+
+/// The joined `text` content of an `mcpToolCall` result
+/// (`McpToolCallResult.content[]`): what a terminal tool's JSON answer
+/// rides in. `None` when the call reported no text — never an empty
+/// string standing in for output.
+fn mcp_result_text(result: &Value) -> Option<String> {
+    let mut text = String::new();
+    for item in result.get("content")?.as_array()? {
+        if item.get("type").and_then(Value::as_str) == Some("text") {
+            text.push_str(item.get("text").and_then(Value::as_str).unwrap_or_default());
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// One terminal tool's JSON answer (`docs/14-terminal.md` §4), read off
+/// an `mcpToolCall` result's text: `{tab, block, status, exit_code?,
+/// duration_ms, output, …}`. `None` when the text is not that shape —
+/// the card then bodies the text itself, never a forged parse.
+struct TerminalMcpResult {
+    output_lines: Option<Vec<String>>,
+    exit_code: Option<i32>,
+    tab: Option<String>,
+    duration_ms: Option<u64>,
+}
+
+fn parse_terminal_mcp_result(text: &str) -> Option<TerminalMcpResult> {
+    let object = serde_json::from_str::<Value>(text.trim()).ok()?;
+    let object = object.as_object()?;
+    let output_lines = object
+        .get("output")
+        .and_then(Value::as_str)
+        .map(|output| output.lines().map(str::to_owned).collect());
+    let exit_code = object
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let tab = object
+        .get("tab")
+        .and_then(Value::as_str)
+        .filter(|tab| !tab.trim().is_empty())
+        .map(str::to_owned);
+    let duration_ms = object.get("duration_ms").and_then(Value::as_u64);
+    Some(TerminalMcpResult { output_lines, exit_code, tab, duration_ms })
+}
+
+/// The exit code an `mcpToolCall` item reports, when it reports one: a
+/// terminal tool's answer parsed for `exit_code`. `None` for anything
+/// else — never 0 by assumption.
+fn mcp_exit_code(item: &Item) -> Option<i32> {
+    let text = item.mcp_result().and_then(mcp_result_text)?;
+    parse_terminal_mcp_result(&text)?.exit_code
+}
+
+/// One baaz terminal `mcpToolCall` as its shell card (D51): the header
+/// names the call's command (never the tool, never raw JSON), the body
+/// is the run's output, and the status is the wire's — a rejected call
+/// reads denied, a failed one failed, a still-open one running. Only a
+/// clean `completed` reads success, and a nonzero exit code fails it
+/// closed to error.
+fn terminal_mcp_card(item: &Item) -> (ToolStatus, Block) {
+    let tool = item.mcp_tool();
+    let command =
+        mcp_command(item.mcp_arguments()).unwrap_or_else(|| tool.to_owned());
+    let text = item.mcp_result().and_then(mcp_result_text);
+    let parsed = text.as_deref().and_then(parse_terminal_mcp_result);
+    let rejected = item.mcp_error().is_some_and(is_mcp_rejection);
+    let status = match (item.status(), item.mcp_error()) {
+        ("inProgress", _) => ToolStatus::Running,
+        (_, Some(_)) if rejected => ToolStatus::Cancelled,
+        (_, Some(_)) => ToolStatus::Error,
+        ("completed", None) => match parsed.as_ref().and_then(|parsed| parsed.exit_code) {
+            Some(0) | None => ToolStatus::Success,
+            Some(_) => ToolStatus::Error,
+        },
+        // `failed` without an error message, and any unknown future
+        // status: failed closed to error, never back to a spinner.
+        _ => ToolStatus::Error,
+    };
+    let verb = match status {
+        ToolStatus::Running => TERMINAL_RUNNING_VERB,
+        ToolStatus::Cancelled => "Denied",
+        _ => TERMINAL_RAN_VERB,
+    };
+    let tab = parsed.as_ref().and_then(|parsed| parsed.tab.clone());
+    let target = match tab {
+        Some(tab) if tab.trim() != command.trim() => format!("{command} · {tab}"),
+        _ => command,
+    };
+    let error_lines: Vec<String> = item
+        .mcp_error()
+        .map(|error| error.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let output_lines = match (&status, parsed.as_ref().and_then(|parsed| parsed.output_lines.clone())) {
+        (_, Some(lines)) => lines,
+        (ToolStatus::Running, None) => Vec::new(),
+        (_, None) => text
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or(error_lines),
+    };
+    let exit_code = parsed.as_ref().and_then(|parsed| parsed.exit_code);
+    let duration_ms =
+        item.mcp_duration_ms().or_else(|| parsed.as_ref().and_then(|parsed| parsed.duration_ms));
+    let card = Block::ToolCall {
+        id: item.id().to_owned(),
+        kind: ToolKind::Shell,
+        verb: verb.into(),
+        target,
+        status,
+        duration_ms,
+        body: ToolBody::Shell { output_lines, exit_code, live: false },
+        diff_stat: None,
+    };
+    (status, card)
+}
+
+
+
+/// The `(server, tool)` an MCP tool-call elicitation gates, parsed out
+/// of Codex's own gate message: `Allow the <server> MCP server to run
+/// tool "<tool>"?`. Strict — anything else is not a gate this fold
+/// names a tool for — and the server must equal the request's
+/// `serverName`, so a mismatched message never mislabels the call.
+fn parse_tool_gate(server_name: &str, message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("Allow the ")?;
+    let (server, rest) = rest.split_once(" MCP server to run tool \"")?;
+    let tool = rest.strip_suffix('?').filter(|rest| rest.ends_with('"'))?;
+    let tool = tool.strip_suffix('"')?;
+    if server.trim().is_empty()
+        || server != server_name
+        || tool.trim().is_empty()
+        || tool.contains('"')
+    {
+        return None;
+    }
+    Some((server.to_owned(), tool.to_owned()))
+}
 
 /// The model's command with the runner unwrapped: the server wraps what
 /// the model asked for in `<shell> -c '<inner>'` (single- or
@@ -366,6 +546,48 @@ struct CodexApprovalSite {
     card: Block,
 }
 
+/// A pending MCP tool-call elicitation's card, keyed by the gated call's
+/// `(turn, server, tool)` triple: the elicitation names no item id, so
+/// its `mcpToolCall` item cannot address the card directly, and the
+/// triple is the join the item settles through. The first pending
+/// elicitation for a triple wins.
+type ElicitationSite = String;
+
+/// The three answers an MCP tool-call elicitation takes — allow once,
+/// deny, deny and stop. The ids ride `DecideApproval` verbatim: the
+/// adapter answers exactly these three on the elicitation lane, so the
+/// card declares exactly these three. There is deliberately no
+/// allow-for-session: the elicitation response schema admits no scope,
+/// and a card must never offer what the wire cannot carry.
+fn elicitation_choices() -> Vec<ApprovalChoice> {
+    vec![
+        ApprovalChoice {
+            id: "accept".into(),
+            label: "Allow once".into(),
+            decision: ApprovalDecision::Once,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+        ApprovalChoice {
+            id: "decline".into(),
+            label: "Deny".into(),
+            decision: ApprovalDecision::Deny,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+        ApprovalChoice {
+            id: "cancel".into(),
+            label: "Deny and stop".into(),
+            decision: ApprovalDecision::Abort,
+            scope: ApprovalScope::ThisCommand,
+            rule_preview: None,
+            accepts_feedback: false,
+        },
+    ]
+}
+
 /// The four plain decision tokens the command and file-change lanes
 /// answer — allow once, allow for this session, deny, deny and stop.
 /// The ids ride `DecideApproval` verbatim: the adapter answers exactly
@@ -446,6 +668,11 @@ pub struct CodexFold {
     /// answer through `DecideApproval`; only the completing item moves
     /// the card — never the press.
     approval_sites: HashMap<String, CodexApprovalSite>,
+    /// `(turn, server, tool)` → the pending MCP tool-call elicitation
+    /// gating that call (its card's approval id). The elicitation names
+    /// no item id, so this is the join its `mcpToolCall` item settles
+    /// through.
+    elicitation_sites: HashMap<(String, String, String), ElicitationSite>,
 }
 
 impl CodexFold {
@@ -531,20 +758,31 @@ impl CodexFold {
     pub fn apply(&mut self, frame: &Frame) -> Vec<Delta> {
         match frame {
             Frame::Notification(notification) => self.apply_notification(notification),
-            Frame::Request { method, params, .. } => self.apply_request(method, params),
+            Frame::Request { id, method, params } => self.apply_request(method, params, id),
             Frame::Response { .. } | Frame::ResponseError { .. } => Vec::new(),
         }
     }
 
     /// Fold one server approval request into its pending approval card.
     /// Non-approval requests contribute nothing: our own calls are the
-    /// pump's routing business, never the transcript's.
-    pub fn apply_request(&mut self, method: &str, params: &Value) -> Vec<Delta> {
+    /// pump's routing business, never the transcript's. An
+    /// `mcp_tool_call` elicitation cards the same inline approval every
+    /// other gate gets; any other elicitation cards nothing — it stays a
+    /// question on the answerable surface, never a forged approval.
+    pub fn apply_request(&mut self, method: &str, params: &Value, id: &Value) -> Vec<Delta> {
+        if method == "mcpServer/elicitation/request" {
+            if elicitation_is_tool_approval(params) {
+                return self.apply_mcp_elicitation(params, id);
+            }
+            return Vec::new();
+        }
         match ApprovalKind::from_method(method) {
             Some(ApprovalKind::Command) => self.apply_command_approval(params),
             Some(ApprovalKind::FileChange) => self.apply_file_change_approval(params),
             Some(ApprovalKind::Permissions) => self.apply_permissions_approval(params),
-            Some(ApprovalKind::Unknown) => self.apply_unknown_approval(method, params),
+            Some(ApprovalKind::McpElicitation) | Some(ApprovalKind::Unknown) => {
+                self.apply_unknown_approval(method, params)
+            }
             None => Vec::new(),
         }
     }
@@ -760,6 +998,135 @@ impl CodexFold {
             &mut deltas,
         );
         deltas
+    }
+
+    /// An `mcp_tool_call` elicitation: the gate Codex puts in front of the
+    /// model's MCP tool calls. It cards the same inline approval every
+    /// other gate gets — provider-aware title through the card's tool,
+    /// the gated command, Allow/Deny number-key choices — and the
+    /// completing `mcpToolCall` item settles it: allowed when the call
+    /// ran, denied when the call reports it rejected. The approval id is
+    /// the pump's prefixed elicitation id, so the press routes back
+    /// through the adapter to this exact server request.
+    fn apply_mcp_elicitation(&mut self, params: &Value, id: &Value) -> Vec<Delta> {
+        let mut deltas = Vec::new();
+        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        let approval_id = format!("{MCP_ELICITATION_ID_PREFIX}{id}");
+        let server = params.get("serverName").and_then(Value::as_str).unwrap_or_default();
+        let message = params.get("message").and_then(Value::as_str).unwrap_or_default();
+        let meta = params.get("_meta");
+        let tool_params =
+            meta.and_then(|meta| meta.get("tool_params")).filter(|params| params.is_object());
+        let (gated_server, gated_tool) =
+            parse_tool_gate(server, message).unwrap_or((server.to_owned(), String::new()));
+        // The terminal face needs the bare tool name: it is what the
+        // approval title reads for its verb. Anything else rides
+        // server-qualified, so the card never invents a tool it was not
+        // told.
+        let terminal =
+            gated_server == crate::terminal::SERVER_NAME && is_terminal_tool(&gated_tool);
+        let tool = if terminal {
+            gated_tool.clone()
+        } else if gated_tool.is_empty() {
+            if server.is_empty() { "MCP tool".to_owned() } else { server.to_owned() }
+        } else if server.is_empty() {
+            gated_tool.clone()
+        } else {
+            format!("{server}/{gated_tool}")
+        };
+        let command = tool_params
+            .and_then(|params| params.get("command"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| tool.clone());
+        let mut reason = message.to_owned();
+        if reason.trim().is_empty() {
+            reason = format!("Allow the {server} MCP tool call?");
+        }
+        let description = meta
+            .and_then(|meta| meta.get("tool_description"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .filter(|description| *description != message);
+        if let Some(description) = description {
+            reason.push('\n');
+            reason.push_str(description);
+        }
+        self.card_approval(
+            &approval_id,
+            &turn_id,
+            Block::Approval {
+                id: approval_id.clone(),
+                tool,
+                command,
+                reason,
+                cwd: String::new(),
+                capabilities: Vec::new(),
+                scope: ApprovalScope::ThisCommand,
+                state: ApprovalState::Pending,
+                rule: None,
+                choices: elicitation_choices(),
+                stages: Vec::new(),
+                current_stage: None,
+                badges: ApprovalBadges::default(),
+                feedback: None,
+                resolved_by: None,
+            },
+            &mut deltas,
+        );
+        // The join its item settles through: first pending elicitation
+        // for the triple wins, and a repeat request for an already-carded
+        // id keeps the first — the card moves only on the item's
+        // completion, never on a re-request.
+        self.elicitation_sites
+            .entry((turn_id, gated_server, gated_tool))
+            .or_insert(approval_id);
+        deltas
+    }
+
+    /// Settle one pending MCP tool-call elicitation from its call's
+    /// outcome: denied when the call reports it rejected, allowed when
+    /// the call ran (even when it then failed) — the same ran/refused
+    /// rule the command lane settles by. The join is the
+    /// `(turn, server, tool)` triple the elicitation indexed; a call
+    /// whose triple names nothing pending settles the turn's oldest
+    /// instead, so a gate the message parse could not name still clears.
+    fn settle_mcp_elicitation(
+        &mut self,
+        turn_id: &str,
+        server: &str,
+        tool: &str,
+        item: &Item,
+        deltas: &mut Vec<Delta>,
+    ) {
+        let key = (turn_id.to_owned(), server.to_owned(), tool.to_owned());
+        let approval_id = if let Some(approval_id) = self.elicitation_sites.remove(&key) {
+            approval_id
+        } else {
+            let fallback = self.elicitation_sites.iter().find_map(|(key, approval_id)| {
+                (key.0 == turn_id).then(|| (key.clone(), approval_id.clone()))
+            });
+            match fallback {
+                Some((key, approval_id)) => {
+                    self.elicitation_sites.remove(&key);
+                    approval_id
+                }
+                None => return,
+            }
+        };
+        let rejected = item.mcp_error().is_some_and(is_mcp_rejection);
+        let state = if rejected {
+            ApprovalState::Denied
+        } else {
+            ApprovalState::AllowedOnce {
+                exit_code: mcp_exit_code(item).unwrap_or(0),
+                duration_ms: item.mcp_duration_ms().unwrap_or(0),
+            }
+        };
+        self.resolve_approval(&approval_id, state, deltas);
     }
 
     /// A future `*requestApproval` kind: surfaced as a pending marker, never
@@ -1134,39 +1501,8 @@ impl CodexFold {
                     &mut deltas,
                 );
             }
+            "mcpToolCall" => self.apply_mcp_tool_call(turn_id, item, &mut deltas),
             _ => {
-                // An `mcpToolCall` is a terminal tool call when its server is
-                // baaz — but the item decode this lane shares (`frame.rs`)
-                // drops every field but the id, so the fold cannot read the
-                // server, the command or the result. It folds as a terminal
-                // shell card (D51) rather than an empty generic one, with no
-                // command to name: the strict-config sessions this lane
-                // opens only ever see baaz's tools, and anything richer
-                // needs the decode to carry the item through.
-                if let Item::Other { item_type, .. } = item {
-                    if item_type == "mcpToolCall" {
-                        self.ensure_assistant(turn_id, &mut deltas);
-                        self.push_block(
-                            turn_id,
-                            Block::ToolCall {
-                                id: item.id().to_owned(),
-                                kind: ToolKind::Shell,
-                                verb: TERMINAL_RAN_VERB.into(),
-                                target: TERMINAL_TOOL_TARGET.into(),
-                                status: ToolStatus::Success,
-                                duration_ms: None,
-                                body: ToolBody::Shell {
-                                    output_lines: Vec::new(),
-                                    exit_code: None,
-                                    live: false,
-                                },
-                                diff_stat: None,
-                            },
-                            &mut deltas,
-                        );
-                        return deltas;
-                    }
-                }
                 self.ensure_assistant(turn_id, &mut deltas);
                 self.push_block(
                     turn_id,
@@ -1180,6 +1516,52 @@ impl CodexFold {
             }
         }
         deltas
+    }
+
+    /// One completed `mcpToolCall`: a terminal shell card for a baaz
+    /// terminal tool — the command from the call's arguments, the run's
+    /// output as the body — and a carried generic card for anything
+    /// else. A rejected call reads denied, a failed one failed: never a
+    /// success tick for a call that never ran. A settled (non-running)
+    /// call settles the elicitation that gated it, allowed when the
+    /// call ran and denied when it reports it rejected.
+    fn apply_mcp_tool_call(&mut self, turn_id: &str, item: &Item, deltas: &mut Vec<Delta>) {
+        self.ensure_assistant(turn_id, deltas);
+        let server = item.mcp_server();
+        let tool = item.mcp_tool();
+        if server == crate::terminal::SERVER_NAME && is_terminal_tool(tool) {
+            let (status, card) = terminal_mcp_card(item);
+            self.push_block(turn_id, card, deltas);
+            if !matches!(status, ToolStatus::Running) {
+                self.settle_mcp_elicitation(turn_id, server, tool, item, deltas);
+            }
+            return;
+        }
+        // Not a baaz terminal call (no other server reaches a strict
+        // session, but the fold must not forge one): carried with its
+        // wire status and its refusal or failure message — never the
+        // raw result JSON, never a success the wire did not report.
+        let status = match item.status() {
+            "inProgress" => ToolStatus::Running,
+            "completed" if item.mcp_error().is_none() => ToolStatus::Success,
+            _unknown => ToolStatus::Error,
+        };
+        self.push_block(
+            turn_id,
+            Block::Generic {
+                kind: "mcpToolCall".into(),
+                status: match status {
+                    ToolStatus::Running => "inProgress".into(),
+                    ToolStatus::Success => "completed".into(),
+                    _ => "failed".into(),
+                },
+                text: item.mcp_error().unwrap_or_default().to_owned(),
+            },
+            deltas,
+        );
+        if !matches!(status, ToolStatus::Running) {
+            self.settle_mcp_elicitation(turn_id, server, tool, item, deltas);
+        }
     }
 
     fn finish_turn(&mut self, notification: &Notification) -> Vec<Delta> {
@@ -2301,6 +2683,289 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the decline settles the card to denied"
+        );
+    }
+
+    /// T3b, `mcp-terminal.jsonl`: the live MCP tool-call gate. The
+    /// `mcpServer/elicitation/request` cards the same inline approval
+    /// every other gate gets — the gated command, the terminal tool
+    /// face, exactly the three answers the wire carries — and the
+    /// refused `mcpToolCall` settles it denied while the call itself
+    /// reads denied under its own command. Remove the elicitation arm
+    /// and no card lands; restore the forged-success fallback and the
+    /// refused call reads success under `terminal`.
+    #[test]
+    fn mcp_tool_call_gate_cards_answerable_and_refusal_reads_denied() {
+        let (_, deltas) = replay("mcp-terminal.jsonl");
+        let cards: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 1, "one gate, one card: {deltas:?}");
+        match cards[0] {
+            Block::Approval { id, tool, command, choices, state, .. } => {
+                assert_eq!(
+                    id, "mcp-elicitation-0",
+                    "the pump's prefixed elicitation id, so the press routes back"
+                );
+                assert_eq!(tool, "terminal_run", "the terminal face, for the title verb");
+                assert_eq!(
+                    command, "echo hi-from-codex",
+                    "the gated command, from the call's arguments"
+                );
+                assert_eq!(*state, ApprovalState::Pending);
+                let ids: Vec<&str> =
+                    choices.iter().map(|choice| choice.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["accept", "decline", "cancel"],
+                    "exactly what the wire carries — no session scope"
+                );
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+        // The refused call: denied under its own command, never success
+        // under `terminal`.
+        let denied: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Shell,
+                            verb,
+                            target,
+                            status,
+                            body,
+                            ..
+                        },
+                    ..
+                } => Some((verb.clone(), target.clone(), *status, body.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(denied.len(), 1, "one MCP call, one card");
+        let (verb, target, status, body) = &denied[0];
+        assert_eq!(verb, "Denied");
+        assert_eq!(*status, ToolStatus::Cancelled);
+        assert_eq!(target, "echo hi-from-codex");
+        match body {
+            ToolBody::Shell { output_lines, .. } => assert!(
+                output_lines.iter().any(|line| line.contains("rejected")),
+                "the refusal reads on the card: {output_lines:?}"
+            ),
+            body => panic!("a shell body, not {body:?}"),
+        }
+        // And the gate settles denied with it.
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block: Block::Approval { id, state: ApprovalState::Denied, .. },
+                    ..
+                } if id == "mcp-elicitation-0"
+            )),
+            "the refusal settles the gate to denied"
+        );
+    }
+
+    /// One synthetic `mcpToolCall` per outcome, through the real fold: a
+    /// clean terminal run reads success with its output and exit code, a
+    /// nonzero exit fails closed, a still-open call reads running, and a
+    /// non-terminal call is carried generic with its wire status — never
+    /// raw JSON, never a forged success.
+    #[test]
+    fn mcp_tool_call_outcomes_fold_honestly() {
+        fn completed(
+            status: &str,
+            arguments: serde_json::Value,
+            error: Option<&str>,
+            result: Option<serde_json::Value>,
+        ) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "t",
+                    "turnId": "u",
+                    "item": {
+                        "type": "mcpToolCall",
+                        "id": "exec-1",
+                        "server": "baaz",
+                        "tool": "terminal_run",
+                        "status": status,
+                        "arguments": arguments,
+                        "error": error.map(|message| serde_json::json!({"message": message})).unwrap_or(serde_json::Value::Null),
+                        "result": result.unwrap_or(serde_json::Value::Null),
+                        "durationMs": 7,
+                    },
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic line decodes")
+        }
+        fn terminal_result(output: &str, exit_code: i32) -> serde_json::Value {
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::json!({
+                        "tab": "t1", "block": "t1:0", "status": "exited",
+                        "exit_code": exit_code, "duration_ms": 42, "output": output,
+                    })
+                    .to_string(),
+                }],
+            })
+        }
+        fn shell_of(frame: &Frame) -> (String, String, ToolStatus, ToolBody) {
+            let mut fold = CodexFold::new();
+            let deltas = fold.apply(frame);
+            deltas
+                .iter()
+                .find_map(|delta| match delta {
+                    Delta::BlockAdded {
+                        block:
+                            Block::ToolCall { verb, target, status, body, .. },
+                        ..
+                    } => Some((verb.clone(), target.clone(), *status, body.clone())),
+                    _ => None,
+                })
+                .expect("an mcpToolCall folds to a shell card")
+        }
+        let args = serde_json::json!({"command": "echo hi", "wait": "exit"});
+        // Clean run: success, command plus tab, output and exit code.
+        let (verb, target, status, body) =
+            shell_of(&completed("completed", args.clone(), None, Some(terminal_result("hi\n", 0))));
+        assert_eq!(verb, TERMINAL_RAN_VERB);
+        assert_eq!(target, "echo hi · t1");
+        assert_eq!(status, ToolStatus::Success);
+        match body {
+            ToolBody::Shell { output_lines, exit_code, live } => {
+                assert_eq!(output_lines, ["hi"]);
+                assert_eq!(exit_code, Some(0));
+                assert!(!live);
+            }
+            body => panic!("a shell body, not {body:?}"),
+        }
+        // Nonzero exit: the same card, failed closed.
+        let (_, _, status, _) =
+            shell_of(&completed("completed", args.clone(), None, Some(terminal_result("", 3))));
+        assert_eq!(status, ToolStatus::Error, "exit 3 is not success");
+        // Still open: running, never done.
+        let (verb, _, status, _) = shell_of(&completed("inProgress", args.clone(), None, None));
+        assert_eq!(verb, TERMINAL_RUNNING_VERB);
+        assert_eq!(status, ToolStatus::Running);
+        // Failed without a refusal message: error, and the error is the body.
+        let (verb, target, status, body) =
+            shell_of(&completed("failed", args.clone(), Some("the bridge exploded"), None));
+        assert_eq!(verb, TERMINAL_RAN_VERB);
+        assert_eq!(target, "echo hi");
+        assert_eq!(status, ToolStatus::Error);
+        match body {
+            ToolBody::Shell { output_lines, exit_code, .. } => {
+                assert!(output_lines.iter().any(|line| line.contains("exploded")));
+                assert_eq!(exit_code, None, "no exit code was reported");
+            }
+            body => panic!("a shell body, not {body:?}"),
+        }
+        // A call naming no command names its tool, never a guess.
+        let (verb, target, status, _) = shell_of(&completed(
+            "completed",
+            serde_json::json!({"tab": "auto"}),
+            None,
+            None,
+        ));
+        assert_eq!((verb.as_str(), target.as_str(), status), ("Ran in terminal", "terminal_run", ToolStatus::Success));
+    }
+
+    /// A non-baaz `mcpToolCall` is carried, never forged: its wire status
+    /// survives and its message rides the card — no raw result JSON, and
+    /// a failure never reads success.
+    #[test]
+    fn foreign_mcp_tool_calls_are_carried_never_forged() {
+        let line = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "t",
+                "turnId": "u",
+                "item": {
+                    "type": "mcpToolCall",
+                    "id": "exec-9",
+                    "server": "other",
+                    "tool": "thing",
+                    "status": "failed",
+                    "arguments": {"x": 1},
+                    "error": {"message": "boom"},
+                    "result": null,
+                    "durationMs": null,
+                },
+            },
+        })
+        .to_string();
+        let frame = crate::frame::decode_line(&line).expect("synthetic line decodes");
+        let mut fold = CodexFold::new();
+        let deltas = fold.apply(&frame);
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::Generic { kind, status, text },
+                    ..
+                } if kind == "mcpToolCall" && status == "failed" && text == "boom"
+            )),
+            "carried with its status and message: {deltas:?}"
+        );
+        assert!(
+            !deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded {
+                    block: Block::ToolCall { status: ToolStatus::Success, .. },
+                    ..
+                }
+            )),
+            "no forged success"
+        );
+    }
+
+    /// The elicitation gate parses Codex's own message strictly: the
+    /// live shape names `(server, tool)`, anything else names nothing —
+    /// and a server that disagrees with the request never mislabels.
+    #[test]
+    fn tool_gate_parses_strictly() {
+        assert_eq!(
+            parse_tool_gate("baaz", "Allow the baaz MCP server to run tool \"terminal_run\"?"),
+            Some(("baaz".to_owned(), "terminal_run".to_owned()))
+        );
+        assert_eq!(parse_tool_gate("baaz", "Fill the form"), None);
+        assert_eq!(
+            parse_tool_gate("baaz", "Allow the other MCP server to run tool \"terminal_run\"?"),
+            None,
+            "a mismatched server never mislabels"
+        );
+        assert_eq!(
+            parse_tool_gate("baaz", "Allow the baaz MCP server to run tool \"\"?"),
+            None,
+            "no empty tool"
+        );
+    }
+
+    /// An elicitation that gates no tool call cards nothing: genuine
+    /// input stays a question on the answerable surface, never a forged
+    /// approval.
+    #[test]
+    fn non_tool_elicitations_card_nothing() {
+        let params = serde_json::json!({
+            "threadId": "t",
+            "turnId": "u",
+            "serverName": "s",
+            "message": "Fill the form",
+            "mode": "form",
+            "requestedSchema": {},
+        });
+        let mut fold = CodexFold::new();
+        assert!(
+            fold.apply_request("mcpServer/elicitation/request", &params, &serde_json::json!(7)).is_empty()
         );
     }
 

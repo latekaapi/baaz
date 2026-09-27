@@ -177,9 +177,18 @@ impl SessionView {
                     return;
                 }
                 // The card itself arrived as a delta; this is the tap on the
-                // shoulder, carrying only what a decision needs.
+                // shoulder, carrying only what a decision needs. An MCP
+                // tool-call elicitation parks under the pump's prefixed
+                // id, so the tap takes the elicitation kind without a new
+                // event shape — the prefix IS the kind tag.
                 let kind = match self.provider_kind() {
                     ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
+                    _ if approval_id.starts_with(
+                        provider_codex::child::MCP_ELICITATION_ID_PREFIX,
+                    ) =>
+                    {
+                        ExternalApprovalKind::CodexMcpElicitation
+                    }
                     _ => ExternalApprovalKind::CodexCommand,
                 };
                 self.inject_external_approval(
@@ -650,6 +659,62 @@ mod tests {
                 .expect("the tap parks on the approvals surface");
             assert_eq!(approval.headline, "rm -rf /tmp/probe");
         });
+    }
+
+    /// T3b: an MCP tool-call elicitation tap parks under the elicitation
+    /// kind — not the command kind — and its Allow press travels as one
+    /// `DecideApproval` carrying `accept`. Drop the prefix routing and
+    /// the tap mislabels; drop the press arm and no decision leaves the
+    /// lane, which is exactly what `choose:1` did to the live gate.
+    #[gpui::test]
+    fn elicitation_tap_parks_answerable_and_allows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
+                session_id: "s-1".to_owned(),
+                approval_id: "mcp-elicitation-0".to_owned(),
+                headline: "Allow the baaz MCP server to run tool \"terminal_run\"?".to_owned(),
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let approval = view
+                .read(cx)
+                .external_approvals
+                .get("mcp-elicitation-0")
+                .expect("the tap parks on the approvals surface");
+            assert_eq!(
+                approval.kind,
+                crate::providers::ExternalApprovalKind::CodexMcpElicitation,
+                "the prefix routes the kind, not the provider default"
+            );
+            view.update(cx, |view, cx| {
+                view.decide_external_approval(
+                    "mcp-elicitation-0".to_owned(),
+                    crate::providers::ApprovalChoice::Accept,
+                    None,
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        let decides: Vec<_> = handle
+            .commands_of("decide-approval")
+            .into_iter()
+            .filter(|c| matches!(c, provider::Command::DecideApproval { .. }))
+            .collect();
+        assert_eq!(decides.len(), 1, "one DecideApproval leaves the lane, drew {decides:?}");
+        match &decides[0] {
+            provider::Command::DecideApproval { approval, choice, .. } => {
+                assert_eq!(approval, "mcp-elicitation-0");
+                assert_eq!(choice, "accept", "Allow travels as the wire's accept");
+            }
+            other => panic!("a press must travel as DecideApproval, travelled as {other:?}"),
+        }
     }
 
     #[gpui::test]

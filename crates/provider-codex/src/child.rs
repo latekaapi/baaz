@@ -53,15 +53,46 @@ pub enum ApprovalKind {
     FileChange,
     /// `item/permissions/requestApproval`.
     Permissions,
+    /// `mcpServer/elicitation/request` for an MCP tool call: Codex gates
+    /// the model's MCP tool calls through the MCP elicitation shape, with
+    /// `_meta.codex_approval_kind: "mcp_tool_call"` and the call's server,
+    /// tool and params beside the form. Captured live 2026-09-27 in
+    /// `fixtures/codex/mcp-terminal.jsonl`; answered with
+    /// [`elicitation_action_result`], never refused blind.
+    McpElicitation,
     /// A future `*requestApproval` method this adapter does not know yet.
     /// Surfaced, never answered blind.
     Unknown,
 }
 
+/// The approval id an MCP tool-call elicitation is parked under, on the
+/// transcript and on the answerable surface alike. The elicitation names
+/// no item id, so the JSON-RPC request id alone would collide with the
+/// `itemId` keys the other three lanes use: the prefix keeps the lanes
+/// apart, and lets the app tell an elicitation tap from a command one
+/// without a new event shape.
+pub const MCP_ELICITATION_ID_PREFIX: &str = "mcp-elicitation-";
+
+/// Whether an `mcpServer/elicitation/request` params gates an MCP tool
+/// call (the answerable approval lane) rather than asking the person for
+/// genuine input (the question lane, still surfaced and still refused):
+/// `_meta.codex_approval_kind` is `"mcp_tool_call"`. Anything else —
+/// including a missing `_meta` — stays a question, never an approval.
+pub fn elicitation_is_tool_approval(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(|meta| meta.get("codex_approval_kind"))
+        .and_then(Value::as_str)
+        == Some("mcp_tool_call")
+}
+
 impl ApprovalKind {
     /// Classify a server→client method: the three known approval requests,
     /// or `Unknown` for a future `*requestApproval` kind. `None` means the
-    /// method is not an approval request at all.
+    /// method is not an approval request at all. Elicitations are NOT
+    /// classified here: only an `mcp_tool_call` elicitation is an
+    /// approval (see [`elicitation_is_tool_approval`]), and that needs
+    /// the params, not just the method.
     pub fn from_method(method: &str) -> Option<Self> {
         match method {
             "item/commandExecution/requestApproval" => Some(ApprovalKind::Command),
@@ -552,6 +583,35 @@ pub enum ApprovalAnswer {
     FileChange(FileChangeApprovalDecision),
     /// Answer a permissions approval.
     Permissions(PermissionsApprovalAnswer),
+    /// Answer an MCP tool-call elicitation.
+    McpElicitation(McpElicitationAction),
+}
+
+/// The person's answer to an MCP tool-call elicitation. Typed per
+/// `McpServerElicitationAction` in
+/// `McpServerElicitationRequestResponse.json`: exactly `accept`,
+/// `decline` and `cancel` — there is deliberately no session-scoped
+/// variant, because the response shape admits no scope: answering
+/// "for this session" would promise what the wire cannot carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpElicitationAction {
+    /// Run the tool call, once (`accept`).
+    Accept,
+    /// Refuse; the turn continues (`decline`).
+    Decline,
+    /// Refuse; the turn is interrupted (`cancel`).
+    Cancel,
+}
+
+impl McpElicitationAction {
+    /// The wire token.
+    pub fn wire(self) -> &'static str {
+        match self {
+            McpElicitationAction::Accept => "accept",
+            McpElicitationAction::Decline => "decline",
+            McpElicitationAction::Cancel => "cancel",
+        }
+    }
 }
 
 /// The `result` answering a command-execution approval:
@@ -605,6 +665,25 @@ pub fn approval_answer_result(answer: &ApprovalAnswer) -> Value {
             file_change_decision_result(*decision)
         }
         ApprovalAnswer::Permissions(answer) => permissions_answer_result(answer),
+        ApprovalAnswer::McpElicitation(action) => elicitation_action_result(*action),
+    }
+}
+
+/// The `result` answering an MCP tool-call elicitation:
+/// `{"action": <token>}` with the filled form under `content` on
+/// accept. Per `McpServerElicitationRequestResponse.json` the content
+/// mirrors RMCP `CreateElicitationResult`: with an empty
+/// `requestedSchema` (what a tool-call approval carries — the form
+/// asks nothing, it only gates) the honest fill is `{}`. Decline and
+/// cancel carry no content, by the same schema.
+pub fn elicitation_action_result(action: McpElicitationAction) -> Value {
+    match action {
+        McpElicitationAction::Accept => {
+            json!({"action": action.wire(), "content": {}})
+        }
+        McpElicitationAction::Decline | McpElicitationAction::Cancel => {
+            json!({"action": action.wire()})
+        }
     }
 }
 
@@ -782,8 +861,13 @@ impl RunningChild {
                             // decode-and-fold the fixture tests exercise —
                             // then the request itself is routed below (the
                             // answerable record and the tap), never answered
-                            // here.
-                            if ApprovalKind::from_method(&method).is_some() {
+                            // here. An `mcp_tool_call` elicitation cards
+                            // the same way; any other elicitation stays a
+                            // question and cards nothing.
+                            if ApprovalKind::from_method(&method).is_some()
+                                || (method == "mcpServer/elicitation/request"
+                                    && elicitation_is_tool_approval(&params))
+                            {
                                 if let Ok(mut fold) = fold.lock() {
                                     crate::fold::step_line(&mut fold, &line, &mut |event| {
                                         let _ = events.send(event);
@@ -833,11 +917,12 @@ impl RunningChild {
         })
     }
 
-    /// Answer one server→client request. Approval requests (all three
-    /// `*requestApproval` kinds) are surfaced as
-    /// [`ProviderEvent::ApprovalRequested`] and answered later by the
-    /// per-kind answer fns; question requests (`item/tool/requestUserInput`,
-    /// `mcpServer/elicitation/request`) are surfaced as
+    /// Answer one server→client request. Approval requests (the three
+    /// `*requestApproval` kinds plus an `mcp_tool_call` elicitation) are
+    /// surfaced as [`ProviderEvent::ApprovalRequested`] and answered later
+    /// by the per-kind answer fns; question requests
+    /// (`item/tool/requestUserInput`, and any elicitation that is NOT an
+    /// MCP tool-call approval) are surfaced as
     /// [`ProviderEvent::QuestionRaised`], recorded for
     /// [`Self::pending_questions`], and refused with the same "cannot serve"
     /// error — answering their shapes blind would be guessing, but hanging
@@ -855,7 +940,32 @@ impl RunningChild {
     ) {
         let thread_id =
             params.get("threadId").and_then(Value::as_str).unwrap_or_default().to_owned();
-        if let Some(kind) = ApprovalKind::from_method(method) {
+        if method == "mcpServer/elicitation/request" && elicitation_is_tool_approval(params) {
+            // The MCP tool-call gate: parked under its prefixed id (the
+            // elicitation names no item id), answered later through
+            // [`Self::answer_mcp_elicitation`] — never refused here, or
+            // the call reads rejected before the person has seen it.
+            let item_id = format!("{MCP_ELICITATION_ID_PREFIX}{id}");
+            let headline = params
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or(method)
+                .to_owned();
+            if let Ok(mut shared) = shared.lock() {
+                shared.approvals.insert(item_id.clone(), PendingApproval {
+                    request_id: id.clone(),
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                    headline: headline.clone(),
+                    kind: ApprovalKind::McpElicitation,
+                });
+            }
+            let _ = events.send(ProviderEvent::ApprovalRequested {
+                session_id: thread_id,
+                approval_id: item_id,
+                headline,
+            });
+        } else if let Some(kind) = ApprovalKind::from_method(method) {
             let item_id =
                 params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned();
             let headline = params
@@ -1016,6 +1126,19 @@ impl RunningChild {
         self.answer_result(item_id, &permissions_answer_result(answer))
     }
 
+    /// Answer a pending MCP tool-call elicitation with its
+    /// `{action, content?}` shape. True when the elicitation was known
+    /// (and is now answered and forgotten); false when the id is
+    /// unknown — never an error, a stale decision is refused, not
+    /// misdelivered.
+    pub fn answer_mcp_elicitation(
+        &self,
+        item_id: &str,
+        action: McpElicitationAction,
+    ) -> std::io::Result<bool> {
+        self.answer_result(item_id, &elicitation_action_result(action))
+    }
+
     fn answer_result(&self, item_id: &str, result: &Value) -> std::io::Result<bool> {
         let pending = self
             .shared
@@ -1043,6 +1166,7 @@ impl RunningChild {
             ApprovalAnswer::Command(_) => ApprovalKind::Command,
             ApprovalAnswer::FileChange(_) => ApprovalKind::FileChange,
             ApprovalAnswer::Permissions(_) => ApprovalKind::Permissions,
+            ApprovalAnswer::McpElicitation(_) => ApprovalKind::McpElicitation,
         };
         let kind = self.approval_kind(item_id);
         match kind {
@@ -1549,6 +1673,13 @@ mod tests {
         assert_eq!(ApprovalKind::from_method("item/future/requestApproval"), Some(K::Unknown));
         assert_eq!(ApprovalKind::from_method("turn/start"), None);
         assert_eq!(ApprovalKind::from_method("item/tool/requestUserInput"), None);
+        // Elicitations classify on params, never on method alone: only an
+        // `mcp_tool_call` one is an approval (see
+        // `elicitation_is_tool_approval`), so the method maps to no lane.
+        assert_eq!(ApprovalKind::from_method("mcpServer/elicitation/request"), None);
+        assert!(elicitation_is_tool_approval(&json!({"_meta": {"codex_approval_kind": "mcp_tool_call"}})));
+        assert!(!elicitation_is_tool_approval(&json!({"message": "Fill the form"})));
+        assert!(!elicitation_is_tool_approval(&json!({})));
     }
 
     #[test]
@@ -1662,6 +1793,70 @@ mod tests {
         assert!(
             shared.questions.contains_key("q-1"),
             "the refused question is recorded for ListPending"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_call_elicitation_parks_as_an_approval_not_a_refusal() {
+        // The live gate (`fixtures/codex/mcp-terminal.jsonl`): an
+        // `mcp_tool_call` elicitation must park answerable — writing the
+        // refusal here is what read "rejected" before the person saw it.
+        // Nothing is written yet: the person's press answers later.
+        let (written, seen, shared) = serve_question(
+            "mcpServer/elicitation/request",
+            json!({
+                "threadId": "t",
+                "turnId": "u",
+                "serverName": "baaz",
+                "mode": "form",
+                "_meta": {
+                    "codex_approval_kind": "mcp_tool_call",
+                    "tool_params": {"command": "echo hi-from-codex", "wait": "exit"},
+                },
+                "message": "Allow the baaz MCP server to run tool \"terminal_run\"?",
+                "requestedSchema": {"type": "object", "properties": {}},
+            }),
+        );
+        assert!(written.is_empty(), "nothing answers yet — the press does: {written:?}");
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ProviderEvent::ApprovalRequested { session_id, approval_id, headline }]
+                if session_id == "t" && approval_id == "mcp-elicitation-7"
+                    && headline.contains("terminal_run")
+            ),
+            "the tap routes back through the adapter: {seen:?}"
+        );
+        let pending = shared.approvals.get("mcp-elicitation-7").expect("parked for DecideApproval");
+        assert_eq!(pending.kind, ApprovalKind::McpElicitation);
+        assert_eq!(pending.request_id, json!(7), "the answer echoes this id");
+        assert!(shared.questions.is_empty(), "no dead question row beside it");
+    }
+
+    #[test]
+    fn elicitation_answers_pin_their_schema_shape() {
+        // Per `McpServerElicitationRequestResponse.json`: `{action}` plus
+        // the filled form on accept, bare otherwise. Pinned byte-for-byte
+        // against the schema's literals, not through our own round trip.
+        assert_eq!(
+            serde_json::to_string(&elicitation_action_result(McpElicitationAction::Accept))
+                .expect("serializes"),
+            r#"{"action":"accept","content":{}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&elicitation_action_result(McpElicitationAction::Decline))
+                .expect("serializes"),
+            r#"{"action":"decline"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&elicitation_action_result(McpElicitationAction::Cancel))
+                .expect("serializes"),
+            r#"{"action":"cancel"}"#
+        );
+        assert_eq!(
+            approval_answer_result(&ApprovalAnswer::McpElicitation(McpElicitationAction::Accept)),
+            elicitation_action_result(McpElicitationAction::Accept),
+            "the kind-tagged answer routes to the elicitation shape"
         );
     }
 
