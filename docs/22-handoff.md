@@ -142,3 +142,27 @@ provider session underneath. What changes is what the user sees:
   different row; the composer is live on the destination immediately.
 - **Carried-over state kept:** `provider-sessions.json` / `sessions.json`
   links as today; the ledger still records each provider session separately.
+
+### 8.1 As built (X3a, transcript half)
+
+- Snapshot I/O, divider text and the pack-bubble match live in
+  `crates/baaz/src/handoff_snapshot.rs`. The file is
+  `<state>/handoff/<destination id>.json` (same state-dir resolver as the
+  other stores, so `BAAZ_STATE_DIR` is honoured; no-op + unread under
+  `BAAZ_DETERMINISTIC=1`), written atomically at activation from the source
+  view's visible turns. Schema: `version`, `from`/`to` wire ids, `source`
+  (the back-link target), `toModel`, `activatedMs`, `packText`,
+  `packDisplay`, `turns`.
+- The destination's prefix and divider are view-side (`SessionView` fields
+  in `crates/baaz/src/session.rs`, assembled in
+  `refresh_render_cache`): the old fold-written origin marker is gone, so
+  one handoff draws exactly one divider. The pack's user turn is hidden by
+  full text live, by summary after a replay (pre-snapshot pairs fall back
+  to the display map); it stays in provider history.
+- Activation (`acknowledge_handoff`) writes the snapshot, shows the prefix
+  on the destination, and leaves the window on it with the composer
+  focused; reopening (`attach_handoff_prefix`, called from the provider
+  open and the muse open/resume paths) reads the snapshot, or the fallback
+  divider alone when only `handoff_from` survives.
+- The sidebar half (head-only rows, member-id redirect) is separate work;
+  `sidebar.rs` is untouched by this change.

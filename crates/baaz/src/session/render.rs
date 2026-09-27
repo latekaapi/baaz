@@ -204,7 +204,13 @@ impl SessionView {
     /// grew or shrank under us, or when `follow` says the content changed.
     pub(super) fn sync_render_cache(&mut self) {
         let live_len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
-        if live_len != self.cached_turns.len() || self.follow {
+        // The cache holds more than the fold: the view-side handoff prefix
+        // and its one divider, minus the hidden pack bubble.
+        let expected = live_len
+            + self.handoff_prefix.len()
+            + usize::from(self.handoff_divider.is_some())
+            - usize::from(self.handoff_pack_hidden.is_some());
+        if expected != self.cached_turns.len() || self.follow {
             self.refresh_render_cache();
         }
     }
@@ -769,7 +775,7 @@ impl SessionView {
     /// result. Called when the fold changes (length drift or `follow`), never
     /// per frame, so steady-state frames share one `Rc`.
     pub(super) fn refresh_render_cache(&mut self) {
-        if let Some(session) = self.fold.session(&self.session_id) {
+        if self.fold.session(&self.session_id).is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
             // costs one turn's clone rather than the transcript's
@@ -780,9 +786,31 @@ impl SessionView {
             for turn in self.cached_turns.iter() {
                 held.insert(turn.id(), turn);
             }
-            let turns: Vec<Rc<Turn>> = session
-                .turns
+            // The visible transcript: the view-side handoff prefix, exactly
+            // one divider, then the fold's own turns with the pack's user
+            // bubble hidden (the divider stands for it). The prefix and the
+            // divider never enter the fold, so provider deltas never touch
+            // them — and the pack stays in history, only undrawn.
+            let hidden = self.fold.session(&self.session_id).and_then(|s| {
+                crate::handoff_snapshot::first_pack_user_id(
+                    &s.turns,
+                    self.handoff_pack_full.as_deref(),
+                    self.handoff_pack_display.as_deref(),
+                )
+            });
+            self.handoff_pack_hidden = hidden.clone();
+            let empty: &[Turn] = &[];
+            let own: &[Turn] =
+                self.fold.session(&self.session_id).map(|s| s.turns.as_slice()).unwrap_or(empty);
+            let visible: Vec<&Turn> = self
+                .handoff_prefix
                 .iter()
+                .map(|rc| rc as &Turn)
+                .chain(self.handoff_divider.iter().map(|rc| rc as &Turn))
+                .chain(own.iter().filter(|turn| hidden.as_deref() != Some(turn.id())))
+                .collect();
+            let turns: Vec<Rc<Turn>> = visible
+                .into_iter()
                 .map(|turn| match held.get(turn.id()) {
                     Some(previous) if ***previous == *turn => Rc::clone(previous),
                     _ => Rc::new(turn.clone()),
@@ -2697,5 +2725,285 @@ mod tests {
             ids,
             vec!["muse", "handoff:claude-code", "claude-code", "handoff:codex", "codex"]
         );
+    }
+
+    /// §8's transcript half, against the real render cache: fold the
+    /// destination's own turns, show the prefix, and read what the frame
+    /// would draw.
+    fn handoff_user(id: &str, text: &str) -> aui_protocol::Turn {
+        aui_protocol::Turn::User {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            attachments: vec![],
+            mentions: vec![],
+            timestamp: None,
+        }
+    }
+
+    fn handoff_reply(id: &str, text: &str) -> aui_protocol::Turn {
+        aui_protocol::Turn::Assistant {
+            id: id.to_owned(),
+            blocks: vec![aui_protocol::Block::Text { text: text.to_owned(), streaming: false }],
+            meta: Default::default(),
+            timestamp: None,
+        }
+    }
+
+    fn handoff_destination(
+        vc: &mut gpui::VisualTestContext,
+        session_id: &str,
+        provider_id: &str,
+    ) -> gpui::Entity<crate::session::SessionView> {
+        vc.update(|window, cx| {
+            let overlays = cx.new(|_| crate::overlays::Overlays::default());
+            let host = crate::session::SessionHost {
+                provider_id: provider_id.to_owned(),
+                workspace: "/tmp/ws".to_owned(),
+                overlays,
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new(session_id.to_owned(), None, host, window, cx))
+        })
+    }
+
+    fn handoff_origin(from: ProviderId) -> crate::handoff::HandoffOrigin {
+        crate::handoff::HandoffOrigin {
+            source_session: "src-1".to_owned(),
+            from,
+            from_model: String::new(),
+        }
+    }
+
+    fn cached_ids(
+        vc: &mut gpui::VisualTestContext,
+        view: &gpui::Entity<crate::session::SessionView>,
+    ) -> Vec<String> {
+        vc.update(|_, cx| {
+            view.read(cx).cached_turns.iter().map(|turn| turn.id().to_owned()).collect()
+        })
+    }
+
+    fn cached_handoff_dividers(
+        vc: &mut gpui::VisualTestContext,
+        view: &gpui::Entity<crate::session::SessionView>,
+    ) -> Vec<String> {
+        vc.update(|_, cx| {
+            view.read(cx)
+                .cached_turns
+                .iter()
+                .flat_map(|turn| match &**turn {
+                    aui_protocol::Turn::Assistant { blocks, .. } => blocks.clone(),
+                    aui_protocol::Turn::User { .. } => vec![],
+                })
+                .filter_map(|block| match block {
+                    aui_protocol::Block::Marker { kind: aui_protocol::MarkerKind::HandOff { .. }, text } => {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn a_destination_view_draws_prefix_divider_then_own_turns(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-1", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session("dest-1", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "dest-1",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: handoff_reply("a2", "Got it — ready to continue…"),
+                        },
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u2", "Keep going") },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    handoff_origin(ProviderId::ClaudeCode),
+                    vec![
+                        handoff_user("u1", "Name three ferry routes"),
+                        handoff_reply("a1", "Cormorant, Heron, Gull"),
+                    ],
+                    crate::handoff_snapshot::divider_text(
+                        ProviderId::ClaudeCode,
+                        ProviderId::Codex,
+                        Some("gpt-5"),
+                    ),
+                    Some(pack.to_owned()),
+                    Some("Handed off from Claude Code: the goal".to_owned()),
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            cached_ids(vc, &view),
+            vec!["u1", "a1", "handoff-divider-dest-1", "a2", "u2"],
+            "prefix…, one divider, own turns — and no user bubble for the pack"
+        );
+        assert_eq!(cached_handoff_dividers(vc, &view).len(), 1, "exactly one divider, not two");
+        // The pack stays in the provider history: the fold still holds it,
+        // only the frame does not draw it.
+        let folded: Vec<String> = vc.update(|_, cx| {
+            view.read(cx)
+                .session()
+                .map(|s| s.turns.iter().map(|t| t.id().to_owned()).collect())
+                .unwrap_or_default()
+        });
+        assert_eq!(folded, vec!["u-pack", "a2", "u2"]);
+    }
+
+    #[gpui::test]
+    fn a_replayed_destination_hides_the_pack_by_its_summary(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-r", "codex");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session("dest-r", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "dest-r",
+                    vec![
+                        // A replay substitutes the summary for the whole pack.
+                        aui_protocol::Delta::TurnStarted {
+                            turn: handoff_user("u-pack", "Handed off from Muse: the goal"),
+                        },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: handoff_reply("a1", "Got it — ready to continue…"),
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    handoff_origin(ProviderId::Muse),
+                    vec![],
+                    crate::handoff_snapshot::fallback_text(ProviderId::Muse),
+                    Some("Continuing a session handed off from Muse. Context follows.".to_owned()),
+                    Some("Handed off from Muse: the goal".to_owned()),
+                    cx,
+                );
+            });
+        });
+        assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-r", "a1"]);
+        assert_eq!(
+            cached_handoff_dividers(vc, &view),
+            vec!["Handed off from Muse — earlier turns are in the previous session".to_owned()]
+        );
+    }
+
+    #[gpui::test]
+    fn a_real_first_prompt_is_never_hidden_as_a_pack(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-k", "codex");
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session("dest-k", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "dest-k",
+                    vec![aui_protocol::Delta::TurnStarted {
+                        turn: handoff_user("u1", "A real first prompt"),
+                    }],
+                );
+            });
+            view.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    handoff_origin(ProviderId::Muse),
+                    vec![],
+                    crate::handoff_snapshot::fallback_text(ProviderId::Muse),
+                    Some("Continuing a session handed off from Muse".to_owned()),
+                    Some("Handed off from Muse: x".to_owned()),
+                    cx,
+                );
+            });
+        });
+        assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-k", "u1"]);
+    }
+
+    #[gpui::test]
+    fn a_two_hop_chain_shows_two_dividers_in_order(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        // B's transcript: A's turns, the A→B divider, B's own reply. C's
+        // snapshot is exactly this, so C shows A, divider, B, divider, C.
+        let vc = cx.add_empty_window();
+        let view_b = handoff_destination(vc, "hop-b", "claude-code");
+        vc.update(|_, cx| {
+            view_b.update(cx, |view, _| {
+                view.fold.ensure_session("hop-b", aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "hop-b",
+                    vec![aui_protocol::Delta::TurnStarted {
+                        turn: handoff_reply("ab", "Got it — ready to continue…"),
+                    }],
+                );
+            });
+            view_b.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    handoff_origin(ProviderId::Muse),
+                    vec![
+                        handoff_user("ua", "Plan Greyport"),
+                        handoff_reply("aa", "Three ferry routes…"),
+                    ],
+                    crate::handoff_snapshot::divider_text(
+                        ProviderId::Muse,
+                        ProviderId::ClaudeCode,
+                        None,
+                    ),
+                    Some("pack-a".to_owned()),
+                    Some("display-a".to_owned()),
+                    cx,
+                );
+            });
+        });
+        let prefix_b: Vec<aui_protocol::Turn> = vc.update(|_, cx| {
+            view_b.read(cx).cached_turns.iter().map(|turn| (**turn).clone()).collect()
+        });
+        let view_c = handoff_destination(vc, "hop-c", "codex");
+        vc.update(|_, cx| {
+            view_c.update(cx, |view, _| {
+                view.fold.ensure_session("hop-c", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "hop-c",
+                    vec![aui_protocol::Delta::TurnStarted {
+                        turn: handoff_reply("ac", "Got it — ready to continue…"),
+                    }],
+                );
+            });
+            view_c.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    crate::handoff::HandoffOrigin {
+                        source_session: "hop-b".to_owned(),
+                        from: ProviderId::ClaudeCode,
+                        from_model: String::new(),
+                    },
+                    prefix_b,
+                    crate::handoff_snapshot::divider_text(
+                        ProviderId::ClaudeCode,
+                        ProviderId::Codex,
+                        Some("gpt-5"),
+                    ),
+                    Some("pack-b".to_owned()),
+                    Some("display-b".to_owned()),
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            cached_ids(vc, &view_c),
+            vec!["ua", "aa", "handoff-divider-hop-b", "ab", "handoff-divider-hop-c", "ac"]
+        );
+        let dividers = cached_handoff_dividers(vc, &view_c);
+        assert_eq!(dividers.len(), 2, "one divider per hop");
+        assert!(dividers[0].contains("Muse to Claude Code"), "A→B first, got: {}", dividers[0]);
+        assert!(dividers[1].contains("Claude Code to Codex"), "B→C second, got: {}", dividers[1]);
     }
 }

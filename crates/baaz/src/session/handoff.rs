@@ -92,22 +92,91 @@ impl SessionView {
         cx.notify();
     }
 
-    /// The destination's quiet origin marker, appended before the pack is
-    /// submitted so it sits at the top: "Handed off from <Provider> ·
-    /// <model>". The back-link to the source session is wired in
-    /// [`Self::fold_intents`] from [`Self::handoff_origin`].
-    pub(crate) fn append_handoff_origin(&mut self, origin: handoff::HandoffOrigin, cx: &mut Context<Self>) {
-        let marker = Block::Marker {
-            kind: aui_protocol::MarkerKind::HandOff {
-                from: handoff::wire_provider(origin.from),
-                to: handoff::wire_provider(self.provider_kind()),
-            },
-            text: format!("Handed off from {} · {}", origin.from.label(), origin.from_model),
-        };
+    /// The destination's quiet origin divider, set before the pack is
+    /// submitted so it sits at the top: "Handed off from \<From> to \<To>".
+    /// View-side, never folded: client-authored blocks are not persisted, so
+    /// a fold-written marker would vanish on reopen and double the divider
+    /// once the prefix loads. The back-link to the source session is wired
+    /// in [`Self::fold_intents`] from [`Self::handoff_origin`].
+    pub(crate) fn note_handoff_origin(&mut self, origin: handoff::HandoffOrigin, cx: &mut Context<Self>) {
+        let to = self.provider_kind();
+        let divider = crate::handoff_snapshot::divider_turn(
+            &format!("handoff-divider-{}", self.session_id),
+            origin.from,
+            to,
+            crate::handoff_snapshot::divider_text(origin.from, to, None),
+        );
         self.handoff_origin = Some(origin);
-        self.fold.append_client_block(&self.session_id, &format!("{}-origin", self.session_id), marker);
+        self.handoff_divider = Some(Rc::new(divider));
         self.follow = true;
+        self.refresh_render_cache();
         cx.notify();
+    }
+
+    /// Remember the pack's texts when it submits, so the view can hide the
+    /// destination's first user turn (the divider stands for it) live and
+    /// after a replay, where the bubble shows the summary instead.
+    pub(crate) fn note_handoff_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
+        self.handoff_pack_full = Some(pack);
+        self.handoff_pack_display = Some(display);
+        self.refresh_render_cache();
+        cx.notify();
+    }
+
+    /// Show the handoff prefix at activation (or on reopen): the source
+    /// transcript's turns above the divider, then this session's own turns.
+    /// The caller builds the divider text — the activation divider names the
+    /// destination model when known, the fallback divider names the previous
+    /// session instead.
+    pub(crate) fn show_handoff_prefix(
+        &mut self,
+        origin: handoff::HandoffOrigin,
+        prefix: Vec<Turn>,
+        divider_text: String,
+        pack_full: Option<String>,
+        pack_display: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let to = self.provider_kind();
+        let divider = crate::handoff_snapshot::divider_turn(
+            &format!("handoff-divider-{}", self.session_id),
+            origin.from,
+            to,
+            divider_text,
+        );
+        self.handoff_origin = Some(origin);
+        self.handoff_prefix = Rc::new(prefix.into_iter().map(Rc::new).collect());
+        self.handoff_divider = Some(Rc::new(divider));
+        if pack_full.is_some() {
+            self.handoff_pack_full = pack_full;
+        }
+        if pack_display.is_some() {
+            self.handoff_pack_display = pack_display;
+        }
+        self.follow = true;
+        self.refresh_render_cache();
+        cx.notify();
+    }
+
+    /// The source transcript as this view shows it: prefix, divider, own
+    /// turns with the pack bubble hidden. What activation snapshots, so a
+    /// chain's next hop already carries this hop's divider.
+    pub(crate) fn handoff_snapshot_turns(&mut self) -> Vec<Turn> {
+        self.refresh_render_cache();
+        self.cached_turns.iter().map(|turn| (**turn).clone()).collect()
+    }
+
+    /// A pack-derived bubble text from before snapshots existed: the display
+    /// map's value whose full text starts with the pack header. What hides
+    /// the pack bubble for a pair made before this change, where no snapshot
+    /// names the pack.
+    pub(crate) fn pack_display_fallback(&mut self) -> Option<String> {
+        self.ensure_display_overrides();
+        self.display_overrides.as_ref().and_then(|map| {
+            map.iter()
+                .find(|(full, _)| full.starts_with(crate::handoff_snapshot::PACK_HEAD_PREFIX))
+                .map(|(_, display)| display.clone())
+        })
     }
 
     /// Submit the pack as the destination's first turn: the full pack text

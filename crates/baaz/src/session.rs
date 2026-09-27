@@ -849,6 +849,23 @@ pub struct SessionView {
     /// This session started as a handoff's destination: where it came from.
     /// Drawn as the quiet marker at the top of the transcript.
     handoff_origin: Option<crate::handoff::HandoffOrigin>,
+    /// The handoff prefix: the source transcript's turns at activation,
+    /// view-side so provider deltas never touch them. Read-only history the
+    /// destination renders above its own turns (`docs/22-handoff.md` §8).
+    handoff_prefix: Rc<Vec<Rc<Turn>>>,
+    /// The one divider between the prefix and this session's own turns.
+    /// View-side like the prefix: it replaces the old fold-written origin
+    /// marker, so exactly one divider stands per handoff, never two.
+    handoff_divider: Option<Rc<Turn>>,
+    /// The pack's full model-visible text and its short summary bubble text:
+    /// what identifies the destination's first user turn so the view can
+    /// hide it (the divider stands for it). The pack stays in the provider
+    /// history untouched.
+    handoff_pack_full: Option<String>,
+    handoff_pack_display: Option<String>,
+    /// The hidden pack bubble's turn id, found on the last cache refresh:
+    /// what keeps the per-frame sync check O(1).
+    handoff_pack_hidden: Option<String>,
     /// Full provider-submitted text → bubble text for submits that carried
     /// `display_text`, mirrored from the provider session record on first
     /// use. `None` until a provider submit records one or a replayed delta
@@ -1032,6 +1049,11 @@ impl SessionView {
             handoff_card: None,
             handed_off_to: None,
             handoff_origin: None,
+            handoff_prefix: Rc::new(Vec::new()),
+            handoff_divider: None,
+            handoff_pack_full: None,
+            handoff_pack_display: None,
+            handoff_pack_hidden: None,
             display_overrides: None,
             _subscriptions: vec![subscription],
         }
