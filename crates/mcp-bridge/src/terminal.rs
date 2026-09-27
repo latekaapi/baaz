@@ -59,10 +59,12 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         (
             "terminal_open".to_owned(),
-            "Open a new agent-owned terminal tab. It belongs to the project and the person can see it."
+            "Open a new agent-owned terminal tab. It belongs to the project and the person can see it. \
+            `cwd` may name any directory the user could open themselves (same privilege as the user); \
+            it defaults to the project root."
                 .to_owned(),
             json!({"type": "object", "properties": {
-                "cwd": {"type": "string", "description": "Starting directory; defaults to the project root."},
+                "cwd": {"type": "string", "description": "Starting directory, any directory; defaults to the project root."},
                 "title": {"type": "string", "description": "Tab title; defaults to shell."},
             }}),
         ),
@@ -101,7 +103,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         (
             "terminal_send".to_owned(),
-            "Type into a tab: pasted text and/or named keys (answer prompts, interrupt with ctrl-c)."
+            "Type into a tab: pasted text and/or named keys (answer prompts, interrupt with ctrl-c). \
+            Tabs the person opened take only answers to a prompt of a command the agent ran there."
                 .to_owned(),
             json!({"type": "object", "required": ["tab"], "properties": {
                 "tab": {"type": "string"},
