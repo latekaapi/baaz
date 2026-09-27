@@ -371,30 +371,33 @@ fn changed_lines(diff: &Diff) -> usize {
 
 /// X2: the diff a card actually draws: the first `cap` rows of the first
 /// hunk, plus a final muted `… N more lines` context row when rows were
-/// cut (`N` counts every dropped row, including whole dropped hunks).
+/// cut (`N` counts the first hunk's dropped rows; later hunks are kept).
 /// Short diffs come back unchanged. The input is never mutated — the
 /// caller draws this copy and the stored block keeps the full diff. aui
 /// v0.3.1 offers no line-level "show all" affordance (its fold row only
 /// covers further hunks), so the truncation plus the count is the whole
 /// affordance for now.
 pub fn display_diff(diff: &Diff, cap: usize) -> Diff {
-    let total: usize = diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+    // Only an over-long FIRST hunk is cut; every later hunk stays, so the
+    // library's own fold row still reaches them. Cutting at the first hunk
+    // regardless dropped hunks 2..N of every multi-hunk edit (X2 review).
     let Some(first) = diff.hunks.first() else { return diff.clone() };
-    let kept: Vec<DiffLine> = first.lines.iter().take(cap).cloned().collect();
-    let omitted = total.saturating_sub(kept.len());
-    if omitted == 0 {
+    if first.lines.len() <= cap {
         return diff.clone();
     }
-    let mut lines = kept;
+    let omitted = first.lines.len() - cap;
+    let mut lines: Vec<DiffLine> = first.lines.iter().take(cap).cloned().collect();
     lines.push(DiffLine {
         kind: DiffKind::Context,
         old_no: None,
         new_no: None,
-        text: format!("… {omitted} more lines"),
+        text: format!("\u{2026} {omitted} more lines"),
     });
+    let mut hunks = vec![Hunk { header: first.header.clone(), lines }];
+    hunks.extend(diff.hunks.iter().skip(1).cloned());
     Diff {
         path: diff.path.clone(),
-        hunks: vec![Hunk { header: first.header.clone(), lines }],
+        hunks,
         added: diff.added,
         removed: diff.removed,
     }
@@ -1946,7 +1949,7 @@ mod tests {
     }
 
     /// X2: an opened big diff draws the first 40 rows of the first hunk
-    /// plus a final `… N more lines` row counting every dropped row.
+    /// plus a final `… N more lines` row counting its dropped rows.
     #[test]
     fn opened_big_diffs_show_forty_rows_and_a_count() {
         let shown = display_diff(&edit_diff(&write_call(233)), DIFF_DISPLAY_CAP);
@@ -1955,6 +1958,25 @@ mod tests {
         assert_eq!(shown.hunks[0].lines[DIFF_DISPLAY_CAP].text, "… 193 more lines");
         // The chip counts still describe the whole change.
         assert_eq!((shown.added, shown.removed), (233, 0));
+    }
+
+    /// X2 review: every hunk after the first survives — a small edit in
+    /// two places keeps both, and a long first hunk is cut without taking
+    /// the later ones with it.
+    #[test]
+    fn later_hunks_are_never_dropped() {
+        let mut two = edit_diff(&write_call(3));
+        let mut second = two.hunks[0].clone();
+        second.header = "@@ -20,0 +20,3 @@".to_owned();
+        two.hunks.push(second.clone());
+        assert_eq!(display_diff(&two, DIFF_DISPLAY_CAP), two);
+
+        let mut long = edit_diff(&write_call(100));
+        long.hunks.push(second);
+        let shown = display_diff(&long, DIFF_DISPLAY_CAP);
+        assert_eq!(shown.hunks.len(), 2);
+        assert_eq!(shown.hunks[0].lines[DIFF_DISPLAY_CAP].text, "… 60 more lines");
+        assert_eq!(shown.hunks[1].lines.len(), 3);
     }
 
     /// X2: short diffs pass through untouched — no count row appended.
