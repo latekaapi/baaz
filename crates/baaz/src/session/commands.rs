@@ -51,6 +51,23 @@ impl SessionView {
     }
 
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
+        // A retired source session takes no sends: the work moved to the
+        // destination. The draft goes back in the composer untouched.
+        if let Some(notice) = self.handoff_readonly_notice() {
+            self.banner = Some(notice);
+            self.banner_action = None;
+            self.restore_prompt(text, cx);
+            return;
+        }
+        // Mid-handoff the source is quiet: a send now would land in a
+        // transcript the pack already captured. It resumes if the move
+        // fails; the draft is kept either way.
+        if self.handoff_quiescing() {
+            self.banner = Some("Handoff in progress — sends resume if it fails.".to_owned());
+            self.banner_action = None;
+            self.restore_prompt(text, cx);
+            return;
+        }
         // The provider lane never touches the muse wire: text plus the
         // composer's attachments travel as one `SubmitInput`, queued
         // behind a running turn by the provider itself — the same

@@ -54,6 +54,19 @@ pub struct ProviderSessionRecord {
     /// [`crate::sidebar::UNNAMED`] before the auto-title lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
+    /// The handoff that retired this session: the fresh destination
+    /// session id, written on activation. The destination's own record
+    /// carries the other half, so both survive restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_to: Option<String>,
+    /// The handoff this session was born from: the source session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_from: Option<String>,
+    /// The source session's wire provider id (`"muse"`, `"claude-code"`,
+    /// `"codex"`): what the sidebar row's "from <Provider>" byline reads
+    /// without joining the source's own record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_from_provider: Option<String>,
 }
 
 /// Every provider session this window knows, keyed by session id.
@@ -132,6 +145,9 @@ pub fn upsert_open(
             turns: 0,
             title,
             first_prompt: None,
+            handoff_to: None,
+            handoff_from: None,
+            handoff_from_provider: None,
         });
 }
 
@@ -181,6 +197,27 @@ pub fn note_first_prompt(store: &mut ProviderSessionStore, session_id: &str, pro
 /// caller's job — this only forgets the record.
 pub fn remove(store: &mut ProviderSessionStore, session_id: &str) -> bool {
     store.remove(session_id).is_some()
+}
+
+/// A handoff activated between two provider-lane sessions: the source
+/// record points at the destination, and the destination points back at
+/// the source with its wire provider id (what the sidebar row's "from
+/// <Provider>" byline reads). Missing records are skipped, never created:
+/// a muse session on either side keeps its half in
+/// [`crate::sessions::SessionMeta`] instead.
+pub fn note_handoff(
+    store: &mut ProviderSessionStore,
+    source: &str,
+    source_provider: &str,
+    dest: &str,
+) {
+    if let Some(record) = store.get_mut(source) {
+        record.handoff_to = Some(dest.to_owned());
+    }
+    if let Some(record) = store.get_mut(dest) {
+        record.handoff_from = Some(source.to_owned());
+        record.handoff_from_provider = Some(source_provider.to_owned());
+    }
 }
 
 /// The `ResumeSession` command that reopens `record`: a full resume, not a

@@ -21,6 +21,7 @@ use aui::overlay::{
     anchored_menu, command_palette, dialog, popover_layer, DialogKind, MenuAlign, MenuSide, PaletteIcon,
     PaletteItem, PaletteSection,
 };
+use aui::transcript::handoff_confirm;
 use aui_icons::IconName;
 use aui_motion::{presence, EnterExit, PresenceStyle};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
@@ -110,6 +111,9 @@ impl Harness {
     }
 
     pub(crate) fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        // The handoff confirm's facts leave with it: dismissing any other
+        // way confirms nothing afterwards.
+        self.handoff_confirm = None;
         self.overlays.update(cx, |overlays, _| overlays.dialog = None);
         cx.notify();
     }
@@ -589,6 +593,7 @@ impl Harness {
             | Command::Usage
             | Command::Clear
             | Command::Project
+            | Command::Handoff
             | Command::Fork
             | Command::Name
             | Command::Resume
@@ -931,9 +936,49 @@ impl Harness {
         )
     }
 
+    /// The handoff confirm: the library's own dialog — the destination
+    /// row, the Carried / Not carried lists the card draws, the pack size
+    /// and the honest fresh-start note — over the same modal layer every
+    /// other dialog uses. Cancel closes it (the frozen facts leave with
+    /// it); Hand off starts the run.
+    fn render_handoff_confirm(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.handoff_confirm.clone()?;
+        let confirm = cx.listener(|this: &mut Self, _: &(), window, cx| this.confirm_handoff(window, cx));
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        let model = if state.to_model.trim().is_empty() { "provider default".to_owned() } else { state.to_model };
+        let card = handoff_confirm(
+            "handoff-confirm",
+            crate::handoff::wire_provider(state.to),
+            model,
+            &state.carried,
+            &state.lost,
+            Some(state.pack_tokens),
+        )
+        .on_primary(move |window, cx| confirm(&(), window, cx))
+        .on_secondary(move |window, cx| close(&(), window, cx))
+        .on_dismiss(move |window, cx| dismiss(&(), window, cx));
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        Some(
+            popover_layer(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .key_context(aui::keys::MENU_CONTEXT)
+                    .track_focus(&self.focus_dialog)
+                    .on_action(cx.listener(|this, _: &Cancel, _, cx| this.close_dialog(cx)))
+                    .child(card.into_any_element()),
+            )
+            .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Read the modal out whole before anything asks `cx` for a listener:
         // the entity's borrow and `cx.listener` cannot be alive at once.
+        if self.overlays.read(cx).dialog.as_ref().is_some_and(|m| m.action == DialogAction::HandoffConfirm) {
+            return self.render_handoff_confirm(window, cx);
+        }
         let (title, detail, kind, primary_label, action, danger) = {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
             let danger = modal.action == DialogAction::Archive
@@ -971,6 +1016,13 @@ impl Harness {
             this.close_dialog(cx);
             match action {
                 DialogAction::Dismiss => {}
+                // Rendered through `render_handoff_confirm`, never through
+                // this card — but the action still routes here if the
+                // dialog ever falls through, so it confirms rather than
+                // dropping the request.
+                DialogAction::HandoffConfirm => {
+                    this.confirm_handoff(window, cx);
+                }
                 DialogAction::Reconnect => {
                     this.wire = Wire::Reconnecting;
                     this.reconnect(cx);
@@ -1688,19 +1740,19 @@ mod tests {
 
     /// The Commands filter reads the slash and the description,
     /// case-insensitively: `brow` is `/browser`, `reasoning` is a
-    /// description word only, nonsense is nothing, empty is all 23.
+    /// description word only, nonsense is nothing, empty is all 24.
     #[test]
     fn the_command_filter_matches_slash_and_description() {
         assert_eq!(filter_commands("brow"), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("BROW"), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("reasoning"), vec![Command::Effort]);
         assert!(filter_commands("zzz-no-such-command").is_empty());
-        assert_eq!(filter_commands("").len(), 24, "an empty query lists every command");
-        assert_eq!(filter_commands("   ").len(), 24, "whitespace is an empty query");
+        assert_eq!(filter_commands("").len(), 25, "an empty query lists every command");
+        assert_eq!(filter_commands("   ").len(), 25, "whitespace is an empty query");
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
-    /// field opens empty with all 23 rows, and setting it to `brow`
+    /// field opens empty with all 24 rows, and setting it to `brow`
     /// leaves `/browser` alone — the same rows the keyboard walks.
     #[gpui::test]
     fn the_command_palette_has_a_query_field_and_filters(cx: &mut gpui::TestAppContext) {
@@ -1715,7 +1767,7 @@ mod tests {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
         });
-        assert_eq!(empty, 24, "an empty query lists every command");
+        assert_eq!(empty, 25, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));

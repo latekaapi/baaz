@@ -41,6 +41,7 @@
 //! | `name:<name>` | `/name`, the session rename command |
 //! | `hide` | `/hide` the open session |
 //! | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
+//! | `handoff:<provider>` | "Hand off to X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
 //! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
 //! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
@@ -414,6 +415,11 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "resume", run: |_, _, _, cx| cx.emit(SessionEvent::Resume) },
     SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.set_model(rest, cx) },
     SessionVerb { verb: "setprovider", run: |v, rest, _, cx| v.step_setprovider(rest, cx) },
+    // `handoff:<provider>`: start the lossy re-prompt to that backend,
+    // headless — the command line already asked, so no confirm dialog.
+    // Refusals (no turns, a pending question or approval, a same-provider
+    // pick) record a step failure and change nothing.
+    SessionVerb { verb: "handoff", run: |v, rest, _, cx| v.step_handoff(rest, cx) },
     SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
     SessionVerb { verb: "compact", run: |v, _, _, cx| v.compact(cx) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },

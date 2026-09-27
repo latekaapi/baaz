@@ -771,6 +771,19 @@ pub struct Harness {
     /// task, so they claim the next start up front — any other `new` while
     /// a switch is in flight is a duplicate and starts nothing.
     pub(crate) switch_claim: Option<String>,
+    /// One handoff run per source session: the machine in
+    /// [`crate::handoff`]. The source view mirrors the run's card; this
+    /// map is the authority the ack and cancel paths advance.
+    pub(crate) handoffs: HashMap<String, crate::handoff::HandoffRun>,
+    /// Owner-epoch counter for handoffs: every request bumps it and
+    /// carries the value, so an event from a superseded epoch is ignored
+    /// rather than applied to a newer run.
+    pub(crate) handoff_epoch: u64,
+    /// The destination open in flight for a handoff: consumed when the
+    /// fresh session lands, then the pack submits onto it.
+    pub(crate) pending_handoff: Option<crate::handoff::PendingHandoff>,
+    /// The confirm dialog's frozen facts, held while it is open.
+    pub(crate) handoff_confirm: Option<crate::handoff::HandoffConfirmState>,
     /// Whether the boot session has been attempted: [`Harness::ensure_boot_session`]
     /// opens `--session`/`--send`/`--steps`' first session without waiting
     /// for `session/list`, at most once — a failed attempt must not retry on
@@ -1011,6 +1024,10 @@ impl Harness {
             session_switch_pending: false,
             provider_open_epoch: 0,
             switch_claim: None,
+            handoffs: HashMap::new(),
+            handoff_epoch: 0,
+            pending_handoff: None,
+            handoff_confirm: None,
             boot_session_attempted: false,
             renaming_project: None,
             project_colour_open: false,
@@ -3682,6 +3699,9 @@ mod tests {
                         turns: 0,
                         title: None,
                         first_prompt: None,
+                        handoff_to: None,
+                        handoff_from: None,
+                        handoff_from_provider: None,
                     },
                 );
                 // … while the bridge map names the pre-ack request id.

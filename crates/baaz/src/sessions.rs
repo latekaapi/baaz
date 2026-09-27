@@ -93,6 +93,18 @@ pub struct SessionMeta {
     /// silent about the question.
     #[serde(default)]
     pub project: Option<String>,
+    /// The handoff that retired this session: the fresh destination
+    /// session id, written on activation. The destination's row carries
+    /// the other half, so both survive restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_to: Option<String>,
+    /// The handoff this session was born from: the source session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_from: Option<String>,
+    /// The source session's wire provider id: what the sidebar row's
+    /// "from <Provider>" byline reads without joining another record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_from_provider: Option<String>,
 }
 
 impl SessionMeta {
@@ -111,6 +123,9 @@ impl SessionMeta {
             && self.last_ask.is_none()
             && self.last_error.is_none()
             && self.project.is_none()
+            && self.handoff_to.is_none()
+            && self.handoff_from.is_none()
+            && self.handoff_from_provider.is_none()
     }
 }
 

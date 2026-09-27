@@ -46,6 +46,7 @@ mod conn;
 mod dialogs;
 mod files;
 mod full_output;
+mod handoff;
 mod history;
 mod images;
 mod index;

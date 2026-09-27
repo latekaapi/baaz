@@ -245,7 +245,10 @@ impl SessionEntry {
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
-            description: describe(meta, index, text, user_named),
+            description: with_handoff_origin(
+                describe(meta, index, text, user_named),
+                meta.and_then(|m| m.handoff_from_provider.as_deref()),
+            ),
             last_ask: meta
                 .and_then(|m| m.last_ask.as_deref())
                 .map(str::trim)
@@ -343,7 +346,10 @@ impl SessionEntry {
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
-            description: describe(meta, Some(index), text, user_named),
+            description: with_handoff_origin(
+                describe(meta, Some(index), text, user_named),
+                meta.and_then(|m| m.handoff_from_provider.as_deref()),
+            ),
             last_ask: meta
                 .and_then(|m| m.last_ask.as_deref())
                 .map(str::trim)
@@ -420,7 +426,10 @@ impl SessionEntry {
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
-            description: describe(meta, None, text, user_named),
+            description: with_handoff_origin(
+                describe(meta, None, text, user_named),
+                record.handoff_from_provider.as_deref(),
+            ),
             last_ask: meta
                 .and_then(|m| m.last_ask.as_deref())
                 .map(str::trim)
@@ -1179,6 +1188,16 @@ fn elapsed_at(at: DateTime<Local>, now: DateTime<Local>) -> String {
 /// title that is not a prefix or an elision of that prompt (see
 /// `echoes_prompt`). Otherwise there is no second line at all: the turns
 /// meta speaks for the row. The row's own cap bounds whatever is shown.
+/// A handoff destination row's byline origin: "from <Provider>", joined
+/// onto whatever the row already says — or the whole byline when it says
+/// nothing. `provider` is the source session's wire id; unknown ids fall
+/// back to the registry default the same way every other parse does.
+pub fn with_handoff_origin(base: String, provider: Option<&str>) -> String {
+    let Some(wire) = provider.map(str::trim).filter(|s| !s.is_empty()) else { return base };
+    let from = format!("from {}", crate::providers::ProviderId::parse(wire).label());
+    if base.trim().is_empty() { from } else { format!("{base} · {from}") }
+}
+
 pub fn describe(
     meta: Option<&SessionMeta>,
     index: Option<&IndexEntry>,
@@ -2637,6 +2656,9 @@ mod tests {
             turns: 2,
             title: None,
             first_prompt: None,
+            handoff_to: None,
+            handoff_from: None,
+            handoff_from_provider: None,
         }
     }
 
