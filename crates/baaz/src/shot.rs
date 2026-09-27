@@ -175,6 +175,29 @@ fn write_capture(
     Ok((target_w, target_h))
 }
 
+/// A scripted run's own steps do not promise the turn they started
+/// is finished — a trailing `send:` with no matching `wait:` after
+/// it, or the steps ceiling above giving up early, both leave one in
+/// flight — and quitting under a running turn kills its `muse` child
+/// and orphans it (the turn resumes as "orphaned" the next time its
+/// session opens). Wait, bounded, for every open session's own turn
+/// to clear before this process does that.
+async fn wait_for_turns(handle: WindowHandle<Root>, cx: &AsyncApp) {
+    let deadline = std::time::Instant::now() + TURN_CEILING;
+    let mut logged = false;
+    while any_turn_running(handle, cx) {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("baaz: a turn is still running after {TURN_CEILING:?}; quitting anyway");
+            break;
+        }
+        if !logged {
+            crate::baaz_log!("waiting for a running turn before quitting a screenshot");
+            logged = true;
+        }
+        cx.background_executor().timer(POLL).await;
+    }
+}
+
 /// Whether any session `handle`'s window has open has a turn in flight —
 /// [`crate::app::Harness::any_turn_running`], reached through the window's
 /// root view rather than a per-frame flag, so this reads the state fresh on
@@ -291,27 +314,12 @@ pub fn capture_and_quit(
         // animate into before the capture — never a race against steps
         // still running (see this function's own doc).
         settle(cx, delay).await;
-        // A scripted run's own steps do not promise the turn they started
-        // is finished — a trailing `send:` with no matching `wait:` after
-        // it, or the steps ceiling above giving up early, both leave one in
-        // flight — and quitting under a running turn kills its `muse` child
-        // and orphans it (the turn resumes as "orphaned" the next time its
-        // session opens). Wait, bounded, for every open session's own turn
-        // to clear before this process does that.
-        {
-            let deadline = std::time::Instant::now() + TURN_CEILING;
-            let mut logged = false;
-            while any_turn_running(handle, cx) {
-                if std::time::Instant::now() >= deadline {
-                    eprintln!("baaz: a turn is still running after {TURN_CEILING:?}; quitting anyway");
-                    break;
-                }
-                if !logged {
-                    crate::baaz_log!("waiting for a running turn before quitting a screenshot");
-                    logged = true;
-                }
-                cx.background_executor().timer(POLL).await;
-            }
+        // `BAAZ_SHOT_MIDTURN=1` captures the frame while the turn is still
+        // running — the only way to see the first frames after a send — and
+        // waits for the turn after the write instead of before it.
+        let midturn = std::env::var_os("BAAZ_SHOT_MIDTURN").is_some();
+        if !midturn {
+            wait_for_turns(handle, cx).await;
         }
         // Only the render stays on the UI thread; the Lanczos3 downsample,
         // the PNG encode and the write go to the background executor
@@ -347,6 +355,9 @@ pub fn capture_and_quit(
         match result {
             Ok((w, h)) => println!("wrote {} ({w}\u{d7}{h})", path.display()),
             Err(err) => eprintln!("screenshot failed: {err:#}"),
+        }
+        if midturn {
+            wait_for_turns(handle, cx).await;
         }
         // The billing probe may still be driving the `muse` TUI on a
         // background thread, and quitting now would orphan it: the child is
