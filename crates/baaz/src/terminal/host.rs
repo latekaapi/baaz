@@ -279,6 +279,22 @@ impl TerminalHost {
         origin_session: Option<SessionId>,
         cx: &mut Context<Self>,
     ) -> String {
+        self.open_with_cwd(project_root, project_root, title, owner, origin_session, cx)
+    }
+
+    /// Open a tab of `project_root` with the shell starting in `cwd`: the
+    /// agent's `terminal_open` route, whose `cwd` defaults to the project
+    /// root. The tab still belongs to the project (D43); only the shell's
+    /// starting directory differs.
+    pub fn open_with_cwd(
+        &mut self,
+        project_root: &Path,
+        cwd: &Path,
+        title: String,
+        owner: TabOwner,
+        origin_session: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> String {
         // `CLICOLOR` is why a macOS terminal looks alive rather than white.
         // The library already advertises `TERM=xterm-256color` and
         // `COLORTERM=truecolor`, but BSD `ls` gates its colour on `CLICOLOR`
@@ -287,7 +303,7 @@ impl TerminalHost {
         // capability is the library's job; deciding that this terminal's
         // tools should use it is the host's, so it is set here. A user who
         // wants it off can unset it in their rc, which runs after this.
-        let config = aui_terminal::PtyConfig::login(project_root)
+        let config = aui_terminal::PtyConfig::login(cwd)
             .with_env("BAAZ_TERMINAL", "1")
             .with_env("CLICOLOR", "1");
         let nonce = config.nonce().to_owned();
@@ -318,6 +334,22 @@ impl TerminalHost {
         cx: &mut Context<Self>,
     ) -> String {
         let session = TerminalSession::new(Box::new(ScriptBackend::new(script)), 100, 32).with_nonce(nonce);
+        self.push(project_root, title, owner, origin_session, session, cx)
+    }
+
+    /// Open a tab over an already-built session: the service's route for
+    /// scripted backends (tests) and any future caller that builds its own
+    /// [`TerminalSession`]. The tab is otherwise ordinary — titled, owned,
+    /// and made active like every other open.
+    pub fn open_session(
+        &mut self,
+        project_root: &Path,
+        title: String,
+        owner: TabOwner,
+        origin_session: Option<SessionId>,
+        session: TerminalSession,
+        cx: &mut Context<Self>,
+    ) -> String {
         self.push(project_root, title, owner, origin_session, session, cx)
     }
 

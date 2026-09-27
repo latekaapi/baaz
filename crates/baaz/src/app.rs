@@ -103,7 +103,7 @@ use aui::nav::{sidebar_list_state, SidebarRow};
 use crate::sidebar::{self, Grouping, SessionEntry};
 use crate::sidebar_view::{SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState};
 use crate::search::{FileHit, SessionHit};
-use crate::terminal::{self, TabOwner, TerminalHost};
+use crate::terminal::{self, TabOwner, TerminalHost, TerminalService};
 use crate::wire::{SharedProvider, WireCall};
 use crate::{layout, Args};
 
@@ -673,6 +673,10 @@ pub struct Harness {
     pub(crate) layout: layout::Layout,
     /// The terminal tabs behind the dock, keyed by project root (D43).
     pub(crate) terminal_host: Entity<TerminalHost>,
+    /// The agent's seven tools over the unix socket (D46): sessions the
+    /// app registers may list, open, run, read, screen, send and close
+    /// these tabs. Dropped (and its socket removed) on quit.
+    pub(crate) terminal_service: TerminalService,
     /// The dock's own focus: ⌃` focuses it on open, so keys reach the pty
     /// through the wrapper until a click hands the keyboard to the grid.
     pub(crate) terminal_focus: FocusHandle,
@@ -892,6 +896,11 @@ impl Harness {
         // `BAAZ_PROVIDER` names this run; otherwise the last pick the
         // person made, kept in the store across relaunches; otherwise the
         // command-line default.
+        // The terminal service binds before the first frame: its socket is
+        // how the agent's routes reach the tabs, and a relay started
+        // beside the app must find it already listening.
+        let terminal_host = cx.new(|_| TerminalHost::new());
+        let terminal_service = TerminalService::start(terminal_host.clone(), &crate::store::support_dir());
         let new_provider = if args.provider_explicit {
             args.provider.clone()
         } else {
@@ -956,7 +965,8 @@ impl Harness {
             sessions_list_in_flight: false,
             sessions_list_stale: false,
             layout: layout::read(),
-            terminal_host: cx.new(|_| TerminalHost::new()),
+            terminal_host,
+            terminal_service,
             terminal_focus: cx.focus_handle(),
             terminal_drag: None,
             show_hidden: false,
@@ -1012,6 +1022,31 @@ impl Harness {
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
+        // When the agent runs something the dock opens — never focused, so
+        // the person's keyboard stays where it was while they watch.
+        let harness = cx.entity();
+        this.terminal_service.set_activity_hook(move |cx: &mut App| {
+            let _ = harness.update(cx, |harness, cx| {
+                harness.layout.terminal_open = true;
+                layout::write(&harness.layout);
+                cx.notify();
+            });
+        });
+        // The service's requests queue on socket threads; this pump runs
+        // them on the UI thread, one pass every 15 ms, until the window is
+        // gone. A pass is one `drain`: queued tools answer and waiting runs
+        // are polled, so a long run never stalls a frame.
+        this.tasks.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(15)).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.terminal_service.drain(cx);
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        }));
         // Typing in the rename field redraws the row being renamed — in the
         // sidebar pane, which owns that element, as well as here for the
         // header title that shares the field.
@@ -1679,6 +1714,19 @@ impl Harness {
         }
         layout::write(&self.layout);
         cx.notify();
+    }
+
+    /// Trust `session_id` for the terminal service (D53): the app opened
+    /// this session, so its agent routes may drive the project's tabs.
+    /// Called wherever a session becomes current; the provider lanes join
+    /// in T2, which owns their open paths.
+    pub(crate) fn register_terminal_session(&mut self, session_id: &str, project_root: std::path::PathBuf) {
+        self.terminal_service.register_session(session_id, project_root);
+    }
+
+    /// Forget `session_id`: its agent routes are refused from here on.
+    pub(crate) fn unregister_terminal_session(&mut self, session_id: &str) {
+        self.terminal_service.unregister_session(session_id);
     }
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
@@ -2436,6 +2484,17 @@ impl Harness {
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
         self.active = Some(view);
+        // The replayed session is current, so its agent routes may drive
+        // the terminal (D53): register it for this window's project root.
+        // Live lanes register on their own open paths (T2 owns those).
+        let replayed_id = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        if let Some(session_id) = replayed_id {
+            let root = self
+                .current_project()
+                .map(|project| project.root.clone())
+                .unwrap_or_else(|| self.args.workspace.clone());
+            self.register_terminal_session(&session_id, root);
+        }
         // The capture is already folded, and no wire event will ever run
         // `title_from_transcript` for it: without this the replayed row
         // keeps the file's name even when the transcript knows better.

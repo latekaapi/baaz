@@ -13,6 +13,9 @@ use std::io::{BufRead, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// The terminal relay: the seven tools as MCP, forwarded to Baaz's socket.
+pub mod terminal;
+
 /// Protocol version the probe server answered with, and this bridge keeps.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -119,6 +122,7 @@ impl std::error::Error for RegistryError {}
 pub struct ToolRegistry {
     tools: Vec<ToolDef>,
     index: HashMap<String, usize>,
+    instructions: Option<String>,
 }
 
 impl fmt::Debug for ToolRegistry {
@@ -189,6 +193,13 @@ impl ToolRegistry {
     /// Registered tools in registration order.
     pub fn tools(&self) -> &[ToolDef] {
         &self.tools
+    }
+
+    /// Steering for the model, advertised in `initialize` as
+    /// `instructions` (the terminal relay's D50 steering). Unset by
+    /// default: diagnostic bridges say nothing.
+    pub fn set_instructions(&mut self, instructions: impl Into<String>) {
+        self.instructions = Some(instructions.into());
     }
 }
 
@@ -279,19 +290,23 @@ fn handle_line(line: &str, registry: &ToolRegistry) -> Option<String> {
     let params = object.get("params").unwrap_or(&Value::Null);
 
     match method {
-        "initialize" => Some(success_reply(id, &initialize_result())),
+        "initialize" => Some(success_reply(id, &initialize_result(registry))),
         "tools/list" => Some(success_reply(id, &tools_list_result(registry))),
         "tools/call" => Some(call_tool(id, params, registry)),
         _ => Some(error_reply(id, -32601, &format!("method not found: {method}"))),
     }
 }
 
-fn initialize_result() -> Value {
-    json!({
+fn initialize_result(registry: &ToolRegistry) -> Value {
+    let mut result = json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {}},
         "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
-    })
+    });
+    if let Some(instructions) = &registry.instructions {
+        result["instructions"] = Value::String(instructions.clone());
+    }
+    result
 }
 
 fn tools_list_result(registry: &ToolRegistry) -> Value {

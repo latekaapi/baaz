@@ -9,7 +9,12 @@ pub mod dock;
 pub mod host;
 pub mod intents;
 pub mod run;
+pub mod service;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub use host::{Pick, TabOwner, TerminalHost, deterministic_script, title_from_command};
 pub use run::{RunRequest, send_enter_for_alt};
+pub use service::{
+    RUN_DEFAULT_TIMEOUT_MS, RUN_MAX_TIMEOUT_MS, RUN_OUTPUT_CAP, READ_DEFAULT_MAX, READ_MAX, TOOL_NAMES, UNAVAILABLE,
+    TerminalService, socket_path_for,
+};
