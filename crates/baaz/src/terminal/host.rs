@@ -33,6 +33,9 @@ pub struct TerminalTab {
     pub id: String,
     /// The project this tab belongs to: [`Project::root`][crate::projects::Project].
     pub project_root: PathBuf,
+    /// The shell's starting directory: the project root, unless the agent
+    /// named another `cwd` at open. What `terminal_list` reports.
+    pub cwd: PathBuf,
     /// The tab title, from the command that opened it.
     pub title: String,
     /// Who opened the tab.
@@ -310,7 +313,7 @@ impl TerminalHost {
         let mut pty = aui_terminal::Pty::new();
         let _ = pty.spawn_config(&config);
         let session = TerminalSession::new(Box::new(pty), 100, 32).with_nonce(&nonce);
-        self.push(project_root, title, owner, origin_session, session, cx)
+        self.push(project_root, cwd, title, owner, origin_session, session, cx)
     }
 
     /// Open a tab over a scripted backend: the `--steps` verb's route, so
@@ -334,13 +337,16 @@ impl TerminalHost {
         cx: &mut Context<Self>,
     ) -> String {
         let session = TerminalSession::new(Box::new(ScriptBackend::new(script)), 100, 32).with_nonce(nonce);
-        self.push(project_root, title, owner, origin_session, session, cx)
+        self.push(project_root, project_root, title, owner, origin_session, session, cx)
     }
 
-    /// Open a tab over an already-built session: the service's route for
-    /// scripted backends (tests) and any future caller that builds its own
-    /// [`TerminalSession`]. The tab is otherwise ordinary — titled, owned,
-    /// and made active like every other open.
+    /// Open a tab over an already-built session: the service tests' route
+    /// for scripted backends that answer writes (a recording cannot). The
+    /// tab is otherwise ordinary — titled, owned, and made active like
+    /// every other open. Test-only: production opens go through
+    /// [`open`](Self::open), [`open_with_cwd`](Self::open_with_cwd) or
+    /// [`open_fake`](Self::open_fake).
+    #[cfg(test)]
     pub fn open_session(
         &mut self,
         project_root: &Path,
@@ -350,7 +356,7 @@ impl TerminalHost {
         session: TerminalSession,
         cx: &mut Context<Self>,
     ) -> String {
-        self.push(project_root, title, owner, origin_session, session, cx)
+        self.push(project_root, project_root, title, owner, origin_session, session, cx)
     }
 
     /// Drive one tab's backend until its script is spent, synchronously.
@@ -395,9 +401,11 @@ impl TerminalHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         project_root: &Path,
+        cwd: &Path,
         title: String,
         owner: TabOwner,
         origin_session: Option<SessionId>,
@@ -410,6 +418,7 @@ impl TerminalHost {
         self.tabs.push(TerminalTab {
             id: id.clone(),
             project_root: project_root.to_owned(),
+            cwd: cwd.to_owned(),
             title,
             owner,
             origin_session,
