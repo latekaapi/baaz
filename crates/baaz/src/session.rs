@@ -663,6 +663,10 @@ pub struct SessionView {
     completed_turns: HashSet<String>,
     /// A `turn/start` is in flight and no `turn/started` has arrived yet.
     submitting: bool,
+    /// Optimistic user turns folded at send, oldest first, waiting on the
+    /// provider's own user turn to replace them (X1). A refused submit or
+    /// a dead connection removes them; the echo consumes the earliest.
+    pending_optimistic: Vec<String>,
     /// History is still being paged in behind the live stream.
     loading_history: bool,
     /// A `view/page` chain is in flight. Separate from `loading_history`,
@@ -958,6 +962,7 @@ impl SessionView {
             running: None,
             completed_turns: HashSet::new(),
             submitting: false,
+            pending_optimistic: Vec::new(),
             loading_history: false,
             backfill_running: false,
             backfill_stale_retried: false,
