@@ -73,5 +73,38 @@ view state.
 ## 6. What this doc does not prove
 
 How the card looks and whether the destination genuinely understood the
-pack. The live runs (§7 of the task) are the evidence; report them, do
-not claim beyond them.
+pack. The live runs (§7) are the evidence; report them, do not claim
+beyond them.
+
+## 7. Live evidence
+
+### H2b — Claude Code → Codex, 2026-09-27
+
+Scripted baaz run under a scratch `BAAZ_STATE_DIR` (nothing written to
+the owner's store): `new` on `claude-code`, two turns about the
+fictional harbor town Greyport (three ferry-route names, then a
+backstory for Cormorant Crossing), `handoff:codex`, then
+"What were we working on?" on the destination.
+
+- The run logged `handoff requested … -> codex`, opened the destination
+  on the codex lane, and logged `handoff activated <source> ->
+  <destination>` — the transition that replaces the source card with
+  the Activated card (carrying `destination_session`) and retires the
+  source composer ("Handed off to Codex — open the new session").
+  `provider-sessions.json` kept `handoffTo` on the source and
+  `handoffFrom` + `handoffFromProvider: claude-code` on the
+  destination.
+- Destination marker: the destination view opened on
+  "Handed off from Claude Code: We are planning a fictional harbor
+  town called Greyport…" with the carried turns (both Greyport
+  exchanges verbatim) above its first reply.
+- Destination's first reply to the pack: "Got it—I'm ready to continue
+  with Greyport." (gpt-5.6-sol). Asked "What were we working on?" it
+  answered: "We were developing Greyport, a fictional harbor town. We
+  named three ferry routes, then chose Cormorant Crossing and wrote its
+  two-sentence backstory about lighthouse-island birds and a
+  fisherman's informal supply run becoming an official service."
+- No fold panic: this is the leg that used to underflow
+  `muse-adapter`'s `push_block` (H2b §1) — the source card and the
+  destination origin marker both file through the fixed path.
+- Not run: the Codex → Muse reverse leg (optional in H2b).
