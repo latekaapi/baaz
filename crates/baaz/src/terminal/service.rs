@@ -26,7 +26,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,6 +73,38 @@ pub fn socket_path_for(support_dir: &Path, pid: u32) -> PathBuf {
     support_dir.join("run").join(format!("terminal-{pid}.sock"))
 }
 
+/// A restrictive process umask held while the run dir and socket are
+/// created, restored on drop. `umask` is process-wide, so a static lock
+/// serialises holders: without it two concurrent starts could restore in
+/// the wrong order and leak one caller's wider mask into the other's
+/// window.
+struct UmaskGuard {
+    previous: libc::mode_t,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl UmaskGuard {
+    fn restrict() -> Self {
+        let lock = UMASK_LOCK.lock().expect("umask lock");
+        // SAFETY: `umask` always succeeds and is async-signal-safe; the
+        // previous mask is restored in `drop`, and the static lock keeps
+        // concurrent holders from interleaving set/restore pairs.
+        let previous = unsafe { libc::umask(0o077) };
+        Self { previous, _lock: lock }
+    }
+}
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: restoring the mask this guard replaced.
+        unsafe {
+            libc::umask(self.previous);
+        }
+    }
+}
+
 /// The service: session registry, request queue, pending runs, and the
 /// socket's lifecycle. One service per window owns its socket; it is not
 /// `Clone`, so a drop always means quit and always removes the socket.
@@ -101,7 +133,12 @@ struct Shared {
 }
 
 /// What the harness does when the agent runs something: open the dock (not
-/// focused) so the person can watch. Runs on the UI thread, inside `drain`.
+/// focused) so the person can watch. Runs on the UI thread, inside `drain` —
+/// which the harness calls from inside its own update — so the hook must
+/// never synchronously update the entity that is draining: defer that work
+/// with `cx.defer`, which runs at the end of the effect cycle with the
+/// entity off the stack. A hook that updates the draining entity re-enters
+/// it and aborts the app.
 type ActivityHook = Box<dyn Fn(&mut App) + Send + Sync>;
 
 struct Job {
@@ -149,8 +186,16 @@ impl TerminalService {
     /// drive with a temp dir standing in for the support dir.
     pub fn start_at(host: Entity<TerminalHost>, support_dir: &Path, pid: u32) -> Self {
         let path = socket_path_for(support_dir, pid);
+        // No world-readable window: a restrictive umask holds from the run
+        // dir's creation through the bind and its chmod, so neither the dir
+        // nor the socket ever carries group/other bits. `DirBuilder::mode`
+        // is umask-proof on its own (`mkdir` applies `mode & !umask`), and
+        // the umask covers the bind, whose mode the process would otherwise
+        // choose. The trailing `set_permissions` tightens pre-existing
+        // dirs; the guard restores the mask on every return below.
+        let _umask = UmaskGuard::restrict();
         if let Some(run_dir) = path.parent() {
-            let _ = std::fs::create_dir_all(run_dir);
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(run_dir);
             let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
         }
         let shared = Arc::new(Shared {
@@ -206,6 +251,10 @@ impl TerminalService {
 
     /// What the harness runs on the UI thread when the agent starts
     /// something (open the dock, unfocused). Test hooks observe it instead.
+    ///
+    /// The hook fires inside [`drain`][TerminalService::drain], inside the
+    /// draining entity's update: it must defer entity work with `cx.defer`
+    /// rather than updating the draining entity inline (see [`ActivityHook`]).
     pub fn set_activity_hook(&self, hook: impl Fn(&mut App) + Send + Sync + 'static) {
         *self.shared.activity.lock().expect("activity hook") = Some(Box::new(hook));
     }
@@ -419,6 +468,11 @@ impl TerminalService {
         params: &Value,
         cx: &mut App,
     ) -> Result<Value, String> {
+        // Any existing directory is accepted, deliberately: the agent runs
+        // with the user's own privileges, so a tab starting elsewhere is no
+        // wider than the person opening it there themselves — and a narrower
+        // rule would add no boundary anyway, since any command can `cd`.
+        // The tool description says as much.
         let cwd = match params.get("cwd").and_then(Value::as_str) {
             Some(dir) => {
                 let path = PathBuf::from(dir);
@@ -495,13 +549,27 @@ impl TerminalService {
                     fail(format!("tab {named} belongs to another project"));
                     return;
                 }
+                // D43's sharing rule: the agent may run in the person's tab
+                // only when that tab is idle and not in alt-screen — exactly
+                // `!busy()`, which covers a running block and the alternate
+                // screen alike. A busy user-owned tab is refused by id,
+                // naming the owner and what runs there; `auto` never picks
+                // a busy tab ([`pick_tab`]) and opens an agent-owned tab
+                // instead. Agent-owned tabs take the same idle rule: nobody
+                // pastes into a running command.
                 if self.host().read(cx).busy(cx, named) {
                     let running = self
                         .host()
                         .read(cx)
                         .running_command(cx, named)
                         .unwrap_or_else(|| "an interactive program".to_owned());
-                    fail(format!("tab {named} is busy (running: {running})"));
+                    if self.host().read(cx).get(named).is_some_and(|tab| tab.owner == TabOwner::User) {
+                        fail(format!(
+                            "tab {named} is owned by the user and busy (running: {running}); run with tab auto or new instead"
+                        ));
+                    } else {
+                        fail(format!("tab {named} is busy (running: {running})"));
+                    }
                     return;
                 }
                 named.to_owned()
@@ -732,6 +800,25 @@ impl TerminalService {
     fn send(&self, root: &Path, params: &Value, cx: &mut App) -> Result<Value, String> {
         let tab_arg = params.get("tab").and_then(Value::as_str).ok_or("terminal_send needs tab")?;
         let tab = self.tab_in_project(root, tab_arg, cx)?;
+        // The person's tab is theirs: the agent may only answer a prompt of
+        // a command it ran there — the tab's currently running block, when
+        // that block is agent-authored — and never type into the person's
+        // own ssh/less/password prompt. Tabs the agent opened take anything.
+        let owner = self.host().read(cx).get(&tab).expect("checked").owner;
+        if owner == TabOwner::User {
+            let session = self.host().read(cx).get(&tab).expect("checked").session.clone();
+            let agent_running = session
+                .read(cx)
+                .blocks()
+                .iter()
+                .find(|block| block.running())
+                .is_some_and(|block| block.author == BlockAuthor::Agent);
+            if !agent_running {
+                return Err(format!(
+                    "tab {tab} is owned by the user and is not running a command the agent started; terminal_send reaches only a prompt of a command the agent ran"
+                ));
+            }
+        }
         let text = params.get("text").and_then(Value::as_str).unwrap_or("");
         let keys = match params.get("keys") {
             None => Vec::new(),
@@ -1148,11 +1235,14 @@ mod tests {
         }
     }
 
-    /// A tab over a responding backend, agent-owned like every service tab.
+    /// A tab over a responding backend. The owner is the caller's: most
+    /// service tabs are agent-owned, and the user-tab sharing tests need a
+    /// user-owned one running an agent-started block.
     fn open_responding(
         cx: &mut gpui::TestAppContext,
         fx: &Fixture,
         title: &str,
+        owner: TabOwner,
         backend: RespondBackend,
     ) -> String {
         let nonce = backend.nonce.clone();
@@ -1162,7 +1252,7 @@ mod tests {
             fx.host.update(cx, |host, cx| {
                 let session =
                     TerminalSession::new(Box::new(backend), 100, 32).with_nonce(&nonce);
-                host.open_session(&root, title.into(), TabOwner::Agent, origin, session, cx)
+                host.open_session(&root, title.into(), owner, origin, session, cx)
             })
         })
     }
@@ -1246,6 +1336,12 @@ mod tests {
         let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         let stale = socket_path_for(&tmp.path, pid);
         std::fs::create_dir_all(stale.parent().expect("run dir")).expect("run dir");
+        // A pre-existing run dir with loose modes is tightened, not kept.
+        std::fs::set_permissions(
+            stale.parent().expect("run dir"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .expect("loose run dir");
         std::fs::write(&stale, b"stale").expect("stale file");
         let host = cx.new(|_| TerminalHost::new());
         let service = TerminalService::start_at(host, &tmp.path, pid);
@@ -1313,6 +1409,7 @@ mod tests {
             cx,
             &fx,
             "agent",
+            TabOwner::Agent,
             RespondBackend::new("exit-nonce", 3, b"hello from agent\r\nsecond line\r\n".to_vec()),
         );
         let out = result(
@@ -1344,7 +1441,7 @@ mod tests {
     #[gpui::test]
     fn exit_waits_across_drains(cx: &mut gpui::TestAppContext) {
         let fx = fixture(cx, "s1");
-        open_responding(cx, &fx, "agent", RespondBackend::new("mid-nonce", 0, b"hi\r\n".to_vec()));
+        open_responding(cx, &fx, "agent", TabOwner::Agent, RespondBackend::new("mid-nonce", 0, b"hi\r\n".to_vec()));
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let mut reader =
             send_json(&fx, &fx.session.clone(), id, "terminal_run", json!({"command": "echo hi", "tab": "t1"}));
@@ -1374,7 +1471,7 @@ mod tests {
     #[gpui::test]
     fn wait_none_answers_running_and_marks_late(cx: &mut gpui::TestAppContext) {
         let fx = fixture(cx, "s1");
-        open_responding(cx, &fx, "agent", RespondBackend::new("late-nonce", 0, b"late output\r\n".to_vec()));
+        open_responding(cx, &fx, "agent", TabOwner::Agent, RespondBackend::new("late-nonce", 0, b"late output\r\n".to_vec()));
         let out = result(
             &call(cx, &fx, "terminal_run", json!({"command": "echo late", "tab": "t1", "wait": "none"})),
         );
@@ -1400,6 +1497,7 @@ mod tests {
             cx,
             &fx,
             "agent",
+            TabOwner::Agent,
             RespondBackend::trickling("tick-nonce", b"partial\r\n".to_vec(), b"tick\r\n".to_vec()),
         );
         let out = result(
@@ -1455,7 +1553,110 @@ mod tests {
         assert_eq!(tabs[2].get("owner"), Some(&json!("muse")), "the fallback tab is the agent's");
         let refused = call(cx, &fx, "terminal_run", json!({"command": "echo hi", "tab": "t2"}));
         let message = err_text(&refused);
-        assert!(message.contains("busy") && message.contains("sleep 300"), "names it: {message}");
+        assert!(
+            message.contains("owned by the user") && message.contains("sleep 300"),
+            "names it: {message}"
+        );
+    }
+
+    #[gpui::test]
+    fn run_into_an_idle_user_tab_succeeds(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(cx, &fx, "user shell", TabOwner::User, b"test % ".to_vec(), "idle-run-nonce");
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "true", "tab": "t1", "wait": "none"})),
+        );
+        assert_eq!(out.get("tab"), Some(&json!("t1")), "D43: an idle user tab takes the run");
+    }
+
+    #[gpui::test]
+    fn run_refuses_an_altscreen_user_tab_and_auto_opens_an_agent_one(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(
+            cx,
+            &fx,
+            "person pager",
+            TabOwner::User,
+            b"\x1b[?1049hless\rlines\r\n:".to_vec(),
+            "less-nonce",
+        );
+        cx.read(|cx| {
+            assert!(
+                fx.host.read(cx).get("t1").expect("tab").session.read(cx).alt_screen(),
+                "the script entered the alternate screen"
+            );
+        });
+        let refused = call(cx, &fx, "terminal_run", json!({"command": "echo hi", "tab": "t1"}));
+        let message = err_text(&refused);
+        assert!(
+            message.contains("owned by the user") && message.contains("busy"),
+            "names it: {message}"
+        );
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "true", "tab": "auto", "wait": "none"})),
+        );
+        assert_eq!(out.get("tab"), Some(&json!("t2")), "auto never takes an alt-screen tab");
+        let tabs = result(&call(cx, &fx, "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs[1].get("owner"), Some(&json!("muse")), "the fallback tab is the agent's");
+    }
+
+    #[gpui::test]
+    fn send_into_user_tabs_reaches_only_agent_started_prompts(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        // Idle: the person's own prompt — hands off.
+        open_recording(cx, &fx, "idle shell", TabOwner::User, b"test % ".to_vec(), "idle-nonce");
+        let refused = call(cx, &fx, "terminal_send", json!({"tab": "t1", "text": "x"}));
+        assert!(err_text(&refused).contains("owned by the user"), "refusal: {refused}");
+        // Busy with the person's own command: a human-authored running
+        // block the agent must never type into.
+        open_recording(
+            cx,
+            &fx,
+            "person shell",
+            TabOwner::User,
+            running_script("person-nonce", "ssh prod"),
+            "person-nonce",
+        );
+        let refused = call(cx, &fx, "terminal_send", json!({"tab": "t2", "text": "x"}));
+        assert!(err_text(&refused).contains("owned by the user"), "refusal: {refused}");
+        // Busy with a command the agent ran there: answering its prompt is
+        // the one send a user tab takes.
+        open_responding(
+            cx,
+            &fx,
+            "shared shell",
+            TabOwner::User,
+            RespondBackend::trickling(
+                "shared-nonce",
+                b"partial\r\n".to_vec(),
+                b"tick\r\n".to_vec(),
+            ),
+        );
+        let started = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "sleep 300", "tab": "t3", "wait": "none"})),
+        );
+        assert_eq!(started.get("tab"), Some(&json!("t3")));
+        assert_eq!(
+            result(&call(cx, &fx, "terminal_send", json!({"tab": "t3", "text": "y", "keys": "enter"}))),
+            json!({"ok": true})
+        );
+        // Agent-owned tabs stay unrestricted, even mid-command.
+        open_responding(
+            cx,
+            &fx,
+            "agent shell",
+            TabOwner::Agent,
+            RespondBackend::trickling("own-nonce", b"partial\r\n".to_vec(), Vec::new()),
+        );
+        let started = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "sleep 300", "tab": "t4", "wait": "none"})),
+        );
+        assert_eq!(started.get("tab"), Some(&json!("t4")));
+        assert_eq!(
+            result(&call(cx, &fx, "terminal_send", json!({"tab": "t4", "text": "z"}))),
+            json!({"ok": true})
+        );
     }
 
     #[gpui::test]
@@ -1516,7 +1717,7 @@ mod tests {
     #[gpui::test]
     fn send_types_text_and_named_keys(cx: &mut gpui::TestAppContext) {
         let fx = fixture(cx, "s1");
-        open_recording(cx, &fx, "user shell", TabOwner::User, b"test % ".to_vec(), "send-nonce");
+        open_recording(cx, &fx, "agent shell", TabOwner::Agent, b"test % ".to_vec(), "send-nonce");
         assert_eq!(
             result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "text": "hello"}))),
             json!({"ok": true})
@@ -1578,7 +1779,7 @@ mod tests {
         // Trailing newline so the `D` close lands on a fresh line, outside
         // the output range.
         let big = format!("{}{}\r\n", "Q".repeat(20_000), "Z".repeat(20_000));
-        open_responding(cx, &fx, "agent", RespondBackend::new("cap-nonce", 0, big.into_bytes()));
+        open_responding(cx, &fx, "agent", TabOwner::Agent, RespondBackend::new("cap-nonce", 0, big.into_bytes()));
         let out = result(
             &call(cx, &fx, "terminal_run", json!({"command": "firehose", "tab": "t1", "wait": "exit"})),
         );
@@ -1700,5 +1901,130 @@ mod tests {
             assert!(key_bytes_for(key).is_ok(), "{key} has bytes");
         }
         assert!(key_bytes_for("bogus").is_err());
+    }
+
+    /// Offline `--no-connect` args for a Harness that never spawns a child:
+    /// the same shape the session-lifecycle tests boot.
+    fn harness_args(dir: &Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            bench_out: None,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    /// A real Harness whose service owns the pid socket name. The name is
+    /// process-wide, so when a parallel Harness test holds it ours is a
+    /// guest and its requests would land on the other service: build until
+    /// ours binds, waiting the other out. A guest drops without removing
+    /// anything, so retries are cheap.
+    fn harness_with_socket(
+        vc: &mut gpui::VisualTestContext,
+        dir: &Path,
+    ) -> gpui::Entity<crate::app::Harness> {
+        for _ in 0..600 {
+            let harness = vc.update(|window, cx| {
+                cx.new(|cx| {
+                    crate::app::Harness::new(
+                        harness_args(dir),
+                        crate::shot::CaptureToken::default(),
+                        window,
+                        cx,
+                    )
+                })
+            });
+            let owned = vc.update(|_, cx| harness.read(cx).terminal_service.owned);
+            if owned {
+                return harness;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("no Harness owned the terminal socket after 60s");
+    }
+
+    /// `terminal_run` through the real Harness wiring: the Harness `new`
+    /// builds, its own activity hook installed, the request over its real
+    /// socket, and the drain inside a Harness update — exactly the pump
+    /// task's shape. Before the hook deferred, this died re-entering the
+    /// Harness (`cannot update baaz::app::Harness while it is already being
+    /// updated`); the service tests never saw it because their hosts were
+    /// standalone and their hooks never touched an entity.
+    #[gpui::test]
+    fn run_through_the_harness_pump_never_reenters(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let tmp = TmpDir::new();
+        let root = tmp.path.clone();
+        let vc = cx.add_empty_window();
+        let harness = harness_with_socket(vc, &root);
+        vc.update(|_, cx| {
+            harness.update(cx, |harness, _| {
+                harness.register_terminal_session("t1c", root.clone());
+            });
+        });
+        let host = vc.update(|_, cx| harness.read(cx).terminal_host.clone());
+        let tab = vc.update(|_, cx| {
+            host.update(cx, |host, cx| {
+                host.open_fake(&root, "agent".into(), TabOwner::Agent, Some("t1c".into()), Vec::new(), "t1c-nonce", cx)
+            })
+        });
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let request = serde_json::to_string(&json!({
+            "id": id, "session": "t1c", "tool": "terminal_run",
+            "params": {"command": "echo hi-from-harness", "tab": tab, "wait": "none"},
+        }))
+        .expect("request serializes");
+        let socket = vc.update(|_, cx| harness.read(cx).terminal_service.socket_path().to_owned());
+        let mut stream = UnixStream::connect(&socket).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(300))).expect("read timeout");
+        stream.write_all(request.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        let mut reader = BufReader::new(stream);
+        let mut reply = None;
+        for _ in 0..400 {
+            // The pump task's exact shape: the service drains inside a
+            // Harness update, so a hook that touches the Harness re-enters.
+            vc.update(|_, cx| {
+                harness.update(cx, |harness, cx| harness.terminal_service.drain(cx));
+            });
+            reply = try_recv(&mut reader, id);
+            if reply.is_some() {
+                break;
+            }
+        }
+        let out = result(&reply.expect("terminal_run answered through the Harness pump"));
+        assert_eq!(out.get("tab"), Some(&json!(tab)), "the run landed: {out}");
+        assert_eq!(out.get("status"), Some(&json!("running")));
+        vc.update(|_, cx| {
+            assert!(
+                harness.read(cx).layout.terminal_open,
+                "the run opens the dock for the person to watch"
+            );
+        });
     }
 }

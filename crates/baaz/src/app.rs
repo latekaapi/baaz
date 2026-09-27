@@ -1036,10 +1036,18 @@ impl Harness {
         // the person's keyboard stays where it was while they watch.
         let harness = cx.entity();
         this.terminal_service.set_activity_hook(move |cx: &mut App| {
-            harness.update(cx, |harness, cx| {
-                harness.layout.terminal_open = true;
-                layout::write(&harness.layout);
-                cx.notify();
+            // Deferred: the hook runs inside `drain`, which the pump task
+            // calls inside a Harness update — touching the Harness here
+            // re-enters it and aborts (`cannot update Harness while it is
+            // already being updated`). The defer runs at the end of the
+            // effect cycle, with the Harness off the stack.
+            let harness = harness.clone();
+            cx.defer(move |cx| {
+                harness.update(cx, |harness, cx| {
+                    harness.layout.terminal_open = true;
+                    layout::write(&harness.layout);
+                    cx.notify();
+                });
             });
         });
         // The service's requests queue on socket threads; this pump runs
