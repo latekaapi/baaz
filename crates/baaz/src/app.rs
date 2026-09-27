@@ -1894,6 +1894,26 @@ impl Harness {
         cx.notify();
     }
 
+    /// D51 "Open terminal" on a terminal tool card: open the dock and
+    /// focus the card's tab. A tab the host no longer holds (or none
+    /// named) opens the dock on its active tab instead of failing.
+    pub(crate) fn open_terminal_tab(
+        &mut self,
+        tab: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout.terminal_open = true;
+        if let Some(tab) = tab {
+            if self.terminal_host.read(cx).get(&tab).is_some() {
+                self.terminal_host.update(cx, |host, _| host.activate(&tab));
+            }
+        }
+        window.focus(&self.terminal_focus, cx);
+        layout::write(&self.layout);
+        cx.notify();
+    }
+
     /// The first open creates the project's tab; later opens keep it. Tabs
     /// belong to the project, not the session, so this never runs twice for
     /// one project in a window's life (D43).
@@ -2082,6 +2102,30 @@ impl Harness {
     /// re-laid-out — and the pty sees no resize storm mid-motion. The dock
     /// stays mounted while it collapses and leaves the tree only once the
     /// spring has settled shut.
+    /// The agent mark for a terminal tab: the provider of the session that
+    /// opened it — Claude Code's C, Codex's O — and Muse's M when the
+    /// person opened it or no record names the lane (D43). Under a
+    /// deterministic capture the provider-session store reads empty, so
+    /// every tab reads Muse and the strip matches its baseline.
+    fn terminal_tab_provider(&self, origin: Option<&str>) -> Provider {
+        origin
+            .and_then(|session| self.provider_sessions.get(session))
+            .and_then(|record| crate::sidebar::provider_mark(&record.provider))
+            .unwrap_or(Provider::Muse)
+    }
+
+    /// The dock header's hint for the active tab's agent: whose session the
+    /// person shares the terminal with (D43). Muse keeps the exact string
+    /// the baselines hold; other lanes name their own agent.
+    fn terminal_hint_name(&self, provider: Provider) -> String {
+        match provider {
+            Provider::Muse => "Muse can type here".to_owned(),
+            Provider::Claude => "Claude Code can type here".to_owned(),
+            Provider::Codex => "Codex can type here".to_owned(),
+            _ => "An agent can type here".to_owned(),
+        }
+    }
+
     fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.layout.terminal_open;
         let resting = self.dock_height(window);
@@ -2104,15 +2148,18 @@ impl Harness {
         let mut tabs = Vec::new();
         let mut active_ix = 0;
         let mut active_tab: Option<(String, Entity<aui_terminal::TerminalSession>)> = None;
+        let mut hint_provider = Provider::Muse;
         let active_id = host.active_for(&root).map(|tab| tab.id.clone());
         for tab in host.tabs_for(&root) {
+            let provider = self.terminal_tab_provider(tab.origin_session.as_deref());
             if Some(tab.id.as_str()) == active_id.as_deref() {
                 active_ix = tabs.len();
                 active_tab = Some((tab.id.clone(), tab.session.clone()));
+                hint_provider = provider;
             }
             let mut view = TermTab::new(tab.id.clone(), tab.title.clone());
             if tab.owner == TabOwner::Agent {
-                view = view.agent(Provider::Muse);
+                view = view.agent(provider);
             }
             if host.busy(cx, &tab.id) {
                 view = view.busy(true);
@@ -2157,7 +2204,7 @@ impl Harness {
                 TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
             });
         let dock = terminal_dock("terminal-dock", header, body)
-            .hint("Muse can type here")
+            .hint(self.terminal_hint_name(hint_provider))
             .maximized(maximised)
             .on_action(dock_action);
         let resize_start = cx.processor(|this: &mut Self, grab: f32, _, _| {
@@ -2439,7 +2486,7 @@ impl Harness {
         // The capture names its own session; this id is a placeholder the view
         // replaces the moment the first line is folded.
         let view = cx.new(|cx| {
-            let host = SessionHost { provider_id: provider, workspace, overlays, capture };
+            let host = SessionHost { provider_id: provider, workspace, overlays, capture, terminal_host: None };
             let mut view = SessionView::new("replay".to_owned(), None, host, window, cx);
             view.set_at_rest(at_rest);
             if bench {

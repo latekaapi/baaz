@@ -1,0 +1,21 @@
+# synthetic — HAND-WRITTEN, not a wire capture.
+#
+# No capture carries a baaz terminal tool call: this file exercises the D51
+# terminal card — a `terminal_run` and a `terminal_list` folding to shell
+# cards that name the command and the tab, carry the exit and the duration,
+# and body the run's output instead of the raw request/response JSON.
+#
+# Shapes follow `fixtures/msp/msp-ts/msp.d.ts` and the real bash toolCall
+# item in `transcript-real.jsonl`; every `<-- ` line below is synthetic.
+# Paths and ids are sanitised (`/tmp/synthetic`, generated UUIDs): nothing
+# here names a real user, workspace or session.
+#
+# The `synthetic-` prefix is load-bearing: nothing here was ever on a wire,
+# and it must never be read as evidence of what Muse does.
+<-- {"jsonrpc": "2.0", "method": "session/started", "params": {"viewCursor": "v:syn:1", "session": {"sessionId": "synthetic-terminal", "workspaceRoot": "/tmp/synthetic", "modelId": "muse-spark-test", "status": "idle", "createdAt": "2026-09-10T09:00:00Z", "updatedAt": "2026-09-10T09:00:00Z", "turnCount": 0, "approvalMode": {"mode": "onRequest", "source": "session"}, "path": "/tmp/synthetic/synthetic-terminal/session.jsonl", "activeTurnId": null}}}
+<-- {"jsonrpc": "2.0", "method": "turn/started", "params": {"viewCursor": "v:syn:2", "sessionId": "synthetic-terminal", "turnId": "t-syn-1"}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:3", "sessionId": "synthetic-terminal", "item": {"itemId": "i-syn-user-1", "kind": "userMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Run the tests in the terminal where I can watch."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:4", "sessionId": "synthetic-terminal", "item": {"itemId": "i-syn-term-1", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "terminal_run", "callId": "call_i-syn-term-1", "args": "{\"command\": \"pnpm vitest run\", \"tab\": \"auto\", \"wait\": \"exit\"}", "visibleOutput": "{\"tab\":\"t1\",\"block\":\"t1:0\",\"status\":\"exited\",\"exit_code\":0,\"duration_ms\":412,\"output\":\" ✓ validators.test.ts (18) 412ms\\n Test Files  1 passed (1)\\n\",\"truncated_bytes\":0,\"cursor\":\"c:64\"}", "exitCode": 0, "durationMs": 412}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:5", "sessionId": "synthetic-terminal", "item": {"itemId": "i-syn-text-1", "kind": "agentMessage", "turnId": "t-syn-1", "revision": 1, "status": "completed", "text": "Tests pass. Checking what else is open."}}}
+<-- {"jsonrpc": "2.0", "method": "item/completed", "params": {"viewCursor": "v:syn:6", "sessionId": "synthetic-terminal", "item": {"itemId": "i-syn-term-2", "kind": "toolCall", "turnId": "t-syn-1", "revision": 2, "status": "completed", "tool": "terminal_list", "callId": "call_i-syn-term-2", "args": "{}", "visibleOutput": "{\"tabs\":[{\"tab\":\"t1\",\"title\":\"pnpm vitest run\",\"cwd\":\"/tmp/synthetic\",\"owner\":\"muse\",\"busy\":false,\"alt_screen\":false,\"last_block\":\"t1:0\"}]}", "durationMs": 3}}}
+<-- {"jsonrpc": "2.0", "method": "turn/completed", "params": {"viewCursor": "v:syn:7", "sessionId": "synthetic-terminal", "turnId": "t-syn-1", "terminal": "completed"}}

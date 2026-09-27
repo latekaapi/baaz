@@ -1046,7 +1046,9 @@ mod tests {
                 workspace: "/tmp/p3-model-picker".to_owned(),
                 overlays: cx.new(|_| Overlays::default()),
                 capture: CaptureToken::default(),
-            };
+            
+                terminal_host: None,
+};
             cx.new(|cx| SessionView::new(session_id, None, host, window, cx))
         })
     }

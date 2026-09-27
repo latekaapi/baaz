@@ -1,0 +1,119 @@
+[
+  {
+    "sessionId": "synthetic-terminal",
+    "session": {
+      "id": "synthetic-terminal",
+      "agent": "muse",
+      "model": "muse-spark-test",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "/tmp/synthetic",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Run the tests in the terminal where I can watch.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "i-syn-term-1",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran in terminal",
+              "target": "pnpm vitest run · t1",
+              "status": "success",
+              "duration_ms": 412,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  " ✓ validators.test.ts (18) 412ms",
+                  " Test Files  1 passed (1)"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Tests pass. Checking what else is open.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-syn-term-2",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran in terminal",
+              "target": "terminal_list",
+              "status": "success",
+              "duration_ms": 3,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "{",
+                  "  \"tabs\": [",
+                  "    {",
+                  "      \"tab\": \"t1\",",
+                  "      \"title\": \"pnpm vitest run\",",
+                  "      \"cwd\": \"/tmp/synthetic\",",
+                  "      \"owner\": \"muse\",",
+                  "      \"busy\": false,",
+                  "      \"alt_screen\": false,",
+                  "      \"last_block\": \"t1:0\"",
+                  "    }",
+                  "  ]",
+                  "}"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    },
+    "side": {
+      "context": null,
+      "cumulative": {
+        "outputTokens": 0,
+        "promptTokens": 0,
+        "totalTokens": 0
+      },
+      "goal": null,
+      "queued": [],
+      "retry": null,
+      "pending_approvals": {},
+      "pending_inputs": {},
+      "model": null,
+      "approval_mode": "onRequest",
+      "last_cursor": "v:syn:7",
+      "command_text": {},
+      "restored_prompt": null,
+      "model_route_unserved": null,
+      "decode_failures": 0
+    }
+  }
+]

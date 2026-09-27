@@ -226,6 +226,10 @@ pub struct SessionHost {
     pub overlays: Entity<Overlays>,
     /// This window's `--screenshot` flags (see [`CaptureToken`]).
     pub capture: CaptureToken,
+    /// The window's terminal tabs, for the D51 live mirror and the
+    /// "Open terminal" focus. `None` in replays and tests, where there is
+    /// no host and cards render their folded text.
+    pub terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
 }
 
 /// An unsent composer's content: the text plus the images and files waiting
@@ -413,6 +417,13 @@ pub enum SessionEvent {
         /// A plain click sends Enter after the paste; an ⌥-click pastes
         /// without it.
         send_enter: bool,
+    },
+    /// A D51 "Open terminal" press on a terminal tool card: open the dock
+    /// and focus the card's tab. Entirely local like [`SessionEvent::RunInTerminal`].
+    OpenTerminal {
+        /// The tab to focus, when the card named one — `None` opens the
+        /// dock on its active tab.
+        tab: Option<String>,
     },
 }
 
@@ -680,6 +691,9 @@ pub struct SessionView {
     /// [`CaptureToken`]). The application's own, handed down at construction,
     /// so a second window's capture can never read this one's.
     capture: CaptureToken,
+    /// The window's terminal tabs, for the D51 live mirror: `None` in
+    /// replays and tests, where cards render their folded text.
+    terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
     /// A prompt handed back by a retraction, waiting for a frame with a
     /// `Window` in it to reach the composer.
     pending_prompt: Option<String>,
@@ -810,7 +824,7 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let SessionHost { provider_id, workspace, overlays, capture } = host;
+        let SessionHost { provider_id, workspace, overlays, capture, terminal_host } = host;
         // The empty composer names the session's own provider: the person
         // is asking whoever this session runs on, never a hardcoded Muse.
         let composer_placeholder = ProviderId::parse(&provider_id).composer_placeholder();
@@ -913,6 +927,7 @@ impl SessionView {
             titles: Rc::new(HashMap::new()),
             at_rest: false,
             capture,
+            terminal_host,
             pending_prompt: None,
             models: Vec::new(),
             models_error: None,
@@ -2516,6 +2531,7 @@ mod tests {
                 workspace: "/tmp/w2-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
             };
             cx.new(|cx| SessionView::new_on_provider("s-1".to_owned(), provider, rx, host, window, cx))
         });

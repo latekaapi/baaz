@@ -2399,6 +2399,31 @@ fn todo_entry_state(status: &str) -> TodoState {
 /// `bash`, the write/edit family, the search family and the web family); a name
 /// this table has never seen is still presented honestly as a Muse-provided
 /// tool rather than guessed at.
+/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
+/// §4), served on the muse lane as session-MCP tools under these bare
+/// names. The lane carries no server field on the item, and the session's
+/// only MCP server is baaz's own bridge — so a bare `terminal_*` name is
+/// baaz's tool, never a guess about someone else's.
+pub fn is_terminal_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "terminal_list"
+            | "terminal_open"
+            | "terminal_run"
+            | "terminal_read"
+            | "terminal_screen"
+            | "terminal_send"
+            | "terminal_close"
+    )
+}
+
+/// The opening verb every terminal card folds with; the presentation maps
+/// it to past tense once the item is terminal.
+pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
+
+/// The settled verb of a terminal card.
+pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
+
 fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     let parsed: Option<Value> = args.and_then(|args| serde_json::from_str(args).ok());
     let field = |name: &str| {
@@ -2406,6 +2431,15 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     };
     let raw = || args.unwrap_or_default().to_owned();
     let path = || field("path").or_else(|| field("file_path")).or_else(|| field("filename"));
+    // A terminal tool call names its command in the header and folds to a
+    // shell card (D51): the existing tool-card rendering carries the
+    // command, the exit pill, the duration and the output — a generic MCP
+    // card would paint the raw request/response JSON instead.
+    if is_terminal_tool(tool) {
+        let target =
+            field("command").or_else(|| field("tab")).filter(|text| !text.trim().is_empty()).unwrap_or_else(|| tool.to_owned());
+        return (ToolKind::Shell, TERMINAL_RUNNING_VERB.to_owned(), target);
+    }
     match tool {
         "bash" | "shell" => (ToolKind::Shell, "Ran".to_owned(), field("command").unwrap_or_else(raw)),
         "read" | "read_file" | "view" | "cat" => (ToolKind::Read, "Read".to_owned(), path().unwrap_or_else(raw)),
@@ -2472,6 +2506,61 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
 ///   line parses, and otherwise keeps the raw output;
 /// * everything else keeps the raw output, because a card with no body would
 ///   hide what the tool actually said.
+/// A terminal tool call's card (D51): the command (plus the tab the result
+/// names) in the header, the run's output as the body, the exit code as
+/// the status. While the item is still open the card reads running with a
+/// live body; once terminal it reads ran. A result without an `output`
+/// field (list, open, send, close) renders the result text itself.
+fn terminal_presentation(
+    target: String,
+    item: &msp::Item,
+    terminal: bool,
+) -> (String, String, ToolStatus, ToolBody) {
+    let visible = item.visible_output.as_deref().unwrap_or("");
+    let result: Option<serde_json::Map<String, Value>> =
+        serde_json::from_str(visible.trim()).ok().filter(|value: &Value| value.is_object()).map(
+            |value: Value| value.as_object().cloned().unwrap_or_default(),
+        );
+    let tab = result
+        .as_ref()
+        .and_then(|result| result.get("tab"))
+        .and_then(Value::as_str)
+        .filter(|tab| !tab.trim().is_empty());
+    let target = match tab {
+        Some(tab) if target.trim() != tab => format!("{target} · {tab}"),
+        _ => target,
+    };
+    let verb =
+        if terminal { TERMINAL_RAN_VERB.to_owned() } else { TERMINAL_RUNNING_VERB.to_owned() };
+    let output_lines = match result
+        .as_ref()
+        .and_then(|result| result.get("output"))
+        .and_then(Value::as_str)
+    {
+        Some(output) => split_lines(output),
+        None => match pretty_json_object(visible) {
+            Some(pretty) => pretty.lines().map(str::to_owned).collect(),
+            None => split_lines(visible),
+        },
+    };
+    let exit_code = result
+        .as_ref()
+        .and_then(|result| result.get("exit_code"))
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .or(item.exit_code);
+    let status = if !terminal {
+        ToolStatus::Running
+    } else {
+        match exit_code {
+            Some(0) | None => ToolStatus::Success,
+            Some(_) => ToolStatus::Error,
+        }
+    };
+    let body = ToolBody::Shell { output_lines, exit_code, live: !terminal };
+    (verb, target, status, body)
+}
+
 fn tool_presentation(
     kind: &ToolKind,
     verb: String,
@@ -2479,6 +2568,9 @@ fn tool_presentation(
     item: &msp::Item,
     terminal: bool,
 ) -> (String, String, ToolStatus, ToolBody) {
+    if verb == TERMINAL_RUNNING_VERB {
+        return terminal_presentation(target, item, terminal);
+    }
     let visible = item.visible_output.as_deref().unwrap_or("");
     if matches!(kind, ToolKind::Shell) {
         if let Some(envelope) = shell_envelope(visible) {
@@ -2721,16 +2813,24 @@ fn approval_block(
         .map(|choice| choice.scope)
         .unwrap_or(ApprovalScope::ThisCommand);
     let rule = choices.iter().find_map(|choice| choice.rule_preview.clone());
+    // A terminal tool's approval names the command it would run, never the
+    // raw request: "Run in terminal · `<command>`" (D51).
+    let command = request
+        .subject
+        .command
+        .clone()
+        .or_else(|| request.subject.path.clone())
+        .or_else(|| request.subject.target.clone())
+        .unwrap_or_default();
+    let command = if is_terminal_tool(&request.tool_name) && !command.trim().is_empty() {
+        format!("Run in terminal · `{}`", command.trim())
+    } else {
+        command
+    };
     Block::Approval {
         id: request.approval_id.clone(),
         tool: request.tool_name.clone(),
-        command: request
-            .subject
-            .command
-            .clone()
-            .or_else(|| request.subject.path.clone())
-            .or_else(|| request.subject.target.clone())
-            .unwrap_or_default(),
+        command,
         reason: String::new(),
         cwd: request.subject.workspace_root.clone().unwrap_or_default(),
         capabilities: Vec::new(),
@@ -3387,6 +3487,76 @@ mod tests {
             turns_before,
             "the transcript is unchanged"
         );
+    }
+
+    #[test]
+    fn a_terminal_run_folds_to_a_shell_card_not_raw_json() {
+        // D51: the card names the command and the tab, carries the exit
+        // and the duration, and bodies the run's output — never the raw
+        // request/response JSON the generic MCP card would paint.
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        let result = serde_json::json!({
+            "tab": "t1", "block": "t1:0", "status": "exited",
+            "exit_code": 0, "duration_ms": 42,
+            "output": "hi\n", "truncated_bytes": 0, "cursor": "c:9",
+        })
+        .to_string();
+        fold.apply(MuseEvent::Notification {
+            method: "item/completed".to_owned(),
+            params: serde_json::json!({ "item": {
+                "itemId": "i-term-1", "turnId": "t-1", "kind": "toolCall",
+                "status": "completed", "revision": 1, "tool": "terminal_run",
+                "callId": "call_i-term-1",
+                "args": "{\"command\": \"echo hi\", \"tab\": \"auto\"}",
+                "visibleOutput": result, "exitCode": 0, "durationMs": 42,
+            }}),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+        let session = &fold.sessions["s"].session;
+        let card = session.turns.iter().flat_map(|turn| turn.blocks()).find_map(|block| match block {
+            Block::ToolCall { id, kind, verb, target, status, duration_ms, body, .. } if id == "i-term-1" => {
+                Some((kind.clone(), verb.clone(), target.clone(), *status, *duration_ms, body.clone()))
+            }
+            _ => None,
+        }).expect("terminal tool card");
+        assert_eq!(card.0, ToolKind::Shell, "a shell card, not a generic MCP card");
+        assert_eq!(card.1, TERMINAL_RAN_VERB);
+        assert_eq!(card.2, "echo hi · t1", "the command plus the tab label");
+        assert_eq!(card.3, ToolStatus::Success);
+        assert_eq!(card.4, Some(42));
+        match card.5 {
+            ToolBody::Shell { output_lines, exit_code, live } => {
+                assert_eq!(output_lines, vec!["hi".to_owned()]);
+                assert_eq!(exit_code, Some(0));
+                assert!(!live);
+            }
+            body => panic!("a shell body, not {body:?}"),
+        }
+    }
+
+    #[test]
+    fn a_terminal_run_still_open_reads_running() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        fold.apply(MuseEvent::Notification {
+            method: "item/started".to_owned(),
+            params: serde_json::json!({ "item": {
+                "itemId": "i-term-2", "turnId": "t-1", "kind": "toolCall",
+                "status": "inProgress", "revision": 1, "tool": "terminal_run",
+                "callId": "call_i-term-2",
+                "args": "{\"command\": \"sleep 30\", \"wait\": \"none\"}",
+            }}),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+        let session = &fold.sessions["s"].session;
+        let verb = session.turns.iter().flat_map(|turn| turn.blocks()).find_map(|block| match block {
+            Block::ToolCall { id, verb, .. } if id == "i-term-2" => Some(verb.clone()),
+            _ => None,
+        }).expect("open terminal card");
+        assert_eq!(verb, TERMINAL_RUNNING_VERB);
     }
 
     #[test]

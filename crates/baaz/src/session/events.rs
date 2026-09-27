@@ -466,6 +466,7 @@ mod tests {
                 workspace: "/tmp/item3-probe".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
             };
             let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
             let event = |method: &str, turn: &str| {
@@ -628,6 +629,7 @@ for line in sys.stdin:
                 workspace: workspace.to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
             };
             let client = client.map(StdArc::new);
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), client, host, window, cx))

@@ -69,7 +69,16 @@ use provider::ProviderEvent;
 use serde_json::Value;
 
 use crate::child::{ApprovalKind, FileChangeApprovalParams, PermissionsApprovalParams};
-use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Notification, TokenCounts};
+use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Item, Notification, TokenCounts};
+
+/// The settled verb of a terminal tool card (D51): the decode drops the
+/// call's payload, so the open/running distinction is gone by the time the
+/// card folds — every `mcpToolCall` lands settled.
+pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
+
+/// The header target of a terminal card whose command never survived the
+/// decode: what the card names when there is no command to name.
+pub const TERMINAL_TOOL_TARGET: &str = "terminal";
 
 /// The model's command with the runner unwrapped: the server wraps what
 /// the model asked for in `<shell> -c '<inner>'` (single- or
@@ -1126,6 +1135,38 @@ impl CodexFold {
                 );
             }
             _ => {
+                // An `mcpToolCall` is a terminal tool call when its server is
+                // baaz — but the item decode this lane shares (`frame.rs`)
+                // drops every field but the id, so the fold cannot read the
+                // server, the command or the result. It folds as a terminal
+                // shell card (D51) rather than an empty generic one, with no
+                // command to name: the strict-config sessions this lane
+                // opens only ever see baaz's tools, and anything richer
+                // needs the decode to carry the item through.
+                if let Item::Other { item_type, .. } = item {
+                    if item_type == "mcpToolCall" {
+                        self.ensure_assistant(turn_id, &mut deltas);
+                        self.push_block(
+                            turn_id,
+                            Block::ToolCall {
+                                id: item.id().to_owned(),
+                                kind: ToolKind::Shell,
+                                verb: TERMINAL_RAN_VERB.into(),
+                                target: TERMINAL_TOOL_TARGET.into(),
+                                status: ToolStatus::Success,
+                                duration_ms: None,
+                                body: ToolBody::Shell {
+                                    output_lines: Vec::new(),
+                                    exit_code: None,
+                                    live: false,
+                                },
+                                diff_stat: None,
+                            },
+                            &mut deltas,
+                        );
+                        return deltas;
+                    }
+                }
                 self.ensure_assistant(turn_id, &mut deltas);
                 self.push_block(
                     turn_id,

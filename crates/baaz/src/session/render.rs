@@ -180,6 +180,13 @@ impl SessionView {
             return self.empty_or_loading(window, cx);
         }
         let folds = self.fold_intents(window, cx);
+        // A running terminal block holds one animation frame: the D51
+        // mirror tracks arriving output at most once per frame, and a
+        // settled transcript requests nothing — which is what
+        // `bench-idle` asserts.
+        if folds.terminal_live {
+            window.request_animation_frame();
+        }
         let element = self.transcript_list(folds, cx);
         record_frame_stats(frame_start.elapsed());
 
@@ -240,6 +247,10 @@ impl SessionView {
 
     /// Every intent a card can raise, bound once per frame.
     pub(super) fn fold_intents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Folds {
+        // The D51 mirror is read before the literal: the borrow of `self`
+        // below is the snapshot, and the struct build after it only moves
+        // refcounts.
+        let (mirror, live) = self.terminal_mirror_snapshot(cx);
         Folds {
             toggled: Rc::clone(&self.toggled),
             toggle: {
@@ -383,7 +394,83 @@ impl SessionView {
                     open(&name, window, cx)
                 }))
             },
+            // D51 "Open terminal" on a terminal tool card: the tab rides
+            // out to the application, which opens the dock on it. Local,
+            // like the run above — honoured under `--replay` too.
+            open_terminal: {
+                let open = cx.listener(|this: &mut Self, tab: &Option<String>, _, cx| {
+                    this.handle_open_terminal(tab.clone(), cx);
+                });
+                Some(Rc::new(
+                    move |tab: Option<String>, window: &mut Window, cx: &mut gpui::App| {
+                        open(&tab, window, cx)
+                    },
+                ))
+            },
+            // D51 live mirror, snapshotted once per frame from the window's
+            // terminal host: empty in replays and tests, where there is no
+            // host and cards render their folded result text.
+            terminal_mirror: Rc::new(mirror),
+            terminal_live: live,
         }
+    }
+
+    /// One frame's D51 live mirror: every lone terminal card's block text
+    /// from the window's terminal host, plus whether any of it still runs.
+    ///
+    /// The scan walks the cached turns (what the frame renders), matches
+    /// each terminal card to its tab's block by command — the last block
+    /// with the card's command, else the tab's last block — and takes the
+    /// block's last [`crate::transcript::TERMINAL_MIRROR_LINES`] lines.
+    /// Grouped members keep their folded text: the group card owns no
+    /// per-call mirror slot.
+    fn terminal_mirror_snapshot(
+        &self,
+        cx: &gpui::App,
+    ) -> (std::collections::HashMap<String, crate::transcript::TerminalMirror>, bool) {
+        let mut mirror = std::collections::HashMap::new();
+        let mut live = false;
+        let Some(host) = &self.terminal_host else { return (mirror, live) };
+        let host = host.read(cx);
+        for turn in self.cached_turns.iter() {
+            for block in turn.blocks() {
+                let aui_protocol::Block::ToolCall { id, kind, verb, target, .. } = block else {
+                    continue;
+                };
+                if !matches!(kind, aui_protocol::ToolKind::Shell)
+                    || (verb != crate::transcript::TERMINAL_RUNNING_VERB
+                        && verb != crate::transcript::TERMINAL_RAN_VERB)
+                {
+                    continue;
+                }
+                let Some(tab) = crate::transcript::terminal_tab_id(target) else { continue };
+                let Some(tab_handle) = host.get(&tab) else { continue };
+                let command = crate::transcript::terminal_command(target);
+                let session = tab_handle.session.read(cx);
+                let blocks = session.blocks();
+                let index = blocks
+                    .iter()
+                    .rposition(|term_block| term_block.command.trim() == command.trim())
+                    .or_else(|| blocks.len().checked_sub(1));
+                let Some(index) = index else { continue };
+                let running = blocks.get(index).is_some_and(|term_block| term_block.running());
+                let lines = session
+                    .block_text(index)
+                    .map(|text| {
+                        let lines: Vec<String> =
+                            text.lines().map(str::to_owned).collect();
+                        let skip = lines.len().saturating_sub(crate::transcript::TERMINAL_MIRROR_LINES);
+                        lines.into_iter().skip(skip).collect()
+                    })
+                    .unwrap_or_default();
+                live = live || running;
+                mirror.insert(
+                    id.clone(),
+                    crate::transcript::TerminalMirror { lines, live: running },
+                );
+            }
+        }
+        (mirror, live)
     }
 
     /// Bring the virtual list in step with the cache.
@@ -883,6 +970,14 @@ impl SessionView {
             command: request.command,
             send_enter: request.send_enter,
         });
+    }
+
+    /// An "Open terminal" press (D51): emit it for the application, which
+    /// opens the dock on the card's tab. Local-only by construction —
+    /// this is an event, not a submit, so no path here can start a turn or
+    /// reach the wire.
+    pub(super) fn handle_open_terminal(&mut self, tab: Option<String>, cx: &mut Context<Self>) {
+        cx.emit(SessionEvent::OpenTerminal { tab });
     }
 
     /// A grouped shell call's run action (D49): the call's command text
@@ -2419,6 +2514,7 @@ mod tests {
                 workspace: root.to_string_lossy().into_owned(),
                 overlays: overlays.clone(),
                 capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
             };
             let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
             let record = seen.clone();
@@ -2473,6 +2569,7 @@ mod tests {
                 workspace: root.to_string_lossy().into_owned(),
                 overlays: overlays.clone(),
                 capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
             };
             let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx));
             let toasts = |cx: &gpui::App| overlays.read(cx).toasts.len();
