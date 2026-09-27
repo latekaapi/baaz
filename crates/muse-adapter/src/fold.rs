@@ -303,8 +303,27 @@ impl MuseFold {
         };
         let mut landed = Vec::with_capacity(deltas.len());
         for delta in deltas {
-            if folded.session.apply(delta.clone()) {
-                landed.push(delta);
+            match &delta {
+                Delta::TurnStarted { turn } => {
+                    if folded.session.apply(delta.clone()) {
+                        folded.track_turn(turn);
+                        landed.push(delta);
+                    }
+                }
+                Delta::TurnRemoved { turn_id } => {
+                    let at = folded.session.turns.iter().position(|turn| turn.id() == turn_id);
+                    if folded.session.apply(delta.clone()) {
+                        if let Some(at) = at {
+                            folded.reindex(at, turn_id);
+                        }
+                        landed.push(delta);
+                    }
+                }
+                _ => {
+                    if folded.session.apply(delta.clone()) {
+                        landed.push(delta);
+                    }
+                }
             }
         }
         landed
@@ -524,6 +543,23 @@ impl Folded {
         self.turn_index.insert(key, self.turn_keys.len());
         self.turn_keys.push(key);
         key
+    }
+
+    /// Record a turn the provider lane appended straight to `session.turns`,
+    /// the way the muse lane's turn constructors mint theirs — so the handles
+    /// stay parallel to the transcript and a later [`Folded::push_block`]
+    /// files into the turn its handle names, not the provider's turn sitting
+    /// at the newborn handle's index (H2b).
+    fn track_turn(&mut self, turn: &Turn) {
+        let key = self.mint_turn_key();
+        match turn {
+            Turn::Assistant { id, .. } => {
+                self.assistant_turns.insert(id.clone(), key);
+            }
+            Turn::User { id, .. } => {
+                self.user_keys.insert(id.clone(), key);
+            }
+        }
     }
 
     /// Remember what a command was sent with, evicting past
@@ -780,7 +816,7 @@ impl Folded {
                 let turn = self.standalone_turn(&id, &mut deltas);
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                self.slots.set_goal(Some(slot));
+                self.slots.set_goal(slot);
                 deltas
             }
         }
@@ -1169,10 +1205,12 @@ impl Folded {
                 }
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                if groupable {
-                    self.note_open(turn, slot);
+                if let Some(slot) = slot {
+                    if groupable {
+                        self.note_open(turn, slot);
+                    }
+                    self.slots.set_item(&item.item_id, slot);
                 }
-                self.slots.set_item(&item.item_id, slot);
                 deltas
             }
         }
@@ -1307,7 +1345,9 @@ impl Folded {
                     deltas.extend(fresh);
                     let (added, fresh_slot) = self.push_block(turn, block);
                     deltas.extend(added);
-                    self.slots.set_item(&item.item_id, fresh_slot);
+                    if let Some(fresh_slot) = fresh_slot {
+                        self.slots.set_item(&item.item_id, fresh_slot);
+                    }
                     deltas
                 }
             }
@@ -1384,10 +1424,12 @@ impl Folded {
                 }
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                if groupable {
-                    self.note_open(turn, slot);
+                if let Some(slot) = slot {
+                    if groupable {
+                        self.note_open(turn, slot);
+                    }
+                    self.slots.set_item(&item.item_id, slot);
                 }
-                self.slots.set_item(&item.item_id, slot);
                 deltas
             }
         }
@@ -1426,7 +1468,7 @@ impl Folded {
                 let turn = self.standalone_turn(&id, &mut deltas);
                 let (added, slot) = self.push_block(turn, block);
                 deltas.extend(added);
-                self.slots.set_todo(Some(slot));
+                self.slots.set_todo(slot);
                 deltas
             }
         }
@@ -1602,7 +1644,9 @@ impl Folded {
         let turn = self.ensure_assistant_turn(&request.turn_id, &mut deltas);
         let (added, slot) = self.push_block(turn, block);
         deltas.extend(added);
-        self.slots.set_approval(&request.approval_id, slot);
+        if let Some(slot) = slot {
+            self.slots.set_approval(&request.approval_id, slot);
+        }
         deltas
     }
 
@@ -1745,7 +1789,9 @@ impl Folded {
             let block = question_block(&request, question, None);
             let (added, slot) = self.push_block(turn, block);
             deltas.extend(added);
-            slots.push(slot);
+            if let Some(slot) = slot {
+                slots.push(slot);
+            }
         }
         self.slots.set_inputs(&request.user_input_id, slots);
         deltas
@@ -1878,25 +1924,40 @@ impl Folded {
     /// an out-of-order arrival is expressed as an append plus the
     /// [`Delta::BlockUpdated`]s that rotate the tail. Every cached [`Slot`] past
     /// the insertion point shifts with it.
-    fn push_block(&mut self, turn: TurnKey, block: Block) -> (Vec<Delta>, Slot) {
+    /// A block that never lands files nothing and returns no slot — never a
+    /// panic. `Session::apply` refuses a block its turn cannot hold (a
+    /// `Turn::User` holds none) and reports it unlanded; the callers below
+    /// then skip caching the slot they never got (H2b).
+    fn push_block(&mut self, turn: TurnKey, block: Block) -> (Vec<Delta>, Option<Slot>) {
         let Some(at_turn) = self.turn_at(turn) else {
-            return (Vec::new(), Slot { turn, block: 0 });
+            return (Vec::new(), None);
         };
         let turn_id = self.session.turns[at_turn].id().to_owned();
         // An event with no sequence (a synthesised marker, a `session/*` fact)
         // belongs after everything already filed, which is what `u64::MAX` says.
         let order = self.current_seq.unwrap_or(u64::MAX);
-        let keys = self.block_order.entry(turn_id.clone()).or_default();
         // `<=` so that two blocks from the same log record keep the order they
         // were folded in, which is the order the fold created them.
-        let at = keys.partition_point(|&key| key <= order);
-        keys.insert(at, order);
+        let at = self
+            .block_order
+            .entry(turn_id.clone())
+            .or_default()
+            .partition_point(|&key| key <= order);
 
         let mut deltas = vec![Delta::BlockAdded { turn_id: turn_id.clone(), block: block.clone() }];
-        self.session.apply(deltas[0].clone());
-        let last = self.session.turns[at_turn].blocks().len() - 1;
+        if !self.session.apply(deltas[0].clone()) {
+            return (Vec::new(), None);
+        }
+        self.block_order.entry(turn_id.clone()).or_default().insert(at, order);
+        let Some(last) = self.session.turns[at_turn].blocks().len().checked_sub(1) else {
+            return (Vec::new(), None);
+        };
+        // `at` counts filed sequence keys, which never outrun the blocks now
+        // that every landed block files exactly one; clamp regardless so the
+        // rotation below cannot slice out of bounds.
+        let at = at.min(last);
         if at == last {
-            return (deltas, Slot { turn, block: at });
+            return (deltas, Some(Slot { turn, block: at }));
         }
 
         // Rotate `[at, last]` right by one: each old occupant moves down a slot
@@ -1914,7 +1975,7 @@ impl Folded {
             }
         }
         self.shift_slots(turn, at);
-        (deltas, Slot { turn, block: at })
+        (deltas, Some(Slot { turn, block: at }))
     }
 
     /// Every cached slot at or past `at` in `turn` moved down one.
@@ -3486,6 +3547,39 @@ mod tests {
             fold.session("s-1").expect("folded").turns.len(),
             turns_before,
             "the transcript is unchanged"
+        );
+    }
+
+    #[test]
+    fn provider_lane_turns_then_a_client_block_lands_in_its_own_turn() {
+        // H2b: the provider lane folds its turns through `apply_deltas`, which
+        // never minted turn handles — so the next client-authored block (the
+        // handoff card, the destination's origin marker) read the provider's
+        // user turn at the newborn key's index, `BlockAdded` was refused, and
+        // `push_block` underflowed `len() - 1` and panicked.
+        let mut fold = MuseFold::new();
+        fold.ensure_session("s-1", Provider::Codex, String::new(), String::new());
+        fold.apply_deltas("s-1", scripted_deltas("hello"));
+        let deltas = fold.append_client_block(
+            "s-1",
+            "card-1",
+            Block::Text { text: "handed off".to_owned(), streaming: false },
+        );
+        assert!(!deltas.is_empty(), "the client block lands");
+        let session = fold.session("s-1").expect("folded");
+        assert_eq!(session.turns.len(), 3, "provider turns plus the card's own turn");
+        assert!(
+            matches!(session.turns[0], Turn::User { .. }),
+            "the provider's user turn is untouched"
+        );
+        let card_turn = session.turns.last().expect("a card turn");
+        assert_eq!(card_turn.blocks().len(), 1, "the card sits in its own turn");
+        assert!(
+            card_turn.blocks().iter().any(|block| matches!(
+                block,
+                Block::Text { text, .. } if text == "handed off"
+            )),
+            "and it is the block that was sent"
         );
     }
 
