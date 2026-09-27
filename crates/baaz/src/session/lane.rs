@@ -169,6 +169,21 @@ impl SessionView {
                 if session_id.as_deref() != Some(self.session_id.as_str()) {
                     return;
                 }
+                // A replayed history echoes whole inputs the live adapter
+                // already substituted: show the recorded bubble text (the
+                // handoff summary, a plan-mode prompt) instead of the pack.
+                let deltas = deltas
+                    .into_iter()
+                    .map(|delta| match delta {
+                        Delta::TurnStarted { turn: Turn::User { id, text, attachments, mentions, timestamp } } => {
+                            let text = self.display_override_for(&text).unwrap_or(text);
+                            Delta::TurnStarted {
+                                turn: Turn::User { id, text, attachments, mentions, timestamp },
+                            }
+                        }
+                        other => other,
+                    })
+                    .collect();
                 let session_id = self.session_id.clone();
                 let landed = self.fold.apply_deltas(&session_id, deltas);
                 if !landed.is_empty() {

@@ -626,6 +626,14 @@ pub struct ClaudeFold {
     /// Echo uuids already rendered as user turns, so a replayed fixture
     /// never mints the same bubble twice.
     user_echoes: HashSet<String>,
+    /// Full submitted text → the bubble text (`SubmitInput.display_text`):
+    /// the replayed echo carries the whole input, so the user turn shows
+    /// the short text instead. The model still received the full text.
+    display_by_text: HashMap<String, String>,
+    /// Replayed user message uuid → the bubble text, learned when an echo
+    /// first folds: what a stored history shows after a restart, when the
+    /// submit's full text is gone but the uuid survives in the transcript.
+    display_by_uuid: HashMap<String, String>,
     /// `tool_use` ids of todo-list calls (TaskCreate/TaskUpdate/TodoWrite):
     /// their results refine the turn's todo card, never a tool card.
     todo_tool_ids: HashSet<String>,
@@ -1110,6 +1118,33 @@ impl ClaudeFold {
         deltas
     }
 
+    /// Remember the bubble text for a submit carrying `display_text`.
+    /// An empty display, or one identical to the input, records nothing,
+    /// so the typed text renders as before.
+    pub fn record_display_text(&mut self, full_text: &str, display: &str) {
+        if display.is_empty() || display == full_text {
+            return;
+        }
+        if full_text.len() > 131_072 || self.display_by_text.len() >= 64 {
+            return;
+        }
+        self.display_by_text.insert(full_text.to_owned(), display.to_owned());
+    }
+
+    /// The submit display map, for seeding a fresh fold that replays
+    /// stored history in place of this one.
+    pub fn display_overrides(&self) -> HashMap<String, String> {
+        self.display_by_text.clone()
+    }
+
+    /// Seed the submit display map on a fresh fold before it replays
+    /// stored history.
+    pub fn set_display_overrides(&mut self, overrides: HashMap<String, String>) {
+        for (full, display) in overrides {
+            self.record_display_text(&full, &display);
+        }
+    }
+
     /// Pre-mark one echo uuid as already rendered, without rendering it:
     /// the resume path. History the adapter already showed carries the
     /// same uuids the resumed child's stream repeats (proven live by
@@ -1135,6 +1170,20 @@ impl ClaudeFold {
         if uuid.is_empty() || !self.user_echoes.insert(uuid.to_owned()) {
             return Vec::new();
         }
+        // The echo carries the whole submitted input; a submit that
+        // recorded `display_text` shows the short text instead. The uuid
+        // join wins (it names the replayed message exactly); the full
+        // text is the fallback, and its hit teaches the uuid map so a
+        // later replay keyed by uuid alone still shows the short text.
+        let bubble = self
+            .display_by_uuid
+            .get(uuid)
+            .cloned()
+            .or_else(|| self.display_by_text.get(text).cloned());
+        if let Some(display) = &bubble {
+            self.display_by_uuid.insert(uuid.to_owned(), display.clone());
+        }
+        let bubble = bubble.unwrap_or_else(|| text.to_owned());
         let mut deltas = Vec::new();
         // A fresh prompt ends the previous turn when one is still open.
         // Live that turn already closed on its `result` frame, so this is
@@ -1162,7 +1211,7 @@ impl ClaudeFold {
         deltas.push(Delta::TurnStarted {
             turn: Turn::User {
                 id: uuid.to_owned(),
-                text: text.to_owned(),
+                text: bubble,
                 attachments,
                 mentions: Vec::new(),
                 timestamp: None,
@@ -2327,6 +2376,52 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A submit carrying `display_text` bubbles the short text, not the
+    /// whole replayed echo; without one the echo renders as before. The
+    /// first fold teaches the replayed message's uuid, so a stored
+    /// history replayed through a seeded fold still shows the short text.
+    #[test]
+    fn submit_display_text_replaces_the_replayed_bubble() {
+        fn echo(uuid: &str, text: &str) -> Frame {
+            Frame::UserText {
+                session_id: "s".to_owned(),
+                uuid: uuid.to_owned(),
+                text: text.to_owned(),
+                images: Vec::new(),
+            }
+        }
+        let full = "Continuing a session handed off from Muse. Context follows.\n## Original goal\nRename Ledger to Journal";
+        let short = "Handed off from Muse: Rename Ledger to Journal (1 recent turns, 0 open todos, 0 files touched)";
+        // With display_text the replayed echo bubbles the short text, and
+        // the uuid join learns it.
+        let mut fold = ClaudeFold::new();
+        fold.record_display_text(full, short);
+        let deltas = fold.apply(&echo("u-1", full));
+        assert_eq!(user_texts(&deltas), [short]);
+        assert_eq!(
+            fold.display_by_uuid.get("u-1").map(String::as_str),
+            Some(short),
+            "the replayed message's uuid keeps the short text"
+        );
+        // Without display_text the echo renders whole, as before.
+        let mut fold = ClaudeFold::new();
+        let deltas = fold.apply(&echo("u-2", full));
+        assert_eq!(user_texts(&deltas), [full]);
+        // A seeded replay fold (what `stored_history` builds after a
+        // restart) still bubbles the short text for the same echo.
+        let mut live = ClaudeFold::new();
+        live.record_display_text(full, short);
+        let mut replay = ClaudeFold::new();
+        replay.set_display_overrides(live.display_overrides());
+        let deltas = replay.apply(&echo("u-1", full));
+        assert_eq!(user_texts(&deltas), [short]);
+        // An identical display records nothing: the typed text stands.
+        let mut fold = ClaudeFold::new();
+        fold.record_display_text(full, full);
+        let deltas = fold.apply(&echo("u-3", full));
+        assert_eq!(user_texts(&deltas), [full]);
     }
 
     /// Defect 1, pinned on `edit.jsonl`: the replayed prompt echo folds

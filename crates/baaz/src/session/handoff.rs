@@ -132,6 +132,10 @@ impl SessionView {
         self.submitting = true;
         let request_id = new_command_id();
         self.fold.record_command(&self.session_id, &request_id, &display);
+        // The provider echoes the whole pack; the bubble shows the short
+        // summary, including across a restart (the record mirrors the map
+        // for the replayed history).
+        self.remember_display_text(pack.clone(), display.clone());
         let command = ProviderCommand::SubmitInput {
             request_id,
             session_id: self.session_id.clone(),

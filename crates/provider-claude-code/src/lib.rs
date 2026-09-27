@@ -460,8 +460,15 @@ impl ClaudeCodeAdapter {
         text: &str,
         images: &[argv::ImageInput],
         turn_id: String,
+        display_text: Option<&str>,
     ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
+        // The full text goes to stdin; the bubble shows the display text
+        // when one rode the submit, keyed by the full text the replayed
+        // user message echo carries back.
+        if let Some(display) = display_text {
+            self.fold.lock().expect("fold mutex").record_display_text(text, display);
+        }
         let line = argv::user_content_line(text, images);
         match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
@@ -577,6 +584,11 @@ impl ClaudeCodeAdapter {
             reason: format!("stored transcript is unreadable: {error}"),
         })?;
         let mut fold = ClaudeFold::new();
+        // The live fold holds this session's submit display map; the
+        // replay fold is fresh, so it inherits the map before the stored
+        // lines fold — a reopened handoff pack still bubbles its summary.
+        let seeded = self.fold.lock().expect("fold mutex").display_overrides();
+        fold.set_display_overrides(seeded);
         let mut deltas = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
@@ -745,7 +757,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "no out-of-turn shell surface was probed over stream-json stdin; the Bash tool \
                  runs inside turns",
             )),
-            Command::SubmitInput { request_id, session_id, parts, effort, .. } => {
+            Command::SubmitInput { request_id, session_id, parts, effort, display_text, .. } => {
                 // Effort is a launch flag: when the pick differs from the
                 // running child's, the next turn relaunches with
                 // `--resume <session-id> --effort <new>` before the text
@@ -756,7 +768,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     self.relaunch(&launch)?;
                 }
                 let (text, images) = Self::split_parts(&parts);
-                self.submit_parts(&session_id, &text, &images, request_id)
+                self.submit_parts(&session_id, &text, &images, request_id, display_text.as_deref())
             }
             // Unverified, so attempted: a second stdin frame mid-turn is the
             // only lane the process shape offers, unprobed as it is.

@@ -52,8 +52,14 @@ pub struct ContextPack {
 }
 
 /// The header every pack is submitted under, naming the source provider.
+/// The last line tells the destination to acknowledge rather than
+/// re-execute: without it the destination re-ran the original
+/// instruction instead of picking up the context.
 pub fn pack_header(from: ProviderId) -> String {
-    format!("Continuing a session handed off from {}. Context follows.", from.label())
+    format!(
+        "Continuing a session handed off from {}. Context follows.\nReply with a one-sentence acknowledgement of this context and wait for the user's next message; do not re-execute the instructions being handed off.",
+        from.label()
+    )
 }
 
 /// Build the pack from the folded transcript. Provider-neutral: only the
@@ -784,6 +790,10 @@ mod tests {
         assert!(!pack.recent.is_empty());
         let text = pack_text(&pack, ProviderId::Muse);
         assert!(text.starts_with("Continuing a session handed off from Muse. Context follows."));
+        assert!(
+            text.contains("one-sentence acknowledgement"),
+            "the pack tells the destination to acknowledge and wait, not re-execute: {text}"
+        );
         let bubble = display_text(&pack, ProviderId::Muse);
         assert!(bubble.len() < text.len());
         assert!(bubble.contains("Handed off from Muse"));

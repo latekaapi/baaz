@@ -67,6 +67,12 @@ pub struct ProviderSessionRecord {
     /// without joining the source's own record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_from_provider: Option<String>,
+    /// Full submitted text → the bubble text for submits that carried
+    /// `display_text` (handoff packs, plan-mode prompts): what a replayed
+    /// history shows instead of the whole input. Written on submit, read
+    /// when a resumed view folds replayed turns the provider echoes whole.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub display_texts: HashMap<String, String>,
 }
 
 /// Every provider session this window knows, keyed by session id.
@@ -148,6 +154,7 @@ pub fn upsert_open(
             handoff_to: None,
             handoff_from: None,
             handoff_from_provider: None,
+            display_texts: HashMap::new(),
         });
 }
 
@@ -176,6 +183,27 @@ pub fn note_settled_turn_counted(
     record.turns = record.turns.max(exchanges);
     record.updated_ms = crate::usage::now_ms();
     true
+}
+
+/// Remember the bubble text for a submit that carried `display_text`,
+/// keyed by the full model-visible text the provider echoes back. An
+/// empty display, or one identical to the input, records nothing. Capped:
+/// the map holds the session's recent submits, never an unbounded log.
+pub fn note_display_text(
+    store: &mut ProviderSessionStore,
+    session_id: &str,
+    full_text: &str,
+    display: &str,
+) {
+    if display.trim().is_empty() || display == full_text || full_text.len() > 131_072 {
+        return;
+    }
+    if let Some(record) = store.get_mut(session_id) {
+        if record.display_texts.len() >= 64 && !record.display_texts.contains_key(full_text) {
+            return;
+        }
+        record.display_texts.insert(full_text.to_owned(), display.to_owned());
+    }
 }
 
 /// Remember the first prompt a session sent, once: later turns never
@@ -385,6 +413,30 @@ mod tests {
             store["s-1"].first_prompt.as_deref(),
             Some("Fix the header second line"),
             "the session keeps its own first words"
+        );
+    }
+
+    #[test]
+    fn display_texts_round_trip_and_survive_a_restart() {
+        let _env = temp_store("display");
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        let full = "Continuing a session handed off from Muse. Context follows.\n## Original goal\nRename";
+        let short = "Handed off from Muse: Rename (1 recent turns, 0 open todos, 0 files touched)";
+        note_display_text(&mut store, "s-1", full, short);
+        assert_eq!(store["s-1"].display_texts.get(full).map(String::as_str), Some(short));
+        // An identical display records nothing: the typed text stands, and
+        // the store stays quiet.
+        note_display_text(&mut store, "s-1", full, full);
+        assert_eq!(store["s-1"].display_texts.len(), 1);
+        // An unknown session records nothing, never a row.
+        note_display_text(&mut store, "s-gone", full, short);
+        assert!(!store.contains_key("s-gone"));
+        write(&store);
+        assert_eq!(
+            read()["s-1"].display_texts.get(full).map(String::as_str),
+            Some(short),
+            "the bubble map survives a restart"
         );
     }
 
