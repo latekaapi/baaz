@@ -145,19 +145,29 @@ impl SessionView {
         };
         let session_id = self.session_id.clone();
         self.provider_send(command, cx, move |this, result, cx| {
-            this.submitting = false;
             match result {
                 Ok(provider::Ack::TurnAccepted { .. }) => {
+                    // X1b: busy until the provider speaks, like a typed
+                    // send — the ack only admits the pack, so `submitting`
+                    // stays true until the first event hands over to
+                    // `running` exactly as before. The pack folds no
+                    // optimistic bubble, so its echo lands the one user
+                    // turn (the short summary) with nothing to duplicate.
                     this.adopt_open_provider_turn(cx);
                     cx.emit(crate::session::SessionEvent::HandoffPackAccepted { session_id });
                 }
                 Ok(_) => {
+                    // No turn carries the pack, so nothing will ever speak:
+                    // idle here rather than sticking busy.
+                    this.submitting = false;
                     cx.emit(crate::session::SessionEvent::HandoffPackFailed {
                         session_id,
                         reason: "the provider answered the pack with no turn".to_owned(),
                     });
                 }
                 Err(error) => {
+                    // The pack never left: idle, and say why.
+                    this.submitting = false;
                     cx.emit(crate::session::SessionEvent::HandoffPackFailed {
                         session_id,
                         reason: error.to_string(),

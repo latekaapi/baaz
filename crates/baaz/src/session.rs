@@ -487,6 +487,14 @@ struct Running {
     started: Instant,
 }
 
+/// A user bubble folded at send, waiting on the provider's own user turn
+/// to replace it (X1). The text rides along so a stop pressed before the
+/// provider's first event can hand the prompt back to the composer (X1b).
+struct PendingOptimistic {
+    id: String,
+    text: String,
+}
+
 /// How many completed turn ids a view remembers. A `turn/started` for a
 /// remembered id is a re-delivered start from a re-attach, not new work —
 /// and must not mark the view running (item 3). Turn ids accumulate one per
@@ -665,8 +673,10 @@ pub struct SessionView {
     submitting: bool,
     /// Optimistic user turns folded at send, oldest first, waiting on the
     /// provider's own user turn to replace them (X1). A refused submit or
-    /// a dead connection removes them; the echo consumes the earliest.
-    pending_optimistic: Vec<String>,
+    /// a dead connection removes them; each echo consumes the earliest
+    /// still pending (X1b). An early stop drains them and hands the newest
+    /// text back to the composer.
+    pending_optimistic: Vec<PendingOptimistic>,
     /// History is still being paged in behind the live stream.
     loading_history: bool,
     /// A `view/page` chain is in flight. Separate from `loading_history`,
