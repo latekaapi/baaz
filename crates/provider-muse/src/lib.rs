@@ -14,6 +14,7 @@
 
 mod caps;
 pub mod errors;
+pub mod terminal;
 mod translate;
 
 use std::sync::{Arc, Mutex};
@@ -31,6 +32,7 @@ use provider::{
 pub use caps::{
     capabilities_for_version, muse_version_supported, MUSE_MCP_VERSION_FLOOR, MUSE_VERSION_FLOOR,
 };
+pub use terminal::TerminalRelay;
 pub use translate::{approval_headline, question_headline};
 
 /// The raw transport, shared between the adapter and the app's legacy
@@ -67,6 +69,15 @@ pub struct MuseAdapter {
     /// lifetime; read by the app to decide whether a session may run shell
     /// commands. `None` before [`ProviderAdapter::connect`] runs.
     granted_shell: Mutex<Option<bool>>,
+    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Fixed for
+    /// the connection lifetime; the terminal relay rides it, and without
+    /// it there is no route. `None` before [`ProviderAdapter::connect`]
+    /// runs.
+    granted_mcp: Mutex<Option<bool>>,
+    /// Where the terminal relay lives, set by the host before the session
+    /// commands run. `None` means no relay: sessions open exactly as they
+    /// always did.
+    terminal: Mutex<Option<TerminalRelay>>,
     /// The schema-fingerprint warning from `initialize`, pre-formatted.
     /// A mismatch is additive evolution, never a failure: the app logs it
     /// and carries on. `None` when the fingerprints agreed.
@@ -97,6 +108,8 @@ impl MuseAdapter {
             pump: None,
             negotiated: Mutex::new(None),
             granted_shell: Mutex::new(None),
+            granted_mcp: Mutex::new(None),
+            terminal: Mutex::new(None),
             warning: Mutex::new(None),
         }
     }
@@ -118,6 +131,39 @@ impl MuseAdapter {
     /// [`ProviderAdapter::connect`] runs.
     pub fn user_shell_granted(&self) -> bool {
         self.granted_shell.lock().expect("granted mutex").unwrap_or(false)
+    }
+
+    /// Whether the handshake granted `sessionMcp` (muse ≥ 1.3). `false`
+    /// before [`ProviderAdapter::connect`] runs — fail closed, so a
+    /// session never carries a bridge the server would silently drop.
+    pub fn session_mcp_granted(&self) -> bool {
+        self.granted_mcp.lock().expect("granted mutex").unwrap_or(false)
+    }
+
+    /// Point the terminal relay at the bridge and socket before the
+    /// session commands run. The relay still rides only on the grant (see
+    /// [`Self::session_mcp_granted`]): set without a grant, sessions open
+    /// exactly as they always did.
+    pub fn set_terminal_relay(
+        &self,
+        bridge: std::path::PathBuf,
+        socket: std::path::PathBuf,
+    ) {
+        *self.terminal.lock().expect("terminal mutex") =
+            Some(TerminalRelay { bridge, socket });
+    }
+
+    /// The bridge `config` for `session_id`, or `None` when there is no
+    /// route: no relay was set, or `initialize` did not grant `sessionMcp`.
+    fn terminal_config_for(&self, session_id: &str) -> Option<muse_client::schema::SessionConfig> {
+        if !self.session_mcp_granted() {
+            return None;
+        }
+        self.terminal
+            .lock()
+            .expect("terminal mutex")
+            .as_ref()
+            .map(|relay| relay.session_config(session_id))
     }
 
     /// The schema-fingerprint warning from `initialize`, pre-formatted for
@@ -234,6 +280,18 @@ fn tap_for(
     }
 }
 
+/// The session id the terminal relay answers for on this command: a fresh
+/// open mints it client-side (`request_id` doubles as the new session's
+/// exact identity, registered with the service before the send), a resume
+/// names the stored session. Every other command carries no route.
+fn command_terminal_session(command: &Command) -> Option<String> {
+    match command {
+        Command::OpenSession { request_id, .. } => Some(request_id.clone()),
+        Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
+        _ => None,
+    }
+}
+
 /// A stand-in id for re-wrapping a server request after its tap was read:
 /// the fold only needs *an* id, and the params already carry the real one
 /// (`approvalId` / `userInputId`), so nothing here invents identity.
@@ -298,6 +356,8 @@ impl ProviderAdapter for MuseAdapter {
         *self.negotiated.lock().expect("negotiated mutex") = Some(version.clone());
         *self.granted_shell.lock().expect("granted mutex") =
             Some(result.granted_capabilities.iter().any(|c| c.as_wire() == Some("userShell")));
+        *self.granted_mcp.lock().expect("granted mutex") =
+            Some(result.granted_capabilities.iter().any(|c| c.as_wire() == Some("sessionMcp")));
         *self.warning.lock().expect("warning mutex") = warning.map(|warning| format!("{warning:?}"));
         Ok(Handshake {
             provider: aui_protocol::Provider::Muse,
@@ -325,7 +385,16 @@ impl ProviderAdapter for MuseAdapter {
         // everywhere except the fold lock. The `Unavailable` refusal happens
         // before this runs, in `provider::Provider::send`, which is the only
         // path that reaches here.
-        translate::dispatch(&self.client, &self.fold, command)
+        //
+        // The open and resume arms read the terminal relay through
+        // `&self`: the bridge `config` rides only on the `sessionMcp`
+        // grant, so an ungranted server (or an unset relay) sends exactly
+        // what it always sent.
+        let terminal = command_terminal_session(&command).and_then(|session_id| {
+            self.terminal_config_for(&session_id)
+                .map(|config| (session_id, config))
+        });
+        translate::dispatch(&self.client, &self.fold, command, terminal)
     }
 
     fn events(&self) -> Receiver<ProviderEvent> {
@@ -387,6 +456,10 @@ pub struct Established {
     pub warning: Option<String>,
     /// Whether `initialize` granted `userShell`.
     pub user_shell: bool,
+    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3): the
+    /// terminal relay's route. `false` means no route — sessions open
+    /// exactly as they always did.
+    pub session_mcp: bool,
 }
 
 /// Spawn `muse serve` ([`spawn`]) and shake hands over it: identify the
@@ -399,5 +472,6 @@ pub fn establish(program: &str, client: &ConnectInfo) -> Result<Established, Pro
     let legacy = adapter.legacy_events();
     let warning = adapter.schema_warning();
     let user_shell = adapter.user_shell_granted();
-    Ok(Established { adapter, transport, legacy, handshake, warning, user_shell })
+    let session_mcp = adapter.session_mcp_granted();
+    Ok(Established { adapter, transport, legacy, handshake, warning, user_shell, session_mcp })
 }

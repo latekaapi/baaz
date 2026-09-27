@@ -10,7 +10,12 @@
 # `Baaz.icns` with `sips`/`iconutil`, writes `Info.plist`
 # (`sh.baaz.app`) and assembles `target/bundle/Baaz.app`:
 #
-#   Baaz.app/Contents/{Info.plist,MacOS/Baaz,Resources/Baaz.icns}
+#   Baaz.app/Contents/{Info.plist,MacOS/{Baaz,mcp-bridge},Resources/Baaz.icns}
+#
+# `mcp-bridge` rides beside the baaz binary: it is the terminal relay every
+# provider route spawns (`config.mcpServers`, `--mcp-config`, `-c
+# mcp_servers.baaz…` all name the sibling — see
+# `crates/baaz/src/terminal/relay.rs`).
 #
 # The bundle is ad-hoc signed so it launches on this machine with `open`.
 # Re-running the script rebuilds in place; it never touches the repo's
@@ -30,7 +35,7 @@ if [ ! -f "$SRC" ]; then
     exit 1
 fi
 
-cargo build --release -p baaz
+cargo build --release -p baaz -p mcp-bridge
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -46,6 +51,7 @@ iconutil -c icns "$SET" -o "$WORK/Baaz.icns"
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$ROOT/target/release/baaz" "$CONTENTS/MacOS/Baaz"
+cp "$ROOT/target/release/mcp-bridge" "$CONTENTS/MacOS/mcp-bridge"
 cp "$WORK/Baaz.icns" "$CONTENTS/Resources/Baaz.icns"
 cat >"$CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

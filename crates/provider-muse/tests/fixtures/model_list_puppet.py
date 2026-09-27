@@ -86,14 +86,14 @@ def fake_approval():
     }
 
 
-def canned(method, params):
+def canned(method, params, granted=()):
     """A minimally valid result for `method`, or None when unknown."""
     command_id = (params or {}).get("commandId", "cmd-1")
     session = fake_session()
     if method == "initialize":
         return {
             "experimentalApi": False,
-            "grantedCapabilities": [],
+            "grantedCapabilities": list(granted),
             "museHome": "/tmp/fake-muse-home",
             "platformFamily": "unix",
             "platformOs": "macos",
@@ -191,6 +191,7 @@ def canned(method, params):
 def main():
     record_path = None
     emit_bad_tap = False
+    granted = []
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -202,6 +203,10 @@ def main():
             i += 1
         elif args[i] == "--emit-bad-tap":
             emit_bad_tap = True
+            i += 1
+        elif args[i] == "--grant-mcp":
+            # Behave like muse >= 1.3: grant the terminal relay's route.
+            granted = ["userShell", "sessionMcp"]
             i += 1
         else:
             i += 1  # `serve` and the client's own flags: ignored.
@@ -230,7 +235,7 @@ def main():
         req_id = req.get("id")
         if req_id is None:
             continue  # A notification: recorded, never answered.
-        payload = canned(method, params if isinstance(params, dict) else {})
+        payload = canned(method, params if isinstance(params, dict) else {}, granted)
         if payload is None:
             failure(req_id, -32601, "fake server knows no method " + str(method))
         else:

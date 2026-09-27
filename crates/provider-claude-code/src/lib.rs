@@ -21,6 +21,7 @@ pub mod child;
 pub mod fold;
 pub mod frame;
 pub mod history;
+pub mod terminal;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -82,6 +83,26 @@ pub struct ClaudeCodeAdapter {
     home_override: Option<PathBuf>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
+    /// Where the terminal relay lives, set by the host before the session
+    /// commands run: the bridge binary, the socket to point it at, and the
+    /// directory (`<support_dir>/mcp`) its per-session config files land
+    /// in. `None` means no relay: sessions spawn exactly today's argv.
+    terminal: Mutex<Option<TerminalRelay>>,
+}
+
+/// Where the terminal relay lives: the bridge to spawn and the socket to
+/// point it at, plus where its per-session MCP config files land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRelay {
+    /// Absolute path of the `mcp-bridge` binary beside the running baaz
+    /// binary (or inside the app bundle next to it).
+    pub bridge: PathBuf,
+    /// `<support_dir>/run/terminal-<pid>.sock`: what the bridge's
+    /// `--socket` names.
+    pub socket: PathBuf,
+    /// `<support_dir>/mcp`: the directory each session's `--mcp-config`
+    /// file is written into.
+    pub config_dir: PathBuf,
 }
 
 impl ClaudeCodeAdapter {
@@ -103,7 +124,78 @@ impl ClaudeCodeAdapter {
             home_override: None,
             connected: Mutex::new(false),
             version: Mutex::new(None),
+            terminal: Mutex::new(None),
         }
+    }
+
+    /// Point the terminal relay at the bridge, socket and config directory
+    /// before the session commands run. Every open, resume, fork and
+    /// effort-swap relaunch then writes its per-session MCP config and
+    /// spawns with `--mcp-config <path> --strict-mcp-config`.
+    pub fn set_terminal_relay(&self, relay: TerminalRelay) {
+        *self.terminal.lock().expect("terminal mutex") = Some(relay);
+    }
+
+    /// The `--mcp-config` path for `session_id`, writing its file first —
+    /// or `None` when no relay is set. A session without a relay spawns
+    /// exactly today's argv.
+    fn mcp_config_for(&self, session_id: &str) -> Result<Option<String>, ProviderError> {
+        let Some(relay) = self.terminal.lock().expect("terminal mutex").clone() else {
+            return Ok(None);
+        };
+        let path = terminal::write_mcp_config(&relay.config_dir, session_id, &relay.bridge, &relay.socket)
+            .map_err(|error| ProviderError::Unavailable {
+                reason: format!("could not write the terminal MCP config: {error}"),
+            })?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+
+    /// The open launch for `request_id`: the caller-chosen session id plus
+    /// the terminal relay's config file, when one is set. Pure apart from
+    /// that one file write — no spawn — so tests drive this without a CLI.
+    pub fn launch_for_open(
+        &self,
+        request_id: &str,
+        workspace: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<SessionLaunch, ProviderError> {
+        let mcp = self.mcp_config_for(request_id)?;
+        Ok(argv::argv_for_open(request_id, workspace, model, mcp.as_deref(), None))
+    }
+
+    /// The resume launch for a stored `session_id`, with the relay's
+    /// config file when one is set. No spawn — see [`Self::launch_for_open`].
+    pub fn launch_for_resume(&self, session_id: &str) -> Result<SessionLaunch, ProviderError> {
+        let mcp = self.mcp_config_for(session_id)?;
+        Ok(argv::argv_for_resume(session_id, None, mcp.as_deref(), None))
+    }
+
+    /// The fork launch branching `session_id` into `request_id`, with the
+    /// relay's config file (for the NEW session) when one is set. No spawn.
+    pub fn launch_for_fork(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> Result<SessionLaunch, ProviderError> {
+        let mcp = self.mcp_config_for(request_id)?;
+        Ok(argv::argv_for_fork(request_id, session_id, None, mcp.as_deref(), None))
+    }
+
+    /// Carry the relay onto an effort-swap `launch`: the swap relaunches
+    /// with `--resume`, and the resumed child must see the same bridge the
+    /// old one did. A launch that already carries `--mcp-config` (every
+    /// [`Self::launch_for_open`] one does) passes through untouched, so
+    /// the file is written once per session, not once per swap.
+    fn with_mcp_config(&self, mut launch: SessionLaunch) -> Result<SessionLaunch, ProviderError> {
+        if launch.argv.iter().any(|arg| arg == "--mcp-config") {
+            return Ok(launch);
+        }
+        if let Some(path) = self.mcp_config_for(&launch.session_id.clone())? {
+            launch.argv.push("--mcp-config".into());
+            launch.argv.push(path);
+            launch.argv.push("--strict-mcp-config".into());
+        }
+        Ok(launch)
     }
 
     /// Override `$HOME` for stored-history lookup (tests).
@@ -311,15 +403,18 @@ impl ClaudeCodeAdapter {
 
     /// Swap the running child for `launch`: hang up the old one first, then
     /// spawn. The old child's pump ends with its stdout; its folded
-    /// transcript stays on the adapter.
+    /// transcript stays on the adapter. The relay rides along: an
+    /// effort-swap relaunch is still the same session, so the resumed child
+    /// sees the same bridge the old one did.
     fn relaunch(&self, launch: &SessionLaunch) -> Result<(), ProviderError> {
         if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
             running.shutdown();
         }
         *self.child.lock().expect("child mutex") = None;
+        let launch = self.with_mcp_config(launch.clone())?;
         let running = RunningChild::spawn(
             &self.program,
-            launch,
+            &launch,
             Arc::clone(&self.fold),
             self.tx.clone(),
         )
@@ -544,11 +639,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         match command {
             Command::OpenSession { request_id, workspace, model, .. } => {
                 let launch =
-                    argv::argv_for_open(&request_id, workspace.as_deref(), model.as_deref(), None, None);
+                    self.launch_for_open(&request_id, workspace.as_deref(), model.as_deref())?;
                 self.spawn_launch(&launch)
             }
             Command::ResumeSession { session_id, .. } => {
-                let launch = argv::argv_for_resume(&session_id, None, None, None);
+                let launch = self.launch_for_resume(&session_id)?;
                 let ack = self.spawn_launch(&launch)?;
                 // Best-effort resume seeding (see `seed_history_echoes`):
                 // history already shown must not bubble again off the
@@ -575,7 +670,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 Ok(ack)
             }
             Command::ForkSession { request_id, session_id, .. } => {
-                let launch = argv::argv_for_fork(&request_id, &session_id, None, None, None);
+                let launch = self.launch_for_fork(&request_id, &session_id)?;
                 self.spawn_launch(&launch)
             }
             Command::ListSessions { workspace, .. } => {

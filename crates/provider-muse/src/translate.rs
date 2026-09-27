@@ -162,21 +162,35 @@ pub fn transport_error(error: MuseError) -> ProviderError {
 /// maps the result to a neutral [`Ack`]. Paging also takes the fold: it is
 /// the one command whose ack carries transcript, so its page is folded to
 /// deltas before it crosses the seam.
+///
+/// `terminal` is the relay's route for this command — the `(session_id,
+/// config)` the adapter resolved before dispatch — or `None` when there is
+/// no route (no relay was set, or `initialize` did not grant `sessionMcp`).
+/// A fresh open mints its session id client-side from `request_id` exactly
+/// then, so the host could register it with the service before the send; a
+/// resume names the stored session and only gains the bridge config.
+/// Without a route both arms send byte-identical params to what they always
+/// sent.
 pub fn dispatch(
     client: &MuseClient,
     fold: &std::sync::Mutex<muse_adapter::MuseFold>,
     command: Command,
+    terminal: Option<(String, muse_client::schema::SessionConfig)>,
 ) -> Result<Ack, ProviderError> {
     match command {
         Command::OpenSession { request_id, workspace, model, model_provider } => {
+            let (session_id, config) = match terminal {
+                Some((id, config)) => (Some(id), Some(config)),
+                None => (None, None),
+            };
             let result = client
                 .session_start(&SessionStartParams {
                     approval_mode: None,
                     command_id: request_id,
-                    config: None,
+                    config,
                     model_id: model,
                     provider_id: model_provider,
-                    session_id: None,
+                    session_id,
                     workspace_root: workspace,
                 })
                 .map_err(transport_error)?;
@@ -186,10 +200,11 @@ pub fn dispatch(
             })
         }
         Command::ResumeSession { request_id, session_id, cursor, metadata_only } => {
+            let config = terminal.map(|(_, config)| config);
             let result = client
                 .session_resume(&SessionResumeParams {
                     command_id: request_id,
-                    config: None,
+                    config,
                     cursor,
                     exclude_items: metadata_only.then_some(true),
                     history: None,

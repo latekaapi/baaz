@@ -40,9 +40,12 @@ pub use provider_muse::errors::{
 pub const CLIENT_NAME: &str = "baaz";
 
 /// The capabilities the app requests at the handshake. `userShell` is the
-/// `!` escape hatch; the experimental opt-in the account lane needs is set
+/// `!` escape hatch; `sessionMcp` is the terminal relay's route (T2: the
+/// bridge rides `session/start` and `session/resume` only when the server
+/// grants it — muse ≥ 1.3 does, older servers silently keep the old
+/// behaviour). The experimental opt-in the account lane needs is set
 /// inside `provider-muse`.
-pub const REQUESTED_CAPABILITIES: &[&str] = &["userShell"];
+pub const REQUESTED_CAPABILITIES: &[&str] = &["userShell", "sessionMcp"];
 
 /// A live connection: the provider behind its gate, the provider events,
 /// and the transitional legacy bundle sharing the same child.
@@ -77,6 +80,10 @@ pub struct Legacy {
     pub warning: Option<String>,
     /// Whether `initialize` granted `userShell`.
     pub user_shell: bool,
+    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3): the
+    /// terminal relay's route. `false` means no route — sessions open
+    /// exactly as they always did.
+    pub session_mcp: bool,
 }
 
 /// A one-line title for a connection failure, for the reconnect dialog.
@@ -120,6 +127,7 @@ pub fn connect(program: &str) -> Result<Connected, ProviderError> {
             agent_version: established.handshake.agent_version,
             warning: established.warning,
             user_shell: established.user_shell,
+            session_mcp: established.session_mcp,
         },
     })
 }

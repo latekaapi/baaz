@@ -277,6 +277,14 @@ pub(crate) fn default_provider_factory() -> ProviderFactory {
     Arc::new(open_provider)
 }
 
+/// This window's terminal socket — what the relay's bridge is pointed at.
+/// The same path the app's [`TerminalService`](crate::terminal::TerminalService)
+/// serves (or would, when a second window owns the name — then the bridge
+/// answers that the terminal is unavailable rather than failing).
+pub(crate) fn terminal_socket_path() -> PathBuf {
+    crate::terminal::service::socket_path_for(&crate::store::support_dir(), std::process::id())
+}
+
 /// Resolve, wrap, and connect one provider lane's child. `Err` when the
 /// binary is missing or the handshake fails — the caller surfaces it with
 /// the provider's name and opens nothing, never a silent muse fallback.
@@ -293,9 +301,31 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
     let program = program.to_string_lossy().into_owned();
     let mut provider = match id {
         ProviderId::ClaudeCode => {
-            Provider::new(provider_claude_code::ClaudeCodeAdapter::new(&program))
+            // The terminal relay's route (T2): the bridge beside this
+            // binary, pointed at this window's socket, with per-session
+            // configs under the support dir. Per-session only — the
+            // operator's own connectors stay out via `--strict-mcp-config`.
+            let adapter = provider_claude_code::ClaudeCodeAdapter::new(&program);
+            adapter.set_terminal_relay(provider_claude_code::TerminalRelay {
+                bridge: crate::terminal::relay::bridge_path(),
+                socket: terminal_socket_path(),
+                config_dir: crate::terminal::relay::claude_config_dir(
+                    &crate::store::support_dir(),
+                ),
+            });
+            Provider::new(adapter)
         }
-        ProviderId::Codex => Provider::new(provider_codex::CodexAdapter::new(&program)),
+        ProviderId::Codex => {
+            // The terminal relay's route (T2): the bridge as a per-session
+            // MCP server through process-scoped `-c` overrides — the
+            // owner's `~/.codex/config.toml` is never touched.
+            let adapter = provider_codex::CodexAdapter::new(&program);
+            adapter.set_terminal_relay(provider_codex::TerminalRelay {
+                bridge: crate::terminal::relay::bridge_path(),
+                socket: terminal_socket_path(),
+            });
+            Provider::new(adapter)
+        }
         ProviderId::Muse => {
             return Err(ProviderError::Unavailable {
                 reason: "muse sessions ride the legacy pump, never a spawned child".into(),
