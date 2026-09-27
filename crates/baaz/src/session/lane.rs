@@ -2557,7 +2557,7 @@ mod tests {
     /// the default when it has one.
     #[gpui::test]
     fn a_catalog_default_chips_under_history(cx: &mut gpui::TestAppContext) {
-        use muse_client::schema::ModelCatalogEntry;
+        use crate::session::ModelCatalogEntry;
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
