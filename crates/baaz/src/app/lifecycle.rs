@@ -1397,6 +1397,14 @@ impl Harness {
                 // A handoff to muse lands here: the pack submits onto the
                 // fresh view, which the lane check above just built.
                 this.land_handoff_destination(session_id.clone(), cx);
+                // A reopened handoff destination renders its snapshot
+                // prefix above the backfilled history; anything else is a
+                // no-op.
+                if let Some(view) =
+                    this.active.clone().filter(|view| view.read(cx).session_id == session_id)
+                {
+                    this.attach_handoff_prefix(&view, cx);
+                }
                 // The project's effort rides along before the first turn.
                 if let Some(effort) = effort {
                     if let Some(view) = this.active.clone() {
@@ -1779,6 +1787,7 @@ impl Harness {
                     // even with no client behind it.
                     if let Some(view) = self.active.clone() {
                         view.update(cx, |view, cx| view.mark_history_loading(cx));
+                        self.attach_handoff_prefix(&view, cx);
                     }
                 }
             }
@@ -1806,6 +1815,7 @@ impl Harness {
         // round 6). Same frame as the swap, so no paint lands between.
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.mark_history_loading(cx));
+            self.attach_handoff_prefix(&view, cx);
         }
         crate::log::trace_mark("swap");
         crate::log::trace_arm_first_frame();
@@ -2187,6 +2197,12 @@ impl Harness {
         // A handoff's destination lands here: the pack submits onto the
         // fresh view. Anything else leaves `pending_handoff` alone.
         self.land_handoff_destination(session_id.clone(), cx);
+        // A reopened handoff destination renders its snapshot prefix (or
+        // the fallback divider) above the replayed history. Fresh opens
+        // have no links yet and pass through untouched.
+        if let Some(view) = self.active.clone().filter(|view| view.read(cx).session_id == session_id) {
+            self.attach_handoff_prefix(&view, cx);
+        }
         // The scriptable check: a `--steps` run greps the log for this line
         // to prove the pick ended on a provider lane, not a muse session.
         // (`baaz_log!` already carries the `baaz: ` prefix; spelling it
@@ -3550,7 +3566,8 @@ impl Harness {
         let text = crate::handoff::pack_text(&pack, run.from);
         let display = crate::handoff::display_text(&pack, run.from);
         view.update(cx, |view, cx| {
-            view.append_handoff_origin(origin, cx);
+            view.note_handoff_origin(origin, cx);
+            view.note_handoff_pack(text.clone(), display.clone(), cx);
             view.submit_pack(text, display, cx);
         });
     }
@@ -3570,9 +3587,47 @@ impl Harness {
             return;
         }
         run.activate();
+        // §8, the transcript half: snapshot the source's visible turns —
+        // everything its transcript shows, prefix and card included — for
+        // the destination, then show them there above the one divider.
+        let snap_turns = self
+            .find_view(&source, cx)
+            .map(|view| view.update(cx, |view, _| view.handoff_snapshot_turns()))
+            .unwrap_or_default();
+        let (pack_full, pack_display) = run
+            .pack
+            .as_ref()
+            .map(|pack| {
+                (
+                    crate::handoff::pack_text(pack, run.from),
+                    crate::handoff::display_text(pack, run.from),
+                )
+            })
+            .unwrap_or_default();
+        let to_model = (!run.to_model.is_empty()).then(|| run.to_model.clone());
+        crate::handoff_snapshot::write_snapshot(
+            &dest,
+            &crate::handoff_snapshot::HandoffSnapshot {
+                version: crate::handoff_snapshot::SNAPSHOT_VERSION,
+                from: run.from.as_str().to_owned(),
+                to: run.to.as_str().to_owned(),
+                source: source.clone(),
+                to_model: to_model.clone(),
+                activated_ms: crate::handoff_snapshot::now_ms(),
+                pack_text: pack_full.clone(),
+                pack_display: pack_display.clone(),
+                turns: snap_turns.clone(),
+            },
+        );
         let card = run.card();
         let card_id = run.card_id.clone();
         let (from, to) = (run.from, run.to);
+        let origin = crate::handoff::HandoffOrigin {
+            source_session: source.clone(),
+            from,
+            from_model: run.from_model.clone(),
+        };
+        let divider = crate::handoff_snapshot::divider_text(from, to, to_model.as_deref());
         self.handoffs.insert(source.clone(), run);
         if let Some(view) = self.find_view(&source, cx) {
             view.update(cx, |view, cx| {
@@ -3580,8 +3635,36 @@ impl Harness {
                 view.retire_for_handoff(to, dest.clone(), cx);
             });
         }
+        if let Some(view) = self.find_view(&dest, cx) {
+            view.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    origin,
+                    snap_turns,
+                    divider,
+                    (!pack_full.is_empty()).then(|| pack_full.clone()),
+                    (!pack_display.is_empty()).then(|| pack_display.clone()),
+                    cx,
+                );
+            });
+        }
         self.persist_handoff_links(&source, from, &dest, to, cx);
         crate::baaz_log!("handoff activated {source} -> {dest}");
+        // In place: activation leaves the window on the destination — the
+        // same slot the source occupied, scrolled to the bottom (the prefix
+        // update set follow) — with the composer focused and live. The
+        // destination has been visible since it opened; only a user who
+        // clicked away mid-flight still needs the swap.
+        self.focus_composer = true;
+        if let Some(view) = self.find_view(&dest, cx) {
+            let current = self.active.as_ref().is_some_and(|active| *active == view);
+            if !current {
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.activate(view, false, window, cx);
+                    });
+                }));
+            }
+        }
         cx.notify();
     }
 
@@ -3652,6 +3735,62 @@ impl Harness {
         }
         crate::baaz_log!("handoff failed {}: {reason}", pending.source_session);
         cx.notify();
+    }
+
+    /// Reopening a handoff destination (`docs/22-handoff.md` §8): prefix +
+    /// divider from the snapshot, or the fallback divider alone when the
+    /// chain predates snapshots. No-op for sessions with no handoff links,
+    /// so fresh opens pass through untouched. No child is ever spawned for
+    /// the source — history comes from the file.
+    fn attach_handoff_prefix(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        let (session_id, to) = {
+            let view = view.read(cx);
+            (view.session_id.clone(), view.provider_kind())
+        };
+        if let Some(snapshot) = crate::handoff_snapshot::read_snapshot(&session_id) {
+            let from = ProviderId::parse(&snapshot.from);
+            let origin = crate::handoff::HandoffOrigin {
+                source_session: snapshot.source.clone(),
+                from,
+                from_model: String::new(),
+            };
+            let divider =
+                crate::handoff_snapshot::divider_text(from, to, snapshot.to_model.as_deref());
+            view.update(cx, |view, cx| {
+                view.show_handoff_prefix(
+                    origin,
+                    snapshot.turns.clone(),
+                    divider,
+                    (!snapshot.pack_text.is_empty()).then(|| snapshot.pack_text.clone()),
+                    (!snapshot.pack_display.is_empty()).then(|| snapshot.pack_display.clone()),
+                    cx,
+                );
+            });
+            return;
+        }
+        let linked = self
+            .provider_sessions
+            .get(&session_id)
+            .and_then(|record| {
+                record.handoff_from.clone().map(|source| (source, record.handoff_from_provider.clone()))
+            })
+            .or_else(|| {
+                self.overrides.get(&session_id).and_then(|meta| {
+                    meta.handoff_from.clone().map(|source| (source, meta.handoff_from_provider.clone()))
+                })
+            });
+        let Some((source, from_wire)) = linked else { return };
+        let from = ProviderId::parse(from_wire.as_deref().unwrap_or("muse"));
+        let origin = crate::handoff::HandoffOrigin {
+            source_session: source,
+            from,
+            from_model: String::new(),
+        };
+        let divider = crate::handoff_snapshot::fallback_text(from);
+        view.update(cx, |view, cx| {
+            let display = view.pack_display_fallback();
+            view.show_handoff_prefix(origin, Vec::new(), divider, None, display, cx);
+        });
     }
 
     /// Both halves of the link survive restart: the provider record for a

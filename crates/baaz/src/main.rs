@@ -47,6 +47,7 @@ mod dialogs;
 mod files;
 mod full_output;
 mod handoff;
+mod handoff_snapshot;
 mod history;
 mod images;
 mod index;
