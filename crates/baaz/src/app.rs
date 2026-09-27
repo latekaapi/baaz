@@ -3525,6 +3525,24 @@ impl Harness {
             self.login_escape(window, cx);
             return;
         }
+        // The Skills page is the next thing Escape takes back, from any
+        // focus the window's own Cancel reaches (V1): the page's own
+        // `SkillsClose` only fires with focus inside the page, so from the
+        // dock or the sidebar nothing left it. One layer per press, through
+        // the same `close_skills` the page's key takes — a dialog, then the
+        // menu, then the page. A text field that consumes Escape never
+        // reaches here, so field editing is untouched.
+        if self.skills.open {
+            self.close_skills(cx);
+            return;
+        }
+        // The composer's `+` menu is view-local, so the overlay stack
+        // above never saw it: Escape closes it here, before edits (V1).
+        if let Some(view) = self.active.clone() {
+            if view.update(cx, |view, cx| view.close_plus_menu(cx)) {
+                return;
+            }
+        }
         // An open rename is the next thing Escape takes back — a project
         // rename first, then a session row's. (There is no sidebar search
         // field left to clear: ⌘⇧F owns search now, and its palette closes

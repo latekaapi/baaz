@@ -2641,6 +2641,14 @@ impl Harness {
         // Whatever switch the scripts were waiting for has landed: session
         // verbs run against this view from here on.
         self.session_switch_pending = false;
+        // Opening a session leaves the Skills page (D54, V1): "New session"
+        // from the sidebar or ⌘N activates through here on every path
+        // (draft reuse, local draft, provider lane), so the page never
+        // swallows the new session the way it did before. Selecting a
+        // session closes it earlier in `resume_inner`; closing it here too
+        // is idempotent there and covers every other opener.
+        self.skills.open = false;
+        self.skills.detail_focused = false;
         // The UI points at what is open: the row highlight and the header
         // label read this, never the view, so every swap refreshes it here
         // rather than at each call site.
@@ -4193,6 +4201,156 @@ mod tests {
             let dialog = harness.overlays.read(cx).dialog.as_ref().expect("the failure is dialogued");
             assert_eq!(dialog.title, "Couldn't start Claude Code");
             assert!(dialog.detail.contains("no child here"), "the reason survives: {}", dialog.detail);
+        });
+        lane_restore(state);
+    }
+
+    /// V1: "New session" (sidebar row, ⌘N) while the Skills page is open
+    /// leaves the page and opens the session. Clicking a session already
+    /// left (via `resume_inner`); the new-session paths activate through
+    /// `activate` without ever closing it, so the page swallowed the new
+    /// lane. Drop the `activate` close and the page stays open.
+    #[gpui::test]
+    fn a_new_session_leaves_the_skills_page(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("v1-skills-new");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.skills.open = true;
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session(window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.active.is_some(), "the new session opened");
+            assert!(!harness.skills.open, "New session leaves the Skills page");
+        });
+        lane_restore(state);
+    }
+
+    /// V1: Escape leaves the Skills page from any focus the window's own
+    /// Cancel reaches. The page's `SkillsClose` key only fires with focus
+    /// inside the page, so from the dock or the sidebar nothing left it.
+    /// Drop the `cancel` arm and the page stays open.
+    #[gpui::test]
+    fn escape_leaves_the_skills_page_from_outside_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("v1-skills-esc");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.auth = Auth::SignedIn(crate::auth::Identity {
+                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    name: "Test".into(),
+                    email: String::new(),
+                });
+                harness.skills.open = true;
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.cancel(window, cx));
+        });
+        vc.update(|_, cx| {
+            assert!(!baaz.read(cx).skills.open, "Escape leaves the Skills page");
+        });
+        lane_restore(state);
+    }
+
+    /// V1: Escape closes the composer's provider menu. The chip picker
+    /// lives in the shared overlay stack, so the overlay close at the top
+    /// of `cancel` takes it — this pins that against a regression that
+    /// would strand the menu and let the next Enter pick a row.
+    #[gpui::test]
+    fn escape_closes_the_composer_provider_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("v1-menu-esc");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+                harness.auth = Auth::SignedIn(crate::auth::Identity {
+                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    name: "Test".into(),
+                    email: String::new(),
+                });
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("the lane opened");
+            view.update(cx, |view, cx| view.toggle_picker(crate::overlays::MenuKind::Provider, cx));
+            assert!(
+                baaz.read(cx).overlays.read(cx).menu.is_some(),
+                "the provider menu opened"
+            );
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.cancel(window, cx));
+        });
+        vc.update(|_, cx| {
+            assert!(
+                baaz.read(cx).overlays.read(cx).menu.is_none(),
+                "Escape closes the composer's provider menu"
+            );
+        });
+        lane_restore(state);
+    }
+
+    /// V1: Escape closes the composer's view-local `+` menu. The overlay
+    /// stack never saw it (plain view state), so `cancel` passed it by
+    /// and the menu stranded. Drop the `cancel` arm and it stays open.
+    #[gpui::test]
+    fn escape_closes_the_composer_plus_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("v1-plus-esc");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+                harness.auth = Auth::SignedIn(crate::auth::Identity {
+                    lane: muse_client::schema::AccountStateKind::AccountLogin,
+                    name: "Test".into(),
+                    email: String::new(),
+                });
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the lane opened");
+            view.update(cx, |view, cx| view.step_plus(cx));
+            assert!(view.read(cx).plus_open(), "the `+` menu opened");
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.cancel(window, cx));
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let open = harness.active.clone().expect("the lane opened").read(cx).plus_open();
+            assert!(!open, "Escape closes the composer's `+` menu");
         });
         lane_restore(state);
     }

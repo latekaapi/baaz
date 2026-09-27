@@ -112,20 +112,33 @@ impl SessionView {
     }
 
     /// `choose:<n>`: the n-th choice of the newest pending approval, 1-based,
-    /// exactly as the digits on the card are.
+    /// exactly as the digits on the card are. With no muse card pending, a
+    /// parked provider tap answers to the same digits (V1) — the newest
+    /// undecided one, in the card's own choice order. Taps take no
+    /// feedback, so the press decides at once.
     pub(crate) fn step_choose(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(n) = rest.parse::<usize>() else { return };
-        let Some((approval_id, choices)) = self.newest_pending_approval() else { return };
-        let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
-        let (approval_id, choice) = (approval_id.clone(), choice.clone());
-        if choice.accepts_feedback && self.feedback_open.is_none() {
-            // The same two-press dance a person does: the first press
-            // opens the field, `feedback:` fills it, the second sends.
-            self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+        if let Some((approval_id, choices)) = self.newest_pending_approval() {
+            let Some(choice) = choices.get(n.saturating_sub(1)) else { return };
+            let (approval_id, choice) = (approval_id.clone(), choice.clone());
+            if choice.accepts_feedback && self.feedback_open.is_none() {
+                // The same two-press dance a person does: the first press
+                // opens the field, `feedback:` fills it, the second sends.
+                self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+                return;
+            }
+            let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
+            self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
             return;
         }
-        let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
-        self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
+        let Some(tap) = self.external_approvals.pending().last().cloned() else {
+            return;
+        };
+        let choices = crate::providers::ApprovalChoice::all();
+        let Some(choice) = choices.get(n.saturating_sub(1)) else {
+            return;
+        };
+        self.decide_external_approval(tap.id.clone(), *choice, None, cx);
     }
 
     /// `feedback:<text>`: type into whichever field is open — an approval's

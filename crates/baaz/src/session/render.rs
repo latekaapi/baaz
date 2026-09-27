@@ -2264,9 +2264,20 @@ impl SessionView {
         )
     }
 
-    /// One external approval card. Every button carries its accessibility
-    /// role and human label on the wrapper in the same change (the button
-    /// itself has no aria builder, so the wrapper names it).
+    /// The accessibility name for one external approval choice button
+    /// (V1): the choice's human label naming the decision, headlined with
+    /// what it decides — "Approve: rm -rf /tmp/probe". Decline and Cancel
+    /// never share one, because "no, do something else" and "no, stop"
+    /// are different answers.
+    pub(super) fn external_choice_label(choice: ApprovalChoice, headline: &str) -> String {
+        format!("{}: {}", choice.label(), headline)
+    }
+
+    /// One external approval card. Every choice button carries its
+    /// accessibility role and human label directly (V1: the library
+    /// `Button` names itself from `accessibility_label`, which also sets
+    /// the button role — so the button is the one named control, with no
+    /// role-bearing wrapper around it).
     fn render_external_card(
         &self,
         approval: &ExternalApproval,
@@ -2324,6 +2335,13 @@ impl SessionView {
                             }
                             ApprovalChoice::Decline | ApprovalChoice::Cancel => press.danger(),
                         };
+                        // The human label from the same helper the test
+                        // pins: naming the button also gives it the button
+                        // role, so the choice answers an AX query by name.
+                        let press = press.accessibility_label(Self::external_choice_label(
+                            choice,
+                            &headline,
+                        ));
                         let press = press.on_click(cx.listener(
                             move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                                 this.decide_external_approval(
@@ -2334,12 +2352,8 @@ impl SessionView {
                                 );
                             },
                         ));
-                        // The wrapper carries the role and the human label;
-                        // decline and cancel never share one.
                         div()
                             .id(format!("ext-wrap-{}-{}", approval.id, choice.choice_id()))
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("{}: {}", choice.label(), headline))
                             .child(press)
                     })),
             ),
@@ -2378,6 +2392,34 @@ mod tests {
     fn an_absolute_path_outside_the_workspace_resolves_as_is() {
         assert_eq!(resolve_link_path(&workspace(), "/etc/passwd"), PathBuf::from("/etc/passwd"));
         assert_eq!(resolve_link_path(&workspace(), "/tmp/scratch/note.txt"), PathBuf::from("/tmp/scratch/note.txt"));
+    }
+
+    /// V1: every approval choice answers an AX query by a human name —
+    /// the same string the card sets as the button's accessibility label
+    /// (which also gives it the button role). A choice that shared
+    /// another's name — or shipped none — would decide silently for a
+    /// screen-reader user, so decline and cancel never share one.
+    #[test]
+    fn every_approval_choice_names_its_button() {
+        assert_eq!(
+            SessionView::external_choice_label(ApprovalChoice::Accept, "rm -rf /tmp/probe"),
+            "Approve: rm -rf /tmp/probe"
+        );
+        assert_eq!(
+            SessionView::external_choice_label(
+                ApprovalChoice::AcceptForSession,
+                "rm -rf /tmp/probe"
+            ),
+            "Approve for this session: rm -rf /tmp/probe"
+        );
+        assert_eq!(
+            SessionView::external_choice_label(ApprovalChoice::Decline, "rm -rf /tmp/probe"),
+            "Deny: rm -rf /tmp/probe"
+        );
+        assert_eq!(
+            SessionView::external_choice_label(ApprovalChoice::Cancel, "rm -rf /tmp/probe"),
+            "Deny and stop: rm -rf /tmp/probe"
+        );
     }
 
     #[test]

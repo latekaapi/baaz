@@ -359,6 +359,26 @@ impl SessionView {
         cx.notify();
     }
 
+    /// Close the composer's view-local `+` menu, if open. The chip pickers
+    /// and caret popovers live in the shared overlay stack (closed by
+    /// `close_topmost`), but the `+` menu is plain view state no overlay
+    /// close ever sees — so Escape's `cancel` has to ask the view (V1).
+    /// Reports whether anything closed, like `close_topmost` does.
+    pub fn close_plus_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.plus_open {
+            return false;
+        }
+        self.plus_open = false;
+        cx.notify();
+        true
+    }
+
+    /// Whether the `+` menu stands open, for the Escape test.
+    #[cfg(test)]
+    pub(crate) fn plus_open(&self) -> bool {
+        self.plus_open
+    }
+
     /// The provider menu's rows for a session on `current`.
     ///
     /// A fresh session offers the three backends as a swap. A session
