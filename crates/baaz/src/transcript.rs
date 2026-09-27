@@ -760,7 +760,12 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 turn = turn
                     .on_action(move |action, window, cx| act(turn_id.clone(), body.clone(), action, window, cx));
             }
-            div().w_full().flex().justify_end().child(turn).into_any_element()
+            // A plain block parent, not a flex row: aui's user column is
+            // `w_full` capped at 78% with `ml_auto`, which only resolves
+            // to a definite, right-anchored width as a block child. As a
+            // flex item the column shrink-wraps and the bubble inside
+            // clips to a few characters (aui v0.3.x `ml_auto` addition).
+            div().w_full().child(turn).into_any_element()
         }
         Turn::Assistant { id, blocks, meta, timestamp, .. } => {
             let last = blocks.len().saturating_sub(1);
