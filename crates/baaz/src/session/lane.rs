@@ -1948,8 +1948,8 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(
                 view.read(cx).model().as_ref(),
-                "Claude Code",
-                "no model known yet: the chip names the provider"
+                "Claude Sonnet",
+                "V1: no model known yet, so the chip names the CLI default, never the provider"
             );
         });
         // History lands the way a real resume replays it: one event with
@@ -2466,6 +2466,139 @@ mod tests {
                 .any(|state| matches!(state, ApprovalState::AllowedOnce { .. })),
             "the resolution settles the card to allowed"
         );
+    }
+
+    /// V1: the digits decide a parked provider tap the way they decide a
+    /// muse card — whenever a card is pending and the draft is empty.
+    /// `card_has_keys` and `step_choose` only saw fold cards, so `1` on a
+    /// tap-only approval did nothing. Drop either arm and the tap keeps
+    /// its digits (the first assert) or swallows the press (the second).
+    #[gpui::test]
+    fn digits_decide_a_parked_provider_tap(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.inject_external_approval(
+                    ExternalApproval {
+                        id: "ap-1".to_owned(),
+                        session_id: "s-1".to_owned(),
+                        provider: ProviderId::Codex,
+                        kind: ExternalApprovalKind::CodexMcpElicitation,
+                        headline: "echo hi-from-codex".to_owned(),
+                        reason: "the model asked".to_owned(),
+                        dont_ask_again: None,
+                        stage_token: None,
+                        decision_sent: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).card_has_keys(cx),
+                "a pending tap owns the digits with an empty draft"
+            );
+        });
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| view.choose_nth(0, window, cx));
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx)
+                    .external_approvals
+                    .get("ap-1")
+                    .and_then(|approval| approval.decision_sent.clone()),
+                Some("accept".to_owned()),
+                "pressing 1 decides the tap's first choice"
+            );
+        });
+        // A second press decides nothing twice: the decided tap is no
+        // longer undecided, so the digit finds nothing and the wire sees
+        // exactly one decision.
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| view.choose_nth(1, window, cx));
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx)
+                    .external_approvals
+                    .get("ap-1")
+                    .and_then(|approval| approval.decision_sent.clone()),
+                Some("accept".to_owned()),
+                "a second digit press sends nothing twice"
+            );
+        });
+    }
+
+    /// V1: a new Claude Code session's chip names the model the CLI will
+    /// use, not the provider. Nothing is known yet — no pick, no fold
+    /// model, no history — so the chip reads the supplied default.
+    #[gpui::test]
+    fn a_new_claude_session_chips_its_default_model(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).model().to_string(),
+                "Claude Sonnet",
+                "the chip names a model before the first turn, never the provider"
+            );
+        });
+    }
+
+    /// V1: a session with a catalog default but no active row and no
+    /// history chips the default — and its own history still wins over
+    /// the default when it has one.
+    #[gpui::test]
+    fn a_catalog_default_chips_under_history(cx: &mut gpui::TestAppContext) {
+        use muse_client::schema::ModelCatalogEntry;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let row = |id: &str, default: bool| ModelCatalogEntry {
+            context_limit: None,
+            cost: None,
+            description: None,
+            display_label: format!("Codex {id}"),
+            is_active: false,
+            is_default: default,
+            model_id: id.to_owned(),
+            output_limit: None,
+            profile_id: None,
+            provider_id: "codex".to_owned(),
+            release_date: None,
+        };
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models = vec![row("gx-1", false), row("gx-2", true)];
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).model_id(),
+                "gx-2",
+                "the catalog default chips when nothing else is known"
+            );
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.history_model = Some("gx-1".to_owned());
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).model_id(),
+                "gx-1",
+                "the session's own history wins over the catalog default"
+            );
+        });
     }
 
     /// W8: a folded multi-message Claude Code turn settles the view once.

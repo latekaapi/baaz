@@ -352,6 +352,16 @@ pub struct SuppliedModel {
     pub detail: &'static str,
 }
 
+/// The model a fresh Claude Code session runs on when nothing else says
+/// otherwise (V1): the CLI's out-of-box default, matching the supplied
+/// list's standing first row. The chip reads this before the first turn
+/// so a new session names a model, never the provider. A seed from
+/// `claude` settings or the first init frame would outrank it; neither
+/// reaches the view yet.
+pub fn claude_code_default_model() -> &'static str {
+    "sonnet"
+}
+
 /// The Claude Code models Baaz offers: aliases `--model` accepts, in
 /// picker order. No default is marked — no probe established one — so the
 /// current session model marks the active row instead.

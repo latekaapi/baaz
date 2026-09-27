@@ -1077,8 +1077,10 @@ impl SessionView {
     /// back into this fold for those sessions, so the id reads the
     /// recorded pick rather than going stale. On a provider lane the
     /// catalog's active row counts too — a fresh Codex open flags its
-    /// effective model there, with no pick yet. The muse fallback is the
-    /// provider id, exactly as it always was.
+    /// effective model there, with no pick yet — then the session's own
+    /// history (a reopen names the model it ran on), then the catalog's
+    /// default row, then the provider's out-of-box default. The muse
+    /// fallback is the provider id, exactly as it always was.
     pub(crate) fn model_id(&self) -> String {
         if let Some(pending) = self.pending_model.as_deref() {
             return pending.to_owned();
@@ -1099,11 +1101,17 @@ impl SessionView {
             {
                 return id;
             }
-            // No live row (Claude Code has no catalog; a reopen lands
-            // before the fetch): the last finished turn's model — history
-            // first — so the chip names the session, never the provider.
+            // The session's own past wins over any generic default: a
+            // reopened session names the model its history ran on.
             if let Some(model) = self.history_model.clone() {
                 return model;
+            }
+            // The catalog's default row (V1): a fresh session whose
+            // catalog names no active row yet still chips a model.
+            if let Some(id) =
+                self.models.iter().find(|m| m.is_default).map(|m| m.model_id.clone())
+            {
+                return id;
             }
             return String::new();
         }
@@ -1114,13 +1122,22 @@ impl SessionView {
     /// exactly as it always did. A provider lane shows the effective
     /// model's human name from the live catalog — never the provider's
     /// wire id (`claude-code` is not a model); with no model known yet,
-    /// the provider's human label.
+    /// a Claude Code session chips the CLI's out-of-box default (V1),
+    /// anything else the provider's human label.
     pub fn model(&self) -> SharedString {
         if crate::providers::uses_legacy_pump(self.provider_kind()) {
             return SharedString::from(self.model_id());
         }
         let id = self.model_id();
         if id.is_empty() {
+            // Display-only fallback: the id stays empty (nothing is
+            // marked active, no pick is implied) while the chip names a
+            // model. A `claude`-settings seed or the first init frame
+            // would outrank this; neither reaches the view yet.
+            if self.provider_kind() == crate::providers::ProviderId::ClaudeCode {
+                let default = crate::providers::claude_code_default_model();
+                return SharedString::from(crate::providers::claude_code_model_label(default));
+            }
             return SharedString::from(self.provider_kind().label().to_owned());
         }
         let label = self
@@ -1340,9 +1357,14 @@ impl SessionView {
     /// Whether a pending card should own the digit keys this frame (spec §3.9).
     ///
     /// Only with an empty draft: `1` in a half-typed sentence is a `1`, and a
-    /// person mid-thought must never have a keystroke mean "allow".
+    /// person mid-thought must never have a keystroke mean "allow". A parked
+    /// provider tap owns them the same way a muse card does (V1): either
+    /// surface pending is enough.
     pub fn card_has_keys(&self, cx: &gpui::App) -> bool {
-        self.draft_is_empty(cx) && !self.card_field_open() && self.newest_pending_approval().is_some()
+        self.draft_is_empty(cx)
+            && !self.card_field_open()
+            && (self.newest_pending_approval().is_some()
+                || !self.external_approvals.pending().is_empty())
     }
 
     /// Pick the n-th choice of the newest pending approval (`1`–`9`).

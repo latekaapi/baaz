@@ -1041,6 +1041,10 @@ fn code_run_row(
                         .xs()
                         .ghost()
                         .icon(IconName::Play)
+                        // The human label names the control for the
+                        // accessibility tree (V1): one Run button per
+                        // fence, each named for the command it runs.
+                        .accessibility_label(SharedString::from(format!("Run {label}")))
                         .on_click(move |_, window, cx| {
                             if let Some(request) = RunRequest::new(
                                 command.clone(),
