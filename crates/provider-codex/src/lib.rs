@@ -309,7 +309,13 @@ impl CodexAdapter {
         Ok(text)
     }
 
-    fn submit_text(&self, session_id: &str, text: &str, effort: Option<&str>) -> Result<Ack, ProviderError> {
+    fn submit_text(
+        &self,
+        session_id: &str,
+        text: &str,
+        effort: Option<&str>,
+        display_text: Option<&str>,
+    ) -> Result<Ack, ProviderError> {
         self.check_session(session_id)?;
         let (thread_id, model) = self.thread_and_model()?;
         let turn = self
@@ -327,7 +333,12 @@ impl CodexAdapter {
             reason: "turn/start answered without a turn id".into(),
         })?;
         // The ack carries the submission handle; the turn's true identity is
-        // the server-minted id, never derived locally.
+        // the server-minted id, never derived locally. The full text goes
+        // to the model; the bubble shows the display text when one rode
+        // the submit, keyed by the turn this submit creates.
+        if let Some(display) = display_text {
+            self.fold.lock().expect("fold mutex").record_display_text(Some(&turn_id), text, display);
+        }
         Ok(Ack::TurnAccepted { turn_id })
     }
 
@@ -589,9 +600,9 @@ impl ProviderAdapter for CodexAdapter {
                 reason: "no out-of-turn shell surface was captured; the shell runs inside turns"
                     .into(),
             }),
-            Command::SubmitInput { session_id, parts, effort, .. } => {
+            Command::SubmitInput { session_id, parts, effort, display_text, .. } => {
                 let text = Self::join_text(&parts)?;
-                self.submit_text(&session_id, &text, effort.as_deref())
+                self.submit_text(&session_id, &text, effort.as_deref(), display_text.as_deref())
             }
             Command::SteerInput { session_id, expected_turn, parts, .. } => {
                 self.check_session(&session_id)?;

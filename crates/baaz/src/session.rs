@@ -835,6 +835,12 @@ pub struct SessionView {
     /// This session started as a handoff's destination: where it came from.
     /// Drawn as the quiet marker at the top of the transcript.
     handoff_origin: Option<crate::handoff::HandoffOrigin>,
+    /// Full provider-submitted text → bubble text for submits that carried
+    /// `display_text`, mirrored from the provider session record on first
+    /// use. `None` until a provider submit records one or a replayed delta
+    /// needs a lookup: the lazy load keeps sessions that never submit with
+    /// a display text off the store entirely.
+    display_overrides: Option<HashMap<String, String>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -1011,6 +1017,7 @@ impl SessionView {
             handoff_card: None,
             handed_off_to: None,
             handoff_origin: None,
+            display_overrides: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -1032,6 +1039,53 @@ impl SessionView {
     /// a session is served by exactly one lane (see `crate::providers`).
     pub fn provider_kind(&self) -> ProviderId {
         ProviderId::parse(&self.provider_id)
+    }
+
+    /// Load the submit display map once, from the provider session record:
+    /// what a resumed view folds replayed turns against after a restart,
+    /// when the adapter's own map is gone with the old process.
+    fn ensure_display_overrides(&mut self) {
+        if self.display_overrides.is_none() {
+            let overrides = crate::provider_sessions::read()
+                .get(&self.session_id)
+                .map(|record| record.display_texts.clone())
+                .unwrap_or_default();
+            self.display_overrides = Some(overrides);
+        }
+    }
+
+    /// Remember the bubble text for a provider submit carrying
+    /// `display_text`, keyed by the full model-visible text the provider
+    /// echoes back. The adapter folds already substitute live; this map
+    /// (mirrored into the provider session record) is what a replayed
+    /// history folds against after a restart.
+    pub(crate) fn remember_display_text(&mut self, full_text: String, display: String) {
+        if display.trim().is_empty() || display == full_text || full_text.len() > 131_072 {
+            return;
+        }
+        self.ensure_display_overrides();
+        let changed = match self.display_overrides.as_mut() {
+            Some(map) if map.len() < 64 || map.contains_key(&full_text) => {
+                map.insert(full_text.clone(), display.clone()).as_deref() != Some(display.as_str())
+            }
+            _ => false,
+        };
+        if !changed {
+            return;
+        }
+        let mut store = crate::provider_sessions::read();
+        let before = store.get(&self.session_id).map(|record| record.display_texts.clone());
+        crate::provider_sessions::note_display_text(&mut store, &self.session_id, &full_text, &display);
+        if store.get(&self.session_id).map(|record| &record.display_texts) != before.as_ref() {
+            crate::provider_sessions::write(&store);
+        }
+    }
+
+    /// The bubble text for an echoed provider turn, if a submit recorded
+    /// one for its full text.
+    pub(crate) fn display_override_for(&mut self, full_text: &str) -> Option<String> {
+        self.ensure_display_overrides();
+        self.display_overrides.as_ref().and_then(|map| map.get(full_text).cloned())
     }
 
     /// Whether this session has sent anything yet: folded turns, or a turn

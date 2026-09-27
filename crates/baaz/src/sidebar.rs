@@ -2659,6 +2659,7 @@ mod tests {
             handoff_to: None,
             handoff_from: None,
             handoff_from_provider: None,
+            display_texts: std::collections::HashMap::new(),
         }
     }
 

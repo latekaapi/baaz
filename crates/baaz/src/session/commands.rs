@@ -158,6 +158,10 @@ impl SessionView {
         // Plan mode prefixes the model-visible input, exactly as on the
         // muse lane; the display text stays the person's words.
         let model_text = if self.plan { plan::prefix(&text) } else { text.clone() };
+        // The provider echoes the whole model-visible input; the bubble
+        // shows what the person typed, including across a restart (the
+        // record mirrors the map for replayed histories).
+        self.remember_display_text(model_text.clone(), text.clone());
         let parts = self.provider_parts(model_text);
         let command = ProviderCommand::SubmitInput {
             request_id,

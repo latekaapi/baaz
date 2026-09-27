@@ -656,6 +656,15 @@ pub struct CodexFold {
     delta_text: HashMap<(String, String), String>,
     delta_order: Vec<(String, String)>,
     user_started: HashSet<String>,
+    /// Full submitted text → the bubble text (`SubmitInput.display_text`):
+    /// the provider echoes the whole input, so the user turn shows the
+    /// short text instead. The turn-keyed map below wins when the echo
+    /// names its turn; this one covers echoes that do not.
+    display_by_text: HashMap<String, String>,
+    /// Turn id from the submit ack → the bubble text: the join the submit
+    /// creates. Recorded when `turn/start` answers, read when the turn's
+    /// `userMessage` item completes (live and `thread/resume` alike).
+    display_by_turn: HashMap<String, String>,
     usage: HashMap<(String, String), TokenCounts>,
     account: AccountSnapshot,
     current_turn: Option<String>,
@@ -696,6 +705,41 @@ impl CodexFold {
     /// it lands in the [`TurnMeta`] footer.
     pub fn set_model(&mut self, model: &str) {
         self.model = Some(model.to_owned());
+    }
+
+    /// Remember the bubble text for a submit carrying `display_text`.
+    /// `turn_id` is the submit ack's turn — the join the submit creates;
+    /// `full_text` is the model-visible input the echo carries back. An
+    /// empty display, or one identical to the input, records nothing, so
+    /// the typed text renders as before.
+    pub fn record_display_text(&mut self, turn_id: Option<&str>, full_text: &str, display: &str) {
+        if display.is_empty() || display == full_text {
+            return;
+        }
+        if full_text.len() > 131_072 {
+            return;
+        }
+        if let Some(turn_id) = turn_id.filter(|id| !id.is_empty()) {
+            if self.display_by_turn.len() < 64 {
+                self.display_by_turn.insert(turn_id.to_owned(), display.to_owned());
+            }
+        }
+        if self.display_by_text.len() < 64 {
+            self.display_by_text.insert(full_text.to_owned(), display.to_owned());
+        }
+    }
+
+    /// The bubble text for an echoed user turn, if a submit recorded one:
+    /// the turn join first, then the full input text.
+    fn display_text_for<'a>(
+        &'a self,
+        turn_id: Option<&'a str>,
+        full_text: &'a str,
+    ) -> Option<&'a str> {
+        turn_id
+            .and_then(|id| self.display_by_turn.get(id))
+            .or_else(|| self.display_by_text.get(full_text))
+            .map(String::as_str)
     }
 
     /// The per-turn figure for `(thread_id, turn_id)`: the `last` bucket,
@@ -1313,11 +1357,17 @@ impl CodexFold {
                 );
             }
             "userMessage" => {
+                // The echo carries the whole submitted input; a submit
+                // that recorded `display_text` shows the short text
+                // instead, while the model still received the full text.
+                let full = item.text().to_owned();
+                let text =
+                    self.display_text_for(notification.turn_id(), &full).unwrap_or(&full).to_owned();
                 if self.user_started.insert(item.id().to_owned()) {
                     deltas.push(Delta::TurnStarted {
                         turn: Turn::User {
                             id: item.id().to_owned(),
-                            text: item.text().to_owned(),
+                            text,
                             attachments: item
                                 .attachments()
                                 .iter()
@@ -2378,6 +2428,66 @@ mod tests {
             assistant_texts(&deltas).iter().any(|text| text.contains("DONE")),
             "the turn saw the image and answered"
         );
+    }
+
+    /// A submit carrying `display_text` bubbles the short text, not the
+    /// whole echoed input; without one the echo renders as before.
+    #[test]
+    fn submit_display_text_replaces_the_echoed_bubble() {
+        fn user_completed(turn_id: &str, item_id: &str, text: &str) -> String {
+            serde_json::json!({
+                "_dir": "server->client",
+                "frame": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "userMessage",
+                            "id": item_id,
+                            "clientId": null,
+                            "content": [{"type": "text", "text": text, "text_elements": []}],
+                        },
+                        "threadId": "thread-1",
+                        "turnId": turn_id,
+                        "completedAtMs": 1790250868,
+                    },
+                },
+            })
+            .to_string()
+        }
+        fn user_texts(deltas: &[Delta]) -> Vec<String> {
+            deltas
+                .iter()
+                .filter_map(|delta| match delta {
+                    Delta::TurnStarted { turn: Turn::User { text, .. } } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+        let full = "Continuing a session handed off from Claude Code. Context follows.\n## Original goal\nRename Ledger to Journal";
+        let short = "Handed off from Claude Code: Rename Ledger to Journal (1 recent turns, 0 open todos, 0 files touched)";
+        // Keyed by the turn the submit creates: the ack's turn id wins.
+        let mut fold = CodexFold::new();
+        fold.record_display_text(Some("turn-1"), full, short);
+        let (_, frame) =
+            decode_envelope(&user_completed("turn-1", "item-1", full)).expect("envelope decodes");
+        assert_eq!(user_texts(&fold.apply(&frame)), [short]);
+        // Without a display text the echoed input renders whole, as before.
+        let mut fold = CodexFold::new();
+        let (_, frame) =
+            decode_envelope(&user_completed("turn-9", "item-9", full)).expect("envelope decodes");
+        assert_eq!(user_texts(&fold.apply(&frame)), [full]);
+        // The text key covers an echo naming an unrecorded turn.
+        let mut fold = CodexFold::new();
+        fold.record_display_text(None, full, short);
+        let (_, frame) =
+            decode_envelope(&user_completed("turn-other", "item-2", full)).expect("envelope decodes");
+        assert_eq!(user_texts(&fold.apply(&frame)), [short]);
+        // An identical display records nothing: the typed text stands.
+        let mut fold = CodexFold::new();
+        fold.record_display_text(Some("turn-3"), full, full);
+        let (_, frame) =
+            decode_envelope(&user_completed("turn-3", "item-3", full)).expect("envelope decodes");
+        assert_eq!(user_texts(&fold.apply(&frame)), [full]);
     }
 
     /// `turn/diff/updated` is carried, never rendered: folding those
