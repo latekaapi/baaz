@@ -394,6 +394,39 @@ impl SessionView {
                     open(&name, window, cx)
                 }))
             },
+            // The handoff card's two intents ("Open the new session",
+            // "Cancel") and the destination marker's back-link: session
+            // ids out to the application as events, like the skill tap
+            // above — honoured under `--replay` too, where they navigate
+            // rather than send.
+            handoff: {
+                let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
+                    cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
+                });
+                let cancel = cx.listener(|_: &mut Self, id: &String, _, cx| {
+                    cx.emit(crate::session::SessionEvent::HandoffCancel { card_id: id.clone() });
+                });
+                Some(crate::transcript::HandoffCards {
+                    open: Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                        open(&id, window, cx)
+                    }),
+                    cancel: Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                        cancel(&id, window, cx)
+                    }),
+                })
+            },
+            handoff_back: self.handoff_origin.as_ref().map(|origin| {
+                let source = origin.source_session.clone();
+                let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
+                    cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
+                });
+                crate::transcript::HandoffBack {
+                    source,
+                    open: Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                        open(&id, window, cx)
+                    }),
+                }
+            }),
             // D51 "Open terminal" on a terminal tool card: the tab rides
             // out to the application, which opens the dock on it. Local,
             // like the run above — honoured under `--replay` too.
@@ -2034,31 +2067,17 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     }
 }
 
-/// The provider menu's rows for a session on `current`. A fresh session offers
-/// the three backends as a swap; a session with turns keeps its lane, so the
-/// other two read as "New session on X" with the reason in the detail line —
-/// the picker component has no disabled state, so the typed reason rides as
-/// prose (the way an `Unavailable` capability explains itself) and every row
-/// still acts on click. Row ids are always the wire ids the pick handler
-/// parses back; only the labels differ.
+/// The provider menu's rows for a session on `current`, drawn from
+/// [`SessionView::provider_rows`]: a fresh session offers the three
+/// backends as a swap; a session with turns keeps its lane, so every
+/// other backend reads as "Hand off to X…" followed by "New session on
+/// X". The picker component has no disabled state, so the typed reason
+/// rides as prose (the way an `Unavailable` capability explains itself)
+/// and every row still acts on click.
 fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
-    ProviderId::all()
+    SessionView::provider_rows(current, has_turns)
         .into_iter()
-        .map(|id| {
-            if has_turns && id != current {
-                PickerRow::new(
-                    id.as_str(),
-                    format!("New session on {}", id.label()),
-                    format!(
-                        "This session already has turns on {}, so its provider cannot be switched. Starts a new session on {}.",
-                        current.label(),
-                        id.label()
-                    ),
-                )
-            } else {
-                PickerRow::new(id.as_str(), id.label(), id.blurb())
-            }
-        })
+        .map(|row| PickerRow::new(row.id, row.label, row.detail))
         .collect()
 }
 
@@ -2605,25 +2624,30 @@ mod tests {
     }
 
     #[test]
-    fn a_session_with_turns_offers_new_sessions_with_the_reason() {
+    fn a_session_with_turns_offers_handoff_then_new_session() {
         let rows = provider_picker_rows(ProviderId::Muse, true);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 5);
         // The session's own provider stays a plain row: clicking it just
         // closes the menu.
         assert_eq!(rows[0].label.as_ref(), "Muse");
-        // The others are new sessions, never switches — each carries why,
-        // in the detail line the menu component can draw.
-        assert_eq!(rows[1].label.as_ref(), "New session on Claude Code");
-        assert_eq!(rows[2].label.as_ref(), "New session on Codex");
+        // Every other backend reads as "Hand off to X…" first, then "New
+        // session on X" with the reason — never a switch.
+        assert_eq!(rows[1].label.as_ref(), "Hand off to Claude Code…");
+        assert_eq!(rows[2].label.as_ref(), "New session on Claude Code");
+        assert_eq!(rows[3].label.as_ref(), "Hand off to Codex…");
+        assert_eq!(rows[4].label.as_ref(), "New session on Codex");
         assert_eq!(
-            rows[1].detail.as_ref(),
+            rows[2].detail.as_ref(),
             "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Claude Code."
         );
         assert_eq!(
-            rows[2].detail.as_ref(),
+            rows[4].detail.as_ref(),
             "This session already has turns on Muse, so its provider cannot be switched. Starts a new session on Codex."
         );
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
-        assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
+        assert_eq!(
+            ids,
+            vec!["muse", "handoff:claude-code", "claude-code", "handoff:codex", "codex"]
+        );
     }
 }

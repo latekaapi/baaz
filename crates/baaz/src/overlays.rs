@@ -58,6 +58,10 @@ pub enum DialogAction {
     /// Close the dialog's `archive_target` terminal tab after confirming
     /// its still-running command (D52).
     CloseTerminalTab,
+    /// Start the handoff the dialog previews: the facts ride on the
+    /// application (`Harness::handoff_confirm`), not on this action, so
+    /// dismissing any other way confirms nothing.
+    HandoffConfirm,
 }
 
 /// Which popover is open over the composer.
@@ -366,6 +370,8 @@ pub enum Command {
     Usage,
     /// Start a new session in this workspace.
     Clear,
+    /// Hand this session's turns to a fresh session on another provider.
+    Handoff,
     /// Open the Projects palette: adopt a folder or switch project.
     Project,
     /// `account/logout`.
@@ -394,7 +400,7 @@ impl Command {
     /// The six window-level commands sit together just before `Help`: the
     /// four right-pane commands as one group, then the two terminal commands
     /// as another, with `Help` still closing the list.
-    pub const ALL: [Command; 24] = [
+    pub const ALL: [Command; 25] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -404,6 +410,7 @@ impl Command {
         Command::Usage,
         Command::Clear,
         Command::Project,
+        Command::Handoff,
         Command::Fork,
         Command::Name,
         Command::Resume,
@@ -438,6 +445,7 @@ impl Command {
             Command::Status => "/status",
             Command::Usage => "/usage",
             Command::Clear => "/clear",
+            Command::Handoff => "/handoff",
             Command::Project => "/project",
             Command::Logout => "/logout",
             Command::Help => "/help",
@@ -468,6 +476,7 @@ impl Command {
             Command::Status => "Show current session status",
             Command::Usage => "Show session usage",
             Command::Clear => "Start a new session in this workspace",
+            Command::Handoff => "Hand off to another provider…",
             Command::Project => "Add or switch project",
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
@@ -634,7 +643,7 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
-        assert_eq!(Command::ALL.len(), 24, "the palette lists every command");
+        assert_eq!(Command::ALL.len(), 25, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
             assert_eq!(Command::parse_line(command.slash()), Some((command, "")));

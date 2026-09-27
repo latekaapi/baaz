@@ -1394,6 +1394,9 @@ impl Harness {
                         cx.notify();
                     });
                 }
+                // A handoff to muse lands here: the pack submits onto the
+                // fresh view, which the lane check above just built.
+                this.land_handoff_destination(session_id.clone(), cx);
                 // The project's effort rides along before the first turn.
                 if let Some(effort) = effort {
                     if let Some(view) = this.active.clone() {
@@ -1427,6 +1430,7 @@ impl Harness {
                 // place this failure would otherwise appear.
                 crate::baaz_log!("session/start failed: {error}");
                 this.session_switch_pending = false;
+                this.fail_pending_handoff(error.to_string(), cx);
                 this.report(&error, cx);
             }
         });
@@ -2027,6 +2031,7 @@ impl Harness {
                 // it, like the failed `session/start` arm does.
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
                 this.session_switch_pending = false;
+                this.fail_pending_handoff(error.to_string(), cx);
                 this.set_dialog(
                     cx,
                     Dialog {
@@ -2094,6 +2099,7 @@ impl Harness {
             Err(reason) => {
                 crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
                 self.session_switch_pending = false;
+                self.fail_pending_handoff(reason.clone(), cx);
                 self.set_dialog(
                     cx,
                     Dialog {
@@ -2178,6 +2184,9 @@ impl Harness {
         // view, points the event subscription at the new one, focuses the
         // composer — everything `open` does for muse.
         self.activate(view, false, window, cx);
+        // A handoff's destination lands here: the pack submits onto the
+        // fresh view. Anything else leaves `pending_handoff` alone.
+        self.land_handoff_destination(session_id.clone(), cx);
         // The scriptable check: a `--steps` run greps the log for this line
         // to prove the pick ended on a provider lane, not a muse session.
         // (`baaz_log!` already carries the `baaz: ` prefix; spelling it
@@ -3120,6 +3129,48 @@ impl Harness {
                     let _ = this.update_in(cx, |this, window, cx| this.new_session(window, cx));
                 }));
             }
+            // "Hand off to X…" on a session with turns: the lossy
+            // re-prompt (see `crate::handoff`). The dialog (or the step
+            // verb's headless flag) decides whether a confirm comes
+            // first; opening the destination needs a window, so both
+            // rejoin through one like the paths above.
+            SessionEvent::HandoffRequested { provider, headless } => {
+                let (source, provider, headless) =
+                    (view.read(cx).session_id.clone(), *provider, *headless);
+                if headless {
+                    self.tasks.push(cx.spawn(async move |this, cx| {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.start_handoff(source, provider, window, cx)
+                        });
+                    }));
+                } else {
+                    self.show_handoff_confirm(source, provider, cx);
+                }
+            }
+            // "Open the new session" on a handoff card, or the
+            // destination marker's back-link: show that session. Rejoins
+            // through a window like the rename path above.
+            SessionEvent::HandoffOpenSession { destination } => {
+                let destination = destination.clone();
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.resume(destination, window, cx));
+                }));
+            }
+            // "Cancel" on a handoff card: abort while cancellable,
+            // shutting the opened destination down.
+            SessionEvent::HandoffCancel { card_id } => {
+                let (source, card_id) = (view.read(cx).session_id.clone(), card_id.clone());
+                self.cancel_handoff(&source, &card_id, cx);
+            }
+            // The pack's submit ack on the destination: the run holding
+            // that destination advances, epoch-fenced.
+            SessionEvent::HandoffPackAccepted { session_id } => {
+                self.acknowledge_handoff(session_id.clone(), cx);
+            }
+            // The pack never landed: the run fails, the source stays usable.
+            SessionEvent::HandoffPackFailed { session_id, reason } => {
+                self.fail_handoff(session_id.clone(), reason.clone(), cx);
+            }
             SessionEvent::RenameStart => {
                 if let Some(view) = self.active.clone() {
                     let session_id = view.read(cx).session_id.clone();
@@ -3214,6 +3265,421 @@ impl Harness {
             archive_target: None,
         };
         self.set_dialog(cx, dialog);
+    }
+}
+
+/// Handoff between providers (H2): the application half. The machine
+/// itself is [`crate::handoff::HandoffRun`]; here the runs are owned
+/// (keyed by source session), the confirm dialog is shown, destinations
+/// are opened, and acks advance the run to activation.
+impl Harness {
+    /// The view for `session_id`: the active one, else a parked one.
+    fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
+        if let Some(view) = self.active.clone() {
+            if view.read(cx).session_id == session_id {
+                return Some(view);
+            }
+        }
+        self.session_cache.iter().find(|(id, _)| id == session_id).map(|(_, view)| view.clone())
+    }
+
+    /// "Hand off to X…" with a confirm first: freeze the pack preview and
+    /// show [`handoff_confirm`](aui::transcript::handoff_confirm). A
+    /// session with no turns, or a pending question / approval / an
+    /// uninterruptible turn, never reaches the dialog — the refusal lands
+    /// on the transcript as a Refused card instead.
+    pub(super) fn show_handoff_confirm(&mut self, source: String, to: ProviderId, cx: &mut Context<Self>) {
+        let Some(view) = self.find_view(&source, cx) else { return };
+        // The preview the dialog draws, frozen before it opens: `None`
+        // when the session holds no turns to carry.
+        let preview = {
+            let view = view.read(cx);
+            let session = view.session();
+            let session = match session {
+                Some(session) if !session.turns.is_empty() => Some(session),
+                _ => None,
+            };
+            session.map(|session| {
+                let pack = crate::handoff::build_pack(session, view.workspace_path());
+                let carried = crate::handoff::carried_items(&pack);
+                (view.provider_kind(), view.model_id(), view.handoff_blockers(), pack.tokens, carried)
+            })
+        };
+        let Some((from, from_model, blockers, pack_tokens, carried)) = preview else {
+            crate::baaz_log!("handoff refused {source}: nothing to hand off yet");
+            return;
+        };
+        if let Some(refusal) = blockers {
+            self.handoff_epoch = self.handoff_epoch.wrapping_add(1);
+            let run = crate::handoff::HandoffRun::refused(
+                source.clone(),
+                self.handoff_epoch,
+                from,
+                to,
+                from_model,
+                refusal,
+            );
+            let card = run.card();
+            let card_id = run.card_id.clone();
+            self.handoffs.insert(source, run);
+            view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+            return;
+        }
+        self.handoff_confirm = Some(crate::handoff::HandoffConfirmState {
+            source_session: source,
+            to,
+            to_model: String::new(),
+            carried,
+            lost: crate::handoff::lost_items(),
+            pack_tokens,
+        });
+        self.set_dialog(
+            cx,
+            Dialog {
+                title: format!("Hand off to {}?", to.label()),
+                detail: String::new(),
+                kind: DialogKind::Warning,
+                primary: "Hand off",
+                action: DialogAction::HandoffConfirm,
+                archive_target: None,
+            },
+        );
+    }
+
+    /// The confirm dialog's "Hand off": close it and start the run. The
+    /// frozen facts are taken, so dismissing any other way confirms
+    /// nothing afterwards.
+    pub(crate) fn confirm_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirm) = self.handoff_confirm.take() else {
+            self.close_dialog(cx);
+            return;
+        };
+        let (source, to) = (confirm.source_session.clone(), confirm.to);
+        self.close_dialog(cx);
+        self.start_handoff(source, to, window, cx);
+    }
+
+    /// Run the machine from Requested to Prepared, then open the
+    /// destination: interrupt a running turn, checkpoint the pack, and
+    /// submit it as the fresh session's first turn when it lands.
+    /// Failures at any step fail the run with the reason; the source
+    /// stays usable.
+    pub(crate) fn start_handoff(
+        &mut self,
+        source: String,
+        to: ProviderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.find_view(&source, cx) else { return };
+        // A newer request supersedes an in-flight one for the same source:
+        // the old run aborts (its destination shuts down when opened) and
+        // the new epoch owns every later event.
+        if let Some(mut old) = self.handoffs.remove(&source) {
+            if old.cancellable() {
+                let opened = old.cancel();
+                if opened {
+                    if let Some(dest) = old.destination_session.clone() {
+                        self.close_view(&dest, cx);
+                    }
+                    if self.pending_handoff.as_ref().is_some_and(|p| p.source_session == source) {
+                        self.pending_handoff = None;
+                    }
+                }
+                let card = old.card();
+                let card_id = old.card_id.clone();
+                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            }
+        }
+        self.handoff_epoch = self.handoff_epoch.wrapping_add(1);
+        let epoch = self.handoff_epoch;
+        // The facts the run needs, read off the source view at once.
+        struct Facts {
+            from: ProviderId,
+            from_model: String,
+            workspace: String,
+            running: bool,
+            has_turns: bool,
+            blockers: Option<crate::handoff::HandoffRefusal>,
+            pack: Option<crate::handoff::ContextPack>,
+        }
+        let facts = {
+            let view = view.read(cx);
+            let session = view.session();
+            Facts {
+                from: view.provider_kind(),
+                from_model: view.model_id(),
+                workspace: view.workspace_path().to_owned(),
+                running: view.handoff_turn_running(),
+                has_turns: view.has_turns(),
+                blockers: view.handoff_blockers(),
+                pack: session.map(|s| crate::handoff::build_pack(s, view.workspace_path())),
+            }
+        };
+        let (question, approval, uninterruptible) = match facts.blockers {
+            Some(crate::handoff::HandoffRefusal::QuestionPending) => (true, false, false),
+            Some(crate::handoff::HandoffRefusal::ApprovalPending) => (false, true, false),
+            Some(crate::handoff::HandoffRefusal::TurnUninterruptible) => (false, false, true),
+            Some(crate::handoff::HandoffRefusal::SameProvider) | None => (false, false, false),
+        };
+        let mut run = match crate::handoff::HandoffRun::request(
+            source.clone(),
+            epoch,
+            facts.from,
+            to,
+            facts.from_model.clone(),
+            String::new(),
+            question,
+            approval,
+            uninterruptible,
+        ) {
+            Ok(run) => run,
+            Err(refusal) => {
+                let refused = crate::handoff::HandoffRun::refused(
+                    source.clone(),
+                    epoch,
+                    facts.from,
+                    to,
+                    facts.from_model,
+                    refusal,
+                );
+                let card = refused.card();
+                let card_id = refused.card_id.clone();
+                self.handoffs.insert(source, refused);
+                view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+                return;
+            }
+        };
+        let Some(pack) = facts.pack.filter(|_| facts.has_turns) else {
+            run.fail("nothing to hand off — the session has no turns".to_owned());
+            let card = run.card();
+            let card_id = run.card_id.clone();
+            self.handoffs.insert(source, run);
+            view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+            return;
+        };
+        let card_id = run.card_id.clone();
+        self.handoffs.insert(source.clone(), run.clone());
+        view.update(cx, |view, cx| view.append_handoff_card(&card_id, run.card(), cx));
+        // Quiescing: a running turn is interrupted, no new sends accepted
+        // (the composer refuses while the card reads Quiescing).
+        if facts.running {
+            view.update(cx, |view, cx| view.interrupt(cx));
+        }
+        run.note_quiescing();
+        self.handoffs.insert(source.clone(), run.clone());
+        view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
+        // Checkpointed: the pack is a point-in-time capture of the folded
+        // transcript — an interrupt's late deltas may land just after it.
+        run.note_checkpointed(pack);
+        self.handoffs.insert(source.clone(), run.clone());
+        view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
+        crate::baaz_log!("handoff requested epoch={epoch} {source} -> {}", to.as_str());
+        // Prepared next: the destination opens in the source's workspace,
+        // and the pack submits when it lands.
+        self.pending_handoff = Some(crate::handoff::PendingHandoff { source_session: source, epoch });
+        if to == ProviderId::Muse {
+            self.select_new_provider(ProviderId::Muse, cx);
+            self.session_switch_pending = true;
+            self.switch_claim = Some(run.source_session.clone());
+            self.new_session(window, cx);
+        } else {
+            let workspace = facts.workspace.clone();
+            let project =
+                self.projects.resolve_available(Some(&workspace), None).map(|p| p.id.clone());
+            self.open_on_provider(to, project, workspace, window, cx);
+        }
+    }
+
+    /// The fresh session landed: when it is a handoff's destination under
+    /// the current epoch, mark Prepared, leave the origin marker, and
+    /// submit the pack as its first turn. Anything else (an ordinary open,
+    /// a superseded request) is left alone.
+    pub(super) fn land_handoff_destination(&mut self, dest: String, cx: &mut Context<Self>) {
+        let pending = self.pending_handoff.clone();
+        let Some(pending) = pending else { return };
+        let Some(run) = self.handoffs.get(&pending.source_session).cloned() else {
+            self.pending_handoff = None;
+            return;
+        };
+        if run.epoch != pending.epoch || !matches!(run.state, aui_protocol::HandoffState::Checkpointed) {
+            return;
+        }
+        let Some(view) = self.find_view(&dest, cx) else { return };
+        // The landing owns this run only on the requested lane: an
+        // ordinary open racing the handoff keeps its session.
+        let (lane, model) = {
+            let view = view.read(cx);
+            (view.provider_kind(), view.model_id())
+        };
+        if lane != run.to {
+            return;
+        }
+        let mut run = run;
+        run.note_prepared(dest.clone());
+        // The destination names its model once the lane reports it; until
+        // then the card keeps the provider default the open used.
+        if !model.is_empty() {
+            run.to_model = model;
+        }
+        let pack = run.pack.clone();
+        self.handoffs.insert(pending.source_session.clone(), run.clone());
+        self.pending_handoff = None;
+        if let Some(source) = self.find_view(&pending.source_session, cx) {
+            let card = run.card();
+            let card_id = run.card_id.clone();
+            source.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+        }
+        let Some(pack) = pack else {
+            self.fail_handoff(dest, "the context pack was never built".to_owned(), cx);
+            return;
+        };
+        let origin = crate::handoff::HandoffOrigin {
+            source_session: pending.source_session.clone(),
+            from: run.from,
+            from_model: run.from_model.clone(),
+        };
+        let text = crate::handoff::pack_text(&pack, run.from);
+        let display = crate::handoff::display_text(&pack, run.from);
+        view.update(cx, |view, cx| {
+            view.append_handoff_origin(origin, cx);
+            view.submit_pack(text, display, cx);
+        });
+    }
+
+    /// The pack's submit ack on the destination: the run holding that
+    /// destination advances to Acknowledged under its own epoch — a stale
+    /// ack (cancelled, failed, superseded) matches no Prepared run and is
+    /// ignored — then activates at once.
+    pub(super) fn acknowledge_handoff(&mut self, dest: String, cx: &mut Context<Self>) {
+        let found = self
+            .handoffs
+            .iter()
+            .find(|(_, run)| run.destination_session.as_deref() == Some(dest.as_str()))
+            .map(|(source, run)| (source.clone(), run.clone()));
+        let Some((source, mut run)) = found else { return };
+        if !run.acknowledge(run.epoch) {
+            return;
+        }
+        run.activate();
+        let card = run.card();
+        let card_id = run.card_id.clone();
+        let (from, to) = (run.from, run.to);
+        self.handoffs.insert(source.clone(), run);
+        if let Some(view) = self.find_view(&source, cx) {
+            view.update(cx, |view, cx| {
+                view.replace_handoff_card(&card_id, card, cx);
+                view.retire_for_handoff(to, dest.clone(), cx);
+            });
+        }
+        self.persist_handoff_links(&source, from, &dest, to, cx);
+        crate::baaz_log!("handoff activated {source} -> {dest}");
+        cx.notify();
+    }
+
+    /// The pack never landed: the run fails with the reason, the source
+    /// stays usable (a Failed card sends again). An event for an unknown
+    /// destination is ignored — it belongs to no run.
+    pub(super) fn fail_handoff(&mut self, dest: String, reason: String, cx: &mut Context<Self>) {
+        let source = self
+            .handoffs
+            .iter()
+            .find(|(_, run)| run.destination_session.as_deref() == Some(dest.as_str()))
+            .map(|(source, _)| source.clone());
+        let Some(source) = source else { return };
+        let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
+        run.fail(reason.clone());
+        let card = run.card();
+        let card_id = run.card_id.clone();
+        self.handoffs.insert(source.clone(), run);
+        if let Some(view) = self.find_view(&source, cx) {
+            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+        }
+        crate::baaz_log!("handoff failed {source}: {reason}");
+        cx.notify();
+    }
+
+    /// "Cancel" on a handoff card: aborts while cancellable and shuts the
+    /// opened destination down. Past Acknowledged the move is done and
+    /// the press is ignored.
+    pub(super) fn cancel_handoff(&mut self, source: &str, card_id: &str, cx: &mut Context<Self>) {
+        let Some(mut run) = self.handoffs.get(source).cloned() else { return };
+        if run.card_id != card_id || !run.cancellable() {
+            return;
+        }
+        let opened = run.cancel();
+        if opened {
+            if let Some(dest) = run.destination_session.clone() {
+                self.close_view(&dest, cx);
+            }
+        }
+        if self.pending_handoff.as_ref().is_some_and(|p| p.source_session == source) {
+            self.pending_handoff = None;
+        }
+        let card = run.card();
+        let card_id = run.card_id.clone();
+        self.handoffs.insert(source.to_owned(), run);
+        if let Some(view) = self.find_view(source, cx) {
+            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+        }
+        crate::baaz_log!("handoff cancelled {source}");
+        cx.notify();
+    }
+
+    /// The destination never opened: fail the pending run with the open's
+    /// reason, so the source card names it and the source stays usable.
+    /// A call with nothing pending is a no-op.
+    pub(super) fn fail_pending_handoff(&mut self, reason: String, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_handoff.take() else { return };
+        let Some(mut run) = self.handoffs.get(&pending.source_session).cloned() else { return };
+        if run.epoch != pending.epoch {
+            return;
+        }
+        run.fail(reason.clone());
+        let card = run.card();
+        let card_id = run.card_id.clone();
+        self.handoffs.insert(pending.source_session.clone(), run);
+        if let Some(view) = self.find_view(&pending.source_session, cx) {
+            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+        }
+        crate::baaz_log!("handoff failed {}: {reason}", pending.source_session);
+        cx.notify();
+    }
+
+    /// Both halves of the link survive restart: the provider record for a
+    /// lane session, the local row for a muse one.
+    fn persist_handoff_links(
+        &mut self,
+        source: &str,
+        from: ProviderId,
+        dest: &str,
+        to: ProviderId,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = to;
+        if self.provider_sessions.contains_key(source) || self.provider_sessions.contains_key(dest) {
+            crate::provider_sessions::note_handoff(&mut self.provider_sessions, source, from.as_str(), dest);
+            crate::provider_sessions::write(&self.provider_sessions);
+        }
+        let solo_source = !self.provider_sessions.contains_key(source);
+        let solo_dest = !self.provider_sessions.contains_key(dest);
+        if solo_source || solo_dest {
+            if solo_source {
+                self.set_override(source, |meta| meta.handoff_to = Some(dest.to_owned()), cx);
+            }
+            if solo_dest {
+                self.set_override(
+                    dest,
+                    |meta| {
+                        meta.handoff_from = Some(source.to_owned());
+                        meta.handoff_from_provider = Some(from.as_str().to_owned());
+                    },
+                    cx,
+                );
+            }
+            crate::sessions::write(&self.overrides);
+        }
+        self.merge_provider_rows();
     }
 }
 

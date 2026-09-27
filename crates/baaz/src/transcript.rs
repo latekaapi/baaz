@@ -20,10 +20,10 @@ use std::rc::Rc;
 use aui::data::button;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
-    goal_card, marker_row, parse_markdown, plan_card, question_card, runnable_command, summary_card,
-    thinking_block, todo_list, tool_card, tool_group, user_turn, AssistantTurnAction, LinkTarget,
-    MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent, ToolCardAction, ToolCardIntent,
-    ToolGroupData, ToolGroupIntent, UserTurnAction,
+    goal_card, handoff_card, marker_row, parse_markdown, plan_card, question_card, runnable_command,
+    summary_card, thinking_block, todo_list, tool_card, tool_group, user_turn, AssistantTurnAction,
+    HandoffIntent, LinkTarget, MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent,
+    ToolCardAction, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{
     ActivityState, Answer, Block, MarkerKind, PlanSection, PlanState, Step, ThinkingState, ToolBody,
@@ -180,6 +180,29 @@ pub struct Folds {
     /// A skill row's tap: the skill name, out to the Skills page. `None`
     /// renders the row read-only.
     pub open_skill: Option<SkillOpenHandler>,
+    /// The live handoff wiring: the card's two intents. `None` renders the
+    /// card read-only.
+    pub handoff: Option<HandoffCards>,
+    /// The destination marker's back-link to the source session. `None`
+    /// renders the marker without its link.
+    pub handoff_back: Option<HandoffBack>,
+}
+
+/// What a handoff card needs to talk back: "Open the new session" opens
+/// the destination by id, "Cancel" aborts the move by the card's block id.
+pub struct HandoffCards {
+    /// Open a session by id: the card's destination session.
+    pub open: CardHandler,
+    /// Cancel the move: the card's own block id.
+    pub cancel: CardHandler,
+}
+
+/// The destination marker's way back to the source session.
+pub struct HandoffBack {
+    /// The source session the link opens.
+    pub source: String,
+    /// Open it.
+    pub open: CardHandler,
 }
 
 /// Whether a tool card is a skill load: a Read card whose verb is the
@@ -826,7 +849,45 @@ fn block(
             generic_item_card(id, kind.clone(), status.clone(), text.clone()).into_any_element()
         }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
+        Block::Handoff { .. } => handoff_block_card(id, block, folds),
     }
+}
+
+/// One handoff card: the move's state, what the pack carried and what it
+/// left behind, and the two intents the card raises ("Open the new
+/// session", "Cancel"). Read-only without [`Folds::handoff`].
+fn handoff_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement {
+    let Block::Handoff {
+        id: handoff_id,
+        from,
+        to,
+        from_model,
+        to_model,
+        state,
+        carried,
+        lost,
+        pack_tokens,
+        destination_session,
+    } = block
+    else {
+        return div().into_any_element();
+    };
+    let card = handoff_card(id, *from, *to, to_model.clone(), state.clone())
+        .from_model(from_model.clone())
+        .carried(carried.clone())
+        .lost(lost.clone())
+        .pack_tokens(*pack_tokens)
+        .destination_session(destination_session.clone());
+    let Some(handoff) = &folds.handoff else { return card.into_any_element() };
+    let (open, cancel) = (handoff.open.clone(), handoff.cancel.clone());
+    // The Cancel intent names no card — the block id rides in the closure
+    // the card captured, which is this render's own handoff id.
+    let handoff_id = handoff_id.clone();
+    card.on_intent(move |intent, window, cx| match intent {
+        HandoffIntent::OpenSession(destination) => open(destination, window, cx),
+        HandoffIntent::Cancel => cancel(handoff_id.clone(), window, cx),
+    })
+    .into_any_element()
 }
 
 /// A skill load's quiet one-line row (D63): muted text, no card chrome, no
@@ -1439,9 +1500,22 @@ fn marker(id: ElementId, kind: &MarkerKind, text: &str, folds: &Folds, cx: &mut 
             let label = folds.titles.get(source).cloned().unwrap_or_else(|| id_group(source));
             row.glyph(IconName::Git, None).text("Forked from ").strong(label)
         }
-        // Muse is one provider, so the fold never raises a hand-off; if a
-        // later provider does, the plain row still says what happened.
-        MarkerKind::HandOff { .. } => row.glyph(IconName::ArrowRight, None).text(text.to_owned()),
+        // A handoff destination's origin marker: the quiet top line naming
+        // where the session came from, with a link back to the source.
+        // Without the back-link (a replayed transcript) the plain row
+        // still says what happened.
+        MarkerKind::HandOff { .. } => {
+            let row = row.glyph(IconName::ArrowRight, None).text(text.to_owned());
+            match &folds.handoff_back {
+                Some(back) => {
+                    let (source, open) = (back.source.clone(), back.open.clone());
+                    row.link("Open the source session", move |_, window, cx| {
+                        open(source.clone(), window, cx)
+                    })
+                }
+                None => row,
+            }
+        }
     }
     .into_any_element()
 }
@@ -1877,6 +1951,8 @@ mod tests {
             terminal_live: false,
             skill_scopes: Rc::new(HashMap::new()),
             open_skill: None,
+            handoff: None,
+            handoff_back: None,
         }
     }
 

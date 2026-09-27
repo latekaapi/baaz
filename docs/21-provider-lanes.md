@@ -524,3 +524,19 @@ Each task compiles and leaves the app working; muse sessions stay on
   → `Opus 5 · 1M`); the menu keeps the id in the row detail. Turns whose
   thinking rendered keep the plain `N reasoning` footer cell. Proven on
   captures only — the window is unverified by the gate.
+
+## 9. Handoff between lanes (H2, built)
+
+A session never changes lanes; work moves as a lossy re-prompt (full
+contract in `docs/22-handoff.md`). The provider menu on a session with
+turns offers "Hand off to X…" then "New session on X" per backend
+(`SessionView::provider_rows`, `handoff:<wire>` row ids); ⌘K `/handoff`
+opens the same picker. The run (`HandoffRun`, `crates/baaz/src/handoff.rs`)
+is owned by the application keyed by source session, epoch-fenced, with
+the card mirrored on the source view and the pack submitted as the fresh
+destination's first turn (`open_on_provider` for Claude Code / Codex,
+`new_session` for Muse). Provider records and muse local rows both carry
+their half of the link (`handoff_to` / `handoff_from` /
+`handoff_from_provider`), so both survive restart; the destination row's
+byline notes "from <Provider>" and its transcript opens with the quiet
+origin marker. Live proof is the two H2 runs, not this doc.

@@ -204,6 +204,7 @@ mod clocks;
 mod commands;
 mod composer;
 mod events;
+mod handoff;
 mod lane;
 mod questions;
 mod render;
@@ -383,6 +384,42 @@ pub enum SessionEvent {
     NewSessionOnProvider {
         /// The backend the new session starts on.
         provider: ProviderId,
+    },
+    /// The person picked "Hand off to X…" (composer provider menu, or ⌘K
+    /// `/handoff`): the session's turns move to a fresh session on the
+    /// pick as a lossy re-prompt (see [`crate::handoff`]). A same-provider
+    /// pick never emits this — [`SessionView::pick_provider`] keeps it a
+    /// menu close, and the run itself refuses it as a model change.
+    HandoffRequested {
+        /// The backend the fresh session starts on.
+        provider: ProviderId,
+        /// From the `handoff:<provider>` step verb: skip the confirm
+        /// dialog, the person already asked on the command line.
+        headless: bool,
+    },
+    /// "Open the new session" on a handoff card: show the destination.
+    HandoffOpenSession {
+        /// The fresh destination session.
+        destination: String,
+    },
+    /// "Cancel" on a handoff card: abort the move while cancellable.
+    HandoffCancel {
+        /// The card's own block id.
+        card_id: String,
+    },
+    /// The handoff pack's submit ack on the destination session: the run
+    /// holding that destination advances to Acknowledged, epoch-fenced.
+    HandoffPackAccepted {
+        /// The destination session the pack landed on.
+        session_id: String,
+    },
+    /// The pack submit failed on the destination: the run fails with the
+    /// reason, and the source stays usable.
+    HandoffPackFailed {
+        /// The destination session the pack never landed on.
+        session_id: String,
+        /// What went wrong, in the provider's or the wire's words.
+        reason: String,
     },
     /// `/name` with nothing after it: open the sidebar row's inline field.
     RenameStart,
@@ -788,6 +825,16 @@ pub struct SessionView {
     tasks: Vec<Task<()>>,
     /// Held only while a turn runs, so the elapsed time advances.
     ticker: Option<Task<()>>,
+    /// The handoff card's render state on this (source) session: the run's
+    /// card, refreshed on every transition. `None` when no handoff ever
+    /// started here (see [`crate::handoff`]).
+    handoff_card: Option<Block>,
+    /// This session was retired by a handoff: the destination provider and
+    /// session id. The composer refuses sends and names the new session.
+    handed_off_to: Option<(ProviderId, String)>,
+    /// This session started as a handoff's destination: where it came from.
+    /// Drawn as the quiet marker at the top of the transcript.
+    handoff_origin: Option<crate::handoff::HandoffOrigin>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -961,6 +1008,9 @@ impl SessionView {
             focus: cx.focus_handle(),
             tasks: Vec::new(),
             ticker: None,
+            handoff_card: None,
+            handed_off_to: None,
+            handoff_origin: None,
             _subscriptions: vec![subscription],
         }
     }

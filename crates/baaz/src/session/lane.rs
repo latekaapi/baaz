@@ -63,6 +63,11 @@ impl ExternalQuestions {
         self.questions.insert(question.id.clone(), question);
     }
 
+    /// Whether any provider question is still waiting on the person.
+    pub(super) fn is_empty(&self) -> bool {
+        self.questions.is_empty()
+    }
+
     /// The newest parked question's headline, by id — what the sidebar row
     /// stands on while a provider lane waits on a person.
     pub(super) fn newest_headline(&self) -> Option<String> {

@@ -80,9 +80,10 @@ impl SessionView {
                 EffortOptions::Unavailable(_) => 0,
             },
             MenuKind::Mode => MODES.iter().position(|m| *m == self.mode()).unwrap_or(0),
-            MenuKind::Provider => {
-                ProviderId::all().iter().position(|id| *id == self.provider_kind()).unwrap_or(0)
-            }
+            MenuKind::Provider => Self::provider_rows(self.provider_kind(), self.has_turns())
+                .iter()
+                .position(|row| row.id == self.provider_kind().as_str())
+                .unwrap_or(0),
             _ => 0,
         };
         self.overlays.update(cx, |overlays, _| overlays.open(Menu::picker(kind, selected)));
@@ -104,7 +105,9 @@ impl SessionView {
                 EffortOptions::Unavailable(_) => 1,
             },
             Some(MenuKind::Mode) => MODES.len(),
-            Some(MenuKind::Provider) => ProviderId::all().len(),
+            Some(MenuKind::Provider) => {
+                Self::provider_rows(self.provider_kind(), self.has_turns()).len()
+            }
             Some(MenuKind::Command) => {
                 let filter = overlays.menu.as_ref().map(|m| m.filter.clone()).unwrap_or_default();
                 let (commands, skill_rows) = self.command_rows(&filter, cx);
@@ -162,8 +165,9 @@ impl SessionView {
                 }
             }
             MenuKind::Provider => {
-                if let Some(id) = ProviderId::all().get(selected).copied() {
-                    self.pick_provider(id.as_str(), cx);
+                let rows = Self::provider_rows(self.provider_kind(), self.has_turns());
+                if let Some(row) = rows.get(selected) {
+                    self.pick_provider(&row.id.clone(), cx);
                 }
             }
             MenuKind::Command => {
@@ -317,13 +321,26 @@ impl SessionView {
         self.close_menu(cx);
     }
 
-    /// A click (or Enter) on a provider menu row, which names the backend's
-    /// wire id. Picking the session's own provider just closes the menu —
-    /// reopening the lane it already rides is not a swap. A fresh session
-    /// swaps through the application (nothing sent, nothing to keep); a
-    /// session with turns keeps its lane and the pick starts a new session
-    /// on the other backend instead.
+    /// A click (or Enter) on a provider menu row. A `handoff:<wire>` row
+    /// starts a handoff to that backend (a lossy re-prompt, never a lane
+    /// swap); a plain wire id keeps the old contract. Picking the
+    /// session's own provider just closes the menu — reopening the lane
+    /// it already rides is not a swap, and a same-provider pick is a
+    /// model change, never a handoff. A fresh session swaps through the
+    /// application (nothing sent, nothing to keep); a session with turns
+    /// keeps its lane and the plain pick starts a new session on the
+    /// other backend instead.
     pub(super) fn pick_provider(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(rest) = id.strip_prefix("handoff:") {
+            let picked = ProviderId::parse(rest);
+            if picked == self.provider_kind() {
+                self.close_menu(cx);
+                return;
+            }
+            cx.emit(SessionEvent::HandoffRequested { provider: picked, headless: false });
+            self.close_menu(cx);
+            return;
+        }
         let picked = ProviderId::parse(id);
         if picked == self.provider_kind() {
             self.close_menu(cx);
@@ -340,6 +357,48 @@ impl SessionView {
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, _| overlays.menu = None);
         cx.notify();
+    }
+
+    /// The provider menu's rows for a session on `current`.
+    ///
+    /// A fresh session offers the three backends as a swap. A session
+    /// with turns keeps its lane, so every other backend gets two rows:
+    /// "Hand off to X…" first (a `handoff:<wire>` id, starting the
+    /// lossy re-prompt), then "New session on X" with the reason in the
+    /// detail line. The picker's rows always act on click — the typed
+    /// reason rides as prose, the way an `Unavailable` capability
+    /// explains itself — and row ids are what [`Self::pick_provider`]
+    /// parses back; only the labels differ.
+    pub(super) fn provider_rows(current: ProviderId, has_turns: bool) -> Vec<ProviderRow> {
+        let mut rows = Vec::new();
+        for id in ProviderId::all() {
+            if has_turns && id != current {
+                rows.push(ProviderRow {
+                    id: format!("handoff:{}", id.as_str()),
+                    label: format!("Hand off to {}…", id.label()),
+                    detail: format!(
+                        "Start a fresh {} session with a summary of this one. Tool state, pending approvals and provider memory do not carry over.",
+                        id.label()
+                    ),
+                });
+                rows.push(ProviderRow {
+                    id: id.as_str().to_owned(),
+                    label: format!("New session on {}", id.label()),
+                    detail: format!(
+                        "This session already has turns on {}, so its provider cannot be switched. Starts a new session on {}.",
+                        current.label(),
+                        id.label()
+                    ),
+                });
+            } else {
+                rows.push(ProviderRow {
+                    id: id.as_str().to_owned(),
+                    label: id.label().to_owned(),
+                    detail: id.blurb().to_owned(),
+                });
+            }
+        }
+        rows
     }
 
     /// Run one client-side slash command (spec §3.10).
@@ -363,6 +422,17 @@ impl SessionView {
             }
             Command::Compact => self.compact(cx),
             Command::Clear => cx.emit(SessionEvent::NewSession),
+            // `/handoff` opens the provider picker on the handoff rows: a
+            // session with turns offers "Hand off to X…" there. With no
+            // turns there is nothing to carry, so it says so instead of
+            // opening a menu whose handoff rows would all refuse.
+            Command::Handoff => {
+                if self.has_turns() {
+                    self.toggle_picker(MenuKind::Provider, cx);
+                } else {
+                    self.set_banner("Nothing to hand off yet — send a turn first.", None, cx);
+                }
+            }
             Command::Logout => cx.emit(SessionEvent::Logout),
             Command::Status | Command::Usage => {
                 let detail = self.status_text(cx);
@@ -627,4 +697,15 @@ impl SessionView {
         self.on_draft_changed(cx);
         self.focus_composer(window, cx);
     }
+}
+
+/// One provider menu row: the id the pick parses back, the label the row
+/// shows, and the detail line under it.
+pub(super) struct ProviderRow {
+    /// The pick id: a plain wire id, or `handoff:<wire>` for the handoff row.
+    pub id: String,
+    /// The row's label.
+    pub label: String,
+    /// The row's detail line.
+    pub detail: String,
 }
