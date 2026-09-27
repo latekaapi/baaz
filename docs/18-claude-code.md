@@ -448,3 +448,28 @@ Captured exchange, both directions:
   and a per-model `modelUsage` with `costUSD`. D3 was withdrawn for muse because
   the field was a hardcoded `0.0`; **on this provider the number is real and must
   not inherit muse's `0.0` literal.**
+
+---
+
+# Addendum 2026-09-27 — the terminal relay rides `--mcp-config` (T2)
+
+Every Baaz session now spawns its child with a per-session MCP config
+file, `<support_dir>/mcp/<session>.json`:
+
+    {"mcpServers": {"baaz": {"type": "stdio",
+      "command": "<baaz-dir>/mcp-bridge",
+      "args": ["--terminal", "--socket", "<run/terminal-<pid>.sock>",
+               "--session", "<session-id>"]}}}
+
+passed as `--mcp-config <path> --strict-mcp-config` on open, resume, fork
+and effort-swap relaunch (`crates/provider-claude-code/src/terminal.rs`,
+launches built by `ClaudeCodeAdapter::launch_for_*`). `--strict-mcp-config`
+stays on every one of those launches: without it the session inherits the
+operator's unrelated connectors (stage-3 finding, §4 above), and a Baaz
+session's tool surface must be reproducible. A fork's bridge answers for
+the NEW session id.
+
+Approvals follow the session: the bridge's tools arrive as ordinary
+`can_use_tool` requests on the `stdio` permission channel, answered from
+Baaz's approvals surface like every other tool (D48). No second Baaz-side
+gate.

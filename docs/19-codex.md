@@ -298,3 +298,55 @@ without `/bin/`, `-c` or `-lc`); the fold unwraps one layer with POSIX
 single/double-quote rules (the `'\''` idiom, `\"` escapes) and leaves
 anything else — a bare command, a non-wrapper shell path, extra words,
 an unterminated quote — verbatim.
+
+---
+
+# Addendum 2026-09-27 — the terminal relay rides `-c` overrides, and the
+# inherited servers CAN be silenced per session (T2)
+
+Every Baaz session spawns `codex app-server` with the bridge as a
+per-session MCP server (`crates/provider-codex/src/terminal.rs`):
+
+    -c mcp_servers.baaz.command="<baaz-dir>/mcp-bridge"
+    -c mcp_servers.baaz.args=["--terminal","--socket","<sock>","--session","<id>"]
+
+Process-scoped: `-c` beats `~/.codex/config.toml` for that child only —
+the owner's file is never read differently, let alone written. A fresh
+open's bridge answers for the `OpenSession` request id (the server mints
+the thread id itself, so it cannot be known at spawn; the app registers
+the request id before the send and the minted id when the ack lands); a
+resume's bridge answers for the stored id directly. `thread/start`'s
+generic `config` object was deliberately NOT used: its MCP shape is
+unprobed, and a wrong guess there breaks the open.
+
+## MCP scoping: probed live, codex-cli 0.144.6
+
+A Baaz-started session (`mcpServerStatus/list`) has **six** servers: the
+bridge plus five inherited ones — `codex_app` (0 tools), `codex_apps`
+(97 tools), `computer-use` (0 tools), `cua_repl` (3 tools), `node_repl`
+(4 tools). Only `node_repl` and `computer-use` are `[mcp_servers]`
+config-file tables; the rest are bundled/plugin-provided.
+
+They CAN be silenced per session, without editing the owner's config —
+with one sharp edge. A single-key `-c mcp_servers.<name>.enabled=false`
+does NOT merge: it replaces the whole table with that one key, the
+transport goes invalid, and the child refuses to start (`error loading
+default config after config error: invalid transport in
+mcp_servers.cua_repl`). A COMPLETE inline table validates:
+
+    -c 'mcp_servers.<name>={enabled=false,command="/bin/true"}'
+
+With all five disabled the session lists only the bridge (8 tools) —
+`codex_apps` included, down from 97 to 0. The adapter therefore emits
+these full-table disables for every inherited server on every spawn:
+the bundled set (`codex_app`, `codex_apps`, `computer-use`, `cua_repl`)
+plus whatever `[mcp_servers]` tables the owner's config file names
+(read-only scan of `$CODEX_HOME/config.toml`, defaulting to
+`~/.codex/config.toml`). Overriding an absent name creates a disabled
+no-op stub, so a name this machine does not have costs one inert row —
+while a missing name would leak its tools into the session.
+
+Approvals follow the session's approval mode (D48): under the default
+profile a safe `echo` runs with no approval request at all (§3 above),
+and anything escaping the profile arrives as the usual
+`*/requestApproval` server request. No second Baaz-side gate.

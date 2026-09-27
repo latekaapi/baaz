@@ -1185,6 +1185,46 @@ impl Harness {
     /// is still unsent this reopens that view instead of starting another
     /// session, so repeated clicks never create more than one session per
     /// project.
+    /// The terminal relay's route for a new muse session (T2 route 1): mint
+    /// the session id and register it with the service BEFORE the start
+    /// runs. `None` when `initialize` did not grant `sessionMcp` — no
+    /// route, and the session opens exactly as it always did (logged once
+    /// per process, not once per session). The caller carries the id onto
+    /// the start with [`crate::terminal::relay::attach_muse_start`].
+    fn muse_terminal_session(&mut self, root: &std::path::Path) -> Option<String> {
+        if !self.session_mcp {
+            crate::terminal::relay::note_muse_route_ungranted();
+            return None;
+        }
+        let session_id = muse_client::new_command_id();
+        self.register_terminal_session(&session_id, root.to_path_buf());
+        Some(session_id)
+    }
+
+    /// The terminal relay's route for resuming a muse session: re-register
+    /// the stored id (harmless when already registered; refreshes the root)
+    /// and attach the bridge to `params`. Without the `sessionMcp` grant
+    /// the resume runs exactly as it always did.
+    pub(crate) fn muse_terminal_resume(
+        &mut self,
+        params: &mut muse_client::schema::SessionResumeParams,
+    ) {
+        if !self.session_mcp {
+            crate::terminal::relay::note_muse_route_ungranted();
+            return;
+        }
+        let session_id = params.session_id.clone();
+        let root = std::path::PathBuf::from(self.session_workspace(&session_id));
+        self.register_terminal_session(&session_id, root);
+        let socket = self.terminal_service.socket_path().to_path_buf();
+        crate::terminal::relay::attach_muse_resume(
+            params,
+            &session_id,
+            &crate::terminal::relay::bridge_path(),
+            &socket,
+        );
+    }
+
     pub(crate) fn new_session_in(
         &mut self,
         project: Option<String>,
@@ -1261,7 +1301,7 @@ impl Harness {
         // different thing, and on this server it does not reach
         // `promptUnmatched`. The params carry the project's root and its
         // defaults, with the command line's approval mode winning.
-        let Some(params) =
+        let Some(mut params) =
             projects::start_params(&self.projects, current.as_deref(), &self.new_provider, self.args.approval_mode.clone())
         else {
             if current.is_none() {
@@ -1291,6 +1331,20 @@ impl Harness {
             .and_then(projects::parse_effort);
         let started_project = current.clone();
         self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
+        // The terminal relay's route (T2 route 1): the minted session id is
+        // registered with the service BEFORE the start runs, and the start
+        // carries the bridge — but only on the `sessionMcp` grant.
+        if let Some(root) = params.workspace_root.clone() {
+            if let Some(session_id) = self.muse_terminal_session(std::path::Path::new(&root)) {
+                let socket = self.terminal_service.socket_path().to_path_buf();
+                crate::terminal::relay::attach_muse_start(
+                    &mut params,
+                    &session_id,
+                    &crate::terminal::relay::bridge_path(),
+                    &socket,
+                );
+            }
+        }
         // The switch lands on the round-trip below, after the following
         // steps would run: session verbs wait for it (see `run_steps`)
         // instead of acting on the session that is still open.
@@ -1405,11 +1459,22 @@ impl Harness {
             self.open_local_draft(window, cx);
             return;
         };
-        let params = projects::start_params_for_root(&root, &self.new_provider, self.args.approval_mode.clone());
+        let mut params = projects::start_params_for_root(&root, &self.new_provider, self.args.approval_mode.clone());
         // Walked eagerly, like `new_session_in` does for a project's root:
         // the `@` picker for the session about to open should not wait on
         // the sessions list to learn where it lives.
         self.load_menu_sources(root.clone(), cx);
+        // The terminal relay's route, as in `new_session_in`: registered
+        // before the start, carried on it, grant-gated.
+        if let Some(session_id) = self.muse_terminal_session(&root) {
+            let socket = self.terminal_service.socket_path().to_path_buf();
+            crate::terminal::relay::attach_muse_start(
+                &mut params,
+                &session_id,
+                &crate::terminal::relay::bridge_path(),
+                &socket,
+            );
+        }
         self.session_switch_pending = true;
         let work = move || client.session_start(&params);
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
@@ -1728,18 +1793,20 @@ impl Harness {
         crate::log::trace_mark("swap");
         crate::log::trace_arm_first_frame();
         let resumed = session_id.clone();
-        let work = move || {
-            client.session_resume(&SessionResumeParams {
-                command_id: new_command_id(),
-                session_id,
-                // History comes through `view/page`, which is the contiguous,
-                // ordered, bounded path; resume just attaches.
-                exclude_items: Some(true),
-                cursor: None,
-                history: None,
-                config: None,
-            })
+        let mut resume_params = SessionResumeParams {
+            command_id: new_command_id(),
+            session_id,
+            // History comes through `view/page`, which is the contiguous,
+            // ordered, bounded path; resume just attaches.
+            exclude_items: Some(true),
+            cursor: None,
+            history: None,
+            config: None,
         };
+        // The terminal relay's route: re-register the stored id and carry
+        // the bridge — grant-gated, like the start.
+        self.muse_terminal_resume(&mut resume_params);
+        let work = move || client.session_resume(&resume_params);
         self.wire_call(cx, work, move |this, result, cx| {
             match &result {
                 Ok(_) => crate::log::trace_mark("resume-ack"),
@@ -1898,12 +1965,21 @@ impl Harness {
         }
         let factory = self.provider_factory.clone();
         let workspace_bg = workspace.clone();
+        // The terminal relay's route: the request id is the session id the
+        // bridge will answer for (Claude Code takes it as `--session-id`;
+        // Codex's bridge answers for it until the minted thread id lands) —
+        // so it is registered with the service BEFORE the open runs.
+        let request_id = new_command_id();
+        self.register_terminal_session(
+            &request_id,
+            std::path::PathBuf::from(workspace.clone()),
+        );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::OpenSession {
-                request_id: new_command_id(),
+                request_id,
                 workspace: Some(workspace_bg),
                 model: None,
                 model_provider: None,
@@ -2040,6 +2116,13 @@ impl Harness {
             return;
         }
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
+        // The terminal relay's route lands here too: the ack's session id
+        // is what the lane serves from now on — for Codex that is the
+        // server-minted thread id, which no pre-registration could name.
+        self.register_terminal_session(
+            &session_id,
+            std::path::PathBuf::from(workspace.clone()),
+        );
         let overlays = self.overlays.clone();
         let host = SessionHost {
             provider_id: provider_id.as_str().to_owned(),
@@ -2251,6 +2334,13 @@ impl Harness {
         }
         let factory = self.provider_factory.clone();
         let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+        // The terminal relay's route: the resumed session's bridge answers
+        // for the stored id, so it is (re-)registered BEFORE the resume
+        // runs — refreshing the root it drives.
+        self.register_terminal_session(
+            &record.session_id,
+            std::path::PathBuf::from(workspace.clone()),
+        );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2401,6 +2491,12 @@ impl Harness {
         }
         let factory = self.provider_factory.clone();
         let workspace_bg = workspace.clone();
+        // The terminal relay's route: the fork's bridge answers for the
+        // fork-minted id, registered BEFORE the resume runs.
+        self.register_terminal_session(
+            &session_id,
+            std::path::PathBuf::from(workspace.clone()),
+        );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2639,16 +2735,18 @@ impl Harness {
         let session_id = view.read(cx).session_id.clone();
         let cursor = view.read(cx).last_cursor();
         let topped = session_id.clone();
-        let work = move || {
-            client.session_resume(&SessionResumeParams {
-                command_id: new_command_id(),
-                session_id,
-                cursor,
-                exclude_items: Some(true),
-                history: None,
-                config: None,
-            })
+        let mut resume_params = SessionResumeParams {
+            command_id: new_command_id(),
+            session_id,
+            cursor,
+            exclude_items: Some(true),
+            history: None,
+            config: None,
         };
+        // The terminal relay's route, as in `open`: re-registered and
+        // carried, grant-gated.
+        self.muse_terminal_resume(&mut resume_params);
+        let work = move || client.session_resume(&resume_params);
         self.wire_call_in(cx, work, move |this, result, window, cx| {
             match result {
                 Ok(resumed) => {

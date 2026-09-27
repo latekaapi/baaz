@@ -620,6 +620,11 @@ pub struct Harness {
     /// a server that did not grant it disables the `!` path with a banner
     /// rather than letting the command fail on the wire.
     user_shell: bool,
+    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Requested
+    /// in `conn::connect`; a server that did not grant it opens sessions
+    /// with no terminal route — the bridge rides `session/start` and
+    /// `session/resume` only on the grant.
+    session_mcp: bool,
     focus_root: FocusHandle,
     /// Whether an overlay stood open on the previous frame. The edge from
     /// true to false is when focus has to be parked back on the root; see
@@ -952,6 +957,7 @@ impl Harness {
             sidebar_user_scrolled: false,
             capture,
             user_shell: true,
+            session_mcp: false,
             focus_root: cx.focus_handle(),
             overlay_was_open: false,
             focus_dialog: cx.focus_handle(),
@@ -1301,6 +1307,7 @@ impl Harness {
                     crate::baaz_log!("{warning}");
                 }
                 this.user_shell = connected.legacy.user_shell;
+                this.session_mcp = connected.legacy.session_mcp;
                 this.client = Some(connected.legacy.transport);
                 this.provider = Some(Arc::new(Mutex::new(connected.provider)));
                 this.wire = Wire::Ready;
@@ -1598,6 +1605,7 @@ impl Harness {
                 // last legacy transport ends the old pump, so the old
                 // adapter detaches cleanly when it follows.
                 let transport = connected.legacy.transport;
+                this.session_mcp = connected.legacy.session_mcp;
                 if let Some(active) = &this.active {
                     active.update(cx, |view, cx| view.reconnected(transport.clone(), cx));
                 }
@@ -1640,16 +1648,18 @@ impl Harness {
         let Some((session_id, cursor)) = resume else { return };
         let Some(client) = self.client.clone() else { return };
         let resumed_id = session_id.clone();
-        let work = move || {
-            client.session_resume(&SessionResumeParams {
-                command_id: new_command_id(),
-                session_id: session_id.clone(),
-                cursor: cursor.clone(),
-                exclude_items: Some(true),
-                history: None,
-                config: None,
-            })
+        let mut resume_params = SessionResumeParams {
+            command_id: new_command_id(),
+            session_id: session_id.clone(),
+            cursor: cursor.clone(),
+            exclude_items: Some(true),
+            history: None,
+            config: None,
         };
+        // The terminal relay's route, as on every resume: re-registered
+        // and carried, grant-gated.
+        self.muse_terminal_resume(&mut resume_params);
+        let work = move || client.session_resume(&resume_params);
         self.wire_call(cx, work, move |this, result, cx| {
             // The notice belongs to the resumed session: a switch since owns
             // its own lease, so anything but the still-open resumed view is

@@ -20,6 +20,7 @@ pub mod caps;
 pub mod child;
 pub mod fold;
 pub mod frame;
+pub mod terminal;
 
 use std::sync::{Arc, Mutex};
 
@@ -59,6 +60,22 @@ pub struct CodexAdapter {
     model: Mutex<Option<String>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
+    /// Where the terminal relay lives, set by the host before the session
+    /// commands run: the bridge binary and the socket to point it at.
+    /// `None` means no relay: the child spawns bare `app-server`.
+    terminal: Mutex<Option<TerminalRelay>>,
+}
+
+/// Where the terminal relay lives: the bridge to spawn and the socket to
+/// point it at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRelay {
+    /// Absolute path of the `mcp-bridge` binary beside the running baaz
+    /// binary (or inside the app bundle next to it).
+    pub bridge: std::path::PathBuf,
+    /// `<support_dir>/run/terminal-<pid>.sock`: what the bridge's
+    /// `--socket` names.
+    pub socket: std::path::PathBuf,
 }
 
 impl CodexAdapter {
@@ -78,7 +95,36 @@ impl CodexAdapter {
             model: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
+            terminal: Mutex::new(None),
         }
+    }
+
+    /// Point the terminal relay at the bridge and socket before the
+    /// session commands run. Every open and resume then spawns its child
+    /// with the bridge as a per-session MCP server (`-c
+    /// mcp_servers.baaz.…`), process-scoped — the owner's config file is
+    /// never touched.
+    pub fn set_terminal_relay(&self, relay: TerminalRelay) {
+        *self.terminal.lock().expect("terminal mutex") = Some(relay);
+    }
+
+    /// The `app-server` argv fragment for `session_id` — or empty when no
+    /// relay is set. With a relay: the bridge as a per-session MCP server,
+    /// then a full-table disable for every inherited server (bundled plus
+    /// file-configured), so the session sees Baaz's tools and nothing
+    /// else. A session without a relay spawns bare `app-server`, exactly
+    /// as before. No spawn — see [`crate::terminal::server_overrides`] —
+    /// so tests drive this without spending the owner's money.
+    pub fn spawn_args_for(&self, session_id: &str) -> Vec<String> {
+        let Some(relay) = self.terminal.lock().expect("terminal mutex").clone() else {
+            return Vec::new();
+        };
+        let mut args =
+            crate::terminal::server_overrides(&relay.bridge, &relay.socket, session_id);
+        args.extend(crate::terminal::disable_overrides(
+            crate::terminal::inherited_servers().iter().map(String::as_str),
+        ));
+        args
     }
 
     fn require_child(&self) -> Result<(), ProviderError> {
@@ -107,8 +153,15 @@ impl CodexAdapter {
     /// `initialized` notification, `model/list` to resolve the model, then
     /// `thread/start` with that explicit model. The server mints the thread
     /// (and session) id; both are stored, never assumed.
+    ///
+    /// `open_id` is the `OpenSession` request id: the bridge's `--session`
+    /// when a relay is set. Codex mints the thread id itself, so it cannot
+    /// be known at spawn — the request id is the Baaz-minted identity the
+    /// app registers with the service before the send, and the minted
+    /// thread id is registered when the ack lands.
     fn open_session(
         &self,
+        open_id: &str,
         workspace: Option<&str>,
         model: Option<&str>,
     ) -> Result<Ack, ProviderError> {
@@ -118,7 +171,8 @@ impl CodexAdapter {
                     .into(),
             });
         }
-        let running = RunningChild::spawn(&self.program, Arc::clone(&self.fold), self.tx.clone())
+        let extra = self.spawn_args_for(open_id);
+        let running = RunningChild::spawn(&self.program, &extra, Arc::clone(&self.fold), self.tx.clone())
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not spawn codex: {error}"),
             })?;
@@ -180,7 +234,10 @@ impl CodexAdapter {
                     .into(),
             });
         }
-        let running = RunningChild::spawn(&self.program, Arc::clone(&self.fold), self.tx.clone())
+        // A resume names its session up front, so the bridge answers for
+        // the stored id directly.
+        let extra = self.spawn_args_for(session_id);
+        let running = RunningChild::spawn(&self.program, &extra, Arc::clone(&self.fold), self.tx.clone())
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not spawn codex: {error}"),
             })?;
@@ -464,8 +521,8 @@ impl ProviderAdapter for CodexAdapter {
 
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
-            Command::OpenSession { workspace, model, .. } => {
-                self.open_session(workspace.as_deref(), model.as_deref())
+            Command::OpenSession { request_id, workspace, model, .. } => {
+                self.open_session(&request_id, workspace.as_deref(), model.as_deref())
             }
             Command::ResumeSession { session_id, .. } => self.resume_session(&session_id),
             Command::ForkSession { .. } => Err(ProviderError::Rejected {

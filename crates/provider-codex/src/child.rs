@@ -724,11 +724,16 @@ impl RunningChild {
     /// Blocking: run it on the background executor.
     pub fn spawn(
         program: &str,
+        extra_args: &[String],
         fold: Arc<Mutex<CodexFold>>,
         events: Sender<ProviderEvent>,
     ) -> std::io::Result<Self> {
+        // `extra_args` rides after `app-server`: the global `-c`
+        // config overrides live there too (`codex app-server -c …`), and
+        // they are process-scoped — this child's config only.
         let mut child = Command::new(program)
             .arg("app-server")
+            .args(extra_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
