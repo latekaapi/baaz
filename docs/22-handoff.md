@@ -108,3 +108,37 @@ backstory for Cormorant Crossing), `handoff:codex`, then
   `muse-adapter`'s `push_block` (H2b §1) — the source card and the
   destination origin marker both file through the fixed path.
 - Not run: the Codex → Muse reverse leg (optional in H2b).
+
+## 8. One session, one row — the handoff chain (owner decision 2026-09-28)
+
+Supersedes the *presentation* in §1 (`activated`) and §5. The machine, the
+pack and the fencing are unchanged.
+
+The owner asked for handoff to continue **in the same session**: one sidebar
+row, one transcript, with a visible break where the provider changed. A
+provider session id is still owned by one lane for life (docs/21) — a Claude
+Code thread cannot become a Codex thread — so the destination is still a new
+provider session underneath. What changes is what the user sees:
+
+- **Chain.** Sessions linked by `handoff_to` / `handoff_from` form a chain;
+  the **head** is the one with no `handoff_to`. The chain is the unit the
+  user sees. The sidebar shows **only the head**, under the chain's original
+  title, and its turn count is the chain's total. Selecting any member id
+  (search result, back/forward, `--session`, a link) opens the head.
+- **Transcript.** The head's view renders, in order: every earlier member's
+  turns (read-only), then a `Block::Marker { kind: MarkerKind::HandOff { from,
+  to } }` divider reading "Handed off from Claude Code to Codex" (with the
+  destination model and time), then its own turns. The pack's user turn is not
+  shown as a bubble — the divider stands for it (its short summary may sit in
+  the divider's text).
+- **Snapshot.** At `activated`, the source view's folded turns (which already
+  include its own prefix, so chains of any length compose) are written as JSON
+  (`aui_protocol` blocks are serde) to `<state>/handoff/<destination>.json`.
+  Reopening the head reads it; the source provider is never respawned just to
+  draw history. A chain with no snapshot (pairs made before this change) shows
+  the divider with an "Open the earlier conversation" affordance to the
+  source's read-only view instead.
+- **In place.** Activation swaps the view in the **same slot** — no jump to a
+  different row; the composer is live on the destination immediately.
+- **Carried-over state kept:** `provider-sessions.json` / `sessions.json`
+  links as today; the ledger still records each provider session separately.
