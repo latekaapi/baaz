@@ -2486,26 +2486,6 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     }
 }
 
-/// What a tool call's card shows: the structured shapes a raw
-/// `visibleOutput` can carry, folded into the existing bodies.
-///
-/// The rule is still "never draw a body the wire did not send". MSP carries
-/// one rendering surface per tool call — `visibleOutput`, a plain string —
-/// and no diffs, no structured hits and no result lists, so:
-///
-/// * a shell result serialised as a JSON envelope (`command`, `description`,
-///   `exit_code`/`terminal_status`, an output field) becomes the shell body:
-///   the command is the title (one line, elided), the output text is the
-///   body, the status comes from the exit code;
-/// * any other JSON object/array result becomes a generic body with the args
-///   as parameter pairs and the result pretty-printed — still a folded code
-///   body, never a raw one-liner;
-/// * a **read** renders as its header plus the line count, which is the
-///   library's own rendering for a read;
-/// * a **search** promotes `path:line:text` output to real hits when every
-///   line parses, and otherwise keeps the raw output;
-/// * everything else keeps the raw output, because a card with no body would
-///   hide what the tool actually said.
 /// A terminal tool call's card (D51): the command (plus the tab the result
 /// names) in the header, the run's output as the body, the exit code as
 /// the status. While the item is still open the card reads running with a
@@ -2561,6 +2541,26 @@ fn terminal_presentation(
     (verb, target, status, body)
 }
 
+/// What a tool call's card shows: the structured shapes a raw
+/// `visibleOutput` can carry, folded into the existing bodies.
+///
+/// The rule is still "never draw a body the wire did not send". MSP carries
+/// one rendering surface per tool call — `visibleOutput`, a plain string —
+/// and no diffs, no structured hits and no result lists, so:
+///
+/// * a shell result serialised as a JSON envelope (`command`, `description`,
+///   `exit_code`/`terminal_status`, an output field) becomes the shell body:
+///   the command is the title (one line, elided), the output text is the
+///   body, the status comes from the exit code;
+/// * any other JSON object/array result becomes a generic body with the args
+///   as parameter pairs and the result pretty-printed — still a folded code
+///   body, never a raw one-liner;
+/// * a **read** renders as its header plus the line count, which is the
+///   library's own rendering for a read;
+/// * a **search** promotes `path:line:text` output to real hits when every
+///   line parses, and otherwise keeps the raw output;
+/// * everything else keeps the raw output, because a card with no body would
+///   hide what the tool actually said.
 fn tool_presentation(
     kind: &ToolKind,
     verb: String,
