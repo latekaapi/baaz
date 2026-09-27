@@ -38,6 +38,10 @@ struct Folded {
     /// The `itemId` of a `userMessage`'s `Turn::User` → its handle, so a
     /// later revision of the same message re-stamps the turn it made.
     user_keys: HashMap<String, TurnKey>,
+    /// The `itemId` of a `userMessage` → the presentation text its turn was
+    /// rendered with, so a later revision that brings `displayText` can tell
+    /// the correction apart from a no-op re-emission.
+    user_text: HashMap<String, String>,
     /// Turn handles, parallel to `session.turns`: index → the key minted for
     /// the turn that sits there.
     turn_keys: Vec<TurnKey>,
@@ -505,6 +509,7 @@ impl Folded {
             revisions: HashMap::new(),
             turn_stamps: HashMap::new(),
             user_keys: HashMap::new(),
+            user_text: HashMap::new(),
             turn_keys: Vec::new(),
             turn_index: HashMap::new(),
             next_turn_key: 0,
@@ -1096,43 +1101,76 @@ impl Folded {
     }
 
     fn user_message(&mut self, item: &msp::Item, seen: bool) -> Vec<Delta> {
-        if seen {
-            // A `userMessage` is a whole `Turn::User`, and `Delta` has no
-            // variant that edits one — but a later revision still re-stamps
-            // it, so live and backfill agree on the durable stamp, not the
-            // ephemeral one.
-            if let Some(&key) = self.user_keys.get(&item.item_id) {
-                self.stamp_item(key, item);
-            }
-            return Vec::new();
-        }
-        if let (Some(command_id), text) = (item.command_id.as_ref(), item.text.clone()) {
-            let command_id = command_id.clone();
-            self.remember_command(&command_id, &text.unwrap_or_default());
-        }
-        let text = item
+        // The presentation text: what the transcript must show.
+        let presentation = item
             .display_text
             .clone()
             .or_else(|| item.text.clone())
             .unwrap_or_default();
-        // `attachments` is metadata only — the base64 is never echoed back — so
+        // `attachments` is metadata only - the base64 is never echoed back - so
         // the chip carries the media type and nothing else.
-        let attachments = item
-            .attachments
-            .iter()
-            .flatten()
-            .map(|attachment| aui_protocol::Attachment {
-                name: attachment.media_type.clone(),
-                kind: aui_protocol::AttachmentKind::Image,
-                size_bytes: None,
-                meta: None,
-                state: aui_protocol::UploadState::Ready,
-            })
-            .collect();
+        let attachments = || {
+            item.attachments
+                .iter()
+                .flatten()
+                .map(|attachment| aui_protocol::Attachment {
+                    name: attachment.media_type.clone(),
+                    kind: aui_protocol::AttachmentKind::Image,
+                    size_bytes: None,
+                    meta: None,
+                    state: aui_protocol::UploadState::Ready,
+                })
+                .collect::<Vec<_>>()
+        };
+        if seen {
+            // A later revision still re-stamps, so live and backfill agree on
+            // the durable stamp - and a revision that brings `displayText`
+            // corrects the rendered turn in place (muse sends the model input
+            // first and the display text just after) and updates the text a
+            // retraction would hand back.
+            let changed =
+                self.user_text.get(&item.item_id).is_some_and(|rendered| *rendered != presentation);
+            if !changed {
+                if let Some(&key) = self.user_keys.get(&item.item_id) {
+                    self.stamp_item(key, item);
+                }
+                return Vec::new();
+            }
+            if let Some(command_id) = item.command_id.as_ref() {
+                self.remember_command(command_id, &presentation);
+            }
+            if let Some(turn_id) = &item.turn_id {
+                self.user_turns.insert(item.item_id.clone(), turn_id.clone());
+            }
+            let Some(&key) = self.user_keys.get(&item.item_id) else {
+                return Vec::new();
+            };
+            let timestamp = self
+                .session
+                .turns
+                .iter()
+                .find(|turn| turn.id() == item.item_id.as_str())
+                .and_then(Turn::timestamp);
+            let turn = Turn::User {
+                id: item.item_id.clone(),
+                text: presentation.clone(),
+                attachments: attachments(),
+                mentions: Vec::new(),
+                timestamp,
+            };
+            let delta = Delta::TurnReplaced { turn };
+            self.session.apply(delta.clone());
+            self.user_text.insert(item.item_id.clone(), presentation);
+            self.stamp_item(key, item);
+            return vec![delta];
+        }
+        if let Some(command_id) = item.command_id.as_ref() {
+            self.remember_command(command_id, &presentation);
+        }
         let turn = Turn::User {
             id: item.item_id.clone(),
-            text,
-            attachments,
+            text: presentation.clone(),
+            attachments: attachments(),
             mentions: Vec::new(),
             timestamp: None,
         };
@@ -1142,6 +1180,7 @@ impl Folded {
         // than through `ensure_assistant_turn`, so it mints its handle here.
         let key = self.mint_turn_key();
         self.user_keys.insert(item.item_id.clone(), key);
+        self.user_text.insert(item.item_id.clone(), presentation);
         self.stamp_item(key, item);
         if let Some(turn_id) = &item.turn_id {
             self.user_turns.insert(item.item_id.clone(), turn_id.clone());
@@ -4017,5 +4056,102 @@ mod tests {
         );
         assert_eq!(verb, "Sent input");
         assert_eq!(target, "x".repeat(80), "the title keeps the first 80 chars");
+    }
+
+    fn user_item_event(
+        fold: &mut MuseFold,
+        method: &str,
+        item_id: &str,
+        revision: u32,
+        command_id: &str,
+        text: Option<&str>,
+        display_text: Option<&str>,
+    ) -> Vec<Delta> {
+        let mut item = serde_json::json!({
+            "itemId": item_id,
+            "turnId": "t-1",
+            "kind": "userMessage",
+            "status": "completed",
+            "revision": revision,
+            "commandId": command_id,
+        });
+        if let Some(text) = text {
+            item["text"] = Value::String(text.to_owned());
+        }
+        if let Some(display) = display_text {
+            item["displayText"] = Value::String(display.to_owned());
+        }
+        fold.apply(MuseEvent::Notification {
+            method: method.to_owned(),
+            params: serde_json::json!({ "item": item }),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        })
+    }
+
+    fn user_turn_text(fold: &MuseFold, item_id: &str) -> String {
+        let session = fold.session("s").expect("session exists");
+        let mut found = None;
+        for turn in &session.turns {
+            if let Turn::User { id, text, .. } = turn {
+                if id == item_id {
+                    assert!(found.is_none(), "exactly one user turn for {item_id}");
+                    found = Some(text.clone());
+                }
+            }
+        }
+        found.expect("the user turn exists")
+    }
+
+    #[test]
+    fn a_late_display_text_replaces_the_user_turn_in_place() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        user_item_event(&mut fold, "item/completed", "m-1", 1, "c-1", Some("EVIDENCE"), None);
+        assert_eq!(user_turn_text(&fold, "m-1"), "EVIDENCE");
+        user_item_event(&mut fold, "item/completed", "m-2", 1, "c-2", Some("second"), None);
+        let deltas =
+            user_item_event(&mut fold, "item/updated", "m-1", 2, "c-1", Some("EVIDENCE"), Some("VISIBLE"));
+        assert!(
+            deltas.iter().any(|delta| matches!(delta, Delta::TurnReplaced { .. })),
+            "the correction is a TurnReplaced"
+        );
+        assert_eq!(user_turn_text(&fold, "m-1"), "VISIBLE");
+        let ids: Vec<String> =
+            fold.session("s").expect("session").turns.iter().map(|turn| turn.id().to_owned()).collect();
+        assert_eq!(ids, vec!["m-1".to_owned(), "m-2".to_owned()], "the turn stays where it was");
+        fold.apply(MuseEvent::Notification {
+            method: "turn/retracted".to_owned(),
+            params: serde_json::json!({ "turnId": "t-1", "commandId": "c-1" }),
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        });
+        assert_eq!(fold.take_restored_prompt("s").as_deref(), Some("VISIBLE"));
+    }
+
+    #[test]
+    fn a_backfilled_user_message_renders_its_display_text() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        let deltas =
+            user_item_event(&mut fold, "item/completed", "m-9", 1, "c-9", Some("EVIDENCE"), Some("VISIBLE"));
+        assert_eq!(user_turn_text(&fold, "m-9"), "VISIBLE");
+        assert!(
+            deltas.iter().all(|delta| !matches!(delta, Delta::TurnReplaced { .. })),
+            "a first sighting starts the turn"
+        );
+    }
+
+    #[test]
+    fn a_user_revision_without_new_text_emits_no_replacement() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        user_item_event(&mut fold, "item/completed", "m-1", 1, "c-1", Some("EVIDENCE"), None);
+        let deltas = user_item_event(&mut fold, "item/updated", "m-1", 2, "c-1", Some("EVIDENCE"), None);
+        assert!(deltas.is_empty(), "a same-text revision only re-stamps");
+        let deltas =
+            user_item_event(&mut fold, "item/updated", "m-1", 3, "c-1", Some("EVIDENCE"), Some("EVIDENCE"));
+        assert!(deltas.is_empty(), "an identical display text is also a no-op");
+        assert_eq!(user_turn_text(&fold, "m-1"), "EVIDENCE");
     }
 }
