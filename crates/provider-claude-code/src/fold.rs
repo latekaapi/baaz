@@ -61,9 +61,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Attachment,
-    AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, Hunk, ThinkingState, TodoItem,
-    TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
+    ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
+    ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, Hunk,
+    ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
 
@@ -1900,6 +1901,18 @@ fn approval_face(request: &ApprovalRequest, session_cwd: &str) -> (String, Strin
     }
 }
 
+/// The card's body kind, from the tool on the wire: Bash (and the terminal
+/// executor) reads as a command, the write/edit family as a file write,
+/// and everything else — reads, fetchers, MCP tools — as other.
+fn approval_body_kind(tool_name: &str) -> ApprovalBodyKind {
+    match tool_name {
+        "Bash" => ApprovalBodyKind::Command,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => ApprovalBodyKind::FileWrite,
+        _ if terminal_tool_name(tool_name).is_some() => ApprovalBodyKind::Command,
+        _ => ApprovalBodyKind::Other,
+    }
+}
+
 /// The transcript card for a `can_use_tool` request: a pending approval the
 /// person resolves through `DecideApproval` with the card's `"allow"` /
 /// `"deny"` choices.
@@ -1926,6 +1939,7 @@ fn approval_card(request: &ApprovalRequest, session_cwd: &str) -> Block {
         cwd,
         capabilities,
         scope: ApprovalScope::ThisCommand,
+        body_kind: approval_body_kind(&request.tool_name),
         state: ApprovalState::Pending,
         rule,
         choices: vec![
@@ -2600,6 +2614,32 @@ mod tests {
         assert!(!finished_metas(&deltas).is_empty(), "the turn still finishes");
     }
 
+    /// `error.jsonl`: the Bash `can_use_tool` ask cards as a command — the
+    /// `$ ` prompt face — while the Write ask in `approval-default.jsonl`
+    /// cards as a file write (asserted in
+    /// `approval_default_fixture_cards_pending_approval_then_runs`).
+    #[test]
+    fn bash_approval_cards_command_body_kind() {
+        let (_, deltas) = replay("error.jsonl");
+        let cards: Vec<Block> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: card @ Block::Approval { .. }, .. } => {
+                    Some(card.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!cards.is_empty(), "the Bash ask cards on the transcript");
+        match &cards[0] {
+            Block::Approval { tool, body_kind, .. } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(*body_kind, ApprovalBodyKind::Command, "a Bash ask reads as a command");
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+    }
+
     /// `todo.jsonl`: three TaskCreate calls plus their status moves fold
     /// to exactly one `Todo` card — opened once, rewritten after — ending
     /// with all three rows done.
@@ -2903,8 +2943,9 @@ mod tests {
             .collect();
         assert_eq!(approvals.len(), 1, "one asked approval, one card");
         match &approvals[0] {
-            Block::Approval { tool, state, choices, command, reason, cwd, .. } => {
+            Block::Approval { tool, state, choices, command, reason, cwd, body_kind, .. } => {
                 assert_eq!(tool, "Write");
+                assert_eq!(*body_kind, ApprovalBodyKind::FileWrite, "a Write ask reads as a file write");
                 assert_eq!(*state, ApprovalState::Pending);
                 assert!(
                     choices.iter().any(|choice| choice.id == "allow")

@@ -1143,6 +1143,7 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         cwd,
         capabilities,
         scope,
+        body_kind,
         state,
         rule,
         choices,
@@ -1161,6 +1162,7 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         .cwd(cwd.clone())
         .capabilities(capabilities.clone())
         .scope(*scope)
+        .body_kind(*body_kind)
         .rule(rule.clone().unwrap_or_default())
         .choices(choices.clone())
         .stages(stages.clone(), *current_stage)

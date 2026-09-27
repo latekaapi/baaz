@@ -46,6 +46,7 @@
               "cwd": "/Users/alex/Projects/acme-web",
               "capabilities": [],
               "scope": "this_worktree",
+              "body_kind": "command",
               "state": {
                 "kind": "approving"
               },

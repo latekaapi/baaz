@@ -2293,6 +2293,7 @@ mod tests {
             cwd: "/tmp/probe".to_owned(),
             capabilities: Vec::new(),
             scope: ApprovalScope::ThisCommand,
+            body_kind: aui_protocol::ApprovalBodyKind::FileWrite,
             state,
             rule: None,
             choices: vec![

@@ -137,6 +137,7 @@
               "cwd": "/tmp/synthetic",
               "capabilities": [],
               "scope": "this_command",
+              "body_kind": "command",
               "state": {
                 "kind": "allowed_once",
                 "exit_code": 0,
