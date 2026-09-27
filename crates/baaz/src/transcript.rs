@@ -26,8 +26,8 @@ use aui::transcript::{
     ToolCardAction, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{
-    ActivityState, Answer, Block, MarkerKind, PlanSection, PlanState, Step, ThinkingState, ToolBody,
-    ToolCall, ToolKind, Turn, TurnMeta,
+    ActivityState, Answer, Block, Diff, DiffKind, DiffLine, Hunk, MarkerKind, PlanSection,
+    PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, Turn, TurnMeta,
 };
 use crate::terminal::{RunRequest, send_enter_for_alt};
 use aui_tokens::scale;
@@ -329,6 +329,94 @@ pub fn shell_run_command(call: &ToolCall) -> Option<String> {
             Some(call.target.clone())
         }
         _ => None,
+    }
+}
+
+/// X2: a Write/Edit card whose diff changes more than this many lines
+/// starts closed (header + diffstat visible, body hidden); smaller edits
+/// keep the open default. Changed lines are added + removed rows —
+/// context rows are not changes.
+pub const BIG_EDIT_CHANGED_LINES: usize = 12;
+
+/// X2: an opened big diff draws at most this many rows of its first hunk,
+/// then a final `… N more lines` row. The stored block keeps the whole
+/// diff; only the copy handed to the card is cut.
+pub const DIFF_DISPLAY_CAP: usize = 40;
+
+/// X2: a shell card's header names at most this many characters of the
+/// command's first line; the block keeps the whole command.
+pub const COMMAND_TARGET_CHARS: usize = 160;
+
+/// X2: whether a lone tool card starts open. A Write/Edit card with more
+/// than [`BIG_EDIT_CHANGED_LINES`] changed lines starts closed — a
+/// 233-line file write is a wall of text nobody asked to re-read — while
+/// small edits and every other card keep today's open default. The toggle
+/// still persists through `folds` either way, so a person can open what
+/// starts closed.
+pub fn default_open(call: &ToolCall) -> bool {
+    match &call.body {
+        ToolBody::Edit { diff } => changed_lines(diff) <= BIG_EDIT_CHANGED_LINES,
+        _ => true,
+    }
+}
+
+/// The changed rows of a diff: every non-context row of every hunk.
+fn changed_lines(diff: &Diff) -> usize {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .filter(|line| !matches!(line.kind, DiffKind::Context))
+        .count()
+}
+
+/// X2: the diff a card actually draws: the first `cap` rows of the first
+/// hunk, plus a final muted `… N more lines` context row when rows were
+/// cut (`N` counts every dropped row, including whole dropped hunks).
+/// Short diffs come back unchanged. The input is never mutated — the
+/// caller draws this copy and the stored block keeps the full diff. aui
+/// v0.3.1 offers no line-level "show all" affordance (its fold row only
+/// covers further hunks), so the truncation plus the count is the whole
+/// affordance for now.
+pub fn display_diff(diff: &Diff, cap: usize) -> Diff {
+    let total: usize = diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+    let Some(first) = diff.hunks.first() else { return diff.clone() };
+    let kept: Vec<DiffLine> = first.lines.iter().take(cap).cloned().collect();
+    let omitted = total.saturating_sub(kept.len());
+    if omitted == 0 {
+        return diff.clone();
+    }
+    let mut lines = kept;
+    lines.push(DiffLine {
+        kind: DiffKind::Context,
+        old_no: None,
+        new_no: None,
+        text: format!("… {omitted} more lines"),
+    });
+    Diff {
+        path: diff.path.clone(),
+        hunks: vec![Hunk { header: first.header.clone(), lines }],
+        added: diff.added,
+        removed: diff.removed,
+    }
+}
+
+/// X2: the header target a shell card shows: the command's first line
+/// only, capped at [`COMMAND_TARGET_CHARS`] characters with `…`. A shell
+/// heredoc otherwise makes the whole script the card's title. The block
+/// keeps the full command — run-in-terminal still runs it whole — and
+/// non-shell cards show their target untouched. Covers every lane: Codex,
+/// Claude Code and muse shell cards all render through `tool_call_card`.
+pub fn display_target(call: &ToolCall) -> String {
+    if !matches!(call.kind, ToolKind::Shell) {
+        return call.target.clone();
+    }
+    let first = call.target.lines().next().unwrap_or("").trim_end().to_owned();
+    if first.chars().count() > COMMAND_TARGET_CHARS {
+        let mut short: String = first.chars().take(COMMAND_TARGET_CHARS).collect();
+        short.push('…');
+        short
+    } else {
+        first
     }
 }
 
@@ -1354,6 +1442,15 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     let block_id = call.id.clone();
     let full = folds.full_output.get(&block_id);
     let mut body = call.body.clone();
+    // X2: an opened big diff is bounded — the display copy is cut to the
+    // first hunk's first rows plus a count, while the stored block keeps
+    // the whole diff. No new element is added here (the count rides an
+    // existing diff row the library already draws), so no new role/label
+    // is owed; the card toggle keeps its own.
+    if let ToolBody::Edit { diff } = &body {
+        let cut = display_diff(diff, DIFF_DISPLAY_CAP);
+        body = ToolBody::Edit { diff: cut };
+    }
     // A fetched full output replaces the truncated visible text on the
     // server's result only (D4): the fold never changes, the card just
     // renders what the fetch returned.
@@ -1403,9 +1500,13 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
                 .icon(IconName::Play),
         );
     }
-    let mut card = tool_card(id, call.verb.clone(), call.target.clone(), call.status, body)
+    // X2: big Write/Edit cards start closed (the toggle still persists
+    // through `folds`), and a shell header names only the command's first
+    // line — the block keeps the full target, so run-in-terminal and the
+    // tab lookup below still see the whole command.
+    let mut card = tool_card(id, call.verb.clone(), display_target(call), call.status, body)
         .duration_ms(call.duration_ms)
-        .open(folds.open(key, true));
+        .open(folds.open(key, default_open(call)));
     if !actions.is_empty() {
         card = card.actions(actions.clone());
     }
@@ -1765,6 +1866,131 @@ mod tests {
             body: ToolBody::Shell { output_lines: vec!["ok".to_owned()], exit_code: Some(0), live: false },
             diff_stat: None,
         }
+    }
+
+    /// X2: an all-addition diff with `lines` rows, shaped like the folds'
+    /// Write cards (Codex `fileChange` adds, Claude Code Write content).
+    fn write_call(lines: usize) -> ToolCall {
+        let diff = Diff {
+            path: "index.html".to_owned(),
+            hunks: vec![Hunk {
+                header: format!("@@ -0,0 +1,{lines} @@"),
+                lines: (1..=lines)
+                    .map(|n| DiffLine {
+                        kind: DiffKind::Add,
+                        old_no: None,
+                        new_no: Some(n as u32),
+                        text: format!("<p>line {n}</p>"),
+                    })
+                    .collect(),
+            }],
+            added: lines as u32,
+            removed: 0,
+        };
+        ToolCall {
+            id: "call-write".to_owned(),
+            kind: ToolKind::Write,
+            verb: "Wrote".to_owned(),
+            target: "index.html".to_owned(),
+            status: aui_protocol::ToolStatus::Success,
+            duration_ms: None,
+            body: ToolBody::Edit { diff },
+            diff_stat: None,
+        }
+    }
+
+    /// The diff out of a test edit card.
+    fn edit_diff(call: &ToolCall) -> Diff {
+        match &call.body {
+            ToolBody::Edit { diff } => diff.clone(),
+            _ => panic!("test helper builds an edit card"),
+        }
+    }
+
+    /// X2: the owner's 233-line HTML write starts closed — the wall of
+    /// numbered HTML that prompted this task.
+    #[test]
+    fn a_233_line_write_starts_closed() {
+        assert!(!default_open(&write_call(233)));
+    }
+
+    /// X2: a 5-line edit keeps today's open default, and so does the
+    /// boundary itself — only *more than* 12 changed lines folds.
+    #[test]
+    fn small_edits_start_open() {
+        let mut edit = write_call(5);
+        edit.kind = ToolKind::Edit;
+        edit.verb = "Edited".to_owned();
+        assert!(default_open(&edit));
+        assert!(default_open(&write_call(12)));
+        assert!(!default_open(&write_call(13)));
+    }
+
+    /// X2: context rows are not changes — a big context with a small edit
+    /// still starts open.
+    #[test]
+    fn context_rows_do_not_fold_a_card() {
+        let mut call = write_call(5);
+        if let ToolBody::Edit { diff } = &mut call.body {
+            for line in &mut diff.hunks[0].lines {
+                line.kind = DiffKind::Context;
+            }
+        }
+        assert!(default_open(&call));
+    }
+
+    /// X2: non-edit cards always keep the open default.
+    #[test]
+    fn shell_cards_start_open() {
+        assert!(default_open(&shell_call("Ran", "npm test")));
+    }
+
+    /// X2: an opened big diff draws the first 40 rows of the first hunk
+    /// plus a final `… N more lines` row counting every dropped row.
+    #[test]
+    fn opened_big_diffs_show_forty_rows_and_a_count() {
+        let shown = display_diff(&edit_diff(&write_call(233)), DIFF_DISPLAY_CAP);
+        assert_eq!(shown.hunks.len(), 1);
+        assert_eq!(shown.hunks[0].lines.len(), DIFF_DISPLAY_CAP + 1);
+        assert_eq!(shown.hunks[0].lines[DIFF_DISPLAY_CAP].text, "… 193 more lines");
+        // The chip counts still describe the whole change.
+        assert_eq!((shown.added, shown.removed), (233, 0));
+    }
+
+    /// X2: short diffs pass through untouched — no count row appended.
+    #[test]
+    fn short_diffs_pass_through_unchanged() {
+        let diff = edit_diff(&write_call(5));
+        assert_eq!(display_diff(&diff, DIFF_DISPLAY_CAP), diff);
+    }
+
+    /// X2: a heredoc command's header is its first line only — the whole
+    /// script is no longer the card's title.
+    #[test]
+    fn a_heredoc_header_is_its_first_line_only() {
+        let command = "cat > /tmp/x.html <<'EOF'\n<html>\n<body>\nEOF";
+        assert_eq!(
+            display_target(&shell_call("Ran", command)),
+            "cat > /tmp/x.html <<'EOF'"
+        );
+    }
+
+    /// X2: a long first line caps at ~160 chars with `…`.
+    #[test]
+    fn long_commands_cap_with_an_ellipsis() {
+        let command = "x".repeat(200);
+        let shown = display_target(&shell_call("Ran", &command));
+        assert_eq!(shown.chars().count(), COMMAND_TARGET_CHARS + 1);
+        assert!(shown.ends_with('…'));
+    }
+
+    /// X2: a short single-line command shows whole, and non-shell targets
+    /// are never touched.
+    #[test]
+    fn short_commands_and_non_shell_targets_show_whole() {
+        assert_eq!(display_target(&shell_call("Ran", "npm test")), "npm test");
+        let write = write_call(5);
+        assert_eq!(display_target(&write), "index.html");
     }
 
     /// D49: a shell tool card carries the card's command text — Muse's
