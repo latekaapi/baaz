@@ -194,7 +194,7 @@ impl SessionView {
         if !landed.is_empty() {
             self.follow = true;
         }
-        self.pending_optimistic.push(optimistic_id.clone());
+        self.pending_optimistic.push(PendingOptimistic { id: optimistic_id.clone(), text: text.clone() });
         let planning = self.plan;
         self.provider_send(command, cx, move |this, result, cx| {
             this.submitted_provider(result, text, planning, optimistic_id, cx);
@@ -443,13 +443,23 @@ impl SessionView {
         // lane: a turn interrupted before anything committed is durably
         // retracted and its prompt comes back.
         if self.is_provider_lane() {
+            // X1b: a stop before the provider's first event — reachable
+            // from the moment of send, while `submitting` holds and no
+            // running turn exists yet — carries no turn id, and a turn
+            // that never started emits no delta to settle it. The ack
+            // itself settles the view (see `settle_early_stop`), whether
+            // the provider acks, errors, or later emits nothing.
+            let early = self.running.is_none();
             let command = ProviderCommand::InterruptTurn {
                 request_id: new_command_id(),
                 session_id: self.session_id.clone(),
                 turn: self.running.as_ref().map(|r| r.turn_id.clone()),
                 retract: true,
             };
-            self.provider_send(command, cx, |this, result, cx| {
+            self.provider_send(command, cx, move |this, result, cx| {
+                if early {
+                    this.settle_early_stop(cx);
+                }
                 if let Err(error) = result {
                     // The provider saying there is nothing to stop is a
                     // better answer about the turn than the local state,
@@ -496,6 +506,38 @@ impl SessionView {
                 this.report(&error, cx);
             }
         });
+    }
+
+    /// Settle a stop pressed before the provider's first event (X1b): the
+    /// optimistic turns come out, `submitting` drops, and the newest
+    /// pending words go back in the composer — retract semantics — so the
+    /// view ends settled whether the provider acked, errored, or later
+    /// emits nothing at all. A pack submit holds no pending turn, so its
+    /// pack text never lands in the composer; only `submitting` drops.
+    ///
+    /// Idempotent: a late echo that already consumed the queue leaves
+    /// nothing to do. And when the turn opened while the stop was in
+    /// flight (`running` is set), this is no longer an early stop — the
+    /// turn runs and settles normally, untouched here.
+    ///
+    /// Late-turn policy, picked and documented: a turn the provider starts
+    /// anyway after an early stop is SHOWN and settles normally. With the
+    /// pending queue drained, its echo folds as an ordinary user turn and
+    /// its start, blocks and finish drive `running` exactly as usual — so
+    /// it can never resurrect a stuck busy.
+    fn settle_early_stop(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_optimistic);
+        for optimistic in &pending {
+            self.remove_optimistic_turn(&optimistic.id);
+        }
+        self.submitting = false;
+        if let Some(restored) = pending.into_iter().last().map(|stopped| stopped.text) {
+            self.restore_prompt(restored, cx);
+        }
+        cx.notify();
     }
 
     /// `turn/unqueue`, remembering why — and the row's text, captured now —

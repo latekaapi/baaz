@@ -170,6 +170,24 @@ optimistic turn and restores the prompt; a lost connection drops every
 pending optimistic turn and idles; a turn that ends with no assistant
 output still clears through its finish, so Working never sticks.
 
+X1b hardens three edges of that window. Stop is reachable from the
+moment of send, while `submitting` holds and no running turn exists yet:
+that stop carries no turn id, and a turn that never started emits no
+delta to settle it, so the interrupt ack itself settles the view — every
+pending optimistic turn comes out, `submitting` drops, and the newest
+pending words go back in the composer (retract semantics) — whether the
+provider acks, errors, or later emits nothing. Each user echo in a batch
+consumes its own pending turn in order, so queued sends and catch-up
+batches leave no duplicate. The Codex reorder still moves the empty
+assistant turn after the echo, but the running turn keeps its original
+start instant across the move, so the elapsed readout never jumps back
+to 0. Handoff packs ride the same busy-until-first-event rule with no
+optimistic bubble of their own: the echo lands the one user turn (the
+short summary), never a duplicate. Late-turn policy: a turn the provider
+starts anyway after an early stop is shown and settles normally — its
+echo folds as an ordinary user turn and its start, blocks and finish
+drive `running` as usual, so it cannot resurrect a stuck busy.
+
 ## 3. The one-writer invariant
 
 **Statement.** Every `SessionView` is owned by exactly one lane for its whole

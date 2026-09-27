@@ -251,7 +251,7 @@ impl SessionView {
                 // both stick with no turn behind them.
                 self.submitting = false;
                 for optimistic in std::mem::take(&mut self.pending_optimistic) {
-                    self.remove_optimistic_turn(&optimistic);
+                    self.remove_optimistic_turn(&optimistic.id);
                 }
                 self.set_banner(&format!("Provider connection lost: {reason}"), None, cx);
             }
@@ -339,6 +339,12 @@ impl SessionView {
     /// [`SessionView::reply_complete_for_running_turn`] all read
     /// `self.running`, so they follow this with no second source.
     fn note_provider_deltas(&mut self, landed: &[Delta], cx: &mut Context<Self>) {
+        // X1b: the Codex reorder (`reconcile_optimistic` moving the empty
+        // assistant turn after the echo) passes the running turn through
+        // remove/start below, which would reset its start instant and make
+        // the elapsed readout jump back to 0. A turn that is running before
+        // and after this batch keeps its original instant and ticker.
+        let running_before = self.running.as_ref().map(|running| (running.turn_id.clone(), running.started));
         for delta in landed {
             match delta {
                 Delta::TurnStarted { turn } => match turn {
@@ -426,6 +432,11 @@ impl SessionView {
                 _ => {}
             }
         }
+        if let (Some((turn_id, started)), Some(running)) = (running_before, self.running.as_mut()) {
+            if running.turn_id == turn_id {
+                running.started = started;
+            }
+        }
     }
 
     /// Drop one optimistic bubble: forget its pending id when it is still
@@ -433,7 +444,7 @@ impl SessionView {
     /// leaves no stuck bubble behind. Removing a turn the fold never saw
     /// (or already dropped) lands nothing — never an error.
     pub(super) fn remove_optimistic_turn(&mut self, turn_id: &str) {
-        if let Some(at) = self.pending_optimistic.iter().position(|id| id == turn_id) {
+        if let Some(at) = self.pending_optimistic.iter().position(|pending| pending.id == turn_id) {
             self.pending_optimistic.remove(at);
         }
         let removed = self.fold.apply_deltas(
@@ -445,25 +456,34 @@ impl SessionView {
         }
     }
 
-    /// Reconcile the provider's own user turn with the optimistic bubble
-    /// folded at send (X1). A batch carrying a user `TurnStarted` consumes
-    /// the earliest pending optimistic turn: its removal is prepended so
-    /// the echo lands in the optimistic turn's place — still exactly one
-    /// user bubble, never an append.
+    /// Reconcile the provider's own user turns with the optimistic bubbles
+    /// folded at send (X1). Each user `TurnStarted` in the batch consumes
+    /// the earliest still-pending optimistic turn, in order: every removal
+    /// is prepended so each echo lands in its optimistic turn's place —
+    /// still exactly one user bubble per send, never an append and never a
+    /// leftover duplicate (X1b).
     ///
     /// When the provider opened its assistant turn before echoing (Codex
     /// `turn/started`), that empty turn sits ahead of the bubble; it is
     /// moved after the echo so the transcript keeps user-before-assistant
-    /// order. Anything else — replayed history, an echo with nothing
-    /// pending — folds exactly as before.
+    /// order. The move passes through remove/start in the fold, but the
+    /// running turn keeps its original start instant (see
+    /// `note_provider_deltas`). Anything else — replayed history, echoes
+    /// with nothing pending — folds exactly as before.
     fn reconcile_optimistic(&mut self, deltas: Vec<Delta>) -> Vec<Delta> {
-        let echoes = deltas.iter().any(|delta| {
-            matches!(delta, Delta::TurnStarted { turn: Turn::User { .. } })
-        });
-        if !echoes || self.pending_optimistic.is_empty() {
+        if self.pending_optimistic.is_empty() {
             return deltas;
         }
-        let optimistic = self.pending_optimistic.remove(0);
+        let echoes = deltas
+            .iter()
+            .filter(|delta| matches!(delta, Delta::TurnStarted { turn: Turn::User { .. } }))
+            .count();
+        if echoes == 0 {
+            return deltas;
+        }
+        let take = echoes.min(self.pending_optimistic.len());
+        let removed: Vec<String> =
+            self.pending_optimistic.drain(..take).map(|pending| pending.id).collect();
         let shift = match self.fold.session(&self.session_id).and_then(|session| session.turns.last()) {
             Some(Turn::Assistant { blocks, .. }) if blocks.is_empty() => self
                 .fold
@@ -472,8 +492,10 @@ impl SessionView {
                 .filter(|turn| !self.completed_turns.contains(turn.id())),
             _ => None,
         };
-        let mut out = Vec::with_capacity(deltas.len() + 2);
-        out.push(Delta::TurnRemoved { turn_id: optimistic });
+        let mut out = Vec::with_capacity(deltas.len() + removed.len() + 2);
+        for turn_id in removed {
+            out.push(Delta::TurnRemoved { turn_id });
+        }
         if let Some(turn) = &shift {
             out.push(Delta::TurnRemoved { turn_id: turn.id().to_owned() });
         }
@@ -1024,6 +1046,7 @@ mod tests {
         catalog: Vec<provider::ModelSummary>,
         catalog_provider: String,
         fail_submit: bool,
+        fail_interrupt: bool,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -1069,6 +1092,14 @@ mod tests {
             (adapter, handle)
         }
 
+        /// A double whose `InterruptTurn` is refused: the stop never
+        /// lands, so an early stop must still settle the view itself.
+        fn failing_interrupt() -> (Self, RecordingHandle) {
+            let (adapter, handle) = Self::with_pending(Vec::new(), Vec::new());
+            adapter.inner.state.lock().expect("recording mutex").fail_interrupt = true;
+            (adapter, handle)
+        }
+
         /// A double serving a model catalog: `ListModels` answers `models`
         /// with `active` flagging the effective model, the way a live child
         /// does. Fork, compact and session config answer `Native` here so
@@ -1098,6 +1129,7 @@ mod tests {
                     catalog: Vec::new(),
                     catalog_provider: "recording".to_owned(),
                     fail_submit: false,
+                    fail_interrupt: false,
                 }),
                 tx,
                 rx,
@@ -1214,6 +1246,11 @@ mod tests {
                     // The interrupted turn still finishes — Codex ends
                     // `interrupt.jsonl` at `turn/completed` with
                     // `status: "interrupted"` — so the stop button drops.
+                    if self.inner.state.lock().expect("recording mutex").fail_interrupt {
+                        return Err(provider::ProviderError::Unavailable {
+                            reason: "the child is down".into(),
+                        });
+                    }
                     if let Some(finished) = turn {
                         self.emit(provider::ProviderEvent::Deltas {
                             session_id: Some(session_id),
@@ -2874,5 +2911,232 @@ mod tests {
             assert!(!view.read(cx).busy(), "the refused submit idles the view");
             assert!(view.read(cx).banner.is_some(), "the refusal banners its reason");
         });
+    }
+
+    /// X1b.1: stop pressed after send but before any provider event ends
+    /// settled — no phantom bubble, no stuck Working — with the prompt
+    /// handed back to the composer (retract semantics). The double acks
+    /// the stop with no turn named, so no delta will ever settle this:
+    /// the ack itself must.
+    #[gpui::test]
+    fn early_stop_before_first_event_settles_and_restores_prompt(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        // Deliberately no `drain_recording`: the ack is in, no provider
+        // event has reached the lane yet — the window Stop is reachable in.
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the view works until the provider speaks");
+            view.update(cx, |view, cx| view.interrupt(cx));
+        });
+        vc.run_until_parked();
+        assert!(
+            user_turns(&view, vc).is_empty(),
+            "the early stop removes the optimistic bubble, drew {:?}",
+            user_turns(&view, vc)
+        );
+        vc.update(|_, cx| {
+            assert!(!view.read(cx).busy(), "the early stop idles the view");
+            assert_eq!(
+                view.read(cx).pending_prompt.as_deref(),
+                Some("hello there"),
+                "the retracted prompt comes back to the composer"
+            );
+        });
+    }
+
+    /// X1b.1: the same early stop, but the interrupt command itself
+    /// errors (the child is down). The view must settle exactly the same
+    /// way — the error banners, never sticks.
+    #[gpui::test]
+    fn early_stop_settles_when_the_interrupt_errors(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::failing_interrupt();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the view works until the provider speaks");
+            view.update(cx, |view, cx| view.interrupt(cx));
+        });
+        vc.run_until_parked();
+        assert!(
+            user_turns(&view, vc).is_empty(),
+            "the failed stop still removes the optimistic bubble, drew {:?}",
+            user_turns(&view, vc)
+        );
+        vc.update(|_, cx| {
+            assert!(!view.read(cx).busy(), "the failed stop still idles the view");
+            assert_eq!(
+                view.read(cx).pending_prompt.as_deref(),
+                Some("hello there"),
+                "the retracted prompt comes back even when the stop errors"
+            );
+        });
+    }
+
+    /// X1b.2: Codex opens the assistant turn (`turn/started`) before its
+    /// `userMessage` echo. The reorder must not reset the Working timer:
+    /// the running turn keeps its original start instant across the echo.
+    #[gpui::test]
+    fn codex_reorder_keeps_the_running_start_instant(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        // The assistant turn opens first, still empty — the view runs on it.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::TurnStarted {
+                    turn: aui_protocol::Turn::Assistant {
+                        id: "a-1".to_owned(),
+                        blocks: Vec::new(),
+                        meta: aui_protocol::TurnMeta::default(),
+                        timestamp: None,
+                    },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        let started_before = vc.update(|_, cx| {
+            view.read(cx).running.as_ref().map(|r| r.started).expect("the open turn runs")
+        });
+        // Separate the two instants past any clock granularity, so a reset
+        // cannot hide inside one tick.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Then the user echo lands behind it — the reorder's trigger.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::TurnStarted {
+                    turn: aui_protocol::Turn::User {
+                        id: "u-1".to_owned(),
+                        text: "hello there".to_owned(),
+                        attachments: Vec::new(),
+                        mentions: Vec::new(),
+                        timestamp: None,
+                    },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        let users = user_turns(&view, vc);
+        assert_eq!(users.len(), 1, "the echo replaces the bubble, drew {users:?}");
+        vc.update(|_, cx| {
+            let started_after =
+                view.read(cx).running.as_ref().map(|r| r.started).expect("the turn still runs");
+            assert_eq!(
+                started_after, started_before,
+                "the reorder keeps the original start instant"
+            );
+        });
+    }
+
+    /// X1b.3: one batch carrying two user echoes (queued sends, catch-up)
+    /// reconciles both pending optimistic turns — exactly two user turns,
+    /// no leftovers, an empty pending queue.
+    #[gpui::test]
+    fn one_batch_with_two_echoes_reconciles_both_pending(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("first".to_owned(), cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("second".to_owned(), cx)));
+        vc.run_until_parked();
+        assert_eq!(user_turns(&view, vc).len(), 2, "two sends fold two bubbles");
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    aui_protocol::Delta::TurnStarted {
+                        turn: aui_protocol::Turn::User {
+                            id: "u-1".to_owned(),
+                            text: "first".to_owned(),
+                            attachments: Vec::new(),
+                            mentions: Vec::new(),
+                            timestamp: None,
+                        },
+                    },
+                    aui_protocol::Delta::TurnStarted {
+                        turn: aui_protocol::Turn::User {
+                            id: "u-2".to_owned(),
+                            text: "second".to_owned(),
+                            attachments: Vec::new(),
+                            mentions: Vec::new(),
+                            timestamp: None,
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        let users = user_turns(&view, vc);
+        assert_eq!(users.len(), 2, "both echoes replace, never append, drew {users:?}");
+        vc.update(|_, cx| {
+            assert!(
+                view.read(cx).pending_optimistic.is_empty(),
+                "no pending optimistic turn is left behind"
+            );
+        });
+    }
+
+    /// X1b.4: a handoff pack submit stays busy until the provider's first
+    /// event and folds no duplicate user turn — the echo lands the one
+    /// bubble (the short summary), the finish idles the view.
+    #[gpui::test]
+    fn pack_submit_busy_until_first_event_without_duplicate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.submit_pack("PACK-BODY".to_owned(), "pack summary".to_owned(), cx)
+            })
+        });
+        vc.run_until_parked();
+        // Deliberately no `drain_recording`: the ack is in, no provider
+        // event has reached the lane yet.
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the pack works until the provider speaks");
+        });
+        assert!(user_turns(&view, vc).is_empty(), "the pack folds no bubble of its own");
+        drain_recording(&view, &tx, vc);
+        let users = user_turns(&view, vc);
+        assert_eq!(users.len(), 1, "the echo lands the one bubble, drew {users:?}");
+        assert_eq!(users[0].1, "pack summary", "the bubble shows the short summary");
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the open turn works");
+        });
+        let running = vc.update(|_, cx| {
+            view.read(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::TurnFinished {
+                    turn_id: running,
+                    meta: aui_protocol::TurnMeta::default(),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(!view.read(cx).busy(), "the finished pack turn drops the stop button");
+        });
+        assert_eq!(user_turns(&view, vc).len(), 1, "the finish keeps the one bubble");
     }
 }
