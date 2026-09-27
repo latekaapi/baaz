@@ -95,9 +95,14 @@ impl SessionView {
     /// [`gpui::Render`] impl above for why). Cheap next to the transcript:
     /// one textarea element plus closed menus.
     pub fn render_composer_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // A restored prompt lands only in an empty composer: a stop's ack
+        // can arrive after the person has started typing the next message,
+        // and that text wins over the retracted one.
         if let Some(text) = self.pending_prompt.take() {
-            self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
-            self.note_draft(cx);
+            if self.composer.read(cx).value().trim().is_empty() {
+                self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
+                self.note_draft(cx);
+            }
         }
         let composer = self.render_composer(cx);
         let p = cx.aui().colors;
