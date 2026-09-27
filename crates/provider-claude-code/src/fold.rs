@@ -115,6 +115,38 @@ fn is_todo_tool(name: &str) -> bool {
     matches!(name, "TaskCreate" | "TaskUpdate" | "TodoWrite")
 }
 
+/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
+/// §4), served on this lane as `mcp__baaz__terminal_*`. A terminal call
+/// folds to a shell card with terminal verbs (D51) — the existing
+/// tool-card rendering carries the command, the exit pill, the duration
+/// and the output — never the raw request/response JSON.
+fn is_terminal_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "terminal_list"
+            | "terminal_open"
+            | "terminal_run"
+            | "terminal_read"
+            | "terminal_screen"
+            | "terminal_send"
+            | "terminal_close"
+    )
+}
+
+/// The opening verb every terminal card folds with; the result maps it to
+/// past tense, the same present-until-ran rule shell cards follow.
+pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
+
+/// The settled verb of a terminal card.
+pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
+
+/// Whether `name` is a baaz terminal tool call on this lane, and its tool
+/// short of the `mcp__baaz__` prefix when it is.
+fn terminal_tool_name(name: &str) -> Option<String> {
+    let (server, tool) = mcp_split(name)?;
+    (server == "baaz" && is_terminal_tool(&tool)).then_some(tool)
+}
+
 /// The provider's task status vocabulary onto the transcript's.
 fn map_todo_state(status: &str) -> TodoState {
     match status {
@@ -255,6 +287,12 @@ fn finish_tool_block(
     tool_use_id: &str,
     result: &ToolResult,
 ) -> Block {
+    // A terminal call completes from its result JSON, never as raw text:
+    // the tab joins the command in the header, the run's output is the
+    // body, and the exit code is the status (D51).
+    if verb == TERMINAL_RUNNING_VERB {
+        return finish_terminal_block(target, params, tool_use_id, result);
+    }
     let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
     let done = past_verb(kind, verb);
     match kind {
@@ -310,6 +348,71 @@ fn finish_tool_block(
             status: if result.is_error { "error".into() } else { "completed".into() },
             text: result.text.clone(),
         },
+    }
+}
+
+/// Complete a terminal tool card from its result JSON (`docs/14-terminal.md`
+/// §4): `{tab, block, status, exit_code?, duration_ms, output, …}`. The
+/// header names the command plus the tab, the body is the run's output —
+/// a result without an `output` field (list, open, send, close) bodies
+/// the result text itself — and the exit code is the status and the pill.
+fn finish_terminal_block(
+    target: &str,
+    params: &[(String, String)],
+    tool_use_id: &str,
+    result: &ToolResult,
+) -> Block {
+    let object: Option<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(result.text.trim())
+            .ok()
+            .filter(|value: &serde_json::Value| value.is_object())
+            .map(|value: serde_json::Value| value.as_object().cloned().unwrap_or_default());
+    let param = |key: &str| params.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone());
+    let command =
+        param("command").filter(|command| !command.trim().is_empty()).unwrap_or_else(|| target.to_owned());
+    let tab = object
+        .as_ref()
+        .and_then(|object| object.get("tab"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|tab| !tab.trim().is_empty());
+    let target = match tab {
+        Some(tab) if command.trim() != tab => format!("{command} · {tab}"),
+        _ => command,
+    };
+    let output_lines = match object
+        .as_ref()
+        .and_then(|object| object.get("output"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(output) => output.lines().map(str::to_owned).collect(),
+        None => result.text.lines().map(str::to_owned).collect(),
+    };
+    let exit_code = object
+        .as_ref()
+        .and_then(|object| object.get("exit_code"))
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let duration_ms = object
+        .as_ref()
+        .and_then(|object| object.get("duration_ms"))
+        .and_then(serde_json::Value::as_u64);
+    let status = if result.is_error {
+        ToolStatus::Error
+    } else {
+        match exit_code {
+            Some(0) | None => ToolStatus::Success,
+            Some(_) => ToolStatus::Error,
+        }
+    };
+    Block::ToolCall {
+        id: tool_use_id.to_owned(),
+        kind: ToolKind::Shell,
+        verb: TERMINAL_RAN_VERB.into(),
+        target,
+        status,
+        duration_ms,
+        body: ToolBody::Shell { output_lines, exit_code, live: false },
+        diff_stat: None,
     }
 }
 
@@ -1751,6 +1854,19 @@ fn approval_face(request: &ApprovalRequest, session_cwd: &str) -> (String, Strin
             (query.clone(), with_ask(query, request), cwd)
         }
         _ => {
+            // A terminal run asks in its own words — "Run in terminal ·
+            // `<command>`" — never as the raw `baaz · Terminal Run
+            // (mcp__baaz__terminal_run)` request the generic MCP face
+            // would print (D51).
+            if terminal_tool_name(&request.tool_name).as_deref() == Some("terminal_run") {
+                let command = approval_field(request, "command");
+                let command = if command.trim().is_empty() {
+                    fallback_command.clone()
+                } else {
+                    format!("Run in terminal · `{}`", command.trim())
+                };
+                return (command.clone(), with_ask(command, request), cwd);
+            }
             if request.mcp_server.is_some() || request.tool_name.starts_with("mcp__") {
                 let server = request.mcp_server.clone().unwrap_or_default();
                 let head = if server.is_empty() {
@@ -1953,6 +2069,28 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             diff_stat: None,
         };
         ToolCard { kind: ToolKind::SubAgent, verb: "Delegate".into(), target, params, block }
+    } else if terminal_tool_name(name).is_some() {
+        // A baaz terminal tool call opens as a shell card with the
+        // command in the header (D51): the result completes it to "Ran
+        // in terminal" with the tab, the exit and the output.
+        let target = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("tab").and_then(serde_json::Value::as_str))
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(name)
+            .to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::Shell,
+            verb: TERMINAL_RUNNING_VERB.into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::Shell, verb: TERMINAL_RUNNING_VERB.into(), target, params, block }
     } else if let Some((server, tool)) = mcp_split(name) {
         let target = format!("{server} · {tool}");
         let block = Block::ToolCall {
@@ -3013,6 +3151,122 @@ mod tests {
             ))
             .count();
         assert_eq!(generics, 1);
+    }
+
+    /// A `terminal_run` tool_use opens a shell card naming the command —
+    /// never the raw `mcp__baaz__terminal_run` request — and its result
+    /// completes it to "Ran in terminal · command · tab" with the run's
+    /// output, exit and duration (D51).
+    #[test]
+    fn a_baaz_terminal_run_folds_to_a_shell_card_not_raw_json() {
+        let session = "terminal-1";
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "model": "m", "id": "msg_1", "type": "message", "role": "assistant",
+                    "content": [{
+                        "type": "tool_use", "id": "toolu_term1",
+                        "name": "mcp__baaz__terminal_run",
+                        "input": {"command": "echo hi", "tab": "auto", "wait": "exit"},
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result", "tool_use_id": "toolu_term1",
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"tab\":\"t1\",\"block\":\"t1:0\",\"status\":\"exited\",\"exit_code\":0,\"duration_ms\":42,\"output\":\"hi\\n\",\"truncated_bytes\":0,\"cursor\":\"c:9\"}",
+                        }],
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-2", "timestamp": "2026-09-27T00:00:01.000Z",
+            })
+            .to_string(),
+        ];
+        let (_, deltas) = fold_lines(&lines);
+        let opened = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::ToolCall { kind, verb, target, status, .. }, .. } => {
+                    Some((kind.clone(), verb.clone(), target.clone(), *status))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            opened,
+            [(
+                ToolKind::Shell,
+                TERMINAL_RUNNING_VERB.to_owned(),
+                "echo hi".to_owned(),
+                ToolStatus::Running
+            )],
+            "the terminal call opens as a running shell card naming the command"
+        );
+        let completed = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { verb, target, status, duration_ms, body, .. }, .. } => {
+                    Some((verb.clone(), target.clone(), *status, *duration_ms, body.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "the result completes the card");
+        let (verb, target, status, duration_ms, body) = &completed[0];
+        assert_eq!(verb, TERMINAL_RAN_VERB);
+        assert_eq!(target, "echo hi · t1", "the command plus the tab label");
+        assert_eq!(*status, ToolStatus::Success);
+        assert_eq!(*duration_ms, Some(42));
+        match body {
+            ToolBody::Shell { output_lines, exit_code, live } => {
+                assert_eq!(output_lines, &["hi".to_owned()]);
+                assert_eq!(*exit_code, Some(0));
+                assert!(!live);
+            }
+            body => panic!("a shell body, not {body:?}"),
+        }
+    }
+
+    /// The `terminal_run` approval asks "Run in terminal · `<command>`" —
+    /// never "baaz · Terminal Run (mcp__baaz__terminal_run)" (D51).
+    #[test]
+    fn a_terminal_run_approval_names_the_command() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": "req_ask_1",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "mcp__baaz__terminal_run",
+                    "mcp_server": {"name": "baaz", "source": "dynamic"},
+                    "display_name": "Terminal Run",
+                    "input": {"command": "echo hi", "tab": "auto"},
+                    "permission_suggestions": [],
+                    "tool_use_id": "toolu_term1",
+                },
+            })
+            .to_string(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        assert_eq!(fold.pending_approvals().len(), 1, "the ask waits");
+        let commands = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Approval { command, .. }, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(commands, ["Run in terminal · `echo hi`".to_owned()]);
     }
 
     #[test]

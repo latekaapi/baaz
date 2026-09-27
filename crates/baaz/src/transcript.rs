@@ -53,8 +53,26 @@ fn approval_verb(tool: &str) -> String {
         "WebFetch" => "fetch this URL".to_owned(),
         "WebSearch" => "search the web".to_owned(),
         "Permissions" => "change permissions".to_owned(),
+        tool if is_terminal_tool_name(tool) => "run this command in the terminal".to_owned(),
         other => format!("use {other}"),
     }
+}
+
+/// Whether `tool` names a baaz terminal tool on any lane: the muse lane's
+/// bare `terminal_*` names and the Claude Code lane's `mcp__baaz__`
+/// prefix. The approval title asks what the tool would do, so both
+/// spellings map to the terminal verb.
+fn is_terminal_tool_name(tool: &str) -> bool {
+    const TOOLS: [&str; 7] = [
+        "terminal_list",
+        "terminal_open",
+        "terminal_run",
+        "terminal_read",
+        "terminal_screen",
+        "terminal_send",
+        "terminal_close",
+    ];
+    TOOLS.iter().any(|name| tool == *name || tool == format!("mcp__baaz__{name}"))
 }
 
 /// The pending question for one approval card: the muse lane keeps
@@ -140,6 +158,20 @@ pub struct Folds {
     /// runnable fences ("Run"), and honoured under `--replay` — the request
     /// is entirely local, never a turn, never the wire.
     pub terminal_run: Option<TerminalRunHandler>,
+    /// D51 "Open terminal" on terminal tool cards: the tab to focus, when
+    /// the card names one — `None` opens the dock on its active tab.
+    /// Entirely local like [`Folds::terminal_run`], honoured under
+    /// `--replay` too.
+    pub open_terminal: Option<OpenTerminalHandler>,
+    /// D51 live mirror: tool-call id → the block's last lines and whether
+    /// it is still running, snapshotted once per frame by the session view
+    /// from the terminal host. Empty under `--replay` (no host), where
+    /// the card renders the folded result text instead.
+    pub terminal_mirror: Rc<HashMap<String, TerminalMirror>>,
+    /// Whether any terminal card's tab is still busy this frame: the
+    /// session view holds one animation frame while true, so the mirror
+    /// tracks arriving output — one repaint per frame, none once settled.
+    pub terminal_live: bool,
     /// Skill loads, by skill name: the scope the landed catalog reports, so
     /// the quiet row reads "Loaded skill `name` · scope" (D63). Empty when
     /// the catalog knows no such skill — the scope is omitted, never
@@ -173,6 +205,26 @@ pub fn skill_load_text(name: &str, scope: Option<&str>) -> String {
 /// the application owns the dock.
 pub type TerminalRunHandler = Rc<dyn Fn(RunRequest, &mut Window, &mut App)>;
 
+/// An "Open terminal" press: the tab to focus, when the card names one.
+/// The view emits it as [`crate::session::SessionEvent::OpenTerminal`];
+/// the application opens the dock on that tab.
+pub type OpenTerminalHandler = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
+
+/// One frame's live mirror of a terminal tab's block (D51): the block's
+/// last lines for the card body, and whether the tab is still busy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalMirror {
+    /// The block's last lines, oldest first — at most
+    /// [`TERMINAL_MIRROR_LINES`].
+    pub lines: Vec<String>,
+    /// The tab still holds a running block: the card keeps its live pill
+    /// and the view keeps repainting, one frame at a time.
+    pub live: bool,
+}
+
+/// How many of the block's last lines the terminal card mirrors (D51).
+pub const TERMINAL_MIRROR_LINES: usize = 6;
+
 /// A skill row's tap: the skill name, out. The view emits it as
 /// [`crate::session::SessionEvent::OpenSkill`]; the application opens the
 /// Skills page on that skill.
@@ -184,6 +236,57 @@ pub const RUN_IN_TERMINAL_ACTION_ID: &str = "run-in-terminal";
 /// The header action label of "Run in terminal" on shell tool cards.
 pub const RUN_IN_TERMINAL_LABEL: &str = "Run in terminal";
 
+/// The header action id of "Open terminal" on terminal tool cards (D51):
+/// opens the dock and focuses the card's tab.
+pub const OPEN_IN_TERMINAL_ACTION_ID: &str = "open-terminal";
+
+/// The header action label of "Open terminal" on terminal tool cards.
+/// The label is the accessible name: the library's button only takes a
+/// role with an explicit accessibility label, and its action slot carries
+/// id/label/icon alone — so the human label here is what a screen reader
+/// has to announce the control with.
+pub const OPEN_IN_TERMINAL_LABEL: &str = "Open terminal";
+
+/// Whether a tool call is a terminal tool call (D51): a shell card whose
+/// verb is the folds' terminal verb, on every lane. Only these cards get
+/// the "Open terminal" action and the live mirror; every other shell card
+/// keeps "Run in terminal".
+pub fn is_terminal_card(call: &ToolCall) -> bool {
+    matches!(&call.kind, ToolKind::Shell)
+        && (call.verb == TERMINAL_RUNNING_VERB || call.verb == TERMINAL_RAN_VERB)
+}
+
+/// The opening verb every lane's fold gives a terminal card.
+pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
+
+/// The settled verb every lane's fold gives a terminal card.
+pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
+
+/// The tab a terminal target names (`"<command> · t1"`), when the result
+/// named one. The suffix is the only channel the frozen tool-call shape
+/// leaves the fold, so the parse is strict — a trailing `· t<digits>` —
+/// and anything else is no tab rather than a wrong one.
+pub fn terminal_tab_id(target: &str) -> Option<String> {
+    let (_, tab) = target.rsplit_once('·')?;
+    let tab = tab.trim();
+    if tab.len() > 1 && tab.starts_with('t') && tab[1..].chars().all(|c| c.is_ascii_digit()) {
+        Some(tab.to_owned())
+    } else {
+        None
+    }
+}
+
+/// The command a terminal target ran: the target short of the tab suffix,
+/// for matching the tab's block to mirror.
+pub fn terminal_command(target: &str) -> String {
+    match target.rsplit_once('·') {
+        Some((command, tab)) if terminal_tab_id(target).is_some_and(|id| id == tab.trim()) => {
+            command.trim_end().to_owned()
+        }
+        _ => target.to_owned(),
+    }
+}
+
 /// The run row's button label under assistant turns with runnable fences.
 pub const RUN_LABEL: &str = "Run";
 
@@ -191,14 +294,27 @@ pub const RUN_LABEL: &str = "Run";
 /// the `!` userShell both fold to [`ToolKind::Shell`] with a
 /// [`ToolBody::Shell`] body, so one match covers both. The card's command
 /// text is its target; anything else — a read, a search that fell back to a
-/// shell body, a blank target — offers no button.
+/// shell body, a blank target — offers no button. Terminal cards offer
+/// none either: their command already ran in the dock, and their action
+/// is "Open terminal", not a rerun.
 pub fn shell_run_command(call: &ToolCall) -> Option<String> {
+    if is_terminal_card(call) {
+        return None;
+    }
     match (&call.kind, &call.body) {
         (ToolKind::Shell, ToolBody::Shell { .. }) if !call.target.trim().is_empty() => {
             Some(call.target.clone())
         }
         _ => None,
     }
+}
+
+/// Whether the pressed header action is the open-terminal action: the
+/// payload of [`ToolCardIntent::Action`] is the action's index in the
+/// order the card received them, so the check is against the id at that
+/// index — the same index rule [`action_is_run`] follows.
+pub fn action_is_open(actions: &[ToolCardAction], index: usize) -> bool {
+    actions.get(index).is_some_and(|action| action.id == OPEN_IN_TERMINAL_ACTION_ID)
 }
 
 /// Whether the pressed header action is the run action: the payload of
@@ -1187,11 +1303,29 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         .map(|full| (full.fetchable, matches!(full.state, FullOutputState::Idle)))
         .unwrap_or((false, false));
     let show = folds.show_full_output.clone();
-    // D49's "Run in terminal": shell tool cards (Muse's shell and the `!`
-    // userShell) carry the card's command text in the header's action slot.
+    // D51's terminal card: while the tab lives the body mirrors the
+    // block's last lines from the frame's snapshot; once the tab is gone
+    // (or under `--replay`, where the snapshot is empty) the card keeps
+    // the folded result text. The mirror flag decides the live pill —
+    // the tab still runs — while the fold's own flag covers the rest.
+    if is_terminal_card(call) {
+        if let ToolBody::Shell { output_lines, live, .. } = &mut body {
+            if let Some(mirror) = folds.terminal_mirror.get(&call.id).cloned() {
+                *output_lines = mirror.lines;
+                *live = mirror.live;
+            }
+        }
+    }
+    // D51's "Open terminal" on terminal cards, D49's "Run in terminal" on
+    // every other shell card: a terminal command already ran in the dock,
+    // so its card opens the dock rather than offering a rerun.
+    let terminal = is_terminal_card(call);
+    let open_tab = if terminal { terminal_tab_id(&call.target) } else { None };
     let run_command = shell_run_command(call);
     let mut actions = Vec::new();
-    if run_command.is_some() {
+    if terminal {
+        actions.push(ToolCardAction::new(OPEN_IN_TERMINAL_ACTION_ID, OPEN_IN_TERMINAL_LABEL));
+    } else if run_command.is_some() {
         actions.push(
             ToolCardAction::new(RUN_IN_TERMINAL_ACTION_ID, RUN_IN_TERMINAL_LABEL)
                 .icon(IconName::Play),
@@ -1204,6 +1338,7 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         card = card.actions(actions.clone());
     }
     let run = folds.terminal_run.clone();
+    let open = folds.open_terminal.clone();
     card
         .on_intent({
             let toggle = folds.toggle.clone();
@@ -1216,18 +1351,24 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
                         toggle(key.clone(), window, cx);
                     }
                 }
-                // ⌥-click pastes without Enter; a plain click sends it.
-                // Anything that is not the run action still just toggles.
-                ToolCardIntent::Action(index) => match (&run, &run_command) {
-                    (Some(run), Some(command)) if action_is_run(&actions, index) => {
-                        if let Some(request) = RunRequest::new(
-                            command.clone(),
-                            send_enter_for_alt(window.modifiers().alt),
-                        ) {
-                            run(request, window, cx);
-                        }
+                // "Open terminal" opens the dock on the card's tab; a
+                // ⌥-click run pastes without Enter, a plain click sends
+                // it. Anything that is not either action still toggles.
+                ToolCardIntent::Action(index) => match (&open, &open_tab) {
+                    (Some(open), _) if action_is_open(&actions, index) => {
+                        open(open_tab.clone(), window, cx);
                     }
-                    _ => toggle(key.clone(), window, cx),
+                    _ => match (&run, &run_command) {
+                        (Some(run), Some(command)) if action_is_run(&actions, index) => {
+                            if let Some(request) = RunRequest::new(
+                                command.clone(),
+                                send_enter_for_alt(window.modifiers().alt),
+                            ) {
+                                run(request, window, cx);
+                            }
+                        }
+                        _ => toggle(key.clone(), window, cx),
+                    },
                 },
                 _ => toggle(key.clone(), window, cx),
             }
@@ -1666,6 +1807,49 @@ mod tests {
             approval_title(Some("Claude Code"), "mcp__server__tool"),
             "Allow Claude Code to use mcp__server__tool?"
         );
+        assert_eq!(
+            approval_title(Some("Claude Code"), "mcp__baaz__terminal_run"),
+            "Allow Claude Code to run this command in the terminal?"
+        );
+        assert_eq!(approval_title(None, "terminal_run"), APPROVAL_TITLE);
+    }
+
+    /// D51: a terminal card is a shell card with the terminal verb — only
+    /// it gets "Open terminal" and the mirror. Its tab parses off the
+    /// target's strict `· t<digits>` suffix; anything else is no tab
+    /// rather than a wrong one.
+    #[test]
+    fn terminal_cards_are_detected_and_their_tabs_parsed() {
+        use aui_protocol::{ToolBody, ToolStatus};
+        let shell = |verb: &str, target: &str| ToolCall {
+            id: "i-1".into(),
+            kind: ToolKind::Shell,
+            verb: verb.into(),
+            target: target.into(),
+            status: ToolStatus::Success,
+            duration_ms: None,
+            body: ToolBody::Shell { output_lines: Vec::new(), exit_code: Some(0), live: false },
+            diff_stat: None,
+        };
+        let ran = shell(TERMINAL_RAN_VERB, "echo hi · t1");
+        assert!(is_terminal_card(&ran));
+        assert_eq!(terminal_tab_id(&ran.target), Some("t1".to_owned()));
+        assert_eq!(terminal_command(&ran.target), "echo hi");
+        assert_eq!(shell_run_command(&ran), None, "no rerun on a terminal card");
+        let running = shell(TERMINAL_RUNNING_VERB, "sleep 30");
+        assert!(is_terminal_card(&running));
+        assert_eq!(terminal_tab_id(&running.target), None, "no tab yet");
+        assert_eq!(terminal_command(&running.target), "sleep 30");
+        // A command that merely ends in something tab-like is not a tab:
+        // the suffix must be exactly `· t<digits>`.
+        let tricky = shell(TERMINAL_RAN_VERB, "echo · t1x");
+        assert_eq!(terminal_tab_id(&tricky.target), None);
+        assert_eq!(terminal_command(&tricky.target), "echo · t1x");
+        let plain = shell("Ran", "echo hi · t1");
+        assert!(!is_terminal_card(&plain), "an ordinary shell card keeps Run in terminal");
+        assert_eq!(shell_run_command(&plain), Some("echo hi · t1".to_owned()));
+        let read = ToolCall { kind: ToolKind::Read, ..shell(TERMINAL_RAN_VERB, "x") };
+        assert!(!is_terminal_card(&read), "the verb alone never marks the card");
     }
 
     fn quiet_folds() -> Folds {
@@ -1688,6 +1872,9 @@ mod tests {
             span_event: None,
             tool_group: None,
             terminal_run: None,
+            open_terminal: None,
+            terminal_mirror: Rc::new(HashMap::new()),
+            terminal_live: false,
             skill_scopes: Rc::new(HashMap::new()),
             open_skill: None,
         }

@@ -1651,6 +1651,7 @@ impl Harness {
             workspace,
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
+            terminal_host: Some(self.terminal_host.clone()),
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), None, host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
@@ -1928,7 +1929,7 @@ impl Harness {
         let (provider, workspace) = (self.new_provider.clone(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
-        let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone() };
+        let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
@@ -2141,6 +2142,7 @@ impl Harness {
             workspace: workspace.clone(),
             overlays,
             capture: self.capture.clone(),
+            terminal_host: Some(self.terminal_host.clone()),
         };
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
@@ -3147,6 +3149,16 @@ impl Harness {
                         });
                     }));
                 }
+            }
+            // A D51 "Open terminal" press: local-only like the run above —
+            // the dock opens and the card's tab takes focus.
+            SessionEvent::OpenTerminal { tab } => {
+                let tab = tab.clone();
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.open_terminal_tab(tab, window, cx);
+                    });
+                }));
             }
             SessionEvent::Projects => {
                 self.tasks.push(cx.spawn(async move |this, cx| {

@@ -527,7 +527,9 @@ mod tests {
                 workspace: "/tmp/w1-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
-            };
+            
+                terminal_host: None,
+};
             cx.new(|cx| SessionView::new_on_provider(session_id, provider, rx, host, window, cx))
         });
         (view, tx)
@@ -1118,7 +1120,9 @@ mod tests {
                 workspace: "/tmp/w3-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
                 capture: crate::shot::CaptureToken::default(),
-            };
+            
+                terminal_host: None,
+};
             cx.new(|cx| SessionView::new_on_provider(session_id, provider, rx, host, window, cx))
         });
         vc.run_until_parked();
