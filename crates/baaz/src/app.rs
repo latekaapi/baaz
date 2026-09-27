@@ -901,6 +901,10 @@ impl Harness {
         // beside the app must find it already listening.
         let terminal_host = cx.new(|_| TerminalHost::new());
         let terminal_service = TerminalService::start(terminal_host.clone(), &crate::store::support_dir());
+        // Where this window's agent tools listen: the relay T2 spawns is
+        // pointed at exactly this path, so a second window keeping another
+        // window's name shows up here rather than as a silent misroute.
+        crate::baaz_log!("terminal service socket: {}", terminal_service.socket_path().display());
         let new_provider = if args.provider_explicit {
             args.provider.clone()
         } else {
@@ -1026,7 +1030,7 @@ impl Harness {
         // the person's keyboard stays where it was while they watch.
         let harness = cx.entity();
         this.terminal_service.set_activity_hook(move |cx: &mut App| {
-            let _ = harness.update(cx, |harness, cx| {
+            harness.update(cx, |harness, cx| {
                 harness.layout.terminal_open = true;
                 layout::write(&harness.layout);
                 cx.notify();
@@ -1719,14 +1723,13 @@ impl Harness {
     /// Trust `session_id` for the terminal service (D53): the app opened
     /// this session, so its agent routes may drive the project's tabs.
     /// Called wherever a session becomes current; the provider lanes join
-    /// in T2, which owns their open paths.
+    /// in T2, which owns their open paths — and their closes, which is
+    /// where the matching unregister will live. No session-close path runs
+    /// in T1b's scope (hide/archive/undo all close views outside it), so an
+    /// unregister here would be dead code; until T2 the registry lives as
+    /// long as the window, and the socket's removal on quit ends it.
     pub(crate) fn register_terminal_session(&mut self, session_id: &str, project_root: std::path::PathBuf) {
         self.terminal_service.register_session(session_id, project_root);
-    }
-
-    /// Forget `session_id`: its agent routes are refused from here on.
-    pub(crate) fn unregister_terminal_session(&mut self, session_id: &str) {
-        self.terminal_service.unregister_session(session_id);
     }
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):

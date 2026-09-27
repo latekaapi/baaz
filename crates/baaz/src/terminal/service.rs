@@ -18,8 +18,8 @@
 //! the block, so a long run never stalls a frame and the UI never blocks.
 //!
 //! Only session ids the app registered ([`register_session`][TerminalService::register_session],
-//! [`unregister`][TerminalService::unregister_session], D53) are served.
-//! The socket file is removed when the service drops (quit).
+//! D53) are served; anything else is refused. The socket file is removed
+//! when the service drops (quit).
 //!
 //! Terminal output never reaches a log line: this module has no logging at
 //! all, by construction (pinned by `crates/baaz/tests/terminal_service.rs`).
@@ -74,11 +74,18 @@ pub fn socket_path_for(support_dir: &Path, pid: u32) -> PathBuf {
 }
 
 /// The service: session registry, request queue, pending runs, and the
-/// socket's lifecycle. Clone it freely; every clone serves the same socket.
+/// socket's lifecycle. One service per window owns its socket; it is not
+/// `Clone`, so a drop always means quit and always removes the socket.
 pub struct TerminalService {
     shared: Arc<Shared>,
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
+    /// Whether this window bound the socket (false when another window kept
+    /// the name): only the owner removes it on quit.
+    owned: bool,
+    /// The listener thread, joined on drop so removal never races a still
+    /// bound socket.
+    accept: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 struct Shared {
@@ -86,6 +93,10 @@ struct Shared {
     sessions: Mutex<HashMap<String, PathBuf>>,
     queue: Mutex<VecDeque<Job>>,
     pending: Mutex<Vec<PendingRun>>,
+    /// Blocks a `wait: none` run (or a timed-out `wait: exit`) left behind:
+    /// each drain stamps what has appeared so far agent-owned, until the
+    /// run's block closes or the tab goes away.
+    marks: Mutex<Vec<MarkWatch>>,
     activity: Mutex<Option<ActivityHook>>,
 }
 
@@ -109,8 +120,19 @@ struct PendingRun {
     id: Value,
     tab: String,
     before: usize,
+    started: Instant,
     deadline: Instant,
     reply: mpsc::Sender<String>,
+}
+
+/// A run the service already answered (`wait: none`, or a `wait: exit` that
+/// timed out) whose blocks still want the agent mark: `before` counts the
+/// blocks that predate the run, and each drain stamps what has appeared
+/// since. Dropped when the run's block closes or the tab goes away — later
+/// blocks are someone else's.
+struct MarkWatch {
+    tab: String,
+    before: usize,
 }
 
 impl TerminalService {
@@ -120,27 +142,30 @@ impl TerminalService {
     /// no listener — the relay then reports the terminal unavailable
     /// rather than stealing the first window's socket.
     pub fn start(host: Entity<TerminalHost>, support_dir: &Path) -> Self {
-        Self::start_at(host, &support_dir.join("run"), std::process::id())
+        Self::start_at(host, support_dir, std::process::id())
     }
 
-    /// Serve on `<run_dir>/terminal-<pid>.sock`: the seam the tests drive
-    /// with a temp dir.
-    pub fn start_at(host: Entity<TerminalHost>, run_dir: &Path, pid: u32) -> Self {
-        let _ = std::fs::create_dir_all(run_dir);
-        let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
-        let path = run_dir.join(format!("terminal-{pid}.sock"));
+    /// Serve on [`socket_path_for`]`(support_dir, pid)`: the seam the tests
+    /// drive with a temp dir standing in for the support dir.
+    pub fn start_at(host: Entity<TerminalHost>, support_dir: &Path, pid: u32) -> Self {
+        let path = socket_path_for(support_dir, pid);
+        if let Some(run_dir) = path.parent() {
+            let _ = std::fs::create_dir_all(run_dir);
+            let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
+        }
         let shared = Arc::new(Shared {
             host,
             sessions: Mutex::new(HashMap::new()),
             queue: Mutex::new(VecDeque::new()),
             pending: Mutex::new(Vec::new()),
+            marks: Mutex::new(Vec::new()),
             activity: Mutex::new(None),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
         // A leftover file from a crashed run binds fine once removed; a
         // live socket means another window owns the name, so keep hands off.
         if path.exists() && UnixStream::connect(&path).is_ok() {
-            return Self { shared, socket_path: path, shutdown };
+            return Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None) };
         }
         let _ = std::fs::remove_file(&path);
         match UnixListener::bind(&path) {
@@ -149,36 +174,34 @@ impl TerminalService {
                 let _ = listener.set_nonblocking(true);
                 let worker = shared.clone();
                 let done = shutdown.clone();
-                std::thread::spawn(move || accept_loop(listener, worker, done));
+                let accept =
+                    std::thread::spawn(move || accept_loop(listener, worker, done));
+                Self {
+                    shared,
+                    socket_path: path,
+                    shutdown,
+                    owned: true,
+                    accept: Mutex::new(Some(accept)),
+                }
             }
             Err(_) => {
                 // No listener (permissions, a second window that raced us):
                 // the object still works, the socket just is not ours.
+                Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None) }
             }
         }
-        Self { shared, socket_path: path, shutdown }
     }
 
-    /// Where this service listens (or would, when another window owns it).
+    /// Where this service listens (or would, when another window owns it):
+    /// what a relay beside the app is pointed at.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
-    }
-
-    /// Whether this service owns a live listener: false when another
-    /// window kept the name.
-    pub fn is_serving(&self) -> bool {
-        UnixStream::connect(&self.socket_path).is_ok()
     }
 
     /// Trust `id` (a session the app opened) for `project_root` (D53).
     /// Re-registering moves the session to the new root.
     pub fn register_session(&self, id: &str, project_root: PathBuf) {
         self.shared.sessions.lock().expect("session registry").insert(id.to_owned(), project_root);
-    }
-
-    /// Forget `id`: its tools are refused from here on.
-    pub fn unregister_session(&self, id: &str) {
-        self.shared.sessions.lock().expect("session registry").remove(id);
     }
 
     /// What the harness runs on the UI thread when the agent starts
@@ -195,6 +218,7 @@ impl TerminalService {
             self.execute(job, cx);
         }
         self.poll_runs(cx);
+        self.poll_marks(cx);
     }
 
     /// How many runs are still waiting on their blocks. Tests read this;
@@ -226,7 +250,7 @@ impl TerminalService {
             "terminal_screen" => self.screen(&root, &job.params, cx),
             "terminal_send" => self.send(&root, &job.params, cx),
             "terminal_close" => self.close(&root, &job.params, cx),
-            other => Err(format!("unknown tool: {other}")),
+            other => Err(format!("unknown tool: {other} ({})", TOOL_NAMES.join(", "))),
         };
         match outcome {
             Ok(result) => send(&job.reply, &job.id, true, result),
@@ -237,12 +261,16 @@ impl TerminalService {
 
 impl Drop for TerminalService {
     fn drop(&mut self) {
+        // Quit removes the socket — but only when this window bound it. A
+        // second window's service never owned the name, so it leaves the
+        // first window's socket alone. Joining the listener first makes the
+        // removal deterministic: no still-bound socket can answer a probe
+        // and no fresh bind after a crash can be mistaken for ours.
         self.shutdown.store(true, Ordering::Release);
-        // Quit removes the socket; a second window's service never owned
-        // the name, so only remove what answers to no one. A connect here
-        // races a fresh bind after a crash — removing a live stranger's
-        // socket is worse than leaving a stale file, so check first.
-        if UnixStream::connect(&self.socket_path).is_err() {
+        if let Some(accept) = self.accept.lock().expect("listener thread").take() {
+            let _ = accept.join();
+        }
+        if self.owned {
             let _ = std::fs::remove_file(&self.socket_path);
         }
     }
@@ -260,6 +288,13 @@ fn accept_loop(listener: UnixListener, shared: Arc<Shared>, shutdown: Arc<Atomic
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Accepted sockets inherit the listener's nonblocking mode
+                // on some platforms: without this, any reply past the
+                // kernel buffer (~8 KB — every large `terminal_read`) fails
+                // mid-write and drops the connection.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let worker = shared.clone();
                 std::thread::spawn(move || serve_conn(stream, worker));
             }
@@ -362,10 +397,12 @@ impl TerminalService {
             json!({
                 "tab": tab.id,
                 "title": tab.title,
-                "cwd": tab.project_root.to_string_lossy(),
+                "cwd": tab.cwd.to_string_lossy(),
                 "owner": match tab.owner {
                     TabOwner::User => "user",
-                    TabOwner::Agent => "agent",
+                    // The contract names the agent `muse` (§4); the host's
+                    // enum stays product-free, the label is the wire's.
+                    TabOwner::Agent => "muse",
                 },
                 "busy": session.alt_screen() || blocks.iter().any(|block| block.running()),
                 "alt_screen": session.alt_screen(),
@@ -504,17 +541,22 @@ impl TerminalService {
                     "tab": id,
                     "block": format!("{id}:{before}"),
                     "status": "running",
+                    "duration_ms": 0,
                     "output": "",
                     "truncated_bytes": 0,
                     "cursor": cursor,
                 }),
             );
+            // The block forms after this reply; watch it so it still earns
+            // the agent mark.
+            self.shared.marks.lock().expect("mark watches").push(MarkWatch { tab: id, before });
             return;
         }
         self.shared.pending.lock().expect("pending runs").push(PendingRun {
             id: job_id.clone(),
             tab: id,
             before,
+            started: Instant::now(),
             deadline: Instant::now() + Duration::from_millis(timeout_ms),
             reply,
         });
@@ -539,14 +581,7 @@ impl TerminalService {
             let blocks = entity.read(cx).blocks();
             // New blocks are the agent's: upgrade their authors now that
             // they exist (the assembler leaves every block human).
-            if blocks.len() > run.before {
-                entity.update(cx, |session, _| {
-                    let fresh = session.blocks().len().min(blocks.len());
-                    for i in run.before..fresh {
-                        session.set_block_author(i, BlockAuthor::Agent);
-                    }
-                });
-            }
+            stamp_agent(&entity, cx, run.before, blocks.len());
             let finished = blocks.get(run.before).is_some_and(|block| !block.running());
             if finished {
                 let block = &blocks[run.before];
@@ -587,16 +622,51 @@ impl TerminalService {
                         "tab": run.tab,
                         "block": format!("{}:{}", run.tab, run.before),
                         "status": "timeout",
+                        "duration_ms": run.started.elapsed().as_millis() as u64,
                         "output": output,
                         "truncated_bytes": truncated_bytes,
                         "cursor": tail_of(cx, self.host(), &run.tab),
                     }),
                 );
+                // `timeout` stops waiting, never the command: watch the
+                // block so its eventual close still earns the agent mark.
+                self.shared.marks.lock().expect("mark watches").push(MarkWatch {
+                    tab: run.tab.clone(),
+                    before: run.before,
+                });
                 done.push(index);
             }
         }
         for index in done.into_iter().rev() {
             pending.remove(index);
+        }
+    }
+
+    /// Pump and stamp what answered-but-unwaited runs left behind: the tab
+    /// is pumped once (nothing else drives it now that no run waits on it)
+    /// and every block since `before` becomes agent-owned. A watch retires
+    /// when its block closes (later blocks are someone else's) or when the
+    /// tab goes away.
+    fn poll_marks(&self, cx: &mut App) {
+        let mut marks = self.shared.marks.lock().expect("mark watches");
+        let mut done: Vec<usize> = Vec::new();
+        for (index, watch) in marks.iter().enumerate() {
+            let Some(entity) =
+                self.host().read(cx).get(&watch.tab).map(|tab| tab.session.clone())
+            else {
+                done.push(index);
+                continue;
+            };
+            entity.read(cx).pump();
+            let blocks = entity.read(cx).blocks();
+            stamp_agent(&entity, cx, watch.before, blocks.len());
+            if blocks.len() <= watch.before || blocks[watch.before].running() {
+                continue;
+            }
+            done.push(index);
+        }
+        for index in done.into_iter().rev() {
+            marks.remove(index);
         }
     }
 
@@ -735,6 +805,19 @@ impl TerminalService {
     }
 }
 
+/// Mark blocks `before..len` agent-owned: the assembler leaves every new
+/// block human, and only the agent's runs stamp what they started.
+fn stamp_agent(entity: &Entity<aui_terminal::TerminalSession>, cx: &mut App, before: usize, len: usize) {
+    if len > before {
+        entity.update(cx, |session, _| {
+            let fresh = session.blocks().len().min(len);
+            for i in before..fresh {
+                session.set_block_author(i, BlockAuthor::Agent);
+            }
+        });
+    }
+}
+
 /// This tab's tail cursor line, or the start cursor when the tab is gone.
 fn tail_of(cx: &App, host: &Entity<TerminalHost>, tab: &str) -> i32 {
     host.read(cx).get(tab).map(|tab| tab.session.read(cx).tail_cursor().line).unwrap_or(TextCursor::start().line)
@@ -765,7 +848,11 @@ fn cap_bytes(text: &str, cap: usize) -> (String, usize) {
     while tail_start < bytes.len() && !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
-    (format!("{}{}", &text[..head], &text[tail_start..]), bytes.len() - cap)
+    let out = format!("{}{}", &text[..head], &text[tail_start..]);
+    // What fell out is the middle minus the boundary retreat: the bytes
+    // the output no longer carries, not the nominal over-cap count.
+    let truncated = bytes.len() - out.len();
+    (out, truncated)
 }
 
 /// Strip ANSI/VT100 escape sequences (CSI, OSC, stray ESC): grid text
@@ -832,5 +919,786 @@ fn key_bytes_for(key: &str) -> Result<Vec<u8>, String> {
         other => Err(format!(
             "unknown key: {other} (enter, tab, esc, up, down, left, right, backspace, ctrl-c, ctrl-d, ctrl-z, ctrl-l)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+    use std::time::Duration;
+
+    use aui_terminal::{ScriptChunk, TermEvent, TerminalBackend, TerminalSession};
+    use base64::Engine as _;
+    use gpui::AppContext as _;
+
+    static NEXT_PID: AtomicU32 = AtomicU32::new(1_000_000);
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// A fresh support-dir stand-in per test: parallel tests never share a
+    /// socket path, and the tree is removed afterwards.
+    struct TmpDir {
+        path: PathBuf,
+    }
+
+    impl TmpDir {
+        fn new() -> Self {
+            // Short on purpose: unix socket paths die past ~104 bytes
+            // (SUN_LEN), and the default temp dir on this machine is already
+            // most of that.
+            let n = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+            let path = PathBuf::from(format!("/tmp/bt-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("tmp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct Fixture {
+        service: TerminalService,
+        host: Entity<TerminalHost>,
+        tmp: TmpDir,
+        root: PathBuf,
+        session: String,
+    }
+
+    fn fixture(cx: &mut gpui::TestAppContext, session: &str) -> Fixture {
+        let tmp = TmpDir::new();
+        let root = tmp.path.clone();
+        let host = cx.new(|_| TerminalHost::new());
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let service = TerminalService::start_at(host.clone(), &tmp.path, pid);
+        service.register_session(session, root.clone());
+        Fixture { service, host, tmp, root, session: session.into() }
+    }
+
+    /// One line-delimited request over a real socket, draining the service
+    /// on the UI thread until the reply arrives. The socket thread waits;
+    /// the test pumps — the same division the app's 15 ms task performs.
+    fn call_as(
+        cx: &mut gpui::TestAppContext,
+        fx: &Fixture,
+        session: &str,
+        tool: &str,
+        params: Value,
+    ) -> Value {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let request = serde_json::to_string(&json!({
+            "id": id,
+            "session": session,
+            "tool": tool,
+            "params": params,
+        }))
+        .expect("request serializes");
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(300))).expect("read timeout");
+        stream.write_all(request.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        let mut reader = BufReader::new(stream);
+        for _ in 0..400 {
+            cx.update(|cx| fx.service.drain(cx));
+            if let Some(reply) = try_recv(&mut reader, id) {
+                return reply;
+            }
+        }
+        panic!("{tool}: no reply after draining");
+    }
+
+    fn call(cx: &mut gpui::TestAppContext, fx: &Fixture, tool: &str, params: Value) -> Value {
+        call_as(cx, fx, &fx.session.clone(), tool, params)
+    }
+
+    fn result(reply: &Value) -> Value {
+        assert_eq!(reply.get("ok"), Some(&Value::Bool(true)), "tool succeeded: {reply}");
+        reply.get("result").cloned().expect("success carries a result")
+    }
+
+    fn err_text(reply: &Value) -> String {
+        assert_eq!(reply.get("ok"), Some(&Value::Bool(false)), "tool refused: {reply}");
+        reply
+            .pointer("/error/error")
+            .and_then(Value::as_str)
+            .expect("refusal names itself")
+            .to_owned()
+    }
+
+    /// A scripted pty that answers writes: once the session pastes a command
+    /// and sends Enter, later polls replay a full OSC 133 block — a running
+    /// one first, the `D` close after `finish_after` running polls (never,
+    /// when that is `usize::MAX`). Each running poll also replays `trickle`.
+    #[derive(Clone, Copy)]
+    enum Stage {
+        Idle,
+        Running { polls: usize },
+        Done,
+    }
+
+    struct RespondBackend {
+        nonce: String,
+        seen: Vec<u8>,
+        used: usize,
+        stage: Stage,
+        exit: i32,
+        first_output: Vec<u8>,
+        trickle: Vec<u8>,
+        finish_after: usize,
+    }
+
+    impl RespondBackend {
+        fn new(nonce: &str, exit: i32, first_output: Vec<u8>) -> Self {
+            Self {
+                nonce: nonce.into(),
+                seen: Vec::new(),
+                used: 0,
+                stage: Stage::Idle,
+                exit,
+                first_output,
+                trickle: Vec::new(),
+                finish_after: 1,
+            }
+        }
+
+        fn trickling(nonce: &str, first_output: Vec<u8>, trickle: Vec<u8>) -> Self {
+            Self {
+                nonce: nonce.into(),
+                seen: Vec::new(),
+                used: 0,
+                stage: Stage::Idle,
+                exit: 0,
+                first_output,
+                trickle,
+                finish_after: usize::MAX,
+            }
+        }
+
+        /// The command line the session just submitted: bytes since the last
+        /// Enter, without bracketed-paste wrapping.
+        fn take_command(&mut self) -> String {
+            let end = self.seen[self.used..]
+                .iter()
+                .position(|b| *b == b'\r')
+                .map(|i| self.used + i)
+                .unwrap_or(self.seen.len());
+            let raw = String::from_utf8_lossy(&self.seen[self.used..end]).into_owned();
+            self.used = if end < self.seen.len() { end + 1 } else { end };
+            raw.replace("\u{1b}[200~", "").replace("\u{1b}[201~", "").trim().to_owned()
+        }
+
+        fn open_chunk(&self, command: &str) -> Vec<u8> {
+            let cmd = base64::engine::general_purpose::STANDARD.encode(command);
+            // No prompt text: the block's output range then holds exactly
+            // the program's bytes, which is what the cap tests compare.
+            format!(
+                "\x1b]133;A;k={n}\x07\x1b]133;C;k={n};cmd={cmd};enc=b64\x07\r\n{out}",
+                n = self.nonce,
+                out = String::from_utf8_lossy(&self.first_output),
+            )
+            .into_bytes()
+        }
+
+        fn done_chunk(&self) -> Vec<u8> {
+            format!("\x1b]133;D;{e};k={n}\x07", e = self.exit, n = self.nonce).into_bytes()
+        }
+    }
+
+    impl TerminalBackend for RespondBackend {
+        fn spawn(&mut self, _shell: &str, _cwd: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.seen.extend_from_slice(bytes);
+        }
+
+        fn resize(&mut self, _cols: u16, _rows: u16) {}
+
+        fn poll(&mut self) -> Vec<TermEvent> {
+            match self.stage {
+                Stage::Idle => {
+                    if self.seen[self.used..].contains(&b'\r') {
+                        let command = self.take_command();
+                        self.stage = Stage::Running { polls: 0 };
+                        vec![TermEvent::Output(self.open_chunk(&command))]
+                    } else {
+                        vec![]
+                    }
+                }
+                Stage::Running { polls } => {
+                    if polls >= self.finish_after {
+                        self.stage = Stage::Done;
+                        vec![TermEvent::Output(self.done_chunk())]
+                    } else {
+                        self.stage = Stage::Running { polls: polls + 1 };
+                        if self.trickle.is_empty() {
+                            vec![]
+                        } else {
+                            vec![TermEvent::Output(self.trickle.clone())]
+                        }
+                    }
+                }
+                Stage::Done => vec![],
+            }
+        }
+    }
+
+    /// A tab over a responding backend, agent-owned like every service tab.
+    fn open_responding(
+        cx: &mut gpui::TestAppContext,
+        fx: &Fixture,
+        title: &str,
+        backend: RespondBackend,
+    ) -> String {
+        let nonce = backend.nonce.clone();
+        let root = fx.root.clone();
+        let origin = Some(fx.session.clone());
+        cx.update(|cx| {
+            fx.host.update(cx, |host, cx| {
+                let session =
+                    TerminalSession::new(Box::new(backend), 100, 32).with_nonce(&nonce);
+                host.open_session(&root, title.into(), TabOwner::Agent, origin, session, cx)
+            })
+        })
+    }
+
+    /// A tab over a recording: writes vanish, so runs never complete — the
+    /// timeout and refusal paths' route.
+    fn open_recording(
+        cx: &mut gpui::TestAppContext,
+        fx: &Fixture,
+        title: &str,
+        owner: TabOwner,
+        bytes: Vec<u8>,
+        nonce: &str,
+    ) -> String {
+        let root = fx.root.clone();
+        let origin = Some(fx.session.clone());
+        cx.update(|cx| {
+            fx.host.update(cx, |host, cx| {
+                let script = vec![ScriptChunk { at: Duration::from_millis(0), bytes }];
+                let id = host.open_fake(&root, title.into(), owner, origin, script, nonce, cx);
+                host.drain(&id, cx);
+                id
+            })
+        })
+    }
+
+    /// One scripted chunk whose block is still running: `C` arrived, `D`
+    /// never did, the command riding the `C` payload.
+    fn running_script(nonce: &str, command: &str) -> Vec<u8> {
+        let cmd = base64::engine::general_purpose::STANDARD.encode(command);
+        format!(
+            "\x1b]133;A;k={nonce}\x07test % \x1b]133;C;k={nonce};cmd={cmd};enc=b64\x07\r\npartial output"
+        )
+        .into_bytes()
+    }
+
+    /// One request written, reply not yet read: for tests that drain by
+    /// hand between the two (a `wait: exit` observed mid-flight).
+    fn send_json(fx: &Fixture, session: &str, id: u64, tool: &str, params: Value) -> BufReader<UnixStream> {
+        let request = serde_json::to_string(&json!({
+            "id": id, "session": session, "tool": tool, "params": params,
+        }))
+        .expect("request serializes");
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(300))).expect("read timeout");
+        stream.write_all(request.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        BufReader::new(stream)
+    }
+
+    /// One non-blocking reply attempt: `None` when the service has not
+    /// answered yet (it answers from `drain`, on the UI thread).
+    fn try_recv(reader: &mut BufReader<UnixStream>, id: u64) -> Option<Value> {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => panic!("server closed the connection"),
+            Ok(_) => {
+                if line.trim().is_empty() {
+                    return None;
+                }
+                let reply: Value = serde_json::from_str(&line)
+                    .unwrap_or_else(|e| panic!("reply parses ({} bytes): {e}", line.len()));
+                assert_eq!(reply.get("id"), Some(&json!(id)), "ids echo");
+                Some(reply)
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                None
+            }
+            Err(e) => panic!("socket read failed: {e}"),
+        }
+    }
+
+    #[gpui::test]
+    fn the_socket_is_owner_only_and_dies_with_the_service(cx: &mut gpui::TestAppContext) {
+        let tmp = TmpDir::new();
+        // A crash-leftover file binds fine once removed.
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let stale = socket_path_for(&tmp.path, pid);
+        std::fs::create_dir_all(stale.parent().expect("run dir")).expect("run dir");
+        std::fs::write(&stale, b"stale").expect("stale file");
+        let host = cx.new(|_| TerminalHost::new());
+        let service = TerminalService::start_at(host, &tmp.path, pid);
+        assert_eq!(service.socket_path(), stale);
+        let dir_mode = std::fs::metadata(stale.parent().expect("run dir"))
+            .expect("run dir reads")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "the run dir is owner-only");
+        let sock_mode =
+            std::fs::metadata(&stale).expect("socket reads").permissions().mode() & 0o777;
+        assert_eq!(sock_mode, 0o600, "the socket is owner-only");
+        assert!(UnixStream::connect(&stale).is_ok(), "the service answers");
+        // A second window keeps its hands off the first window's name.
+        let host2 = cx.new(|_| TerminalHost::new());
+        let second = TerminalService::start_at(host2, &tmp.path, pid);
+        drop(second);
+        assert!(stale.exists(), "a guest drop removes nothing");
+        drop(service);
+        assert!(!stale.exists(), "quit removes the socket");
+    }
+
+    #[gpui::test]
+    fn unknown_sessions_are_refused(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        let reply = call_as(cx, &fx, "ghost", "terminal_list", json!({}));
+        assert!(err_text(&reply).contains("unknown session"), "refusal names it: {reply}");
+    }
+
+    #[gpui::test]
+    fn open_and_list_report_the_contract_shape(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        assert_eq!(result(&call(cx, &fx, "terminal_list", json!({}))), json!({"tabs": []}));
+        let subdir = fx.tmp.path.join("sub");
+        std::fs::create_dir_all(&subdir).expect("subdir");
+        let t1 = result(&call(cx, &fx, "terminal_open", json!({"title": "agent shell"})));
+        assert_eq!(t1.get("tab"), Some(&json!("t1")));
+        let t2 = result(
+            &call(cx, &fx, "terminal_open", json!({"cwd": subdir.to_string_lossy(), "title": "down"})),
+        );
+        assert_eq!(t2.get("tab"), Some(&json!("t2")));
+        let bad = call(cx, &fx, "terminal_open", json!({"cwd": "/no/such/dir-anywhere"}));
+        assert!(err_text(&bad).contains("cwd does not exist"), "refusal: {bad}");
+        let tabs = result(&call(cx, &fx, "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].get("owner"), Some(&json!("muse")));
+        assert_eq!(tabs[0].get("cwd"), Some(&json!(fx.root.to_string_lossy())));
+        assert_eq!(tabs[0].get("last_block"), Some(&Value::Null));
+        assert_eq!(tabs[0].get("busy"), Some(&Value::Bool(false)));
+        assert_eq!(tabs[1].get("cwd"), Some(&json!(subdir.to_string_lossy())));
+        assert_eq!(tabs[1].get("owner"), Some(&json!("muse")));
+    }
+
+    #[gpui::test]
+    fn run_wait_exit_returns_code_and_output(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        let hooks = Arc::new(AtomicU64::new(0));
+        let seen = hooks.clone();
+        fx.service.set_activity_hook(move |_| {
+            seen.fetch_add(1, Ordering::Relaxed);
+        });
+        open_responding(
+            cx,
+            &fx,
+            "agent",
+            RespondBackend::new("exit-nonce", 3, b"hello from agent\r\nsecond line\r\n".to_vec()),
+        );
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "echo hi", "tab": "t1", "wait": "exit"})),
+        );
+        assert_eq!(out.get("tab"), Some(&json!("t1")));
+        assert_eq!(out.get("block"), Some(&json!("t1:0")));
+        assert_eq!(out.get("status"), Some(&json!("exited")));
+        assert_eq!(out.get("exit_code"), Some(&json!(3)));
+        assert!(out.get("duration_ms").and_then(Value::as_u64).is_some(), "duration: {out}");
+        let output = out.get("output").and_then(Value::as_str).expect("output text");
+        assert!(output.contains("hello from agent") && output.contains("second line"), "output: {output}");
+        assert_eq!(out.get("truncated_bytes"), Some(&json!(0)));
+        assert!(out.get("cursor").and_then(Value::as_i64).is_some(), "cursor: {out}");
+        assert_eq!(fx.service.pending_runs(), 0, "the run answered and retired");
+        assert_eq!(hooks.load(Ordering::Relaxed), 1, "the dock opens for a run");
+        cx.read(|cx| {
+            let blocks = fx.host.read(cx).get("t1").expect("tab").session.read(cx).blocks();
+            assert_eq!(blocks.len(), 1);
+            assert!(!blocks[0].running());
+            assert_eq!(blocks[0].author, BlockAuthor::Agent, "the run's block carries the agent mark");
+            assert_eq!(blocks[0].command, "echo hi", "the command rides the C payload");
+        });
+        let tabs = result(&call(cx, &fx, "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs[0].get("last_block"), Some(&json!("t1:0")));
+    }
+
+    #[gpui::test]
+    fn exit_waits_across_drains(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_responding(cx, &fx, "agent", RespondBackend::new("mid-nonce", 0, b"hi\r\n".to_vec()));
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut reader =
+            send_json(&fx, &fx.session.clone(), id, "terminal_run", json!({"command": "echo hi", "tab": "t1"}));
+        // The accept thread queues asynchronously (it polls every 50 ms):
+        // drain until the run is in flight, then observe it mid-flight.
+        for _ in 0..400 {
+            cx.update(|cx| fx.service.drain(cx));
+            if fx.service.pending_runs() == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fx.service.pending_runs(), 1, "the C arrived, the D has not");
+        let mut reply = try_recv(&mut reader, id);
+        for _ in 0..400 {
+            if reply.is_some() {
+                break;
+            }
+            cx.update(|cx| fx.service.drain(cx));
+            reply = try_recv(&mut reader, id);
+        }
+        let reply = reply.expect("the D closes the run");
+        assert_eq!(result(&reply).get("status"), Some(&json!("exited")));
+        assert_eq!(fx.service.pending_runs(), 0);
+    }
+
+    #[gpui::test]
+    fn wait_none_answers_running_and_marks_late(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_responding(cx, &fx, "agent", RespondBackend::new("late-nonce", 0, b"late output\r\n".to_vec()));
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "echo late", "tab": "t1", "wait": "none"})),
+        );
+        assert_eq!(out.get("status"), Some(&json!("running")));
+        assert_eq!(out.get("block"), Some(&json!("t1:0")));
+        assert_eq!(out.get("duration_ms"), Some(&json!(0)));
+        assert_eq!(fx.service.pending_runs(), 0, "wait:none never pends");
+        for _ in 0..6 {
+            cx.update(|cx| fx.service.drain(cx));
+        }
+        cx.read(|cx| {
+            let blocks = fx.host.read(cx).get("t1").expect("tab").session.read(cx).blocks();
+            assert_eq!(blocks.len(), 1);
+            assert!(!blocks[0].running(), "drains pumped the close");
+            assert_eq!(blocks[0].author, BlockAuthor::Agent, "the late block is still marked");
+        });
+    }
+
+    #[gpui::test]
+    fn timeout_leaves_it_running_and_read_continues(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_responding(
+            cx,
+            &fx,
+            "agent",
+            RespondBackend::trickling("tick-nonce", b"partial\r\n".to_vec(), b"tick\r\n".to_vec()),
+        );
+        let out = result(
+            &call(
+                cx,
+                &fx,
+                "terminal_run",
+                json!({"command": "sleep 300", "tab": "t1", "timeout_ms": 50}),
+            ),
+        );
+        assert_eq!(out.get("status"), Some(&json!("timeout")));
+        assert!(out.get("duration_ms").and_then(Value::as_u64).is_some(), "duration: {out}");
+        let output = out.get("output").and_then(Value::as_str).expect("output text");
+        assert!(output.contains("partial"), "what arrived so far: {output}");
+        let cursor = out.get("cursor").and_then(Value::as_i64).expect("cursor");
+        assert_eq!(fx.service.pending_runs(), 0, "timeout stops waiting");
+        for _ in 0..5 {
+            cx.update(|cx| fx.service.drain(cx));
+        }
+        let read = result(&call(cx, &fx, "terminal_read", json!({"tab": "t1", "since": cursor})));
+        assert_eq!(read.get("running"), Some(&Value::Bool(true)), "the command runs on");
+        let output = read.get("output").and_then(Value::as_str).expect("delta text");
+        assert!(output.contains("tick"), "what arrived since: {output}");
+        assert!(
+            read.get("cursor").and_then(Value::as_i64).expect("cursor") > cursor,
+            "the cursor advanced: {read}"
+        );
+        let block = result(&call(cx, &fx, "terminal_read", json!({"tab": "t1", "block": "t1:0"})));
+        assert_eq!(block.get("running"), Some(&Value::Bool(true)));
+        assert!(
+            block.get("output").and_then(Value::as_str).expect("block text").contains("partial"),
+            "block reads see the running block: {block}"
+        );
+    }
+
+    #[gpui::test]
+    fn auto_reuses_idle_and_opens_new_when_busy(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(cx, &fx, "user shell", TabOwner::User, b"test % ".to_vec(), "idle-nonce");
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "true", "tab": "auto", "wait": "none"})),
+        );
+        assert_eq!(out.get("tab"), Some(&json!("t1")), "D43: the idle active tab takes it");
+        let busy =
+            open_recording(cx, &fx, "busy shell", TabOwner::User, running_script("busy-nonce", "sleep 300"), "busy-nonce");
+        assert_eq!(busy, "t2");
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "true", "tab": "auto", "wait": "none"})),
+        );
+        assert_eq!(out.get("tab"), Some(&json!("t3")), "D43: a busy tab never takes a command");
+        let tabs = result(&call(cx, &fx, "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs[2].get("owner"), Some(&json!("muse")), "the fallback tab is the agent's");
+        let refused = call(cx, &fx, "terminal_run", json!({"command": "echo hi", "tab": "t2"}));
+        let message = err_text(&refused);
+        assert!(message.contains("busy") && message.contains("sleep 300"), "names it: {message}");
+    }
+
+    #[gpui::test]
+    fn close_is_refused_for_user_tabs(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(cx, &fx, "user shell", TabOwner::User, b"test % ".to_vec(), "close-nonce");
+        let open = result(&call(cx, &fx, "terminal_open", json!({})));
+        assert_eq!(open.get("tab"), Some(&json!("t2")));
+        let refused = call(cx, &fx, "terminal_close", json!({"tab": "t1"}));
+        assert!(err_text(&refused).contains("owned by the user"), "refusal: {refused}");
+        let missing = call(cx, &fx, "terminal_close", json!({"tab": "t404"}));
+        assert!(err_text(&missing).contains("unknown tab"), "refusal: {missing}");
+        assert_eq!(result(&call(cx, &fx, "terminal_close", json!({"tab": "t2"}))), json!({"ok": true}));
+        let tabs = result(&call(cx, &fx, "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs.len(), 1, "only the agent tab closed: {tabs:?}");
+        assert_eq!(tabs[0].get("tab"), Some(&json!("t1")));
+    }
+
+    #[gpui::test]
+    fn tabs_belong_to_the_registered_project(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        let other = fx.tmp.path.join("other");
+        std::fs::create_dir_all(&other).expect("other root");
+        fx.service.register_session("s2", other.clone());
+        assert_eq!(
+            result(&call_as(cx, &fx, "s2", "terminal_list", json!({}))),
+            json!({"tabs": []}),
+            "a session sees only its own project's tabs"
+        );
+        let open = result(&call_as(cx, &fx, "s2", "terminal_open", json!({})));
+        assert_eq!(open.get("tab"), Some(&json!("t1")));
+        let tabs = result(&call_as(cx, &fx, "s2", "terminal_list", json!({})));
+        let tabs = tabs.get("tabs").and_then(Value::as_array).expect("tabs array");
+        assert_eq!(tabs[0].get("cwd"), Some(&json!(other.to_string_lossy())));
+        let refused = call_as(cx, &fx, "s2", "terminal_read", json!({"tab": "t9"}));
+        assert!(err_text(&refused).contains("unknown tab"), "refusal: {refused}");
+        let mine = result(&call(cx, &fx, "terminal_list", json!({})));
+        assert_eq!(mine.get("tabs").and_then(Value::as_array).expect("tabs").len(), 0);
+        let others = call(cx, &fx, "terminal_read", json!({"tab": "t1"}));
+        assert!(
+            err_text(&others).contains("belongs to another project"),
+            "s1 cannot touch s2's tab: {others}"
+        );
+    }
+
+    #[gpui::test]
+    fn run_validates_its_inputs(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        let empty = call(cx, &fx, "terminal_run", json!({"command": "   "}));
+        assert!(err_text(&empty).contains("command is empty"), "refusal: {empty}");
+        let wait = call(cx, &fx, "terminal_run", json!({"command": "echo hi", "wait": "whenever"}));
+        assert!(err_text(&wait).contains("wait must be"), "refusal: {wait}");
+        let tab = call(cx, &fx, "terminal_run", json!({"command": "echo hi", "tab": "t404"}));
+        assert!(err_text(&tab).contains("unknown tab"), "refusal: {tab}");
+    }
+
+    #[gpui::test]
+    fn send_types_text_and_named_keys(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(cx, &fx, "user shell", TabOwner::User, b"test % ".to_vec(), "send-nonce");
+        assert_eq!(
+            result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "text": "hello"}))),
+            json!({"ok": true})
+        );
+        assert_eq!(
+            result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "keys": "enter"}))),
+            json!({"ok": true})
+        );
+        assert_eq!(
+            result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "keys": ["ctrl-c", "ctrl-d"]}))),
+            json!({"ok": true})
+        );
+        let neither = call(cx, &fx, "terminal_send", json!({"tab": "t1"}));
+        assert!(err_text(&neither).contains("needs text or keys"), "refusal: {neither}");
+        let bogus = call(cx, &fx, "terminal_send", json!({"tab": "t1", "keys": "bogus"}));
+        assert!(err_text(&bogus).contains("unknown key"), "refusal: {bogus}");
+        let missing = call(cx, &fx, "terminal_send", json!({"tab": "t404", "text": "hi"}));
+        assert!(err_text(&missing).contains("unknown tab"), "refusal: {missing}");
+    }
+
+    #[gpui::test]
+    fn screen_and_read_report_the_grid(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_recording(
+            cx,
+            &fx,
+            "user shell",
+            TabOwner::User,
+            b"visible line\r\nsecond\r\ntest % ".to_vec(),
+            "screen-nonce",
+        );
+        let screen = result(&call(cx, &fx, "terminal_screen", json!({"tab": "t1"})));
+        assert!(
+            screen.get("lines").and_then(Value::as_str).expect("lines").contains("visible line"),
+            "screen: {screen}"
+        );
+        assert_eq!(screen.get("rows"), Some(&json!(32)));
+        assert_eq!(screen.get("cols"), Some(&json!(100)));
+        assert_eq!(screen.get("alt_screen"), Some(&Value::Bool(false)));
+        assert!(screen.get("cursor").and_then(Value::as_object).is_some(), "cursor: {screen}");
+        let missing = call(cx, &fx, "terminal_screen", json!({"tab": "t404"}));
+        assert!(err_text(&missing).contains("unknown tab"), "refusal: {missing}");
+        let read = result(&call(cx, &fx, "terminal_read", json!({"tab": "t1"})));
+        assert!(
+            read.get("output").and_then(Value::as_str).expect("output").contains("visible line"),
+            "read: {read}"
+        );
+        assert_eq!(read.get("running"), Some(&Value::Bool(false)));
+        assert!(read.get("cursor").and_then(Value::as_i64).is_some(), "cursor: {read}");
+        let bad_block = call(cx, &fx, "terminal_read", json!({"tab": "t1", "block": "zzz"}));
+        assert!(err_text(&bad_block).contains("bad block id"), "refusal: {bad_block}");
+        let foreign = call(cx, &fx, "terminal_read", json!({"tab": "t1", "block": "t2:0"}));
+        assert!(err_text(&foreign).contains("not in tab"), "refusal: {foreign}");
+    }
+
+    #[gpui::test]
+    fn output_is_head_and_tail_capped(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        // Trailing newline so the `D` close lands on a fresh line, outside
+        // the output range.
+        let big = format!("{}{}\r\n", "Q".repeat(20_000), "Z".repeat(20_000));
+        open_responding(cx, &fx, "agent", RespondBackend::new("cap-nonce", 0, big.into_bytes()));
+        let out = result(
+            &call(cx, &fx, "terminal_run", json!({"command": "firehose", "tab": "t1", "wait": "exit"})),
+        );
+        let output = out.get("output").and_then(Value::as_str).expect("output text");
+        assert_eq!(output.len(), RUN_OUTPUT_CAP, "runs cap at 4 KB");
+        // The grid wraps long lines, so wrap newlines fall out of the
+        // comparison; what remains must be one Q run then one Z run, both
+        // substantial — head+tail, not head-only.
+        assert_head_tail(output, 1500, "runs cap head+tail");
+        assert!(out.get("truncated_bytes").and_then(Value::as_u64).expect("count") > 0, "count: {out}");
+        let read = result(
+            &call(cx, &fx, "terminal_read", json!({"tab": "t1", "block": "t1:0", "max_bytes": 1_000_000})),
+        );
+        let output = read.get("output").and_then(Value::as_str).expect("output text");
+        assert_eq!(output.len(), READ_MAX, "reads clamp at 32 KB");
+        assert_head_tail(output, 12_000, "reads clamp head+tail");
+        let small = result(
+            &call(cx, &fx, "terminal_read", json!({"tab": "t1", "block": "t1:0", "max_bytes": 8})),
+        );
+        let output = small.get("output").and_then(Value::as_str).expect("output text");
+        assert!(output.len() <= 8, "small caps hold: {small}");
+        assert!(small.get("truncated_bytes").and_then(Value::as_u64).expect("count") > 0, "count: {small}");
+    }
+
+    #[gpui::test]
+    fn malformed_requests_error_and_unknown_tools_name_themselves(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+        stream.write_all(br#"{"id": 501}"#).expect("malformed writes");
+        stream.write_all(b"\n").expect("malformed ends");
+        stream.flush().expect("malformed flushes");
+        let mut reader = BufReader::new(stream.try_clone().expect("socket clones"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("malformed answered");
+        let reply: Value = serde_json::from_str(&line).expect("reply parses");
+        assert_eq!(reply.get("id"), Some(&json!(501)));
+        assert_eq!(reply.get("ok"), Some(&Value::Bool(false)));
+        drop(reader);
+        drop(stream);
+        // The server outlives a bad line: the next connection works.
+        assert_eq!(result(&call(cx, &fx, "terminal_list", json!({}))), json!({"tabs": []}));
+        let _ = id;
+        let unknown = call(cx, &fx, "frobnicate", json!({}));
+        let message = err_text(&unknown);
+        assert!(message.contains("unknown tool") && message.contains("terminal_run"), "names: {message}");
+    }
+
+    /// Wrap newlines out, then one Q run into one Z run, both at least
+    /// `each` long: the shape a head+tail cap leaves behind.
+    fn assert_head_tail(output: &str, each: usize, what: &str) {
+        let flat: String = output.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        let tail = flat.trim_start_matches('Q');
+        let head_len = flat.len() - tail.len();
+        assert!(head_len >= each && tail.len() >= each, "{what}: {head_len} Q then {} Z", tail.len());
+        assert!(tail.chars().all(|c| c == 'Z'), "{what}: the tail is all Z");
+    }
+
+    #[test]
+    fn cap_bytes_keeps_head_and_tail() {
+        let (out, trunc) = cap_bytes("abc", 4096);
+        assert_eq!((out.as_str(), trunc), ("abc", 0));
+        let text = format!("{}{}", "H".repeat(5000), "T".repeat(5000));
+        let (out, trunc) = cap_bytes(&text, 4096);
+        assert_eq!(out.len(), 4096);
+        assert_eq!(trunc, 10_000 - 4096);
+        assert!(out.starts_with("HHH") && out.ends_with("TTT"));
+        // A cut landing mid-emoji retreats to the char boundary, and the
+        // retreated byte counts as truncated too.
+        let text = format!("{}◉{}", "a".repeat(2047), "b".repeat(3000));
+        let (out, trunc) = cap_bytes(&text, 4096);
+        assert_eq!(out.len(), 4095, "the split head byte falls out");
+        assert_eq!(trunc, text.len() - out.len());
+        assert!(out.starts_with("aaa") && out.ends_with("bbb"));
+    }
+
+    #[test]
+    fn strip_ansi_drops_escapes_and_keeps_text() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m plain"), "red plain");
+        assert_eq!(strip_ansi("\x1b]8;;https://example.com\x07link"), "link");
+        assert_eq!(strip_ansi("a\x1bbc"), "ac");
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn socket_path_for_names_the_run_socket() {
+        assert_eq!(
+            socket_path_for(Path::new("/sup"), 42),
+            PathBuf::from("/sup/run/terminal-42.sock")
+        );
+    }
+
+    #[test]
+    fn the_contract_lists_seven_tools() {
+        assert_eq!(
+            TOOL_NAMES,
+            [
+                "terminal_list",
+                "terminal_open",
+                "terminal_run",
+                "terminal_read",
+                "terminal_screen",
+                "terminal_send",
+                "terminal_close"
+            ]
+        );
+        assert_eq!((RUN_DEFAULT_TIMEOUT_MS, RUN_MAX_TIMEOUT_MS), (30_000, 600_000));
+        assert_eq!((READ_DEFAULT_MAX, READ_MAX), (4_096, 32_768));
+        assert_eq!(RUN_OUTPUT_CAP, 4_096);
+    }
+
+    #[test]
+    fn send_keys_cover_the_contract_set() {
+        for key in [
+            "enter", "tab", "esc", "up", "down", "left", "right", "backspace", "ctrl-c", "ctrl-d",
+            "ctrl-z", "ctrl-l",
+        ] {
+            assert!(key_bytes_for(key).is_ok(), "{key} has bytes");
+        }
+        assert!(key_bytes_for("bogus").is_err());
     }
 }
