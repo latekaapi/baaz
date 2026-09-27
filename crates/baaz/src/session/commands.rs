@@ -5,6 +5,7 @@
 //! the entity owns and why these are its own files.
 
 use super::*;
+use aui_protocol::{Delta, Turn};
 
 impl SessionView {
     // -------------------------------------------------------------- commands
@@ -163,6 +164,7 @@ impl SessionView {
         // record mirrors the map for replayed histories).
         self.remember_display_text(model_text.clone(), text.clone());
         let parts = self.provider_parts(model_text);
+        let optimistic_id = format!("optimistic-{request_id}");
         let command = ProviderCommand::SubmitInput {
             request_id,
             session_id: self.session_id.clone(),
@@ -172,9 +174,30 @@ impl SessionView {
         };
         self.images.clear();
         self.files.clear();
+        // The first frame after send already shows the turn (X1): fold an
+        // optimistic user bubble carrying what the person typed, before
+        // the adapter acks. The provider's own user turn replaces it in
+        // place when it lands, so the hero is gone on the very next
+        // frame instead of waiting on the child's echo.
+        let landed = self.fold.apply_deltas(
+            &self.session_id,
+            vec![Delta::TurnStarted {
+                turn: Turn::User {
+                    id: optimistic_id.clone(),
+                    text: text.clone(),
+                    attachments: Vec::new(),
+                    mentions: Vec::new(),
+                    timestamp: None,
+                },
+            }],
+        );
+        if !landed.is_empty() {
+            self.follow = true;
+        }
+        self.pending_optimistic.push(optimistic_id.clone());
         let planning = self.plan;
         self.provider_send(command, cx, move |this, result, cx| {
-            this.submitted_provider(result, text, planning, cx);
+            this.submitted_provider(result, text, planning, optimistic_id, cx);
         });
         cx.notify();
     }
@@ -186,14 +209,17 @@ impl SessionView {
         result: Result<provider::Ack, provider::ProviderError>,
         text: String,
         planning: bool,
+        optimistic_id: String,
         cx: &mut Context<Self>,
     ) {
         match result {
             Ok(provider::Ack::TurnAccepted { turn_id }) => {
-                self.submitting = false;
-                // The ack names the turn that carries the input; the
-                // `TurnStarted` delta owns the running state. When the
-                // delta already landed (events beat acks), sync onto it.
+                // Busy until the provider speaks (X1): the ack only admits
+                // the send, so `submitting` stays true — the status row
+                // keeps reading Working — until the first provider event
+                // for the turn hands over to `running` exactly as before.
+                // When the delta already landed (events beat acks), sync
+                // onto it.
                 self.adopt_open_provider_turn(cx);
                 // The lane's admission: the application reveals the row,
                 // titles it and touches the record, the way the muse
@@ -212,11 +238,17 @@ impl SessionView {
             }
             Ok(_) => {
                 self.submitting = false;
+                // No turn carries the input, so the optimistic bubble
+                // must go too — otherwise it sticks with no turn behind
+                // it. The prompt stays sent, as before.
+                self.remove_optimistic_turn(&optimistic_id);
             }
             Err(error) => {
                 self.submitting = false;
-                // The turn never left, so the person keeps their words.
-                // An `Unsupported` refusal shows its reason, never silence.
+                // The turn never left, so the optimistic bubble goes and
+                // the person keeps their words. An `Unsupported` refusal
+                // shows its reason, never silence.
+                self.remove_optimistic_turn(&optimistic_id);
                 self.report_provider_error(&error, cx);
                 self.restore_prompt(text, cx);
             }

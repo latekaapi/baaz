@@ -184,6 +184,7 @@ impl SessionView {
                         other => other,
                     })
                     .collect();
+                let deltas = self.reconcile_optimistic(deltas);
                 let session_id = self.session_id.clone();
                 let landed = self.fold.apply_deltas(&session_id, deltas);
                 if !landed.is_empty() {
@@ -244,6 +245,13 @@ impl SessionView {
                     if let Ok(mut provider) = lane.provider.lock() {
                         provider.shutdown();
                     }
+                }
+                // No finish will ever land, so settle the send state here:
+                // drop every optimistic bubble and stop reading Working, or
+                // both stick with no turn behind them.
+                self.submitting = false;
+                for optimistic in std::mem::take(&mut self.pending_optimistic) {
+                    self.remove_optimistic_turn(&optimistic);
                 }
                 self.set_banner(&format!("Provider connection lost: {reason}"), None, cx);
             }
@@ -354,7 +362,11 @@ impl SessionView {
                         }
                     }
                     Turn::User { .. } => {
-                        self.submitting = false;
+                        // The echo replaces the optimistic bubble over in
+                        // `reconcile_optimistic`, but the turn has not
+                        // spoken yet: `submitting` stays true — the view
+                        // keeps reading Working — until an assistant start,
+                        // a block, a finish, or an error hands over.
                     }
                 },
                 Delta::TurnFinished { turn_id, meta, .. } => {
@@ -398,6 +410,10 @@ impl SessionView {
                 // the pending words, so it stands on the needs-you state
                 // while the approval waits instead of `Working`.
                 Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => {
+                    // Any block is the provider speaking: a turn whose
+                    // first event is content hands over from `submitting`
+                    // here, exactly like an assistant start does.
+                    self.submitting = false;
                     if let Block::Approval { id, state, .. } = block {
                         if *state != ApprovalState::Pending {
                             self.resolve_external_approval(id, cx);
@@ -410,6 +426,62 @@ impl SessionView {
                 _ => {}
             }
         }
+    }
+
+    /// Drop one optimistic bubble: forget its pending id when it is still
+    /// queued and fold its removal, so a refused submit or a dead lane
+    /// leaves no stuck bubble behind. Removing a turn the fold never saw
+    /// (or already dropped) lands nothing — never an error.
+    pub(super) fn remove_optimistic_turn(&mut self, turn_id: &str) {
+        if let Some(at) = self.pending_optimistic.iter().position(|id| id == turn_id) {
+            self.pending_optimistic.remove(at);
+        }
+        let removed = self.fold.apply_deltas(
+            &self.session_id,
+            vec![Delta::TurnRemoved { turn_id: turn_id.to_owned() }],
+        );
+        if !removed.is_empty() {
+            self.follow = true;
+        }
+    }
+
+    /// Reconcile the provider's own user turn with the optimistic bubble
+    /// folded at send (X1). A batch carrying a user `TurnStarted` consumes
+    /// the earliest pending optimistic turn: its removal is prepended so
+    /// the echo lands in the optimistic turn's place — still exactly one
+    /// user bubble, never an append.
+    ///
+    /// When the provider opened its assistant turn before echoing (Codex
+    /// `turn/started`), that empty turn sits ahead of the bubble; it is
+    /// moved after the echo so the transcript keeps user-before-assistant
+    /// order. Anything else — replayed history, an echo with nothing
+    /// pending — folds exactly as before.
+    fn reconcile_optimistic(&mut self, deltas: Vec<Delta>) -> Vec<Delta> {
+        let echoes = deltas.iter().any(|delta| {
+            matches!(delta, Delta::TurnStarted { turn: Turn::User { .. } })
+        });
+        if !echoes || self.pending_optimistic.is_empty() {
+            return deltas;
+        }
+        let optimistic = self.pending_optimistic.remove(0);
+        let shift = match self.fold.session(&self.session_id).and_then(|session| session.turns.last()) {
+            Some(Turn::Assistant { blocks, .. }) if blocks.is_empty() => self
+                .fold
+                .session(&self.session_id)
+                .and_then(|session| session.turns.last().cloned())
+                .filter(|turn| !self.completed_turns.contains(turn.id())),
+            _ => None,
+        };
+        let mut out = Vec::with_capacity(deltas.len() + 2);
+        out.push(Delta::TurnRemoved { turn_id: optimistic });
+        if let Some(turn) = &shift {
+            out.push(Delta::TurnRemoved { turn_id: turn.id().to_owned() });
+        }
+        out.extend(deltas);
+        if let Some(turn) = shift {
+            out.push(Delta::TurnStarted { turn });
+        }
+        out
     }
 
     /// Adopt the transcript's open assistant turn, if any: an ack can beat
@@ -951,6 +1023,7 @@ mod tests {
         pending_questions: Vec<provider::PendingQuestion>,
         catalog: Vec<provider::ModelSummary>,
         catalog_provider: String,
+        fail_submit: bool,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -988,6 +1061,14 @@ mod tests {
             Self::with_pending(Vec::new(), Vec::new())
         }
 
+        /// A double whose `SubmitInput` is refused: the submit never
+        /// leaves, so the view must drop its optimistic turn and idle.
+        fn failing_submit() -> (Self, RecordingHandle) {
+            let (adapter, handle) = Self::with_pending(Vec::new(), Vec::new());
+            adapter.inner.state.lock().expect("recording mutex").fail_submit = true;
+            (adapter, handle)
+        }
+
         /// A double serving a model catalog: `ListModels` answers `models`
         /// with `active` flagging the effective model, the way a live child
         /// does. Fork, compact and session config answer `Native` here so
@@ -1016,6 +1097,7 @@ mod tests {
                     pending_questions: questions,
                     catalog: Vec::new(),
                     catalog_provider: "recording".to_owned(),
+                    fail_submit: false,
                 }),
                 tx,
                 rx,
@@ -1089,6 +1171,11 @@ mod tests {
                 provider::Command::SubmitInput { session_id, parts, .. } => {
                     // An open turn, deliberately never finished here: the
                     // test finishes it when it wants the stop button down.
+                    if self.inner.state.lock().expect("recording mutex").fail_submit {
+                        return Err(provider::ProviderError::Unavailable {
+                            reason: "the child is down".into(),
+                        });
+                    }
                     let text = parts
                         .iter()
                         .filter_map(|part| match part {
@@ -2690,6 +2777,102 @@ mod tests {
             assert_eq!(meter.prompt_tokens, want_in, "prompt tokens counted once");
             assert_eq!(meter.output_tokens, want_out, "output tokens counted once");
             assert_eq!(meter.total_tokens, want_in + want_out);
+        });
+    }
+
+    /// The folded user turns of a lane view, as `(id, text)` pairs.
+    fn user_turns(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Vec<(String, String)> {
+        vc.update(|_, cx| {
+            view.read(cx)
+                .session()
+                .map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .filter_map(|turn| match turn {
+                            aui_protocol::Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// X1: the first frame after send already shows the turn. After
+    /// `submit_on_provider` and the `TurnAccepted` ack — with no provider
+    /// event delivered yet — the view holds exactly one user turn with
+    /// the submitted text and stays busy, so the hero is gone and the
+    /// status row reads Working from the moment of send.
+    #[gpui::test]
+    fn submit_folds_the_user_bubble_and_stays_busy_before_first_event(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        // Deliberately no `drain_recording`: the ack is in, no provider
+        // event has reached the lane yet.
+        let users = user_turns(&view, vc);
+        assert_eq!(users.len(), 1, "the optimistic bubble folds on send, drew {users:?}");
+        assert_eq!(users[0].1, "hello there", "the bubble shows what was typed");
+        vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the view works until the provider speaks");
+        });
+    }
+
+    /// X1: the provider's own user turn replaces the optimistic bubble in
+    /// place — never a duplicate — and the finished turn idles the view.
+    #[gpui::test]
+    fn echoed_user_turn_replaces_the_optimistic_bubble_and_finish_idles(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        assert_eq!(user_turns(&view, vc).len(), 1, "the optimistic bubble folds on send");
+        // The double's echo (user turn plus the open assistant turn).
+        drain_recording(&view, &tx, vc);
+        let users = user_turns(&view, vc);
+        assert_eq!(users.len(), 1, "the echo replaces the optimistic bubble, drew {users:?}");
+        assert_eq!(users[0].1, "hello there", "the surviving bubble shows what was typed");
+        let running = vc.update(|_, cx| {
+            assert!(view.read(cx).busy(), "the open turn works");
+            view.read(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::TurnFinished {
+                    turn_id: running,
+                    meta: aui_protocol::TurnMeta::default(),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(!view.read(cx).busy(), "the finished turn drops the stop button");
+        });
+        assert_eq!(user_turns(&view, vc).len(), 1, "the finish keeps the one bubble");
+    }
+
+    /// X1: a refused submit leaves no optimistic bubble behind and idles:
+    /// the turn never left, so the prompt is restored as today.
+    #[gpui::test]
+    fn refused_submit_drops_the_optimistic_bubble_and_idles(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::failing_submit();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.run_until_parked();
+        assert!(user_turns(&view, vc).is_empty(), "the refused submit folds no bubble");
+        vc.update(|_, cx| {
+            assert!(!view.read(cx).busy(), "the refused submit idles the view");
+            assert!(view.read(cx).banner.is_some(), "the refusal banners its reason");
         });
     }
 }

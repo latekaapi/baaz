@@ -150,6 +150,26 @@ error.
 | transcript page/follow | `PageTranscript` / `FollowSession` / `UnfollowSession` / `ReadStoredOutput` | Codex `Transcript Unverified`: attempted |
 | `/` commands, skills | client-side (`run_command_with`, `crates/baaz/src/session/composer.rs:340`); no neutral spelling — stay client-side, text in `SubmitInput` | n/a |
 
+### 2.4 First frame after send: the user bubble and Working from the moment of send
+
+`submit_on_provider` (`crates/baaz/src/session/commands.rs`) folds an
+optimistic user turn carrying the submitted text before the adapter acks,
+so the next frame replaces the empty-state hero with the user bubble —
+never seconds of hero while the child's echo is still on its way. The
+provider's own user turn (Claude Code's `--replay-user-messages` echo,
+Codex's `userMessage` item) replaces the optimistic one in place when it
+lands: still exactly one user bubble, never an append. When Codex opened
+its assistant turn first (`turn/started`, folded in
+`crates/provider-codex/src/fold.rs`), that still-empty turn moves after
+the echo so the transcript keeps user-before-assistant order. The
+`TurnAccepted` ack no longer clears `submitting`: the view stays busy
+(status row Working) until the first provider event for the turn — an
+assistant `TurnStarted`, any block, `TurnFinished`, or an error — then
+hands over to `running` exactly as before. A refused submit removes the
+optimistic turn and restores the prompt; a lost connection drops every
+pending optimistic turn and idles; a turn that ends with no assistant
+output still clears through its finish, so Working never sticks.
+
 ## 3. The one-writer invariant
 
 **Statement.** Every `SessionView` is owned by exactly one lane for its whole

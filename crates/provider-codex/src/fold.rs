@@ -1208,7 +1208,17 @@ impl CodexFold {
             }
             Notification::TurnStarted { .. } => {
                 self.current_turn = notification.turn_id().map(str::to_owned);
-                Vec::new()
+                // Open the assistant turn the moment Codex starts (X1),
+                // not at its first completed item: the view goes running
+                // on this start, so a long-silent turn reads as working,
+                // never hung. Idempotent — the first item's
+                // `ensure_assistant` is then a no-op — so the final
+                // transcript keeps one assistant turn per user turn.
+                let mut deltas = Vec::new();
+                if let Some(turn_id) = notification.turn_id() {
+                    self.ensure_assistant(turn_id, &mut deltas);
+                }
+                deltas
             }
             Notification::TokenUsage { .. } => {
                 if let (Some(thread), Some(turn), Some(usage)) = (
@@ -2488,6 +2498,39 @@ mod tests {
         let (_, frame) =
             decode_envelope(&user_completed("turn-3", "item-3", full)).expect("envelope decodes");
         assert_eq!(user_texts(&fold.apply(&frame)), [full]);
+    }
+
+    /// X1: `turn/started` alone opens the assistant turn, so the view
+    /// goes running the moment Codex starts — not at its first completed
+    /// item. Repeating the start opens nothing twice.
+    #[test]
+    fn turn_started_alone_opens_the_assistant_turn() {
+        fn started(turn_id: &str) -> String {
+            serde_json::json!({
+                "_dir": "server->client",
+                "frame": {
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": turn_id, "status": "inProgress"},
+                    },
+                },
+            })
+            .to_string()
+        }
+        let mut fold = CodexFold::new();
+        let (_, frame) = decode_envelope(&started("turn-1")).expect("envelope decodes");
+        let deltas = fold.apply(&frame);
+        assert_eq!(deltas.len(), 1, "the start opens one turn, drew {deltas:?}");
+        match &deltas[0] {
+            Delta::TurnStarted { turn: Turn::Assistant { id, .. } } => {
+                assert_eq!(id, "turn-1", "the open turn owns the started turn id");
+            }
+            other => panic!("a start must open the assistant turn, opened {other:?}"),
+        }
+        assert_eq!(fold.current_turn(), Some("turn-1"), "the start names the current turn");
+        let (_, frame) = decode_envelope(&started("turn-1")).expect("envelope decodes");
+        assert!(fold.apply(&frame).is_empty(), "a re-delivered start opens nothing twice");
     }
 
     /// `turn/diff/updated` is carried, never rendered: folding those
