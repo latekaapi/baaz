@@ -7,8 +7,8 @@
 //! refusal shapes do not change with the route:
 //!
 //! * **Muse (route 1, session MCP):** `session/start` and `session/resume`
-//!   carry `config.mcpServers.baaz`, a stdio server whose command is the
-//!   bridge and whose args name the socket and the session. Only when
+//!   carry `config.mcpServers.baaz`, built from the [`BridgeSpec`] below by
+//!   `provider-muse` (which owns every muse-schema spelling). Only when
 //!   `initialize` granted `sessionMcp` — otherwise no route.
 //! * **Claude Code:** a per-session MCP config JSON under
 //!   `<support_dir>/mcp/<session>.json` naming the same bridge, passed as
@@ -25,11 +25,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// The MCP server name every route registers the bridge under. One name
-/// everywhere, so the tool surface (`terminal_*` — the bridge's own names,
-/// unprefixed over session MCP) reads the same whatever opened the session.
-pub const SERVER_NAME: &str = "baaz";
 
 /// Where a session's Claude Code MCP config file lives:
 /// `<support_dir>/mcp/<session>.json`, written by
@@ -72,63 +67,36 @@ pub fn bridge_args(socket: &Path, session_id: &str) -> Vec<String> {
     ]
 }
 
-/// The `config.mcpServers` entry for Muse route 1: the bridge as a stdio
-/// server on this session only. `mode` is `required`: a bridge that cannot
-/// start fails the session open loudly rather than leaving a session whose
-/// terminal tools silently never arrive.
-pub fn muse_server_config(
-    bridge: &Path,
-    socket: &Path,
-    session_id: &str,
-) -> muse_client::schema::SessionMcpServerConfig {
-    muse_client::schema::SessionMcpServerConfig::Stdio {
-        args: Some(bridge_args(socket, session_id)),
+/// The provider-neutral bridge spec: what every route names, before any
+/// provider turns it into its own schema. `command` is the bridge binary,
+/// `args` its argv tail for `session_id`, and `required` means a bridge
+/// that cannot start fails the session open loudly rather than leaving a
+/// session whose terminal tools silently never arrive.
+///
+/// The muse-schema spelling of this spec lives in `provider-muse` (which
+/// owns every wire spelling); the Claude Code JSON and the Codex `-c`
+/// overrides live in their own provider crates. This module never names a
+/// wire type, so the seam ratchet (`seam_ratchet.rs`) keeps counting this
+/// file out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeSpec {
+    /// The bridge binary to spawn, under the `baaz` server name every
+    /// route shares.
+    pub command: String,
+    /// `--terminal --socket <sock> --session <id>`, for this session.
+    pub args: Vec<String>,
+    /// The route is mandatory: fail the open, never run bridgeless.
+    pub required: bool,
+}
+
+/// The bridge spec for one session: the bridge binary, its argv tail for
+/// `session_id`, and the required route.
+pub fn bridge_spec(bridge: &Path, socket: &Path, session_id: &str) -> BridgeSpec {
+    BridgeSpec {
         command: bridge.to_string_lossy().into_owned(),
-        env: None,
-        framing: None,
-        mode: Some(muse_client::schema::SessionMcpServerMode::Required),
+        args: bridge_args(socket, session_id),
+        required: true,
     }
-}
-
-/// The whole `config` object for a Muse `session/start` or
-/// `session/resume`: just the bridge, under [`SERVER_NAME`].
-pub fn muse_session_config(
-    bridge: &Path,
-    socket: &Path,
-    session_id: &str,
-) -> muse_client::schema::SessionConfig {
-    muse_client::schema::SessionConfig {
-        mcp_servers: Some(
-            [(SERVER_NAME.to_owned(), muse_server_config(bridge, socket, session_id))]
-                .into_iter()
-                .collect(),
-        ),
-    }
-}
-
-/// Attach the terminal route to a `session/start`'s params: the
-/// client-minted `session_id` (so the id the bridge carries is known before
-/// the start runs and can be registered first) plus the bridge config.
-/// Callers register `session_id` with the service before sending.
-pub fn attach_muse_start(
-    params: &mut muse_client::schema::SessionStartParams,
-    session_id: &str,
-    bridge: &Path,
-    socket: &Path,
-) {
-    params.session_id = Some(session_id.to_owned());
-    params.config = Some(muse_session_config(bridge, socket, session_id));
-}
-
-/// Attach the terminal route to a `session/resume`'s params: the session
-/// already exists, so only the bridge config rides along.
-pub fn attach_muse_resume(
-    params: &mut muse_client::schema::SessionResumeParams,
-    session_id: &str,
-    bridge: &Path,
-    socket: &Path,
-) {
-    params.config = Some(muse_session_config(bridge, socket, session_id));
 }
 
 /// The Muse route's one refusal: `initialize` did not grant `sessionMcp`,
@@ -170,53 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn muse_config_names_the_bridge_socket_and_session() {
-        let config = muse_session_config(&bridge(), &socket(), "s-1");
-        let servers = config.mcp_servers.expect("one server");
-        assert_eq!(servers.len(), 1);
-        match &servers[SERVER_NAME] {
-            muse_client::schema::SessionMcpServerConfig::Stdio { command, args, mode, .. } => {
-                assert_eq!(command, &bridge().to_string_lossy());
-                let args = args.clone().expect("args");
-                assert_eq!(
-                    args,
-                    vec!["--terminal", "--socket", "/tmp/baaz/run/terminal-1.sock", "--session", "s-1"]
-                );
-                assert_eq!(*mode, Some(muse_client::schema::SessionMcpServerMode::Required));
-            }
-            other => panic!("the bridge is a stdio server, not {other:?}"),
-        }
-    }
-
-    #[test]
-    fn muse_start_takes_the_minted_session_id() {
-        let mut params = muse_client::schema::SessionStartParams {
-            command_id: "cmd-1".into(),
-            ..Default::default()
-        };
-        attach_muse_start(&mut params, "s-minted", &bridge(), &socket());
-        assert_eq!(params.session_id.as_deref(), Some("s-minted"));
-        assert!(params.config.is_some(), "the start carries the bridge");
-    }
-
-    #[test]
-    fn muse_resume_keeps_its_session_and_gains_the_bridge() {
-        let mut params = muse_client::schema::SessionResumeParams {
-            command_id: "cmd-2".into(),
-            session_id: "s-known".into(),
-            ..Default::default()
-        };
-        attach_muse_resume(&mut params, "s-known", &bridge(), &socket());
-        assert_eq!(params.session_id, "s-known", "resume never renames the session");
-        let config = params.config.expect("the resume carries the bridge");
-        let args = match &config.mcp_servers.expect("one server")[SERVER_NAME] {
-            muse_client::schema::SessionMcpServerConfig::Stdio { args, .. } => args.clone(),
-            other => panic!("the bridge is a stdio server, not {other:?}"),
-        };
-        assert!(
-            args.expect("args").contains(&"s-known".to_owned()),
-            "the bridge answers for the resumed session"
+    fn bridge_spec_names_the_bridge_socket_and_session() {
+        let spec = bridge_spec(&bridge(), &socket(), "s-1");
+        assert_eq!(spec.command, bridge().to_string_lossy());
+        assert_eq!(
+            spec.args,
+            vec!["--terminal", "--socket", "/tmp/baaz/run/terminal-1.sock", "--session", "s-1"]
         );
+        assert!(spec.required, "a broken bridge fails the open loud");
     }
 
     #[test]
@@ -234,10 +163,12 @@ mod tests {
     }
 
     /// The order the Muse open path runs in, against a real socket: mint
-    /// the id, register it, then build the start — so by the time the
-    /// start (with the bridge) could run, the socket already serves the id
-    /// the bridge will name. An unregistered id is refused, which is what
-    /// would answer if the registration ever moved after the send.
+    /// the id, register it, then build the bridge spec — so by the time
+    /// the start (with the bridge) could run, the socket already serves
+    /// the id the bridge will name. An unregistered id is refused, which
+    /// is what would answer if the registration ever moved after the
+    /// send. Neutral on purpose: the muse-schema spelling lives in
+    /// `provider-muse`, so this file never names the wire crate.
     #[gpui::test]
     fn the_minted_session_is_registered_before_the_start(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -256,25 +187,16 @@ mod tests {
             std::process::id() % 40000 + 20000,
         );
 
-        // The open path's three statements, in its order.
-        let session_id = muse_client::new_command_id();
+        // The open path's three statements, in its order: mint the id
+        // (what `muse_terminal_session` mints client-side), register it,
+        // then name it in the bridge spec the start will carry.
+        let session_id = format!("s-{}", std::process::id());
         service.register_session(&session_id, root.clone());
-        let mut params = muse_client::schema::SessionStartParams {
-            command_id: "cmd-1".into(),
-            workspace_root: Some(root.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        attach_muse_start(&mut params, &session_id, &bridge(), service.socket_path());
+        let spec = bridge_spec(&bridge(), service.socket_path(), &session_id);
 
-        // The start carries the registered id, and the bridge names it.
-        assert_eq!(params.session_id.as_deref(), Some(session_id.as_str()));
-        let servers = params.config.expect("bridge config").mcp_servers.expect("one server");
-        match &servers[SERVER_NAME] {
-            muse_client::schema::SessionMcpServerConfig::Stdio { args, .. } => {
-                assert!(args.clone().expect("args").contains(&session_id));
-            }
-            other => panic!("the bridge is a stdio server, not {other:?}"),
-        }
+        // The spec carries the registered id.
+        assert!(spec.args.contains(&session_id));
+        assert!(spec.args.contains(&service.socket_path().to_string_lossy().into_owned()));
 
         // And the socket serves that id right now — no start has run, so
         // only the prior registration can be answering.

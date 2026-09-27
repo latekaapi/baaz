@@ -1190,7 +1190,9 @@ impl Harness {
     /// runs. `None` when `initialize` did not grant `sessionMcp` — no
     /// route, and the session opens exactly as it always did (logged once
     /// per process, not once per session). The caller carries the id onto
-    /// the start with [`crate::terminal::relay::attach_muse_start`].
+    /// the start with `provider_muse::terminal::attach_start` (the
+    /// schema spelling lives in the provider crate; the relay only names
+    /// the neutral bridge spec).
     fn muse_terminal_session(&mut self, root: &std::path::Path) -> Option<String> {
         if !self.session_mcp {
             crate::terminal::relay::note_muse_route_ungranted();
@@ -1217,12 +1219,12 @@ impl Harness {
         let root = std::path::PathBuf::from(self.session_workspace(&session_id));
         self.register_terminal_session(&session_id, root);
         let socket = self.terminal_service.socket_path().to_path_buf();
-        crate::terminal::relay::attach_muse_resume(
-            params,
-            &session_id,
+        let spec = crate::terminal::relay::bridge_spec(
             &crate::terminal::relay::bridge_path(),
             &socket,
+            &session_id,
         );
+        provider_muse::terminal::attach_resume(params, &session_id, &spec.command, &spec.args);
     }
 
     pub(crate) fn new_session_in(
@@ -1337,11 +1339,16 @@ impl Harness {
         if let Some(root) = params.workspace_root.clone() {
             if let Some(session_id) = self.muse_terminal_session(std::path::Path::new(&root)) {
                 let socket = self.terminal_service.socket_path().to_path_buf();
-                crate::terminal::relay::attach_muse_start(
-                    &mut params,
-                    &session_id,
+                let spec = crate::terminal::relay::bridge_spec(
                     &crate::terminal::relay::bridge_path(),
                     &socket,
+                    &session_id,
+                );
+                provider_muse::terminal::attach_start(
+                    &mut params,
+                    &session_id,
+                    &spec.command,
+                    &spec.args,
                 );
             }
         }
@@ -1468,11 +1475,16 @@ impl Harness {
         // before the start, carried on it, grant-gated.
         if let Some(session_id) = self.muse_terminal_session(&root) {
             let socket = self.terminal_service.socket_path().to_path_buf();
-            crate::terminal::relay::attach_muse_start(
-                &mut params,
-                &session_id,
+            let spec = crate::terminal::relay::bridge_spec(
                 &crate::terminal::relay::bridge_path(),
                 &socket,
+                &session_id,
+            );
+            provider_muse::terminal::attach_start(
+                &mut params,
+                &session_id,
+                &spec.command,
+                &spec.args,
             );
         }
         self.session_switch_pending = true;

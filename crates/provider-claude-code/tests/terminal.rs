@@ -7,15 +7,15 @@
 //! Baaz's tools and nothing else) and the file names the bridge, the
 //! socket and the session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use provider_claude_code::{ClaudeCodeAdapter, TerminalRelay};
 
-fn relay(dir: &PathBuf) -> TerminalRelay {
+fn relay(dir: &Path) -> TerminalRelay {
     TerminalRelay {
         bridge: PathBuf::from("/tmp/baaz/bin/mcp-bridge"),
         socket: PathBuf::from("/tmp/baaz/run/terminal-9.sock"),
-        config_dir: dir.clone(),
+        config_dir: dir.to_path_buf(),
     }
 }
 
