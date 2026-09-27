@@ -808,8 +808,9 @@ fn consecutive_tool_calls_fold_into_verb_summarised_groups() {
         other => panic!("the read run did not group: {other:?}"),
     }
     match &blocks[3] {
-        Block::Approval { tool, command, state, .. } => {
+        Block::Approval { tool, command, state, body_kind, .. } => {
             assert_eq!(tool, "bash");
+            assert_eq!(*body_kind, aui_protocol::ApprovalBodyKind::Command, "a shell ask reads as a command");
             assert_eq!(command, "cargo run -- --no-connect");
             // The fixture leaves the approval "approving" past its turn's
             // end; the turn's terminal settles it (a card must not spin
@@ -823,6 +824,70 @@ fn consecutive_tool_calls_fold_into_verb_summarised_groups() {
     assert!(failed.target.contains("deny warnings"), "wrong card: {:?}", failed.target);
     let lone = blocks[5].as_tool_call().expect("the last call folded");
     assert_eq!(lone.status, ToolStatus::Success);
+}
+
+/// A `fileAccess` approval cards as a file write — the plain path face —
+/// while the shell approval above cards as a command. No capture carries a
+/// file write, so the test replays `transcript-approve.jsonl` with the ask's
+/// subject rewritten to `fileAccess` in memory; everything else on the wire
+/// is untouched.
+#[test]
+fn a_file_access_approval_cards_a_file_write_body() {
+    use aui_protocol::Block;
+    let path = fixtures_dir().join("transcript-approve.jsonl");
+    let text = std::fs::read_to_string(&path).expect("capture is readable");
+    let mut fold = MuseFold::new();
+    let mut saw_ask = false;
+    for (number, line) in text.lines().enumerate() {
+        let Some(body) = line.strip_prefix("<-- ") else { continue };
+        // Both the ask and its stage refreshes carry the subject; every one
+        // of them is rewritten, or a refresh would flip the card back.
+        let body = if body.contains("\"approval/requested\"") || body.contains("\"approval/updated\"") {
+            saw_ask = true;
+            let mut wire: serde_json::Value =
+                serde_json::from_str(body).expect("the ask is JSON");
+            wire["params"]["subject"] = serde_json::json!({
+                "kind": "fileAccess",
+                "path": "/Users/alex/Projects/acme-web/note.txt",
+                "access": "write",
+                "workspaceRoot": "/Users/alex/Projects/acme-web",
+            });
+            serde_json::to_string(&wire).expect("the rewritten ask serializes")
+        } else {
+            body.to_owned()
+        };
+        let parsed = frame::parse_line(&body)
+            .unwrap_or_else(|err| panic!("{}:{}: {err}", path.display(), number + 1));
+        let Some(frame) = parsed else { continue };
+        if let Some(event) = MuseEvent::from_frame(frame) {
+            fold.apply(event);
+        }
+    }
+    assert!(saw_ask, "the fixture asks an approval");
+    let mut cards = Vec::new();
+    for id in fold.session_ids() {
+        let session = fold.session(id).expect("session exists");
+        for turn in &session.turns {
+            for block in turn.blocks() {
+                if matches!(block, Block::Approval { .. }) {
+                    cards.push(block.clone());
+                }
+            }
+        }
+    }
+    assert_eq!(cards.len(), 1, "one asked approval, one card: {cards:?}");
+    match &cards[0] {
+        Block::Approval { tool, command, body_kind, .. } => {
+            assert_eq!(tool, "shell");
+            assert_eq!(
+                *body_kind,
+                aui_protocol::ApprovalBodyKind::FileWrite,
+                "a file-access ask reads as a file write"
+            );
+            assert_eq!(command, "/Users/alex/Projects/acme-web/note.txt", "the path, not a command");
+        }
+        other => panic!("an approval card, got {other:?}"),
+    }
 }
 
 /// The group forms while streaming: the second started call joins the first

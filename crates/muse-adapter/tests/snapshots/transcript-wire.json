@@ -45,6 +45,7 @@
               "cwd": "/Users/alex/Projects/acme-web",
               "capabilities": [],
               "scope": "this_worktree",
+              "body_kind": "command",
               "state": {
                 "kind": "auto_denied",
                 "rule": "no policy rule allows this action"
@@ -150,6 +151,7 @@
               "cwd": "/Users/alex/Projects/acme-web",
               "capabilities": [],
               "scope": "this_worktree",
+              "body_kind": "command",
               "state": {
                 "kind": "auto_denied",
                 "rule": "no policy rule allows this action"

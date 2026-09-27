@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aui_protocol::{
-    ActivityState, ApprovalBadges, ApprovalChoice, ApprovalScope, ApprovalStage, ApprovalState,
-    Answer, Block, Delta, DiffStat, MarkerKind, PermissionMode, Provider, QuestionOption,
-    QuestionPreview, ResolvedBy, SearchHit, Session, ThinkingState, ToolBody, ToolCall, ToolKind,
-    ToolStatus, TodoItem, TodoState, Turn, TurnMeta,
+    ActivityState, ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalScope, ApprovalStage,
+    ApprovalState, Answer, Block, Delta, DiffStat, MarkerKind, PermissionMode, Provider,
+    QuestionOption, QuestionPreview, ResolvedBy, SearchHit, Session, ThinkingState, ToolBody,
+    ToolCall, ToolKind, ToolStatus, TodoItem, TodoState, Turn, TurnMeta,
 };
 use muse_client::schema::{self as msp, ApprovalMode};
 use muse_client::MuseEvent;
@@ -2836,6 +2836,26 @@ fn approval_decision(decision: &msp::ApprovalDecision) -> aui_protocol::Approval
     }
 }
 
+/// The card's body kind, from the approval's kind/tool on the wire: a shell
+/// subject (or a terminal executor) reads as a command, file access as a
+/// file write, and everything else — network, processes, tools, MCP — as
+/// other.
+fn approval_body_kind(request: &msp::ApprovalRequestParams) -> ApprovalBodyKind {
+    if is_terminal_tool(&request.tool_name) {
+        return ApprovalBodyKind::Command;
+    }
+    match request.subject.kind.as_str() {
+        "shell" => ApprovalBodyKind::Command,
+        "fileAccess" => ApprovalBodyKind::FileWrite,
+        _ => match request.tool_name.as_str() {
+            "bash" | "shell" => ApprovalBodyKind::Command,
+            "write" | "write_file" | "create" | "create_file" | "edit" | "edit_file"
+            | "str_replace" | "apply_patch" => ApprovalBodyKind::FileWrite,
+            _ => ApprovalBodyKind::Other,
+        },
+    }
+}
+
 fn approval_block(
     request: &msp::ApprovalRequestParams,
     state: ApprovalState,
@@ -2896,6 +2916,7 @@ fn approval_block(
         cwd: request.subject.workspace_root.clone().unwrap_or_default(),
         capabilities: Vec::new(),
         scope,
+        body_kind: approval_body_kind(request),
         state,
         rule,
         choices,

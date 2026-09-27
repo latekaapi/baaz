@@ -61,9 +61,10 @@
 use std::collections::{HashMap, HashSet};
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalChoice, ApprovalDecision, ApprovalScope, ApprovalState, Attachment,
-    AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat, Hunk, ThinkingState,
-    TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
+    ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
+    ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat,
+    Hunk, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
+    UploadState,
 };
 use provider::ProviderEvent;
 use serde_json::Value;
@@ -855,6 +856,7 @@ impl CodexFold {
                 cwd,
                 capabilities: Vec::new(),
                 scope: ApprovalScope::ThisCommand,
+                body_kind: ApprovalBodyKind::Command,
                 state: ApprovalState::Pending,
                 rule: None,
                 choices: codex_choices(),
@@ -913,6 +915,7 @@ impl CodexFold {
                 cwd: String::new(),
                 capabilities: Vec::new(),
                 scope: ApprovalScope::ThisCommand,
+                body_kind: ApprovalBodyKind::FileWrite,
                 state: ApprovalState::Pending,
                 rule: None,
                 choices: codex_choices(),
@@ -969,6 +972,7 @@ impl CodexFold {
                 cwd: decoded.cwd.clone(),
                 capabilities: Vec::new(),
                 scope: ApprovalScope::ThisCommand,
+                body_kind: ApprovalBodyKind::Other,
                 state: ApprovalState::Pending,
                 rule: None,
                 choices: vec![
@@ -1066,6 +1070,7 @@ impl CodexFold {
                 cwd: String::new(),
                 capabilities: Vec::new(),
                 scope: ApprovalScope::ThisCommand,
+                body_kind: ApprovalBodyKind::Other,
                 state: ApprovalState::Pending,
                 rule: None,
                 choices: elicitation_choices(),
@@ -2444,8 +2449,9 @@ mod tests {
         let lines = fixture_lines("approval-default.jsonl");
         let (mut fold, ask, rest_at) = fold_until_approval(&lines, 1);
         match added_approval(&ask) {
-            Block::Approval { tool, command, reason, cwd, state, choices, .. } => {
+            Block::Approval { tool, command, reason, cwd, state, choices, body_kind, .. } => {
                 assert_eq!(tool, "Bash");
+                assert_eq!(body_kind, ApprovalBodyKind::Command, "a shell ask reads as a command");
                 assert_eq!(state, ApprovalState::Pending);
                 assert!(command.contains("outside-codex.txt"), "the inner command: {command}");
                 assert!(!command.contains("/bin/zsh"), "the wrapper stays out: {command}");
@@ -2516,8 +2522,9 @@ mod tests {
         let lines = fixture_lines("edit.jsonl");
         let (mut fold, ask, rest_at) = fold_until_approval(&lines, 1);
         match added_approval(&ask) {
-            Block::Approval { tool, command, reason, state, choices, .. } => {
+            Block::Approval { tool, command, reason, state, choices, body_kind, .. } => {
                 assert_eq!(tool, "Edit");
+                assert_eq!(body_kind, ApprovalBodyKind::FileWrite, "a file-change ask reads as a file write");
                 assert_eq!(state, ApprovalState::Pending);
                 assert_eq!(command, "File change");
                 assert!(

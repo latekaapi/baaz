@@ -2474,6 +2474,7 @@ mod tests {
             cwd: "/tmp".to_owned(),
             capabilities: Vec::new(),
             scope: aui_protocol::ApprovalScope::ThisCommand,
+            body_kind: aui_protocol::ApprovalBodyKind::Command,
             state,
             rule: None,
             choices: Vec::new(),
