@@ -1983,7 +1983,7 @@ mod tests {
         let harness = harness_with_socket(vc, &root);
         vc.update(|_, cx| {
             harness.update(cx, |harness, _| {
-                harness.register_terminal_session("t1c", root.clone());
+                harness.register_terminal_session("t1c", root.clone(), "muse");
             });
         });
         let host = vc.update(|_, cx| harness.read(cx).terminal_host.clone());

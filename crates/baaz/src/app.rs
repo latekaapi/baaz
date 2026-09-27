@@ -648,6 +648,12 @@ pub struct Harness {
     /// names these sessions, so without this the sidebar forgets them on
     /// every restart (W5).
     pub(crate) provider_sessions: crate::provider_sessions::ProviderSessionStore,
+    /// Which provider each terminal bridge session answers for, by the id
+    /// the bridge names (`--session`). A Codex open mints its thread id
+    /// after the bridge is already registered under the request id, so
+    /// the durable record above never names that id — without this map
+    /// the dock cannot tell whose agent tab it draws (T3b).
+    pub(crate) terminal_providers: HashMap<String, String>,
     /// The adopted workspaces (design `docs/12-projects.md` §4).
     pub(crate) projects: Projects,
     /// The current project: the open session's project, else the last used.
@@ -967,6 +973,7 @@ impl Harness {
             tier_probing: false,
             overrides: sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
+            terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,
             branches: HashMap::new(),
@@ -1746,8 +1753,14 @@ impl Harness {
     /// in T1b's scope (hide/archive/undo all close views outside it), so an
     /// unregister here would be dead code; until T2 the registry lives as
     /// long as the window, and the socket's removal on quit ends it.
-    pub(crate) fn register_terminal_session(&mut self, session_id: &str, project_root: std::path::PathBuf) {
+    pub(crate) fn register_terminal_session(
+        &mut self,
+        session_id: &str,
+        project_root: std::path::PathBuf,
+        provider: &str,
+    ) {
         self.terminal_service.register_session(session_id, project_root);
+        self.terminal_providers.insert(session_id.to_owned(), provider.to_owned());
     }
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
@@ -2103,26 +2116,32 @@ impl Harness {
     /// stays mounted while it collapses and leaves the tree only once the
     /// spring has settled shut.
     /// The agent mark for a terminal tab: the provider of the session that
-    /// opened it — Claude Code's C, Codex's O — and Muse's M when the
-    /// person opened it or no record names the lane (D43). Under a
-    /// deterministic capture the provider-session store reads empty, so
-    /// every tab reads Muse and the strip matches its baseline.
-    fn terminal_tab_provider(&self, origin: Option<&str>) -> Provider {
+    /// opened it — Claude Code's C, Codex's O — and `None` when the
+    /// person opened it or no record names the lane (D43). The strip
+    /// still wears Muse's M for an unknown tab, which is what the
+    /// deterministic capture's baseline holds; only the dock hint goes
+    /// neutral there.
+    fn terminal_tab_provider(&self, origin: Option<&str>) -> Option<Provider> {
         origin
             .and_then(|session| self.provider_sessions.get(session))
             .and_then(|record| crate::sidebar::provider_mark(&record.provider))
-            .unwrap_or(Provider::Muse)
+            .or_else(|| {
+                origin
+                    .and_then(|session| self.terminal_providers.get(session))
+                    .and_then(|provider| crate::sidebar::provider_mark(provider))
+            })
     }
 
     /// The dock header's hint for the active tab's agent: whose session the
     /// person shares the terminal with (D43). Muse keeps the exact string
-    /// the baselines hold; other lanes name their own agent.
-    fn terminal_hint_name(&self, provider: Provider) -> String {
+    /// the baselines hold; other lanes name their own agent; a tab no
+    /// session owns names none, rather than wearing Muse's name.
+    fn terminal_hint_name(&self, provider: Option<Provider>) -> String {
         match provider {
-            Provider::Muse => "Muse can type here".to_owned(),
-            Provider::Claude => "Claude Code can type here".to_owned(),
-            Provider::Codex => "Codex can type here".to_owned(),
-            _ => "An agent can type here".to_owned(),
+            Some(Provider::Muse) => "Muse can type here".to_owned(),
+            Some(Provider::Claude) => "Claude Code can type here".to_owned(),
+            Some(Provider::Codex) => "Codex can type here".to_owned(),
+            _ => "The agent can type here".to_owned(),
         }
     }
 
@@ -2148,7 +2167,7 @@ impl Harness {
         let mut tabs = Vec::new();
         let mut active_ix = 0;
         let mut active_tab: Option<(String, Entity<aui_terminal::TerminalSession>)> = None;
-        let mut hint_provider = Provider::Muse;
+        let mut hint_provider = None;
         let active_id = host.active_for(&root).map(|tab| tab.id.clone());
         for tab in host.tabs_for(&root) {
             let provider = self.terminal_tab_provider(tab.origin_session.as_deref());
@@ -2159,7 +2178,7 @@ impl Harness {
             }
             let mut view = TermTab::new(tab.id.clone(), tab.title.clone());
             if tab.owner == TabOwner::Agent {
-                view = view.agent(provider);
+                view = view.agent(provider.unwrap_or(Provider::Muse));
             }
             if host.busy(cx, &tab.id) {
                 view = view.busy(true);
@@ -2555,13 +2574,17 @@ impl Harness {
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
         // Live lanes register on their own open paths (T2 owns those).
-        let replayed_id = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-        if let Some(session_id) = replayed_id {
+        let replayed = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx))
+            .map(|view| (view.session_id.clone(), view.provider_kind()));
+        if let Some((session_id, provider)) = replayed {
             let root = self
                 .current_project()
                 .map(|project| project.root.clone())
                 .unwrap_or_else(|| self.args.workspace.clone());
-            self.register_terminal_session(&session_id, root);
+            self.register_terminal_session(&session_id, root, provider.as_str());
         }
         // The capture is already folded, and no wire event will ever run
         // `title_from_transcript` for it: without this the replayed row
@@ -3625,6 +3648,61 @@ mod tests {
         );
         let focused = vc.update(|window, cx| window.focused(cx).is_some());
         assert!(focused, "nothing holds focus after the overlay closed, so every root-context binding is dead");
+        restore_state(state);
+    }
+
+    /// T3b: the dock hint names the agent that owns the running tab — or
+    /// no agent when none does. A Codex bridge id (the pre-ack request id
+    /// the durable record never names) resolves through the bridge map;
+    /// a minted id resolves through the durable record; an unknown tab
+    /// goes neutral rather than wearing Muse's name. Remove either map
+    /// and its arm reads wrong here.
+    #[gpui::test]
+    fn dock_hint_names_the_tab_owner_or_no_agent(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let state = hermetic_state("dock-hint");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let root = state.2.clone();
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                // The durable record names a minted session …
+                h.provider_sessions.insert(
+                    "minted-1".to_owned(),
+                    crate::provider_sessions::ProviderSessionRecord {
+                        provider: "codex".to_owned(),
+                        session_id: "minted-1".to_owned(),
+                        workspace: None,
+                        project: None,
+                        created_ms: 0,
+                        updated_ms: 0,
+                        turns: 0,
+                        title: None,
+                        first_prompt: None,
+                    },
+                );
+                // … while the bridge map names the pre-ack request id.
+                h.register_terminal_session("cmd-open", root.clone(), "codex");
+                h.register_terminal_session("cc-bridge", root.clone(), "claude-code");
+                h.register_terminal_session("m-bridge", root, "muse");
+            });
+        });
+        vc.update(|_, cx| {
+            let hint = |h: &Harness, origin: Option<&str>| {
+                let provider = h.terminal_tab_provider(origin);
+                h.terminal_hint_name(provider)
+            };
+            let h = baaz.read(cx);
+            assert_eq!(hint(h, Some("minted-1")), "Codex can type here");
+            assert_eq!(hint(h, Some("cmd-open")), "Codex can type here");
+            assert_eq!(hint(h, Some("cc-bridge")), "Claude Code can type here");
+            assert_eq!(hint(h, Some("m-bridge")), "Muse can type here");
+            assert_eq!(hint(h, None), "The agent can type here");
+            assert_eq!(hint(h, Some("no-such-tab")), "The agent can type here");
+        });
         restore_state(state);
     }
 

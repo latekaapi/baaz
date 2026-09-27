@@ -242,6 +242,59 @@ fn codex_approved_command_completes() {
     );
 }
 
+/// `codex/mcp-terminal.jsonl` (captured live 2026-09-27): the MCP
+/// tool-call gate cards an answerable approval — the gated command from
+/// the call's arguments, the terminal tool face, exactly the three wire
+/// answers — and the refused call reads denied under its own command
+/// while the gate settles denied. Remove the elicitation arm and no
+/// card lands; restore the forged-success fallback and the refused call
+/// reads success under `terminal`.
+#[test]
+fn codex_mcp_tool_gate_is_answerable_and_refusal_reads_denied() {
+    let lines = fixture("codex", "mcp-terminal.jsonl");
+    let deltas = codex_deltas(&lines);
+    let cards = approvals(&deltas);
+    assert_eq!(cards.len(), 1, "one gate, one card");
+    match cards[0] {
+        Block::Approval { id, tool, command, choices, state, .. } => {
+            assert_eq!(id, "mcp-elicitation-0", "the press routes back to the request");
+            assert_eq!(tool, "terminal_run");
+            assert_eq!(command, "echo hi-from-codex", "the call's arguments, not the tool name");
+            assert_eq!(*state, ApprovalState::Pending);
+            let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
+            assert_eq!(ids, ["accept", "decline", "cancel"]);
+        }
+        other => panic!("an approval card, got {other:?}"),
+    }
+    assert!(
+        deltas.iter().any(|delta| matches!(
+            delta,
+            Delta::BlockAdded {
+                block: Block::ToolCall { kind: ToolKind::Shell, verb, target, status: ToolStatus::Cancelled, .. },
+                ..
+            } if verb == "Denied" && target == "echo hi-from-codex"
+        )),
+        "the refused call reads denied under its command: {deltas:?}"
+    );
+    assert!(
+        !deltas.iter().any(|delta| matches!(
+            delta,
+            Delta::BlockAdded {
+                block: Block::ToolCall { status: ToolStatus::Success, .. },
+                ..
+            }
+        )),
+        "nothing reads success for a call that never ran"
+    );
+    assert!(
+        approval_updates(&deltas).iter().any(|card| matches!(
+            card,
+            Block::Approval { id, state: ApprovalState::Denied, .. } if id == "mcp-elicitation-0"
+        )),
+        "the refusal settles the gate to denied"
+    );
+}
+
 /// `codex/edit.jsonl`: the file-change ask names no forged path, and
 /// the completing change lands the path with its diff on the done card.
 #[test]

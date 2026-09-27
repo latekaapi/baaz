@@ -1199,7 +1199,7 @@ impl Harness {
             return None;
         }
         let session_id = muse_client::new_command_id();
-        self.register_terminal_session(&session_id, root.to_path_buf());
+        self.register_terminal_session(&session_id, root.to_path_buf(), "muse");
         Some(session_id)
     }
 
@@ -1217,7 +1217,7 @@ impl Harness {
         }
         let session_id = params.session_id.clone();
         let root = std::path::PathBuf::from(self.session_workspace(&session_id));
-        self.register_terminal_session(&session_id, root);
+        self.register_terminal_session(&session_id, root, "muse");
         let socket = self.terminal_service.socket_path().to_path_buf();
         let spec = crate::terminal::relay::bridge_spec(
             &crate::terminal::relay::bridge_path(),
@@ -1986,6 +1986,7 @@ impl Harness {
         self.register_terminal_session(
             &request_id,
             std::path::PathBuf::from(workspace.clone()),
+            provider_id.as_str(),
         );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
@@ -2135,6 +2136,7 @@ impl Harness {
         self.register_terminal_session(
             &session_id,
             std::path::PathBuf::from(workspace.clone()),
+            provider_id.as_str(),
         );
         let overlays = self.overlays.clone();
         let host = SessionHost {
@@ -2354,6 +2356,7 @@ impl Harness {
         self.register_terminal_session(
             &record.session_id,
             std::path::PathBuf::from(workspace.clone()),
+            record.provider.as_str(),
         );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
@@ -2510,6 +2513,7 @@ impl Harness {
         self.register_terminal_session(
             &session_id,
             std::path::PathBuf::from(workspace.clone()),
+            provider_id.as_str(),
         );
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
