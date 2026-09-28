@@ -457,6 +457,12 @@ impl Harness {
         // Recorded before the start runs, so a crash between the start and
         // the hide still hides by record after a restart.
         self.remember_side_session(&side_id, cx);
+        // The watchdog is armed NOW, not once the start returns: a Muse that
+        // is connected but hangs in `session/start` or `turn/start` would
+        // otherwise hold the handoff until the client's own 180 s request
+        // timeout (review finding). A start that lands after the watchdog
+        // settled finds no waiting run and is dropped by the harvest guard.
+        self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
         let work = move || -> Result<String, String> {
             // Free pre-flight: the pinned id when listed, else `None` — omit
             // `modelId` and take the server default rather than failing.
@@ -501,7 +507,6 @@ impl Harness {
                         handoff_epoch: Some(epoch),
                     },
                 );
-                this.arm_handoff_summary_timeout(source, epoch, cx);
                 cx.notify();
             }
             Err(reason) => {
