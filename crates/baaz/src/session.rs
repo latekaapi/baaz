@@ -866,6 +866,11 @@ pub struct SessionView {
     /// The hidden pack bubble's turn id, found on the last cache refresh:
     /// what keeps the per-frame sync check O(1).
     handoff_pack_hidden: Option<String>,
+    /// The pack acknowledgement's turn id — the assistant turn immediately
+    /// following the hidden pack turn, hidden with it (the divider stands
+    /// for both). Found on the same refresh; the turn stays in the provider
+    /// history, only undrawn.
+    handoff_pack_reply_hidden: Option<String>,
     /// Full provider-submitted text → bubble text for submits that carried
     /// `display_text`, mirrored from the provider session record on first
     /// use. `None` until a provider submit records one or a replayed delta
@@ -1054,6 +1059,7 @@ impl SessionView {
             handoff_pack_full: None,
             handoff_pack_display: None,
             handoff_pack_hidden: None,
+            handoff_pack_reply_hidden: None,
             display_overrides: None,
             _subscriptions: vec![subscription],
         }

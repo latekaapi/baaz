@@ -143,6 +143,31 @@ provider session underneath. What changes is what the user sees:
 - **Carried-over state kept:** `provider-sessions.json` / `sessions.json`
   links as today; the ledger still records each provider session separately.
 
+### 8.2 Polish (X3c): no frozen card, no pack echo, bounded snapshots
+
+- **No frozen card.** The snapshot never carries the source's handoff card
+  (captured while still Prepared, with live Cancel / "Open the new session"
+  buttons); `read_snapshot` filters it from files written before this
+  change. The divider stands for the handoff. The live source view keeps
+  its card while the handoff is in flight, exactly as before.
+- **The divider says what crossed over.** "Handed off from Claude Code to
+  Codex · gpt-5 · 4 turns carried" — the destination model and the pack's
+  verbatim turn count, each omitted when unknown. "Open the source session"
+  rides the divider only when no snapshot exists (the fallback divider);
+  with the carried turns on screen the back-link has nothing to add.
+- **No pack echo.** The pack's last line asks the destination for a
+  one-sentence acknowledgement, so its reply ("Context received; I'll wait
+  for your next message.") is hidden with the pack bubble — live and on
+  reopen. Both turns stay in provider history; their tokens may still count
+  in the session meters.
+- **First user turn only.** The pack match consults the destination's FIRST
+  user turn, so a later message repeating the pack text is real and stays.
+- **Bounded snapshots.** Tool outputs and bodies beyond ~200 lines truncate
+  with a "… N more lines" line; image and attachment payloads become a
+  placeholder chip; screenshots are dropped; at most the last ~300 turns
+  keep, with a single "Earlier turns not kept" marker at the top. Bounding
+  applies on write and (idempotently) on read; rendering is unchanged.
+
 ### 8.1 As built (X3a, transcript half)
 
 - Snapshot I/O, divider text and the pack-bubble match live in
@@ -152,13 +177,16 @@ provider session underneath. What changes is what the user sees:
   `BAAZ_DETERMINISTIC=1`), written atomically at activation from the source
   view's visible turns. Schema: `version`, `from`/`to` wire ids, `source`
   (the back-link target), `toModel`, `activatedMs`, `packText`,
-  `packDisplay`, `turns`.
+  `packDisplay`, `turns`, `turnsCarried` (X3c; absent in older files, whose
+  divider then omits the count).
 - The destination's prefix and divider are view-side (`SessionView` fields
   in `crates/baaz/src/session.rs`, assembled in
   `refresh_render_cache`): the old fold-written origin marker is gone, so
   one handoff draws exactly one divider. The pack's user turn is hidden by
   full text live, by summary after a replay (pre-snapshot pairs fall back
-  to the display map); it stays in provider history.
+  to the display map); it stays in provider history. (X3c adds the pack's
+  acknowledgement beside it, consults only the first user turn, and drops
+  the divider's back-link while a snapshot prefix is on screen.)
 - Activation (`acknowledge_handoff`) writes the snapshot, shows the prefix
   on the destination, and leaves the window on it with the composer
   focused; reopening (`attach_handoff_prefix`, called from the provider
