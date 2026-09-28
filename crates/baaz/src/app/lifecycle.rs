@@ -483,6 +483,10 @@ impl Harness {
                     join_at.elapsed().as_millis(),
                     wire.len()
                 ));
+                // A handoff chain is one row: collapse before the unchanged
+                // check, or every reply re-applies wholesale around the
+                // hidden members instead of proving nothing changed.
+                let wire = sidebar::collapse_handoff_chains(wire, &this.provider_sessions, &this.overrides);
                 // Provisional rows are never local, so they never survive
                 // this comparison: the first reply always applies wholesale.
                 // (`SessionEntry` equality includes the provisional flag.)
@@ -545,6 +549,7 @@ impl Harness {
             self.sessions.retain(|e| e.id != entry.id);
             self.sessions.push(entry);
         }
+        self.collapse_handoff_chains();
         self.invalidate_list();
     }
 
@@ -1064,6 +1069,10 @@ impl Harness {
             self.sessions[ix] = row;
             self.invalidate_list();
         }
+        // A settled turn on a chain head re-sums the chain: the one-row
+        // refresh above rebuilt head-only facts, the collapse restores the
+        // original title and the total count.
+        self.collapse_handoff_chains();
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,
@@ -1163,6 +1172,9 @@ impl Harness {
             }
             entry.named = name.is_some();
         }
+        // A handoff chain is one row: rejoined member rows collapse back to
+        // the head here, so an override write never resurfaces one.
+        self.collapse_handoff_chains();
     }
 
     /// `session/start` in the current project, on the switcher's provider.
@@ -1710,7 +1722,7 @@ impl Harness {
     /// `--session`): it arms the one-shot reveal. A sidebar or rail click
     /// reaches [`Self::resume_quiet`] instead and never moves the list.
     pub(crate) fn resume(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.resume_inner(session_id, false, window, cx);
+        self.resume_inner(session_id, false, false, window, cx);
     }
 
     /// A sidebar or rail click on a session: [`Self::resume`] without the
@@ -1719,10 +1731,36 @@ impl Harness {
     /// and any stale arm from an earlier outside activation is dropped
     /// rather than served.
     pub(crate) fn resume_quiet(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.resume_inner(session_id, true, window, cx);
+        self.resume_inner(session_id, true, false, window, cx);
     }
 
-    fn resume_inner(&mut self, session_id: String, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open a chain member itself, bypassing the head redirect: the X3a
+    /// fallback divider's "earlier turns are in the previous session" link.
+    /// A retired source view keeps its read-only banner; this only skips
+    /// the resolve, it grants nothing.
+    pub(crate) fn resume_source_read_only(
+        &mut self,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resume_inner(source, false, true, window, cx);
+    }
+
+    fn resume_inner(
+        &mut self,
+        session_id: String,
+        quiet: bool,
+        bypass_chain: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A handoff chain opens as its head: any member id — a sidebar or
+        // rail click, the palettes, an `open:` step, boot `--session`, a
+        // card or divider link — lands on the head instead. Only the
+        // fallback divider's source link bypasses, through
+        // `resume_source_read_only`.
+        let session_id = if bypass_chain { session_id } else { self.chain_head(&session_id) };
         // A hidden session is never loaded. Hiding is a decision about this
         // window's list, and a list that still opened what it refuses to show
         // would be a list that means nothing. Archived sessions are the same.
@@ -2213,11 +2251,40 @@ impl Harness {
         );
     }
 
+    /// Follow `handoff_to` links across both stores to the chain head
+    /// (`docs/22-handoff.md` §8): any member id opens the head instead. A
+    /// dangling destination resolves to the id itself, so its source stays
+    /// listed and openable.
+    pub(crate) fn chain_head(&self, session_id: &str) -> String {
+        sidebar::chain_head(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+    }
+
+    /// Every member of `session_id`'s chain, sorted: what archiving the head
+    /// covers so no member resurfaces.
+    pub(crate) fn chain_members(&self, session_id: &str) -> Vec<String> {
+        sidebar::chain_members(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+    }
+
+    /// Collapse the rows to one per handoff chain (see
+    /// [`sidebar::collapse_handoff_chains`]). Returns whether the list
+    /// changed.
+    pub(crate) fn collapse_handoff_chains(&mut self) -> bool {
+        let collapsed =
+            sidebar::collapse_handoff_chains(self.sessions.clone(), &self.provider_sessions, &self.overrides);
+        if collapsed == self.sessions {
+            return false;
+        }
+        self.sessions = collapsed;
+        self.invalidate_list();
+        true
+    }
+
     /// Rebuild the sidebar rows the provider record owns: one row per
     /// stored session, joined with the overrides, preserving each row's
     /// live facts (a running turn, pending approvals) across the rebuild.
-    /// Rows whose record is gone (deleted) leave with it. Returns whether
-    /// the list changed.
+    /// Rows whose record is gone (deleted) leave with it. A handoff chain
+    /// then collapses to its head row, in the source row's place. Returns
+    /// whether the list changed.
     pub(crate) fn merge_provider_rows(&mut self) -> bool {
         self.sessions.retain(|entry| entry.provider.is_none() || self.provider_sessions.contains_key(&entry.id));
         if self.provider_sessions.is_empty() {
@@ -2259,7 +2326,9 @@ impl Harness {
         if changed {
             self.invalidate_list();
         }
-        changed
+        // A handoff chain is one row: the activation swap lands in this
+        // same build, the destination taking the source row's place.
+        changed | self.collapse_handoff_chains()
     }
 
     /// Reopen a stored provider session after a restart: connect a fresh
@@ -3171,13 +3240,23 @@ impl Harness {
                     self.show_handoff_confirm(source, provider, cx);
                 }
             }
-            // "Open the new session" on a handoff card, or the
-            // destination marker's back-link: show that session. Rejoins
-            // through a window like the rename path above.
+            // "Open the new session" on a handoff card: show the destination
+            // (the chain head, so the redirect is a no-op). Rejoins through
+            // a window like the rename path above.
             SessionEvent::HandoffOpenSession { destination } => {
                 let destination = destination.clone();
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.resume(destination, window, cx));
+                }));
+            }
+            // "Open the source session" on a fallback divider: show the
+            // retired source read-only, bypassing the head redirect.
+            SessionEvent::HandoffOpenSource { source } => {
+                let source = source.clone();
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.resume_source_read_only(source, window, cx)
+                    });
                 }));
             }
             // "Cancel" on a handoff card: abort while cancellable,
@@ -5067,6 +5146,193 @@ mod tests {
             assert_eq!(kept.provider, "codex");
             assert_eq!(kept.cost_usd, 0.04);
             assert_eq!(crate::usage::count_for_session(&connection, &open_id), 1);
+        });
+        lane_restore(state);
+    }
+
+    /// One muse row for a chain test: the wire lists the head, the stores
+    /// carry the links.
+    fn chain_muse_entry(id: &str, label: &str, turns: u64) -> crate::sidebar::SessionEntry {
+        crate::sidebar::SessionEntry {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            updated: crate::clock::now_local(),
+            running: false,
+            turns,
+            hidden: false,
+            pinned: false,
+            archived: false,
+            description: String::new(),
+            replayed: false,
+            provider: None,
+            named: false,
+            needs_title: false,
+            title_pending: false,
+            last_ask: None,
+            local: false,
+            provisional: false,
+            workspace: None,
+            project: None,
+            project_name: None,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
+            branch: None,
+            terminals_running: 0,
+        }
+    }
+
+    /// Seeds the 2-hop mixed chain every X3b test drives: claude-code (A) →
+    /// codex (B) → muse (C, head). Lane halves in the provider store, the
+    /// muse destination's half in the overrides — what activation writes.
+    fn seed_mixed_chain(harness: &mut Harness) {
+        use std::collections::HashMap;
+        let record = |id: &str,
+                      provider: &str,
+                      turns: u64,
+                      prompt: Option<&str>,
+                      to: Option<&str>,
+                      from: Option<(&str, &str)>| {
+            crate::provider_sessions::ProviderSessionRecord {
+                provider: provider.to_owned(),
+                session_id: id.to_owned(),
+                workspace: None,
+                project: None,
+                created_ms: 1_700_000_000_000,
+                updated_ms: 1_700_000_000_000,
+                turns,
+                title: None,
+                first_prompt: prompt.map(str::to_owned),
+                handoff_to: to.map(str::to_owned),
+                handoff_from: from.map(|(source, _)| source.to_owned()),
+                handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+                display_texts: HashMap::new(),
+            }
+        };
+        harness.provider_sessions.insert(
+            "chain-a".into(),
+            record("chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None),
+        );
+        harness.provider_sessions.insert(
+            "chain-b".into(),
+            record("chain-b", "codex", 3, Some("Second leg"), Some("chain-c"), Some(("chain-a", "claude-code"))),
+        );
+        harness.overrides.insert(
+            "chain-c".into(),
+            crate::sessions::SessionMeta {
+                handoff_from: Some("chain-b".into()),
+                handoff_from_provider: Some("codex".into()),
+                ..Default::default()
+            },
+        );
+        // Activation order: the members first, the head appended, then the
+        // collapse puts the head row in the source row's place.
+        harness.merge_provider_rows();
+        harness.sessions.push(chain_muse_entry("chain-c", "Later words", 5));
+        harness.collapse_handoff_chains();
+    }
+
+    /// X3b, sidebar half: a handoff chain is one sidebar row, opening a
+    /// member id opens the head, and archiving the head hides all members.
+    /// Offline, so the opens are local views and the factory never runs.
+    #[gpui::test]
+    fn opening_a_chain_member_opens_the_head(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("x3b-chain");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| seed_mixed_chain(harness));
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.sessions.len(), 1, "three members, one row");
+            let row = &harness.sessions[0];
+            assert_eq!(row.id, "chain-c", "the head is what is listed");
+            assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
+            assert_eq!(row.turns, 10, "2 + 3 + 5 across the chain");
+        });
+        // Opening the tail member lands on the head, selected.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("chain-a".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the member open lands somewhere");
+            assert_eq!(view.read(cx).session_id, "chain-c", "a member id opens the head");
+            assert_eq!(harness.pending_id.as_deref(), Some("chain-c"), "the head row is selected");
+        });
+        // Archiving the head flags every member, so none resurfaces.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.archive_session("chain-c".into(), Some(window), cx));
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            for id in ["chain-a", "chain-b", "chain-c"] {
+                assert!(
+                    harness.overrides.get(id).is_some_and(|meta| meta.archived),
+                    "archiving the head archives {id} too"
+                );
+            }
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(
+                    harness.visible_sessions(cx).iter().all(|entry| entry.id != "chain-c"),
+                    "the archived head leaves the visible list"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// X3b, sidebar half: the fallback divider's source link bypasses the
+    /// head redirect and opens the retired source itself.
+    #[gpui::test]
+    fn the_fallback_source_link_opens_the_source_itself(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("x3b-bypass");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.overrides.insert(
+                    "old-muse".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_to: Some("new-muse".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.overrides.insert(
+                    "new-muse".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_from: Some("old-muse".into()),
+                        handoff_from_provider: Some("muse".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.sessions.push(chain_muse_entry("old-muse", "First words", 2));
+                harness.sessions.push(chain_muse_entry("new-muse", "Later words", 1));
+                harness.collapse_handoff_chains();
+                assert_eq!(harness.sessions.len(), 1, "the pair is one row");
+                assert_eq!(harness.chain_head("old-muse"), "new-muse");
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_source_read_only("old-muse".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the bypass open lands somewhere");
+            assert_eq!(
+                view.read(cx).session_id,
+                "old-muse",
+                "the explicit source path bypasses the redirect"
+            );
         });
         lane_restore(state);
     }

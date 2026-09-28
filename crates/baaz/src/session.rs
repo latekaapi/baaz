@@ -402,6 +402,12 @@ pub enum SessionEvent {
         /// The fresh destination session.
         destination: String,
     },
+    /// "Open the source session" on a fallback divider (no snapshot): show
+    /// the retired source read-only, bypassing the chain-head redirect.
+    HandoffOpenSource {
+        /// The retired source session.
+        source: String,
+    },
     /// "Cancel" on a handoff card: abort the move while cancellable.
     HandoffCancel {
         /// The card's own block id.

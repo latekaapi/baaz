@@ -194,3 +194,39 @@ provider session underneath. What changes is what the user sees:
   divider alone when only `handoff_from` survives.
 - The sidebar half (head-only rows, member-id redirect) is separate work;
   `sidebar.rs` is untouched by this change.
+
+### 8.3 As built (X3b, sidebar half)
+
+- **One row per chain.** The collapse is pure (`collapse_handoff_chains`,
+  `chain_head`, `chain_members` in `crates/baaz/src/sidebar.rs`, links from
+  both stores): a session with a `handoff_to` link whose destination is
+  known in either store or the rows is not listed. The head row keeps its
+  own `updated`, provider badge and flags, reads the tail member's title
+  unless the head was user-renamed, and counts the chain's summed turns.
+  Mixed chains work — the links are read from whichever store holds them.
+  A dangling `handoff_to` keeps the source listed; a head with no row yet
+  waits for the next build; a link cycle lists, never hangs.
+- **Member ids open the head.** `resume_inner` resolves through
+  `Harness::chain_head` first, so every open path — sidebar/rail clicks,
+  both palettes, sidebar search hits, the `open:`/`click:` steps, boot
+  `--session`, the handoff card's link — lands on the head, selected
+  (the existing activation already points the highlight at it). The X3a
+  fallback divider is the one exception: its back-link emits
+  `SessionEvent::HandoffOpenSource`, which opens the source through
+  `resume_source_read_only`, bypassing the redirect — a retired source
+  view keeps its read-only banner there.
+- **Archive/unarchive act on the chain** (`chain_members` expansion), so no
+  member resurfaces past an archived head; Undo restores the whole chain.
+  Rename and pin are untouched — they name the head id the row already
+  shows, which is what the row displays.
+- **Live.** Activation persists the links, which rebuilds the provider rows
+  and collapses in the same build: the source row disappears and the
+  destination row is emitted where the chain's first member stands (no
+  reorder jump beyond what `updated` would cause anyway — the visible list
+  sorts newest-first and the head keeps its own time), with the window
+  already on the destination from the lane open.
+- **What the gate proves, and does not.** `cargo test -p baaz` proves the
+  row list computed from the stores and the id resolution (unit fixtures
+  plus `gpui::test`s through the real `Harness`). It does NOT prove what
+  the sidebar draws, the selection highlight, any animation, or the live
+  swap in the window — those remain unverified here.

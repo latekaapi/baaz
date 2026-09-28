@@ -922,6 +922,191 @@ pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) ->
     listed.len() == wire.len() && listed.iter().zip(wire.iter()).all(|(a, b)| a == &b)
 }
 
+// A handoff chain is one sidebar row (`docs/22-handoff.md` §8).
+//
+// Sessions linked by `handoff_to` / `handoff_from` — the halves live in two
+// stores (provider records for lane sessions, overrides for muse ones) — form
+// a chain whose head (no `handoff_to`) is the only listed row. The helpers
+// below are pure: links in, rows out. The application owns fetching and
+// opening, like everything else in this module.
+//
+// A link counts only when its destination still exists in either store or in
+// the rows: a dangling `handoff_to` (destination missing) keeps the source
+// listed, exactly like an unlinked session.
+
+/// The `handoff_to` half for one id, whichever store holds it.
+fn handoff_to_of(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> Option<String> {
+    provider_sessions
+        .get(id)
+        .and_then(|record| record.handoff_to.clone())
+        .or_else(|| overrides.get(id).and_then(|meta| meta.handoff_to.clone()))
+        .map(|dest| dest.trim().to_owned())
+        .filter(|dest| !dest.is_empty() && dest != id)
+}
+
+/// The `handoff_from` half for one id, whichever store holds it.
+fn handoff_from_of(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> Option<String> {
+    provider_sessions
+        .get(id)
+        .and_then(|record| record.handoff_from.clone())
+        .or_else(|| overrides.get(id).and_then(|meta| meta.handoff_from.clone()))
+        .map(|source| source.trim().to_owned())
+        .filter(|source| !source.is_empty() && source != id)
+}
+
+/// Whether `id` names a session the list could show: a record in either
+/// store, or a row already built (a muse session the wire lists carries no
+/// store entry until it earns an override).
+fn chain_known(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+    entries: &[SessionEntry],
+) -> bool {
+    provider_sessions.contains_key(id)
+        || overrides.contains_key(id)
+        || entries.iter().any(|entry| entry.id == id)
+}
+
+/// Follow `handoff_to` from `id` to the chain head: the first id with no live
+/// link onward. A dangling destination (nothing known under it) stops the
+/// walk, so its source stays listed; a cycle stops too, rather than hanging
+/// the list build on a corrupt store.
+pub fn chain_head(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+    entries: &[SessionEntry],
+) -> String {
+    let mut head = id.to_owned();
+    let mut seen = HashSet::from([head.clone()]);
+    while let Some(next) = handoff_to_of(&head, provider_sessions, overrides) {
+        if !chain_known(&next, provider_sessions, overrides, entries) || !seen.insert(next.clone()) {
+            break;
+        }
+        head = next;
+    }
+    head
+}
+
+/// Every member of `id`'s chain, tail first: all known ids (both stores plus
+/// the rows) that resolve to the same head. Sorted, so archive and rename
+/// batches over it are deterministic. An unlinked id yields itself alone.
+pub fn chain_members(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+    entries: &[SessionEntry],
+) -> Vec<String> {
+    let head = chain_head(id, provider_sessions, overrides, entries);
+    let mut known: HashSet<String> = provider_sessions.keys().cloned().collect();
+    known.extend(overrides.keys().cloned());
+    known.extend(entries.iter().map(|entry| entry.id.clone()));
+    // An id nothing knows still names its own singleton chain: callers act
+    // on the id they were given, never on nothing.
+    known.insert(id.to_owned());
+    let mut members: Vec<String> =
+        known.into_iter().filter(|cand| chain_head(cand, provider_sessions, overrides, entries) == head).collect();
+    members.sort();
+    members
+}
+
+/// Collapse the rows to one per chain, preserving order: a session whose link
+/// points at a live destination is not listed, and its head is emitted where
+/// the chain's first member stands — so on activation the destination row
+/// takes the source row's place rather than jumping elsewhere. A headless
+/// chain (the head has no row yet) is left alone; the next list build heals
+/// it once the head's row arrives.
+///
+/// The head row keeps its own `updated`, provider badge and flags; its label
+/// is the chain's original title (the tail member's row) unless the head was
+/// user-renamed, and its turn count is the chain's total.
+/// Walk `handoff_from` back from the head to the tail member: the chain's
+/// first session, whose title the collapsed row keeps. Stops at an unknown
+/// source or a cycle; `None` when the head itself names no source.
+fn chain_tail(
+    head: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+    entries: &[SessionEntry],
+) -> Option<String> {
+    let mut tail = head.to_owned();
+    let mut seen = HashSet::from([tail.clone()]);
+    let mut found = false;
+    while let Some(source) = handoff_from_of(&tail, provider_sessions, overrides) {
+        if !chain_known(&source, provider_sessions, overrides, entries) || !seen.insert(source.clone()) {
+            break;
+        }
+        tail = source;
+        found = true;
+    }
+    found.then_some(tail)
+}
+
+pub fn collapse_handoff_chains(
+    entries: Vec<SessionEntry>,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> Vec<SessionEntry> {
+    let heads: Vec<String> =
+        entries.iter().map(|entry| chain_head(&entry.id, provider_sessions, overrides, &entries)).collect();
+    let mut by_head: HashMap<String, Vec<usize>> = HashMap::new();
+    for (ix, head) in heads.iter().enumerate() {
+        by_head.entry(head.clone()).or_default().push(ix);
+    }
+    // Collapsible: more than one row resolving to a head that itself has a
+    // row. Singletons already read as themselves; a headless chain waits for
+    // the head's row to arrive.
+    let collapsible: HashSet<String> = by_head
+        .iter()
+        .filter(|(head, ixs)| ixs.len() > 1 && ixs.iter().any(|ix| entries[*ix].id == **head))
+        .map(|(head, _)| head.clone())
+        .collect();
+    if collapsible.is_empty() {
+        return entries;
+    }
+    // The collapsed head rows, built before the rows move: the head's own
+    // row (its `updated`, provider badge and flags), relabelled with the
+    // tail member's title unless the head was user-renamed, and counting the
+    // chain's total turns.
+    let mut collapsed: HashMap<String, SessionEntry> = HashMap::new();
+    for head in &collapsible {
+        let mut row = entries.iter().find(|entry| entry.id == *head).expect("collapsible heads have a row").clone();
+        if !row.named {
+            let original = chain_tail(head, provider_sessions, overrides, &entries)
+                .filter(|tail| tail != head)
+                .and_then(|tail| entries.iter().find(|entry| entry.id == tail).map(|tail_row| tail_row.label.clone()));
+            if let Some(original) = original {
+                row.label = original;
+            }
+        }
+        row.turns = by_head[head].iter().map(|ix| entries[*ix].turns).sum();
+        collapsed.insert(head.clone(), row);
+    }
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for (ix, entry) in entries.into_iter().enumerate() {
+        let head = heads[ix].clone();
+        if !collapsible.contains(&head) {
+            out.push(entry);
+            continue;
+        }
+        if !emitted.insert(head.clone()) {
+            continue;
+        }
+        out.push(collapsed.remove(&head).expect("collapsible heads are prebuilt"));
+    }
+    out
+}
+
 /// The single "now" a grouping is built against.
 ///
 /// Under `BAAZ_DETERMINISTIC=1` it is the newest `updated` in the data, so
@@ -2733,5 +2918,241 @@ mod tests {
         );
         let merged = merge_session_list(vec![wire], &existing);
         assert_eq!(merged.len(), 2, "wire rows and provider rows merge, newest-first downstream");
+    }
+
+    /// X3b fixtures: a 2-hop mixed chain, claude-code (A) → codex (B) →
+    /// muse (C). Lane halves live in the provider store, the muse
+    /// destination's half in the overrides — exactly what
+    /// `persist_handoff_links` writes.
+    fn chain_record(
+        id: &str,
+        provider: &str,
+        turns: u64,
+        prompt: Option<&str>,
+        to: Option<&str>,
+        from: Option<(&str, &str)>,
+    ) -> crate::provider_sessions::ProviderSessionRecord {
+        crate::provider_sessions::ProviderSessionRecord {
+            provider: provider.into(),
+            session_id: id.into(),
+            workspace: None,
+            project: None,
+            created_ms: 1_700_000_000_000,
+            updated_ms: 1_700_000_000_000,
+            turns,
+            title: None,
+            first_prompt: prompt.map(str::to_owned),
+            handoff_to: to.map(str::to_owned),
+            handoff_from: from.map(|(source, _)| source.to_owned()),
+            handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            display_texts: std::collections::HashMap::new(),
+        }
+    }
+
+    fn chain_stores() -> (crate::provider_sessions::ProviderSessionStore, crate::sessions::Overrides) {
+        let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+        provider.insert(
+            "chain-a".into(),
+            chain_record("chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None),
+        );
+        provider.insert(
+            "chain-b".into(),
+            chain_record(
+                "chain-b",
+                "codex",
+                3,
+                Some("Second leg"),
+                Some("chain-c"),
+                Some(("chain-a", "claude-code")),
+            ),
+        );
+        let mut overrides = crate::sessions::Overrides::new();
+        overrides.insert(
+            "chain-c".into(),
+            SessionMeta {
+                handoff_from: Some("chain-b".into()),
+                handoff_from_provider: Some("codex".into()),
+                ..SessionMeta::default()
+            },
+        );
+        (provider, overrides)
+    }
+
+    fn chain_rows(provider: &crate::provider_sessions::ProviderSessionStore) -> Vec<SessionEntry> {
+        let projects = Projects::default();
+        let mut row_a = SessionEntry::provider_row(&provider["chain-a"], None, &projects);
+        row_a.updated = Local::now() - chrono::Duration::days(2);
+        let mut row_b = SessionEntry::provider_row(&provider["chain-b"], None, &projects);
+        row_b.updated = Local::now() - chrono::Duration::days(1);
+        let mut row_c = entry("chain-c");
+        row_c.label = "Later words".into();
+        row_c.turns = 5;
+        row_c.updated = Local::now();
+        vec![row_a, row_b, row_c]
+    }
+
+    /// A 2-hop mixed chain lists one row: the head's id, the original
+    /// title, the summed turns, the head's provider badge and time.
+    #[test]
+    fn a_two_hop_mixed_chain_lists_one_row_with_the_original_title_and_summed_turns() {
+        let (provider, overrides) = chain_stores();
+        let rows = chain_rows(&provider);
+        assert_eq!(rows[0].label, "Chart the Greyport ferry routes");
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 1, "three members, one row, drew {collapsed:?}");
+        let row = &collapsed[0];
+        assert_eq!(row.id, "chain-c", "the head is what is listed");
+        assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
+        assert_eq!(row.turns, 10, "2 + 3 + 5 across the chain");
+        assert!(row.provider.is_none(), "the muse head wears no provider mark");
+    }
+
+    /// The collapsed row keeps the head's own recency: no reorder jump
+    /// beyond what `updated` would cause anyway.
+    #[test]
+    fn the_collapsed_row_reads_the_heads_own_time() {
+        let (provider, overrides) = chain_stores();
+        let rows = chain_rows(&provider);
+        let head_time = rows[2].updated;
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed[0].updated, head_time);
+    }
+
+    /// Member ids resolve to the head; unlinked ids resolve to themselves.
+    #[test]
+    fn member_ids_resolve_to_the_head() {
+        let (provider, overrides) = chain_stores();
+        let rows = chain_rows(&provider);
+        assert_eq!(chain_head("chain-a", &provider, &overrides, &rows), "chain-c");
+        assert_eq!(chain_head("chain-b", &provider, &overrides, &rows), "chain-c");
+        assert_eq!(chain_head("chain-c", &provider, &overrides, &rows), "chain-c");
+        assert_eq!(chain_head("unlinked", &provider, &overrides, &rows), "unlinked");
+    }
+
+    /// The whole chain is one expansion unit: archiving the head can cover
+    /// every member, so none resurfaces.
+    #[test]
+    fn chain_members_cover_the_whole_chain() {
+        let (provider, overrides) = chain_stores();
+        let rows = chain_rows(&provider);
+        for id in ["chain-a", "chain-b", "chain-c"] {
+            assert_eq!(
+                chain_members(id, &provider, &overrides, &rows),
+                vec!["chain-a".to_owned(), "chain-b".to_owned(), "chain-c".to_owned()],
+                "every member expands to the whole chain from {id}"
+            );
+        }
+        assert_eq!(chain_members("unlinked", &provider, &overrides, &rows), vec!["unlinked".to_owned()]);
+    }
+
+    /// Archiving the head hides all members: with every member flagged, the
+    /// collapse still yields the single head row, archived.
+    #[test]
+    fn archiving_the_head_hides_all_members() {
+        let (provider, mut overrides) = chain_stores();
+        for id in ["chain-a", "chain-b", "chain-c"] {
+            overrides.entry(id.into()).or_default().archived = true;
+        }
+        let projects = Projects::default();
+        let mut rows = vec![
+            SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects),
+            SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects),
+        ];
+        let mut head = entry("chain-c");
+        head.archived = true;
+        head.turns = 5;
+        rows.push(head);
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 1);
+        assert!(collapsed[0].archived, "the one row carries the archive flag: the visible filter drops it");
+    }
+
+    /// A user rename of the head wins over the chain's original title.
+    #[test]
+    fn a_renamed_head_keeps_its_own_title() {
+        let (provider, overrides) = chain_stores();
+        let mut rows = chain_rows(&provider);
+        rows[2].label = "Mine".into();
+        rows[2].named = true;
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed[0].label, "Mine");
+        assert_eq!(collapsed[0].turns, 10, "the rename changes the title, not the count");
+    }
+
+    /// An unlinked session passes through untouched.
+    #[test]
+    fn an_unlinked_session_is_unaffected() {
+        let (provider, overrides) = chain_stores();
+        let plain = entry("plain");
+        let collapsed = collapse_handoff_chains(vec![plain.clone()], &provider, &overrides);
+        assert_eq!(collapsed, vec![plain]);
+    }
+
+    /// A dangling `handoff_to` (destination missing from both stores and the
+    /// rows) keeps the source listed.
+    #[test]
+    fn a_dangling_handoff_to_keeps_the_source_listed() {
+        let (mut provider, overrides) = chain_stores();
+        provider.insert(
+            "dangling".into(),
+            chain_record("dangling", "codex", 1, Some("Lost leg"), Some("gone"), None),
+        );
+        let projects = Projects::default();
+        let rows = vec![
+            SessionEntry::provider_row(&provider["dangling"], None, &projects),
+            entry("plain"),
+        ];
+        assert_eq!(chain_head("dangling", &provider, &overrides, &rows), "dangling");
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 2, "a missing destination lists the source");
+        assert_eq!(collapsed[0].id, "dangling");
+    }
+
+    /// The destination row takes the source row's place: the head is
+    /// emitted where the chain's first member stands.
+    #[test]
+    fn the_head_takes_the_source_rows_place() {
+        let (provider, overrides) = chain_stores();
+        let mut rows = chain_rows(&provider);
+        let plain = entry("plain");
+        rows.insert(1, plain);
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[0].id, "chain-c", "the head sits in the source's slot");
+        assert_eq!(collapsed[1].id, "plain");
+    }
+
+    /// A head with no row yet waits: members stay listed until the head's
+    /// row arrives, and the next build heals the chain.
+    #[test]
+    fn a_headless_chain_waits_for_the_heads_row() {
+        let (provider, overrides) = chain_stores();
+        let rows = chain_rows(&provider);
+        let member_rows = vec![rows[0].clone(), rows[1].clone()];
+        let collapsed = collapse_handoff_chains(member_rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 2, "no head row, no collapse");
+    }
+
+    /// Corrupt links must not hang the list build: a two-cycle lists both
+    /// rows rather than looping.
+    #[test]
+    fn a_handoff_cycle_lists_rather_than_loops() {
+        let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+        provider.insert(
+            "loop-a".into(),
+            chain_record("loop-a", "claude-code", 1, Some("A leg"), Some("loop-b"), None),
+        );
+        provider.insert(
+            "loop-b".into(),
+            chain_record("loop-b", "codex", 1, Some("B leg"), Some("loop-a"), None),
+        );
+        let overrides = crate::sessions::Overrides::new();
+        let projects = Projects::default();
+        let rows = vec![
+            SessionEntry::provider_row(&provider["loop-a"], None, &projects),
+            SessionEntry::provider_row(&provider["loop-b"], None, &projects),
+        ];
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 2, "a cycle is two singletons, never a hang");
     }
 }
