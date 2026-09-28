@@ -349,6 +349,18 @@ mod tests {
         assert!(!should_retry_title(TITLE_MAX_ATTEMPTS, true));
     }
 
+    /// Y2a: a handoff destination keeps the chain title — no rename, no
+    /// paid titler run, whatever the turn count reads.
+    #[test]
+    fn a_handoff_destination_never_earns_a_generated_title() {
+        let meta = SessionMeta {
+            handoff_from: Some("chain-a".into()),
+            handoff_from_provider: Some("claude-code".into()),
+            ..Default::default()
+        };
+        assert!(!should_title(true, true, Some(&meta), 0, false));
+    }
+
     #[test]
     fn a_side_session_never_titles_itself() {
         // Recognition is the caller's explicit record, not the id shape: a

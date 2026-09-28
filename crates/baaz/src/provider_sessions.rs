@@ -426,6 +426,22 @@ mod tests {
         );
     }
 
+    /// Y2a: a handoff pack is never a session's own words — neither the
+    /// full pack nor its bubble summary becomes the first prompt.
+    #[test]
+    fn the_handoff_pack_is_never_a_first_prompt() {
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        note_first_prompt(&mut store, "s-1", "Continuing a session handed off from Muse: goal words");
+        assert!(store["s-1"].first_prompt.is_none(), "the pack turn records nothing");
+        note_first_prompt(
+            &mut store,
+            "s-1",
+            "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)",
+        );
+        assert!(store["s-1"].first_prompt.is_none(), "the bubble records nothing either");
+    }
+
     #[test]
     fn display_texts_round_trip_and_survive_a_restart() {
         let _env = temp_store("display");

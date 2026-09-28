@@ -483,10 +483,9 @@ impl Harness {
                     join_at.elapsed().as_millis(),
                     wire.len()
                 ));
-                // A handoff chain is one row: collapse before the unchanged
-                // check, or every reply re-applies wholesale around the
-                // hidden members instead of proving nothing changed.
-                let wire = sidebar::collapse_handoff_chains(wire, &this.provider_sessions, &this.overrides);
+                // Storage keeps one row per session, chain members included:
+                // the chain collapses at view time (`visible_sessions`), so
+                // the unchanged check compares full member rows (Y2a).
                 // Provisional rows are never local, so they never survive
                 // this comparison: the first reply always applies wholesale.
                 // (`SessionEntry` equality includes the provisional flag.)
@@ -1069,10 +1068,10 @@ impl Harness {
             self.sessions[ix] = row;
             self.invalidate_list();
         }
-        // A settled turn on a linked session re-sums its chain: the
-        // one-row refresh above rebuilt head-only facts, the collapse
-        // restores the original title and the total count. An unlinked
-        // settle stops at the O(1) refresh above (X3d).
+        // A settled turn on a linked session re-derives its chain's head:
+        // the one-row refresh above rebuilt member facts, and the view
+        // model re-sums the chain (title, turns, flags) from them. An
+        // unlinked settle stops at the O(1) refresh above (X3d).
         if sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides) {
             self.collapse_handoff_chains();
         }
@@ -1178,10 +1177,10 @@ impl Harness {
             }
             entry.named = name.is_some();
         }
-        // A handoff chain is one row: rejoined member rows collapse back to
-        // the head here, so an override write never resurfaces one — but
-        // only when a link is in play, so link-free rejoins keep the O(1)
-        // row refresh (X3d).
+        // A handoff chain is one row at view time: member rows stay in
+        // storage, so a rejoin never resurfaces one — but the derived
+        // head still re-reads, so invalidate when a link is in play.
+        // Link-free rejoins keep the O(1) row refresh (X3d).
         let touched_link = self
             .sessions
             .iter()
@@ -2302,9 +2301,9 @@ impl Harness {
     /// Rebuild the sidebar rows the provider record owns: one row per
     /// stored session, joined with the overrides, preserving each row's
     /// live facts (a running turn, pending approvals) across the rebuild.
-    /// Rows whose record is gone (deleted) leave with it. A handoff chain
-    /// then collapses to its head row, in the source row's place. Returns
-    /// whether the list changed.
+    /// Rows whose record is gone (deleted) leave with it. Chain members
+    /// stay as rows; the one-row-per-chain view derives in
+    /// `visible_sessions` (Y2a). Returns whether the list changed.
     pub(crate) fn merge_provider_rows(&mut self) -> bool {
         // A deleted record that anchored a chain still needs the collapse:
         // its row leaves, the chain re-sums without it.
@@ -2398,8 +2397,7 @@ impl Harness {
                         workspace: None,
                         project: meta.and_then(|m| m.project.clone()),
                         project_name: None,
-                        attention: Vec::n
-ew(),
+                        attention: Vec::new(),
                         approval_command: None,
                         pending_question: None,
                         turn_started: None,
@@ -3108,16 +3106,21 @@ ew(),
                 // A turn that started is a session made real: it is no
                 // draft any more, whether it already had a row or not.
                 self.drafts.retain(|_, named| named != &session_id);
-                crate::provider_sessions::note_first_prompt(
-                    &mut self.provider_sessions,
-                    &session_id,
-                    &prompt,
-                );
+                let handoff_dest =
+                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+                // A handoff destination's first words are the pack, then the
+                // person's next message on the same chain: neither is the
+                // session's own first prompt (Y2a).
+                if !handoff_dest {
+                    crate::provider_sessions::note_first_prompt(
+                        &mut self.provider_sessions,
+                        &session_id,
+                        &prompt,
+                    );
+                }
                 if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
-                let handoff_dest =
-                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
                 if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
                     if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest) {
                         self.invalidate_list();
@@ -5407,7 +5410,8 @@ mod tests {
 
     /// Seeds the 2-hop mixed chain every X3b test drives: claude-code (A) →
     /// codex (B) → muse (C, head). Lane halves in the provider store, the
-    /// muse destination's half in the overrides — what activation writes.
+    /// muse destination's half in the overrides — what activation writes,
+    /// including the carried chain title (Y2a).
     fn seed_mixed_chain(harness: &mut Harness) {
         use std::collections::HashMap;
         let record = |id: &str,
@@ -5441,30 +5445,42 @@ mod tests {
             "chain-b".into(),
             record("chain-b", "codex", 3, Some("Second leg"), Some("chain-c"), Some(("chain-a", "claude-code"))),
         );
+        // Activation carries the source's display title onto every
+        // destination down the chain — the head reads it, not its own
+        // words ("Later words" below stays the stored label).
+        if let Some(record) = harness.provider_sessions.get_mut("chain-b") {
+            record.handoff_title = Some("Chart the Greyport ferry routes".into());
+        }
         harness.overrides.insert(
             "chain-c".into(),
             crate::sessions::SessionMeta {
                 handoff_from: Some("chain-b".into()),
                 handoff_from_provider: Some("codex".into()),
-            handoff_title: None,
+                handoff_title: Some("Chart the Greyport ferry routes".into()),
                 ..Default::default()
             },
         );
         // Activation order: the members first, the head appended, then the
-        // collapse puts the head row in the source row's place. The head
-        // shows visible turns: the wire's 5 minus the hidden pack exchange.
-        harness.merge_provider_rows();
+        // provider rebuild (which also synthesises a muse-lane head row
+        // from the stores when the wire has not listed it yet — skipped
+        // here because the head row is already present). Storage keeps
+        // every member row (Y2a); the one-row view derives in
+        // `visible_sessions`. The head shows visible turns: the wire's 5
+        // minus the hidden pack exchange.
         harness.sessions.push(chain_muse_entry(
             "chain-c",
             "Later words",
             sidebar::visible_turns(5, true),
         ));
+        harness.merge_provider_rows();
         harness.collapse_handoff_chains();
     }
 
-    /// X3b, sidebar half: a handoff chain is one sidebar row, opening a
-    /// member id opens the head, and archiving the head hides all members.
-    /// Offline, so the opens are local views and the factory never runs.
+    /// X3b, sidebar half (Y2a: view-time collapse): storage keeps every
+    /// member row, the list shows one head row with the chain title,
+    /// opening a member id opens the head, and archiving the head hides
+    /// all members. Offline, so the opens are local views and the factory
+    /// never runs.
     #[gpui::test]
     fn opening_a_chain_member_opens_the_head(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -5476,11 +5492,24 @@ mod tests {
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.sessions.len(), 1, "three members, one row");
-            let row = &harness.sessions[0];
-            assert_eq!(row.id, "chain-c", "the head is what is listed");
-            assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
-            assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
+            assert_eq!(harness.sessions.len(), 3, "storage keeps every member row");
+            assert!(
+                harness.sessions.iter().any(|entry| entry.id == "chain-c" && entry.label == "Later words"),
+                "the head's stored row keeps its own words; the title derives at view time"
+            );
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert_eq!(
+                    row.label, "Chart the Greyport ferry routes",
+                    "the chain keeps its carried title, not the head's own words"
+                );
+                assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
+            });
         });
         // Opening the tail member lands on the head, selected.
         vc.update(|window, cx| {
@@ -5492,6 +5521,29 @@ mod tests {
             let view = harness.active.clone().expect("the member open lands somewhere");
             assert_eq!(view.read(cx).session_id, "chain-c", "a member id opens the head");
             assert_eq!(harness.pending_id.as_deref(), Some("chain-c"), "the head row is selected");
+        });
+        // Y2a, one identity: header, window title and selection all
+        // resolve through the head — the same inputs
+        // `render_centre_header` reads — so the header names the chain
+        // title the one visible row wears.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let pending = harness.pending_id.clone().expect("the head row is selected");
+                let head = harness.chain_head(&pending);
+                let visible = harness.visible_sessions(cx);
+                let row =
+                    visible.iter().find(|entry| entry.id == head).expect("the head is the one listed row");
+                assert_eq!(visible.len(), 1);
+                let header_text = if !row.named {
+                    sidebar::handoff_title_of(&head, &harness.provider_sessions, &harness.overrides)
+                        .map(|t| sidebar::one_line(&t))
+                        .unwrap_or_else(|| row.label.clone())
+                } else {
+                    row.label.clone()
+                };
+                assert_eq!(header_text, row.label, "header title == selected row title");
+                assert_eq!(row.label, "Chart the Greyport ferry routes");
+            });
         });
         // Archiving the head flags every member, so none resurfaces.
         vc.update(|window, cx| {
@@ -5517,6 +5569,88 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Y2a: restart from the local stores alone — before any wire list —
+    /// shows the titled chain row, and the source's pin survives on it.
+    #[gpui::test]
+    fn a_restart_from_stores_shows_the_titled_chain_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a-restart");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                // Pinned before the hop, the way a person leaves it.
+                harness.set_override("chain-a", |meta| meta.pinned = true, cx);
+                // The restart: rows gone, stores re-read, no wire yet.
+                crate::provider_sessions::write(&harness.provider_sessions);
+                harness.sessions.clear();
+                harness.provider_sessions = crate::provider_sessions::read();
+                harness.merge_provider_rows();
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "one chain, one row, before any wire list");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert_eq!(
+                    row.label, "Chart the Greyport ferry routes",
+                    "the chain title from local stores alone"
+                );
+                assert!(row.pinned, "the source's pin survives the hop");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a: the destination's first real message is a live turn, never a
+    /// first send — the stored row keeps the chain title, the paid
+    /// titler stands down, and the pack turn never becomes the byline.
+    #[gpui::test]
+    fn a_destinations_first_real_message_keeps_the_chain_title(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a-first-send");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                seed_mixed_chain(harness);
+                let dest = "chain-c";
+                assert!(
+                    sidebar::is_handoff_dest(dest, &harness.provider_sessions, &harness.overrides),
+                    "the seeded head is a handoff destination"
+                );
+                let turns = {
+                    let row = harness
+                        .sessions
+                        .iter_mut()
+                        .find(|entry| entry.id == dest)
+                        .expect("the head has a stored row");
+                    // The ack-only destination reads no visible turns, so
+                    // the next message is the old "first send" shape.
+                    row.turns = 0;
+                    row.running = false;
+                    assert!(sidebar::first_send_update(
+                        row,
+                        Some("my next message"),
+                        crate::clock::now_local(),
+                        true
+                    ));
+                    assert_eq!(row.label, "Later words", "no rename from the first real message");
+                    assert!(row.running, "the live turn still shows");
+                    row.turns
+                };
+                assert!(
+                    !crate::titles::should_title(true, true, harness.overrides.get(dest), turns, false),
+                    "the paid titler never runs on a destination"
+                );
+                assert!(
+                    sidebar::is_pack_text("Handed off from Codex: Second leg (2 recent turns, 0 open todos, 0 files touched)"),
+                    "the pack acknowledgement matches the byline skip"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
     /// X3b, sidebar half: the fallback divider's source link bypasses the
     /// head redirect and opens the retired source itself.
     #[gpui::test]
@@ -5526,7 +5660,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 harness.overrides.insert(
                     "old-muse".into(),
                     crate::sessions::SessionMeta {
@@ -5550,8 +5684,11 @@ mod tests {
                     sidebar::visible_turns(1, true),
                 ));
                 harness.collapse_handoff_chains();
-                assert_eq!(harness.sessions.len(), 1, "the pair is one row");
+                assert_eq!(harness.sessions.len(), 2, "storage keeps both member rows");
                 assert_eq!(harness.chain_head("old-muse"), "new-muse");
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "the pair is one row");
+                assert_eq!(visible[0].id, "new-muse");
             });
         });
         vc.update(|window, cx| {
@@ -5643,7 +5780,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 use std::collections::HashMap;
                 let record =
                     |id: &str, provider: &str, turns: u64, to: Option<&str>, from: Option<(&str, &str)>| {
@@ -5681,8 +5818,10 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                harness.merge_provider_rows();
                 // The muse head through the real join, wire count 2 incl. pack.
+                // Built before the provider rebuild so the restart synth
+                // below does not double it (Y2a: storage keeps one row per
+                // session).
                 let wire = muse_client::schema::Session {
                     active_turn_id: None,
                     approval_mode: None,
@@ -5710,10 +5849,13 @@ mod tests {
                     &crate::projects::Projects::default(),
                 );
                 harness.sessions.push(head);
+                harness.merge_provider_rows();
                 harness.collapse_handoff_chains();
-                assert_eq!(harness.sessions.len(), 1, "three members, one row");
+                assert_eq!(harness.sessions.len(), 3, "storage keeps every member row");
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
                 assert_eq!(
-                    harness.sessions[0].turns, 3,
+                    visible[0].turns, 3,
                     "1 + (2 - 1) + (2 - 1): each destination hides its pack exchange"
                 );
             });
