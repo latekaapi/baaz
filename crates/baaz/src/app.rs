@@ -1856,9 +1856,12 @@ impl Harness {
             return;
         }
         let Some((root, _)) = self.right_project() else { return };
+        // The walk draws around this: a re-read never collapses a toggled
+        // directory or drops the preview's tree.
+        let expanded = self.right_cache.expanded_for(&root);
         if crate::clock::deterministic() {
             let at = std::time::Instant::now();
-            let snapshot = crate::right::read_snapshot(&root);
+            let snapshot = crate::right::read_snapshot_for(&root, &expanded);
             self.right_cache.apply_snapshot(snapshot, at);
             self.right_last_key = Some((true, kind, Some(root)));
             cx.notify();
@@ -1869,8 +1872,10 @@ impl Harness {
         }
         self.right_refresh_in_flight = true;
         cx.spawn(async move |this, cx| {
-            let snapshot =
-                cx.background_executor().spawn(async move { crate::right::read_snapshot(&root) }).await;
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { crate::right::read_snapshot_for(&root, &expanded) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.right_refresh_in_flight = false;
                 this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
@@ -3553,6 +3558,13 @@ impl Harness {
         // above never saw it: Escape closes it here, before edits (V1).
         if let Some(view) = self.active.clone() {
             if view.update(cx, |view, cx| view.close_plus_menu(cx)) {
+                return;
+            }
+        }
+        // An open file preview is the next thing Escape takes back: back
+        // to the tree, keeping the selected marker and the scroll offset.
+        if let Some((root, _)) = self.right_project() {
+            if self.close_file_preview_for(&root, cx) {
                 return;
             }
         }
