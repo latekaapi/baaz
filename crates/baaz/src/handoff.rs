@@ -26,19 +26,45 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// while the whole pack stays under this.
 pub const PACK_BUDGET_TOKENS: u64 = 8000;
 
+/// Which summary the pack carries: the extractive fallback (the opening
+/// lines of the earliest assistant replies, verbatim — what Z8 replaced
+/// the "no model summary call runs" rule with), or a model-written one
+/// from the checkpoint's cheap side session. The card and the confirm
+/// dialog read [`SummaryKind::label`], so both always say which kind it
+/// is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryKind {
+    /// Opening lines of the earliest replies, verbatim.
+    Extractive,
+    /// A 4–8 line summary the cheap side-session model wrote.
+    Model,
+}
+
+impl SummaryKind {
+    /// The card's `Carried` detail for the conversation summary.
+    pub fn label(self) -> &'static str {
+        match self {
+            SummaryKind::Extractive => "extractive summary",
+            SummaryKind::Model => "model summary",
+        }
+    }
+}
+
 /// The provider-neutral context pack: everything the destination's first
 /// turn carries. See `docs/22-handoff.md` for what is never carried.
 ///
-/// The conversation summary is extractive — the opening lines of the
-/// earliest assistant replies, verbatim. No model summary call runs: H2
-/// builds the pack from the folded transcript only, and says so on the
-/// card ("extractive summary").
+/// The conversation summary is extractive by default — the opening lines
+/// of the earliest assistant replies, verbatim — and is upgraded to a
+/// model-written one when the checkpoint's side session answers in time
+/// (Z8; [`SummaryKind`] says which kind a pack carries).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextPack {
     /// The first user prompt, truncated: the original goal.
     pub goal: String,
-    /// The compact conversation summary (extractive, see above).
+    /// The compact conversation summary ([`SummaryKind`] says which kind).
     pub summary: String,
+    /// Which summary [`Self::summary`] holds.
+    pub summary_kind: SummaryKind,
     /// The last turns verbatim, oldest first: `(role, text)`.
     pub recent: Vec<(String, String)>,
     /// Open todo labels (pending or running, never done).
@@ -157,6 +183,7 @@ pub fn build_pack(session: &Session, workspace: &str) -> ContextPack {
     let mut pack = ContextPack {
         goal,
         summary,
+        summary_kind: SummaryKind::Extractive,
         recent,
         todos,
         files,
@@ -211,12 +238,76 @@ pub fn display_text(pack: &ContextPack, from: ProviderId) -> String {
     )
 }
 
-/// What the card's `Carried` list shows for this pack.
+/// How long the checkpoint waits for the model-written summary before
+/// keeping the extractive one: 20 s. The side-session turn is already
+/// paid for, so a reply that lands later is dropped, never retried.
+pub const SUMMARY_TIMEOUT_SECS: u64 = 20;
+
+/// The prompt input budget: the goal plus the transcript excerpt the
+/// summary side session reads, capped at ~12k characters — whole turns,
+/// most recent kept.
+pub const SUMMARY_INPUT_CHARS: usize = 12_000;
+
+/// The first line of [`summary_prompt`], kept as its own constant so the
+/// hide rule recognises a summary side session from the wire alone, like
+/// a title one (see [`crate::titles::is_side_prompt`]).
+pub const SUMMARY_PROMPT_PREFIX: &str =
+    "Summarise a handed-off chat session for the provider picking it up:";
+
+/// Whether the checkpoint earns a model-written summary: the switch is on
+/// AND the app is signed in to Muse (the side session is a muse turn).
+/// Otherwise the pack keeps its extractive summary and no side session
+/// starts.
+pub fn should_model_summary(switch_on: bool, signed_in: bool) -> bool {
+    switch_on && signed_in
+}
+
+/// The summary side session's input: the goal plus the pack's recent
+/// turns, oldest first, capped at [`SUMMARY_INPUT_CHARS`] — whole turns
+/// only, most recent kept. The cap counts the rendered text; when even
+/// the newest turn alone overflows, it is still kept whole rather than
+/// cut (an empty input would buy nothing).
+pub fn summary_input(pack: &ContextPack) -> String {
+    let goal = format!("Goal: {}\n", pack.goal);
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = goal.len();
+    for (role, text) in pack.recent.iter().rev() {
+        let rendered = format!("\n### {role}\n{text}\n");
+        if used + rendered.len() > SUMMARY_INPUT_CHARS {
+            break;
+        }
+        used += rendered.len();
+        kept.push(rendered);
+    }
+    if kept.is_empty() {
+        if let Some((role, text)) = pack.recent.last() {
+            kept.push(format!("\n### {role}\n{text}\n"));
+        }
+    }
+    kept.reverse();
+    let mut out = goal;
+    for turn in kept {
+        out.push_str(&turn);
+    }
+    out
+}
+
+/// The one prompt the summary side session sends: the capped goal +
+/// excerpt, asking for a 4–8 line summary of what was done, decisions
+/// made, current state, and what is left — plain text, no preamble.
+pub fn summary_prompt(input: &str) -> String {
+    format!(
+        "{SUMMARY_PROMPT_PREFIX}\n\n{input}\n\nWrite a 4-8 line summary of what was done, decisions made, current state, and what is left. Plain text, no preamble."
+    )
+}
+
+/// What the card's `Carried` list shows for this pack. The conversation
+/// summary's detail always says which kind it is ([`SummaryKind::label`]).
 pub fn carried_items(pack: &ContextPack) -> Vec<HandoffItem> {
     vec![
         HandoffItem {
             label: "Conversation summary".to_owned(),
-            detail: Some("extractive summary".to_owned()),
+            detail: Some(pack.summary_kind.label().to_owned()),
         },
         HandoffItem {
             label: "Recent turns".to_owned(),
@@ -374,6 +465,12 @@ pub struct HandoffRun {
     pub state: HandoffState,
     /// The pack, from Checkpointed on.
     pub pack: Option<ContextPack>,
+    /// A model-written summary is in flight for the checkpointed pack:
+    /// the run stays Checkpointed and the card's summary line reads
+    /// "Summarising…" until the side session answers or the watchdog
+    /// keeps the extractive text. Cancel works throughout (the hidden
+    /// side session is simply abandoned; the destination never opens).
+    pub summarising: bool,
     /// The fresh destination session, once it exists.
     pub destination_session: Option<String>,
     /// The failure or refusal reason, on Failed/Refused.
@@ -418,6 +515,7 @@ impl HandoffRun {
             from_model,
             to_model,
             pack: None,
+            summarising: false,
             destination_session: None,
             reason: None,
         })
@@ -443,6 +541,7 @@ impl HandoffRun {
             from_model,
             to_model: String::new(),
             pack: None,
+            summarising: false,
             destination_session: None,
             reason: Some(refusal.to_string()),
         }
@@ -461,6 +560,40 @@ impl HandoffRun {
         if matches!(self.state, HandoffState::Requested | HandoffState::Quiescing) {
             self.pack = Some(pack);
             self.state = HandoffState::Checkpointed;
+        }
+    }
+
+    /// A model-written summary started for the checkpointed pack: the run
+    /// stays Checkpointed, and the card reads "Summarising…" until the
+    /// summary resolves.
+    pub fn note_summary_pending(&mut self) {
+        if matches!(self.state, HandoffState::Checkpointed) {
+            self.summarising = true;
+        }
+    }
+
+    /// The side session answered: the harvested text replaces the pack's
+    /// extractive summary, the kind flips to model, and the wait ends. A
+    /// no-op unless the run is still waiting (a cancelled or superseded
+    /// run keeps whatever it holds).
+    pub fn apply_model_summary(&mut self, summary: String) {
+        if !matches!(self.state, HandoffState::Checkpointed) || !self.summarising {
+            return;
+        }
+        if let Some(pack) = self.pack.as_mut() {
+            pack.summary = summary;
+            pack.summary_kind = SummaryKind::Model;
+            pack.tokens = estimate_tokens(&pack_text(pack, self.from));
+        }
+        self.summarising = false;
+    }
+
+    /// The summary will not arrive (timeout, wire error, empty reply):
+    /// the pack keeps its extractive summary and the wait ends, so the
+    /// destination can open.
+    pub fn note_summary_fallback(&mut self) {
+        if matches!(self.state, HandoffState::Checkpointed) {
+            self.summarising = false;
         }
     }
 
@@ -503,9 +636,13 @@ impl HandoffRun {
     /// Cancel before Acknowledged aborts cleanly. Returns whether a
     /// destination was already opened, so the caller can shut it down.
     /// After Acknowledged the move is done and cancel is a no-op `false`.
+    /// Cancelling during a summary wait also stands the wait down, so the
+    /// card stops reading "Summarising…" and a late side-session answer
+    /// lands on nothing.
     pub fn cancel(&mut self) -> bool {
         if self.cancellable() {
             let opened = self.destination_session.is_some();
+            self.summarising = false;
             self.state = HandoffState::Cancelled;
             return opened;
         }
@@ -524,12 +661,19 @@ impl HandoffRun {
         )
     }
 
-    /// The card block for the current state.
+    /// The card block for the current state. While a model-written
+    /// summary is in flight the summary line reads "Summarising…";
+    /// otherwise it names the kind the pack carries.
     pub fn card(&self) -> Block {
-        let (carried, lost, tokens) = match &self.pack {
+        let (mut carried, lost, tokens) = match &self.pack {
             Some(pack) => (carried_items(pack), lost_items(), Some(pack.tokens)),
             None => (Vec::new(), lost_items(), None),
         };
+        if self.summarising {
+            if let Some(first) = carried.first_mut() {
+                first.detail = Some("Summarising…".to_owned());
+            }
+        }
         Block::Handoff {
             id: self.card_id.clone(),
             from: wire_provider(self.from),
@@ -847,6 +991,115 @@ mod tests {
         } else {
             panic!("not a handoff card");
         }
+    }
+
+    #[test]
+    fn a_harvested_summary_replaces_the_extractive_one() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        run.apply_model_summary("Did X. Decided Y. Now at Z. Left: W.".to_owned());
+        let pack = run.pack.as_ref().expect("checkpointed pack");
+        assert_eq!(pack.summary_kind, SummaryKind::Model);
+        assert!(pack.summary.contains("Decided Y"));
+        let card = run.card();
+        if let Block::Handoff { carried, .. } = card {
+            assert_eq!(carried[0].detail.as_deref(), Some("model summary"));
+        } else {
+            panic!("not a handoff card");
+        }
+    }
+
+    #[test]
+    fn a_late_summary_never_lands_on_a_cancelled_run() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        // Cancel during summarising: clean abort, and no destination was
+        // ever opened, so there is nothing to shut down.
+        assert!(!run.cancel());
+        assert!(matches!(run.state, HandoffState::Cancelled));
+        assert!(!run.summarising, "cancel stands the summary wait down");
+        run.apply_model_summary("late model text".to_owned());
+        let pack = run.pack.as_ref().expect("checkpointed pack");
+        assert_eq!(pack.summary_kind, SummaryKind::Extractive, "abandoned side sessions change nothing");
+    }
+
+    #[test]
+    fn a_timeout_keeps_the_extractive_summary_and_says_so() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        let waiting = run.card();
+        if let Block::Handoff { carried, .. } = waiting {
+            assert_eq!(carried[0].detail.as_deref(), Some("Summarising…"));
+        } else {
+            panic!("not a handoff card");
+        }
+        run.note_summary_fallback();
+        assert!(!run.summarising);
+        let pack = run.pack.as_ref().expect("checkpointed pack");
+        assert_eq!(pack.summary_kind, SummaryKind::Extractive);
+        let card = run.card();
+        if let Block::Handoff { carried, .. } = card {
+            assert_eq!(carried[0].detail.as_deref(), Some("extractive summary"));
+        } else {
+            panic!("not a handoff card");
+        }
+        // Still checkpointed: the destination opens next.
+        assert!(matches!(run.state, HandoffState::Checkpointed));
+        assert!(run.cancellable());
+    }
+
+    #[test]
+    fn the_model_summary_needs_the_switch_and_a_sign_in() {
+        assert!(should_model_summary(true, true));
+        assert!(!should_model_summary(false, true), "switch off starts no side session");
+        assert!(!should_model_summary(true, false), "signed out starts no side session");
+        assert!(!should_model_summary(false, false));
+    }
+
+    #[test]
+    fn the_summary_prompt_asks_for_four_to_eight_lines() {
+        let pack = build_pack(&session_with_turns(), "/tmp/proj");
+        let prompt = summary_prompt(&summary_input(&pack));
+        assert!(prompt.starts_with(SUMMARY_PROMPT_PREFIX));
+        assert!(prompt.contains("4-8 line"));
+        assert!(prompt.contains("no preamble"));
+    }
+
+    #[test]
+    fn the_summary_input_is_capped_and_keeps_the_most_recent_whole_turns() {
+        use aui_protocol::{Block as B, Turn as T};
+        let mut session = Session::new("s", aui_protocol::Provider::Muse, "m", "/tmp/proj");
+        for i in 0..40 {
+            session.turns.push(T::User {
+                id: format!("u{i}"),
+                text: format!("prompt-marker-{i} {}", "word ".repeat(100)),
+                attachments: vec![],
+                mentions: vec![],
+                timestamp: None,
+            });
+            session.turns.push(T::Assistant {
+                id: format!("a{i}"),
+                blocks: vec![B::Text { text: format!("reply-marker-{i} {}", "word ".repeat(100)), streaming: false }],
+                meta: Default::default(),
+                timestamp: None,
+            });
+        }
+        let pack = build_pack(&session, "/tmp/proj");
+        let input = summary_input(&pack);
+        assert!(input.len() <= SUMMARY_INPUT_CHARS, "input {} chars over cap", input.len());
+        assert!(input.contains("reply-marker-39"), "the newest turn is kept");
+        assert!(!input.contains("reply-marker-0"), "the oldest turn falls off");
+        // The first user prompt still arrives as the goal line (the prompt
+        // is goal + excerpt by construction) — but its turn is gone from
+        // the excerpt itself, whole rather than cut mid-turn.
+        assert!(input.starts_with("Goal: prompt-marker-0"));
+        assert!(!input.contains("### user\nprompt-marker-0"));
     }
 
     #[test]

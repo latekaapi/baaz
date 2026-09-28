@@ -160,6 +160,13 @@ pub struct Layout {
     /// preview rung only. Same ownership as [`Self::auto_title`].
     #[serde(rename = "autoSummary", default = "default_true")]
     pub auto_summary: bool,
+    /// Whether a handoff checkpoint spends one cheap model call on a
+    /// model-written pack summary (Z8). ON by default; off means the pack
+    /// keeps the extractive summary (the first lines of the earliest
+    /// replies) and no summary side session ever starts. The Settings
+    /// dialog's Sidebar section owns the switch, like [`Self::auto_title`].
+    #[serde(rename = "handoffModelSummary", default = "default_true")]
+    pub handoff_model_summary: bool,
     /// Whether the terminal dock stands open in the centre column, under
     /// the composer (D42). Closed by default: the dock is asked for, never
     /// assumed.
@@ -211,6 +218,7 @@ impl Default for Layout {
             group_branch: false,
             auto_title: true,
             auto_summary: true,
+            handoff_model_summary: true,
             terminal_open: false,
             terminal_height: None,
             right_open: false,
@@ -349,6 +357,7 @@ mod tests {
             group_branch: true,
             auto_title: true,
             auto_summary: true,
+            handoff_model_summary: true,
             terminal_open: true,
             terminal_height: Some(300.0),
             right_open: true,
@@ -397,8 +406,10 @@ mod tests {
         // without a migration.
         assert!(Layout::default().auto_title);
         assert!(Layout::default().auto_summary);
+        assert!(Layout::default().handoff_model_summary);
         assert!(old.auto_title);
         assert!(old.auto_summary);
+        assert!(old.handoff_model_summary);
         // The dock starts closed at its default height, old files included.
         assert!(!Layout::default().terminal_open);
         assert_eq!(Layout::default().terminal_height, None);

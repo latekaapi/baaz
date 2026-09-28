@@ -42,15 +42,31 @@ ignored. Unit test: `epoch_fencing_ignores_a_stale_ack`.
 
 ## 3. The context pack (provider-neutral)
 
-Built from the folded transcript only — **no model summary call runs**
-(the card says "extractive summary"):
+Built from the folded transcript, plus (Z8) a model-written summary when
+the checkpoint's side session answers in time:
 
 - the original goal (first user prompt, truncated),
-- an extractive summary (opening lines of the earliest replies),
+- the conversation summary — a **model summary** (4–8 lines the cheap
+  side-session model wrote: what was done, decisions made, current state,
+  what is left) when it lands, else the **extractive summary** fallback
+  (opening lines of the earliest replies). The card and the confirm
+  dialog always say which kind it is,
 - the last turns verbatim, whole turns only, within ~8k tokens (chars/4),
 - open todo labels (pending/running, never done),
 - files touched (`verb target` from tool cards, deduped, capped at 30),
 - the working directory.
+
+The model summary (Z8) runs exactly like an auto-title: at checkpoint,
+with the "Summarise handoffs with a model" switch on (default) and a
+Muse sign-in, the app starts one hidden side session in the side
+workspace on the cheapest model, sending the goal + a transcript excerpt
+(capped at ~12k chars, whole turns, most recent kept) and asking for the
+4–8 line summary, plain text, no preamble. The run stays `checkpointed`
+— the card reads "Summarising…" — until the side session's
+`turn/completed` harvests into the pack (at most 20 s); on timeout, wire
+error, empty reply, or signed-out the pack keeps the extractive summary.
+Cancel during the wait abandons the hidden side session and never opens
+the destination. Switch off and no side session ever starts.
 
 Submitted under `Continuing a session handed off from <Provider>. Context
 follows.`; the user bubble shows only the short summary.
