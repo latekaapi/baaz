@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod argv;
+pub mod auth_status;
 pub mod caps;
 pub mod child;
 pub mod fold;

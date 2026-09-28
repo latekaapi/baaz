@@ -3007,6 +3007,10 @@ impl Harness {
         // screen. Cheap when it is already running (one `is_some`) and when
         // nobody runs (one scan).
         self.ensure_pulse_task(cx);
+        // A regained window focus re-probes the provider statuses (Y4):
+        // edge-triggered inside, so steady active frames do no work of
+        // their own and probes run at most every 15s per provider.
+        crate::provider_status::note_window_active(window.is_window_active());
         // The window's title is the session's, so a person with three baaz
         // windows open can tell them apart in Mission Control. It is built
         // only when the list or the open session changed: the scan and the
