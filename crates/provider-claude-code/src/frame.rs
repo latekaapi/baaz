@@ -294,15 +294,20 @@ pub enum Frame {
     /// `initialize` handshake). Carried so the frame counts balance;
     /// host-initiated, so nothing about it needs answering. An `initialize`
     /// answer carries the model catalog (`response.response.models[]`),
-    /// which the fold keeps for `ListModels`.
+    /// which the adapter keeps for `ListModels` once it confirms the reply
+    /// matches its own `initialize` request id. A rejection carries the
+    /// CLI's reason in `error` (see [`decode_control_error`]).
     ControlResponse {
         /// The `response.request_id` this answers.
         request_id: String,
-        /// The `response.subtype` (e.g. `success`).
+        /// The `response.subtype` (`"success"` or `"error"`).
         subtype: String,
         /// The catalog rows, when this answer carries them: `initialize`
         /// only, empty otherwise.
         models: Vec<CatalogModel>,
+        /// The CLI's rejection text, when this answer refuses: what the
+        /// session banner shows. `None` on success.
+        error: Option<String>,
     },
     /// Noise or the not-yet-known: hooks, spinner status, token estimates,
     /// turn summaries, and any unknown `type`. Ignored, not fatal.
@@ -724,6 +729,26 @@ fn decode_turn_result(value: &Value) -> Frame {
     }
 }
 
+/// The CLI's rejection text out of a `control_response`'s `response`
+/// object: the first non-empty string among `error`,
+/// `response.error` and `response.message`, in that order. The first
+/// placement is the probed one — a live `set_model` to a bogus id answers
+/// `{"subtype":"error","request_id":"…","error":"Model '…' not found"}`
+/// (probed 2026-09-28, free control probe, no turn spent) — and the other
+/// two are defensive reads of the success shape's nestings. `None` when no
+/// placement names a reason — a bare `{"subtype":"error"}` still counts as
+/// a refusal, with a fallback reason minted at the confirmation site,
+/// never here.
+pub fn decode_control_error(response: Option<&Value>) -> Option<String> {
+    let response = response?;
+    let text = |value: Option<&Value>| {
+        value.and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(str::to_owned)
+    };
+    text(response.get("error"))
+        .or_else(|| text(response.get("response").and_then(|inner| inner.get("error"))))
+        .or_else(|| text(response.get("response").and_then(|inner| inner.get("message"))))
+}
+
 /// Decode one CLI stdout line. Pure and IO-free.
 ///
 /// Unknown `type` values, unknown `system` subtypes, and unknown assistant
@@ -819,6 +844,7 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 request_id: get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 subtype: get("subtype").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 models,
+                error: decode_control_error(response),
             })
         }
         // Forward compatibility: the CLI will add frames; Baaz ignores them.
@@ -1128,6 +1154,47 @@ mod tests {
         assert!(
             matches!(bare, Frame::ControlResponse { ref models, .. } if models.is_empty()),
             "no payload, no rows: {bare:?}"
+        );
+    }
+
+    /// A rejection decodes with the CLI's reason and no catalog rows: the
+    /// confirmation site rolls back on the subtype, and banners the error.
+    #[test]
+    fn control_error_decodes_with_the_cli_reason() {
+        // The probed rejection shape (live CLI, bogus `set_model`):
+        // `{"subtype":"error","request_id":"…","error":"Model '…' not found"}`.
+        let frame = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"baaz-ctl-3","error":"Model 'bogus-model-xyz-123' not found"}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::ControlResponse { request_id, subtype, models, error } => {
+                assert_eq!(request_id, "baaz-ctl-3");
+                assert_eq!(subtype, "error");
+                assert!(models.is_empty(), "a refusal carries no catalog: {models:?}");
+                assert_eq!(error.as_deref(), Some("Model 'bogus-model-xyz-123' not found"));
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+        // The nested placement reads too: the probe has not named the
+        // shape yet, so every suggested placement decodes.
+        let nested = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"r","response":{"error":"nested reason"}}}"#,
+        )
+        .expect("decodes");
+        assert!(
+            matches!(nested, Frame::ControlResponse { error: Some(_), .. }),
+            "nested error reads: {nested:?}"
+        );
+        // A bare refusal still refuses: the reason falls back at the
+        // confirmation site, never here.
+        let bare = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"r"}}"#,
+        )
+        .expect("decodes");
+        assert!(
+            matches!(bare, Frame::ControlResponse { error: None, .. }),
+            "no reason named, still an error subtype: {bare:?}"
         );
     }
 
