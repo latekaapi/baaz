@@ -5754,6 +5754,7 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "crossbeam-channel",
+ "libc",
 ]
 
 [[package]]

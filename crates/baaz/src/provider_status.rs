@@ -389,11 +389,9 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
                     return Some(candidate);
                 }
             }
-            if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
-                    candidate.is_file()
-                })
-            }) {
+            // The same resolver Muse sessions and the tier probe use, so the
+            // Providers page can never disagree with a session that works.
+            if let Some(program) = muse_client::program::resolve_muse_program() {
                 return Some(program);
             }
             provider::env_path::find_program("muse")
