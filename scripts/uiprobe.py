@@ -156,6 +156,16 @@ ENTRIES = {
                                       "--steps", "new;setprovider:claude-code"]},
     "lane-codex":            {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;setprovider:codex"]},
+    # The inline reopen failure (Z4): the scripted lane mints one fixed id
+    # (`s-scripted`), so `send:` settles a first prompt onto the record —
+    # a turn-less record would open fresh, not fail — and `open:` reopens
+    # that same lane through `ResumeSession`, which the scripted provider
+    # refuses: the honest offline failure, inline on the clicked session.
+    # Offline, deterministic, free like `composer-handoff`'s send. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "reopen-failed":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;setprovider:codex;send:hello reopen probe;wait:3000;open:s-scripted"]},
     # Settings → Providers, open on scripted statuses covering Connected
     # (Muse), Signed out (Claude Code) and Not installed (Codex):
     # offline, deterministic, no baseline yet — generate on main after

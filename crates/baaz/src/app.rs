@@ -452,6 +452,31 @@ enum UndoBatch {
 /// scope it was queried in — a narrowed palette names its project.
 type SearchStatusKey = (bool, usize, usize, bool, String);
 
+/// How to re-run a failed provider open from the inline failure state (Z4).
+#[derive(Clone)]
+pub(crate) enum ProviderOpenRetry {
+    /// Reopen the stored session: a failed sidebar-click reopen.
+    Reopen(Box<crate::provider_sessions::ProviderSessionRecord>),
+    /// Start a fresh session on the provider: a failed new-session open.
+    OpenNew { project: Option<String>, workspace: String },
+}
+
+/// A provider open that failed after the UI already moved (Z4): the window
+/// lands on the failed session with this inline instead of a modal dialog
+/// over another session's transcript.
+#[derive(Clone)]
+pub(crate) struct ProviderOpenError {
+    /// The session the window sits on: the clicked session for a reopen,
+    /// `None` for a fresh open that never earned an id.
+    pub session_id: Option<String>,
+    /// Whose open failed: names the title, the buttons and the composer.
+    pub provider: ProviderId,
+    /// The open failure, verbatim.
+    pub error: String,
+    /// What Retry re-runs.
+    pub retry: ProviderOpenRetry,
+}
+
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
@@ -823,6 +848,14 @@ pub struct Harness {
     /// one — a late-finishing earlier open never steals focus or the send.
     /// Scripted (synchronous) opens bump it too, so the count also tells
     /// how many children one action spawned.
+    /// Z4: a provider open that failed after the click already moved. The
+    /// window sits on the failed session with an inline failure instead of
+    /// another session's transcript: `active` is None while this stands —
+    /// the previous view parks in `session_cache` like any switch away —
+    /// and the next successful activation clears it. `session_id` is the
+    /// clicked session for a reopen, `None` for a fresh open that never
+    /// earned an id.
+    pub(crate) provider_open_error: Option<ProviderOpenError>,
     pub(crate) provider_open_epoch: u64,
     /// A one-shot: the next `finish_provider_open` lands its view with the
     /// disabled-provider banner instead of a live child start having
@@ -1126,6 +1159,7 @@ impl Harness {
             pulse_epoch: std::time::Instant::now(),
             pulse_task: None,
             session_switch_pending: false,
+            provider_open_error: None,
             provider_open_epoch: 0,
             pending_disabled_notice: None,
             switch_claim: None,
@@ -2906,7 +2940,12 @@ impl Harness {
                     }))
                     .into_any_element()
             }
-            None => self.render_no_session(window, cx),
+            None => match self.provider_open_error.clone() {
+                // Z4: the failed session's own place — never another
+                // session's transcript behind a dialog.
+                Some(failure) => self.render_provider_open_error(window, cx, &failure),
+                None => self.render_no_session(window, cx),
+            },
             }
         };
         let dock = self.render_terminal_dock(window, cx);
@@ -3061,6 +3100,87 @@ impl Harness {
         for (_, view) in &self.session_cache {
             view.update(cx, |view, _| view.shutdown_lane());
         }
+    }
+
+    /// The inline state for a provider open that failed after the click
+    /// moved (Z4): the failed title, the error, Retry + Providers…, and a
+    /// disabled composer naming the provider. This is deliberately not a
+    /// session view, so no transcript — and no tier banner — from anywhere
+    /// else can render here.
+    fn render_provider_open_error(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+        failure: &ProviderOpenError,
+    ) -> AnyElement {
+        let p = cx.aui().colors;
+        let label = failure.provider.label();
+        // The click handlers re-run the failed open, or open Settings on
+        // the Providers section. Each wrapper carries the role and the
+        // human label: `button` has no aria builder of its own, so the
+        // header toggle wraps it the same way.
+        let retry = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.retry_provider_open(window, cx);
+        });
+        let providers = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.open_providers(cx);
+        });
+        v_flex()
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(scale::SP_3))
+                    .pb(px(HERO_LIFT))
+                    .px(px(scale::SP_7))
+                    .child(
+                        div()
+                            .text_role(aui_tokens::TextRole::Title)
+                            .text_color(p.ink)
+                            .child(format!("Couldn't reopen {label}")),
+                    )
+                    .child(
+                        div()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child(failure.error.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(scale::SP_2))
+                            .mt(px(scale::SP_2))
+                            .child(
+                                div()
+                                    .id("reopen-failed-retry")
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Retry reopening {label}"))
+                                    .child(button("reopen-retry", "Retry").primary().on_click(retry)),
+                            )
+                            .child(
+                                div()
+                                    .id("reopen-failed-providers")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Open Providers settings")
+                                    .child(
+                                        button("reopen-providers", "Providers…").on_click(providers),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                div().w_full().bg(p.surface_1).border_t_1().border_color(p.line).child(
+                    div()
+                        .w_full()
+                        .px(px(scale::SP_7))
+                        .py(px(scale::SP_4))
+                        .ui(scale::FS_12)
+                        .text_color(p.ink_4)
+                        .child(format!("{label} is not available")),
+                ),
+            )
+            .into_any_element()
     }
 
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
