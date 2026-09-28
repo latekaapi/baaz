@@ -160,7 +160,11 @@ pub fn divider_text(
     turns_carried: Option<usize>,
 ) -> String {
     let mut text = format!("Handed off from {} to {}", from.label(), to.label());
-    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+    // A model named like its provider ("muse" on Muse) says nothing twice.
+    if let Some(model) = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case(to.label()) && !m.eq_ignore_ascii_case(to.as_str()))
+    {
         text.push_str(&format!(" · {}", model.replace(';', ",")));
     }
     if let Some(count) = turns_carried {

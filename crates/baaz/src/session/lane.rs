@@ -471,9 +471,6 @@ impl SessionView {
     /// `note_provider_deltas`). Anything else — replayed history, echoes
     /// with nothing pending — folds exactly as before.
     fn reconcile_optimistic(&mut self, deltas: Vec<Delta>) -> Vec<Delta> {
-        if self.pending_optimistic.is_empty() {
-            return deltas;
-        }
         let echoes = deltas
             .iter()
             .filter(|delta| matches!(delta, Delta::TurnStarted { turn: Turn::User { .. } }))
@@ -481,6 +478,10 @@ impl SessionView {
         if echoes == 0 {
             return deltas;
         }
+        // The reorder below runs for every echo, pending bubble or not: a
+        // handoff pack has no optimistic turn, and Codex opens its reply on
+        // `turn/started` before echoing the pack, so without it the pack's
+        // acknowledgement would sit above the pack and escape being hidden.
         let take = echoes.min(self.pending_optimistic.len());
         let removed: Vec<String> =
             self.pending_optimistic.drain(..take).map(|pending| pending.id).collect();
@@ -3038,6 +3039,51 @@ mod tests {
                 started_after, started_before,
                 "the reorder keeps the original start instant"
             );
+        });
+    }
+
+    /// A user echo with no optimistic bubble pending (a handoff pack) still
+    /// lands above the empty assistant turn Codex opened first, so the
+    /// pack's acknowledgement follows the pack and can be hidden with it.
+    #[gpui::test]
+    fn an_echo_with_nothing_pending_still_lands_above_the_open_reply(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let send = |delta: aui_protocol::Delta| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![delta],
+            })
+            .expect("the lane channel is open");
+        };
+        send(aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::Assistant {
+                id: "a-1".to_owned(),
+                blocks: Vec::new(),
+                meta: aui_protocol::TurnMeta::default(),
+                timestamp: None,
+            },
+        });
+        vc.run_until_parked();
+        send(aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::User {
+                id: "u-1".to_owned(),
+                text: "Continuing a session handed off from Claude Code.".to_owned(),
+                attachments: Vec::new(),
+                mentions: Vec::new(),
+                timestamp: None,
+            },
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let order: Vec<String> = view
+                .read(cx)
+                .session()
+                .map(|s| s.turns.iter().map(|t| t.id().to_owned()).collect())
+                .unwrap_or_default();
+            assert_eq!(order, vec!["u-1".to_owned(), "a-1".to_owned()], "user before its reply");
         });
     }
 
