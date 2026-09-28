@@ -88,7 +88,7 @@ impl Harness {
         if crate::sidebar::is_handoff_dest(session_id, &self.provider_sessions, &self.overrides) {
             return;
         }
-        if first_message.as_deref().is_some_and(|m| crate::sidebar::is_pack_text(m)) {
+        if first_message.as_deref().is_some_and(crate::sidebar::is_pack_text) {
             return;
         }
         let entry = self.sessions.iter().find(|e| e.id == session_id);
@@ -438,7 +438,7 @@ impl Harness {
         let result = view.read(cx).last_summary_text();
         // The pack turn and its acknowledgement are the handoff speaking,
         // never words to rewrite a byline from (Y2a).
-        if ask.as_deref().is_some_and(|a| crate::sidebar::is_pack_text(a)) {
+        if ask.as_deref().is_some_and(crate::sidebar::is_pack_text) {
             return;
         }
         if ask.is_none() && result.is_none() {
