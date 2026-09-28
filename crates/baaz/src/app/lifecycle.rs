@@ -3112,6 +3112,19 @@ impl Harness {
             return false;
         };
         let new_id = new_view.read(cx).session_id.clone();
+        // Z2: a replacement swaps session ids, so the pane state moves with
+        // it — the new id inherits what the old one left, unless it already
+        // holds its own. The restore at the end of `activate` applies it.
+        if new_id != old_id {
+            let carried = self.overrides.get(old_id).and_then(|meta| meta.right.clone());
+            if let Some(state) = carried {
+                let entry = self.overrides.entry(new_id.clone()).or_default();
+                if entry.right.is_none() {
+                    entry.right = Some(state);
+                    crate::sessions::write(&self.overrides);
+                }
+            }
+        }
         // Carry the unsent draft across when the replacement holds nothing.
         let moving = old_view.update(cx, |v, vc| {
             if v.draft_content_empty(vc) { None } else { Some(v.take_draft(window, vc)) }
@@ -3253,6 +3266,12 @@ impl Harness {
         // including swaps the script itself causes, and draining the list
         // from the swap raced the boot it was meant to follow. The frame
         // gate ([`Harness::on_frame`]) runs the script once it is ready.
+        // Z2: the pane belongs to the session now showing — restore it
+        // without animating, so every activation path (click, resume,
+        // reopen, provider reopen, launch restore) lands on the session's
+        // own pane. A session with no stored state (and every brand-new
+        // one) shows the pane closed.
+        self.restore_right_for_session(&session_id, cx);
         cx.notify();
     }
 
@@ -4146,6 +4165,18 @@ impl Harness {
             let card = run.card();
             let card_id = run.card_id.clone();
             source.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+        }
+        // Z2: the handoff swaps session ids, so the pane state moves with
+        // it — the destination inherits what the source left, unless it
+        // already holds its own. The destination activated (and restored
+        // closed) before landing here, so restore again to show it.
+        let carried = self.overrides.get(&pending.source_session).and_then(|meta| meta.right.clone());
+        if let Some(state) = carried {
+            let existing = self.overrides.get(&dest).and_then(|meta| meta.right.clone());
+            if existing.is_none() {
+                self.set_override(&dest, |meta| meta.right = Some(state), cx);
+                self.restore_right_for_session(&dest, cx);
+            }
         }
         let Some(pack) = pack else {
             self.fail_handoff(dest, "the context pack was never built".to_owned(), cx);
