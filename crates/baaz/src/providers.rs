@@ -309,12 +309,16 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
         },
     })?;
     let program = program.to_string_lossy().into_owned();
+    // Z5: the inherit-owner-servers opt-ins, read once per session open —
+    // a flip applies to sessions started after it, never live ones.
+    let use_own_mcp = crate::layout::read().use_own_mcp;
     let mut provider = match id {
         ProviderId::ClaudeCode => {
             // The terminal relay's route (T2): the bridge beside this
             // binary, pointed at this window's socket, with per-session
             // configs under the support dir. Per-session only — the
-            // operator's own connectors stay out via `--strict-mcp-config`.
+            // operator's own connectors stay out via `--strict-mcp-config`
+            // unless the switch below opted in.
             let adapter = provider_claude_code::ClaudeCodeAdapter::new(&program);
             adapter.set_terminal_relay(provider_claude_code::TerminalRelay {
                 bridge: crate::terminal::relay::bridge_path(),
@@ -323,17 +327,20 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
                     &crate::store::support_dir(),
                 ),
             });
+            adapter.set_use_own_mcp(use_own_mcp.claude_code);
             Provider::new(adapter)
         }
         ProviderId::Codex => {
             // The terminal relay's route (T2): the bridge as a per-session
             // MCP server through process-scoped `-c` overrides — the
-            // owner's `~/.codex/config.toml` is never touched.
+            // owner's `~/.codex/config.toml` is never touched — with the
+            // inherit-nothing disables unless the switch opted in.
             let adapter = provider_codex::CodexAdapter::new(&program);
             adapter.set_terminal_relay(provider_codex::TerminalRelay {
                 bridge: crate::terminal::relay::bridge_path(),
                 socket: terminal_socket_path(),
             });
+            adapter.set_use_own_mcp(use_own_mcp.codex);
             Provider::new(adapter)
         }
         ProviderId::Muse => {

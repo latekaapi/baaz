@@ -360,3 +360,82 @@ Approvals follow the session's approval mode (D48): under the default
 profile a safe `echo` runs with no approval request at all (§3 above),
 and anything escaping the profile arrives as the usual
 `*/requestApproval` server request. No second Baaz-side gate.
+
+---
+
+# Addendum 2026-09-28 — Z5 probe: no-relay sessions inherit everything;
+# disables + plugin keys hold (live, codex-cli 0.144.6)
+
+Three `codex app-server` children, stdio JSON-RPC, `initialize` +
+`initialized` then `mcpServerStatus/list` (`ListMcpServerStatusParams`
+is all-optional per `schemas/codex/` v2 aggregate — no thread, no
+turn, nothing reached a model). Raw (tool inputSchemas trimmed to
+names; counts verbatim):
+`fixtures/codex/mcp-inheritance-2026-09-28.json`.
+
+## A — bare `app-server` (today's no-relay session): 5 servers, 104 tools
+
+| name | tools | authStatus | serverInfo.name |
+|---|---|---|---|
+| `codex_app` | 0 | unsupported | — |
+| `codex_apps` | 97 | bearerToken | plugin-runtime |
+| `computer-use` | 0 | unsupported | — |
+| `cua_repl` | 3 (`js`, `js_reset`, `turn_ended`) | unsupported | rmcp |
+| `node_repl` | 4 (`js`, `js_add_node_module_dir`, `js_reset`, `turn_ended`) | unsupported | rmcp |
+
+Entries carry no `enabled` flag — names + tool maps + `authStatus`
+is the whole row. **Plugin-provided tools DO appear**: `codex_apps`
+rides `serverInfo.name: "plugin-runtime"` and serves 97 tools under
+`codex_document_control.*`, `google_drive.*` (e.g. `google_drive.get_slide`),
+`hotline.*`, `plugin_management.*`, `safety_settings.*`, `sites.*`.
+Only `node_repl` and `computer-use` are `[mcp_servers]` tables in
+`~/.codex/config.toml`; the rest are bundled/plugin-provided. A session
+without a relay therefore inherits the owner's full 104-tool set.
+
+## B — relay-equivalent argv: 6 rows, only the bridge can do anything
+
+Argv exactly as Baaz builds it: `-c mcp_servers.baaz.command=… -c
+mcp_servers.baaz.args=[…]` plus one full-table `-c
+'mcp_servers.<name>={enabled=false,command="/bin/true"}'` per name
+(`codex_app`, `codex_apps`, `computer-use`, `cua_repl`, `node_repl`):
+
+| name | tools | authStatus |
+|---|---|---|
+| `baaz` | 0 (bridge binary absent at probe path; live it serves 8) | unsupported |
+| `codex_app` | 0 | unsupported |
+| `codex_apps` | 0 | unsupported |
+| `computer-use` | 0 | unsupported |
+| `cua_repl` | 0 | unsupported |
+| `node_repl` | 0 | unsupported |
+
+The disabled names still LIST (inert stubs, `/bin/true` transport) —
+"lists only the bridge" means only the bridge carries tools, which
+holds: 97 → 0 on `codex_apps`. `node_repl` is file-configured on this
+box, so Z5 keeps it in the bundled floor anyway: covering a name a box
+does not have costs one inert row, missing one leaks its tools.
+
+## C — B plus per-session plugin disables: accepted, no further change
+
+One `-c 'plugins."<name>".enabled=false'` per enabled plugin in the
+owner's config (key names verified verbatim from `~/.codex/config.toml`:
+`browser@openai-bundled`, `chrome@openai-bundled`,
+`computer-use@openai-bundled`, `unified-computer-use@openai-bundled`,
+`documents/pdf/spreadsheets/presentations/template-creator@openai-primary-runtime`,
+`visualize@openai-bundled`, `codex-app-tools@openai-bundled`). The child
+boots normally and lists the same 6 rows with the same 0-tool counts —
+the key is accepted (no config error, unlike the single-key
+`mcp_servers.<name>.enabled=false` form which refuses to start), but it
+removes nothing `mcpServerStatus/list` can see beyond what the server
+disables already silence. Z5 emits them anyway as defense in depth
+(plugins can contribute skills/subagents outside this listing, which
+this probe did not enumerate) — the listing proves the server half,
+not the plugin half.
+
+## Z5 consequences (what this probe justifies)
+
+1. The disables apply to EVERY session, relay or not: run A is the
+   defect (104 inherited tools with no relay), run B is the fix.
+2. A session lists only `baaz` with tools when the relay is set (stubs
+   with 0 tools beside it), or nothing with tools when it is not.
+3. The opt-in switch (`Layout.use_own_mcp`) restores exactly run A
+   (bridge still added when a relay is set).

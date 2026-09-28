@@ -9,8 +9,10 @@
 //!        [--session-id <uuid> | --resume <uuid> [--fork-session]]
 //! ```
 //!
-//! `--strict-mcp-config` rides along whenever `--mcp-config` does (doc §4):
-//! without it the session inherits the operator's unrelated connectors.
+//! `--strict-mcp-config` rides every session (doc §4): without it the
+//! session inherits the operator's unrelated connectors (Z5 — the stage-3
+//! probe found five leaking). The opt-in strips it back off (see
+//! [`without_strict_mcp`]).
 //! User turns go to stdin as NDJSON ([`user_input_line`]); the prompt is
 //! never passed positionally (a variadic flag would eat it — doc §1).
 
@@ -98,10 +100,27 @@ fn with_mcp(mut argv: Vec<String>, mcp_config: Option<&str>) -> Vec<String> {
     if let Some(path) = mcp_config {
         argv.push("--mcp-config".into());
         argv.push(path.to_owned());
-        // Doc §4: without this the session sees the operator's connectors.
-        argv.push("--strict-mcp-config".into());
     }
+    // Doc §4: without this the session sees the operator's connectors —
+    // so it rides EVERY session, even when no bridge config named one
+    // (Z5: the stage-3 probe found five leaking connectors). `claude
+    // --help` lists `--strict-mcp-config` as a standalone boolean flag
+    // ("Only use MCP servers from --mcp-config, ignoring all other MCP
+    // configurations") with no required `--mcp-config` beside it, so no
+    // empty config is passed: strict alone means no servers at all. The
+    // opt-in strips it back off (see [`without_strict_mcp`]).
+    argv.push("--strict-mcp-config".into());
     argv
+}
+
+/// Drop every `--strict-mcp-config` from a built launch: the Settings →
+/// Providers "Use my own MCP servers" opt-in, applied by the adapter when
+/// `use_own_mcp` is set. The `--mcp-config` bridge file (when one rode
+/// the launch) stays — the session gains the owner's servers beside
+/// Baaz's, exactly as it would without Baaz's scoping.
+pub fn without_strict_mcp(mut launch: SessionLaunch) -> SessionLaunch {
+    launch.argv.retain(|arg| arg != "--strict-mcp-config");
+    launch
 }
 
 /// Open a new session. `--session-id` carries the caller-chosen id, so a
@@ -308,13 +327,45 @@ mod tests {
     }
 
     #[test]
-    fn mcp_config_always_brings_strict() {
+    fn strict_rides_every_session_with_or_without_a_bridge() {
+        // Z5: the stage-3 probe found five leaking owner connectors, so
+        // strict no longer waits for a bridge config — and `claude --help`
+        // lists it as a standalone flag, so no empty `--mcp-config` rides
+        // beside it when there is no bridge.
         let launch = argv_for_open("req-1", None, None, Some("/tmp/mcp.json"), None);
         let argv = launch.argv;
         assert!(argv.contains(&"--mcp-config".to_owned()));
         assert!(argv.contains(&"--strict-mcp-config".to_owned()));
-        let plain = argv_for_open("req-1", None, None, None, None);
-        assert!(!plain.argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        for argv in [
+            argv_for_open("req-1", None, None, None, None).argv,
+            argv_for_resume("sess-9", None, None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None, None).argv,
+        ] {
+            assert!(
+                argv.contains(&"--strict-mcp-config".to_owned()),
+                "strict without a bridge too: {argv:?}"
+            );
+            assert!(
+                !argv.iter().any(|arg| arg == "--mcp-config"),
+                "but no config flag without a file: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_opt_in_drops_strict_and_keeps_the_bridge() {
+        let launch = argv_for_open("req-1", None, None, Some("/tmp/mcp.json"), None);
+        let stripped = without_strict_mcp(launch);
+        assert!(stripped.argv.contains(&"--mcp-config".to_owned()));
+        assert!(stripped.argv.contains(&"/tmp/mcp.json".to_owned()));
+        assert!(
+            !stripped.argv.iter().any(|arg| arg == "--strict-mcp-config"),
+            "opted in means no strict: {:?}",
+            stripped.argv
+        );
+        // Idempotent: stripping twice is stripping once.
+        let twice = without_strict_mcp(stripped);
+        assert!(!twice.argv.iter().any(|arg| arg == "--strict-mcp-config"));
     }
 
     #[test]
