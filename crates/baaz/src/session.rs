@@ -775,11 +775,17 @@ pub struct SessionView {
     /// provider. A later pick (see [`SessionView::pending_model`]) or a
     /// live catalog row still wins; the muse lane never sets this.
     history_model: Option<String>,
-    /// The Codex catalog's per-model reasoning levels, folded from a
-    /// `model/list` answer: model id → its `supportedReasoningEfforts`, in
+    /// The Codex catalog's per-model reasoning levels, folded from the
+    /// neutral catalog: model id → its `supportedReasoningEfforts`, in
     /// provider order. A snapshot like [`SessionView::models`], keyed because
     /// the effort menu follows the *selected* model, not the provider.
     codex_efforts: HashMap<String, Vec<provider_codex::child::SupportedEffort>>,
+    /// The Claude Code catalog's per-model effort levels, folded from the
+    /// `initialize` answer's `models[]`: catalog `value` → its
+    /// `supportedEffortLevels`. A snapshot like [`SessionView::codex_efforts`];
+    /// a row that names no levels (Haiku) maps to an empty list, which the
+    /// effort menu explains instead of listing the launch flag's levels.
+    claude_efforts: HashMap<String, Vec<String>>,
     /// The session's reasoning effort. `None` is "Default", which omits the
     /// field; client-side, because nothing on the wire reflects it back.
     effort: Option<ReasoningEffort>,
@@ -1034,6 +1040,7 @@ impl SessionView {
             claude_seed_label: std::cell::OnceCell::new(),
             history_model: None,
             codex_efforts: HashMap::new(),
+            claude_efforts: HashMap::new(),
             effort: None,
             plan: false,
             plan_previous_mode: None,

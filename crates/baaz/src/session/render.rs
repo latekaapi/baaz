@@ -2029,23 +2029,46 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // never from a constant: a model change re-derives them.
                 // With no control the menu carries the typed reason row,
                 // the way the model picker does for an empty catalog.
-                let rows: Vec<PickerRow> = match self.effort_options() {
-                    crate::overlays::EffortOptions::Available(options) => options
-                        .iter()
-                        .map(|option| {
-                            PickerRow::new(
-                                crate::overlays::effort_row_id(option.effort),
-                                crate::overlays::effort_label(option.effort),
-                                option.detail.clone(),
-                            )
-                        })
-                        .collect(),
-                    crate::overlays::EffortOptions::Unavailable(reason) => vec![PickerRow::new(
-                        crate::overlays::EFFORT_UNAVAILABLE_ROW.to_owned(),
-                        "Effort unavailable".to_owned(),
-                        reason,
-                    )],
-                };
+                let listed = self.effort_options();
+                let mut rows: Vec<PickerRow> = listed
+                    .options()
+                    .map(|options| {
+                        options
+                            .iter()
+                            .map(|option| {
+                                PickerRow::new(
+                                    crate::overlays::effort_row_id(option.effort),
+                                    crate::overlays::effort_label(option.effort),
+                                    option.detail.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    if let crate::overlays::EffortOptions::Unavailable(reason) = &listed {
+                        rows.push(PickerRow::new(
+                            crate::overlays::EFFORT_UNAVAILABLE_ROW.to_owned(),
+                            "Effort unavailable".to_owned(),
+                            reason.clone(),
+                        ));
+                    }
+                }
+                // The off-catalog note rides the Default row's muted detail
+                // line: the rows stay the levels, and the note explains
+                // whose validation they carry.
+                if let Some(note) = listed.note() {
+                    if let Some(first) = rows.first_mut() {
+                        *first = PickerRow::new(
+                            crate::overlays::effort_row_id(None),
+                            crate::overlays::effort_label(None),
+                            format!(
+                                "{} — {note}",
+                                crate::overlays::effort_detail(None)
+                            ),
+                        );
+                    }
+                }
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     if id.as_ref() == crate::overlays::EFFORT_UNAVAILABLE_ROW {
                         if let crate::overlays::EffortOptions::Unavailable(reason) =
@@ -2056,8 +2079,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         this.close_menu(cx);
                         return;
                     }
-                    if let crate::overlays::EffortOptions::Available(options) = this.effort_options()
-                    {
+                    if let Some(options) = this.effort_options().options() {
                         if let Some(option) = options
                             .iter()
                             .find(|o| crate::overlays::effort_row_id(o.effort) == id.as_ref())
