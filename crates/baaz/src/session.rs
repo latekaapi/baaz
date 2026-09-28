@@ -766,6 +766,9 @@ pub struct SessionView {
     /// never sets this — its chip moves only on `session/modelChanged` —
     /// and no lane ever changes provider, which has no setter by design.
     pending_model: Option<String>,
+    /// The Claude Code chip's pre-first-turn seed, resolved once: it reads
+    /// up to four files, and the composer asks for it on every frame.
+    claude_seed_label: std::cell::OnceCell<SharedString>,
     /// The last model a finished turn reported on the provider lane, in
     /// arrival order: replayed history's footers land here first, so a
     /// reopened session's chip names the session's model instead of the
@@ -1028,6 +1031,7 @@ impl SessionView {
             models: Vec::new(),
             models_error: None,
             pending_model: None,
+            claude_seed_label: std::cell::OnceCell::new(),
             history_model: None,
             codex_efforts: HashMap::new(),
             effort: None,
@@ -1240,13 +1244,18 @@ impl SessionView {
             // added) while the chip names the seed. The first init
             // frame still updates the chip exactly as before.
             if self.provider_kind() == crate::providers::ProviderId::ClaudeCode {
-                let workspace = if self.workspace.is_empty() {
-                    None
-                } else {
-                    Some(std::path::Path::new(self.workspace.as_str()))
-                };
-                let seed = crate::providers::claude_code_seed_model(workspace);
-                return SharedString::from(crate::providers::claude_code_model_label(&seed));
+                return self
+                    .claude_seed_label
+                    .get_or_init(|| {
+                        let workspace = if self.workspace.is_empty() {
+                            None
+                        } else {
+                            Some(std::path::Path::new(self.workspace.as_str()))
+                        };
+                        let seed = crate::providers::claude_code_seed_model(workspace);
+                        SharedString::from(crate::providers::claude_code_model_label(&seed))
+                    })
+                    .clone();
             }
             return SharedString::from(self.provider_kind().label().to_owned());
         }
