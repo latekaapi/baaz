@@ -10,13 +10,29 @@ run costs nothing and reaches no model.
     uiprobe.py --entry login-choose --probe-shot out.png
     uiprobe.py --entry login-choose --probe-idle 2000
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile
+import argparse, json, os, shutil, subprocess, sys, tempfile, time
 
 # How many captures to take looking for two that agree.
 SETTLE_TRIES = 6
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BAAZ = os.path.join(REPO, "target", "debug", "baaz")
+
+# The scripted statuses behind `connect-first-run` and
+# `launch-cached-shell`: one Connected (Muse, with email and plan), one
+# Signed out (Claude Code, installed), one Not installed (Codex). Shaped
+# exactly as `<state>/provider-status.json`, the cache the status service
+# reads at boot.
+CONNECT_MIXED = json.dumps([
+    {"provider": "muse", "installed": {"Yes": {"version": "1.4.0", "path": "/usr/local/bin/muse"}},
+     "auth": {"SignedIn": {"email": "ada@example.com", "plan": "Pro", "method": "account"}},
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+    {"provider": "claude-code", "installed": {"Yes": {"version": "2.1.276", "path": "/opt/homebrew/bin/claude"}},
+     "auth": "SignedOut",
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+    {"provider": "codex", "installed": "No", "auth": "Unknown",
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+])
 
 # baaz's own switch for this, and its doc comment says exactly what it is for:
 # "Whether captures must be byte-identical run to run." It freezes the clock and
@@ -36,6 +52,39 @@ PROBE_ENV = {**os.environ, "BAAZ_DETERMINISTIC": "1"}
 #         frames drawn at rest. Free, ~4s.
 # An entry that declares only one kind cannot answer the other verb, and says
 # so rather than pretending: relay records that as unverified, never as passed.
+
+def _usage_script():
+    now = int(time.time())
+    def status(provider, email, plan, usage):
+        return {
+            "provider": provider,
+            "installed": {"Yes": {"version": "9.9.9", "path": "/bin/" + provider}},
+            "auth": {"SignedIn": {"email": email, "plan": plan, "method": "account"}},
+            "enabled": True,
+            "advisory": "None",
+            "checked_at": now,
+            "usage": usage,
+        }
+    def usage(provider, plan, windows):
+        return {
+            "provider": provider,
+            "plan": plan,
+            "windows": [
+                {"label": label, "used_fraction": used, "resets_at": resets}
+                for (label, used, resets) in windows
+            ],
+            "as_of": now,
+        }
+    return [
+        status("muse", "latekaapi@gmail.com", "High Usage", usage(
+            "muse", "High Usage", [("Weekly", 0.01, now + 2 * 86400)])),
+        status("claude-code", None, "Pro", usage(
+            "claude-code", "Pro", [("Session · 5h", 0.42, now + 41 * 60),
+                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)])),
+        status("codex", None, "prolite", usage(
+            "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
+    ]
+
 ENTRIES = {
     "login-choose":         {"shot": ["--no-connect", "--login", "choose"]},
     "login-apikey":         {"shot": ["--no-connect", "--login", "apikey"]},
@@ -52,6 +101,12 @@ ENTRIES = {
                                       "--steps", "right-width:400;right:git"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
+    # The Files pane previewing a small file: the same preview a tree
+    # click opens (header plus the file's own bytes), reached through the
+    # click's own `files-select:` verb. No baseline yet — generate on main
+    # after merge, never to silence a finding.
+    "right-file-preview":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:files;files-select:uiprobe.json"]},
     "right-closed":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files;right:off"]},
     # The ⌘K palette, open. It had no coverage at all, which is why a list
@@ -101,6 +156,20 @@ ENTRIES = {
                                       "--steps", "new;setprovider:claude-code"]},
     "lane-codex":            {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;setprovider:codex"]},
+    # Settings → Providers, open on scripted statuses covering Connected
+    # (Muse), Signed out (Claude Code) and Not installed (Codex):
+    # offline, deterministic, no baseline yet — generate on main after
+    # merge, never to silence a finding. Capture and look.
+    "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:providers"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":
+                                      '[{"provider":"muse","installed":{"Yes":{"version":"1.4.0","path":"/bin/muse"}},'
+                                      '"auth":{"SignedIn":{"email":"ada@example.com","plan":"Pro","method":"oauth"}},'
+                                      '"enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                      '{"provider":"claude-code","installed":{"Yes":{"version":"2.1.276","path":"/bin/claude"}},'
+                                      '"auth":"SignedOut","enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                      '{"provider":"codex","installed":"No",'
+                                      '"auth":"Unknown","enabled":true,"advisory":"None","checked_at":1,"usage":null}]'}},
     # The Skills page, open on a fixture catalog (no CLI, deterministic,
     # offline): the full page with its detail pane, and the empty-project
     # state. `skills:` is a window-only steps verb, so `--login signed-in
@@ -120,9 +189,39 @@ ENTRIES = {
                                       "--steps", "skills:import-preview"]},
     "skills-new":           {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:new"]},
+    # The Skills page with the terminal dock open (Y3a): the dock steals
+    # centre height, which once pushed the dock itself below the fold (a
+    # full-height page root) and centred the scroll box up into the header
+    # (a cross-centred body row). `project:.` adopts the checkout the probe
+    # runs from so the dock has a root; `terminal-dock:` opens the
+    # deterministic FakePty tab. Offline. No baseline yet — generate on
+    # main after merge, never to silence a finding.
+    "skills-dock":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "project:.;skills:page;terminal-dock:terminal"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
+    # Y5: the first-run Connect your providers screen, offline with scripted
+    # statuses (`BAAZ_PROVIDER_STATUS_SCRIPT` — the only statuses a
+    # deterministic run reports). `connect-first-run` is mixed rows
+    # (Connected / Signed out / Not installed); `connect-checking` scripts
+    # nothing, so every row reads Checking. `launch-cached-shell` is the
+    # returning launch: cached statuses, `--login signed-in`, straight into
+    # the shell with no sign-in screen.
+    "connect-first-run":    {"shot": ["--no-connect", "--login", "connect"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": CONNECT_MIXED}},
+    "connect-checking":     {"shot": ["--no-connect", "--login", "connect"]},
+    "launch-cached-shell":  {"shot": ["--no-connect", "--login", "signed-in"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": CONNECT_MIXED}},
+    # The account menu, open: one usage card per Connected provider (the
+    # weekly card at 83% exercises the warning ink), scripted through
+    # BAAZ_PROVIDER_STATUS_SCRIPT — offline, deterministic, free. The
+    # timestamps are fixed at import so every settle capture agrees. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "account-usage":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "account"],
+                               "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script())}},
 }
 
 
@@ -147,8 +246,20 @@ def main():
 
     extra = a.extra.split() if a.extra else []
 
+    # An entry's own environment rides on top of the probe's: scripted
+    # statuses and other per-screen fixtures that must not leak across
+    # entries. `boot` validates the entry first, so the lookup below
+    # cannot KeyError.
+    def merged_env(verb):
+        boot(a.entry, verb)
+        return {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
+
     if a.probe_shot:
+        env = merged_env("shot")
         cmd = boot(a.entry, "shot") + extra
+        # Per-entry scripted environment (provider statuses for the connect
+        # entries): merged over the deterministic base, entry only.
+        env = {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
         # Capture twice and require the two to agree. With BAAZ_DETERMINISTIC
         # set they always should, so this is cheap; when they do not, the screen
         # is genuinely still animating and reporting that beats baselining an
@@ -160,7 +271,7 @@ def main():
             p = subprocess.run(cmd + ["--screenshot", shot,
                                       "--screenshot-delay", str(a.delay_ms)],
                                cwd=REPO, capture_output=True, text=True,
-                               timeout=180, env=PROBE_ENV)
+                               timeout=180, env=env)
             if p.returncode != 0 or not os.path.exists(shot):
                 sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
                 return 1
@@ -174,13 +285,15 @@ def main():
         return 1
 
     if a.probe_idle:
+        env = merged_env("idle")
         cmd = boot(a.entry, "idle") + extra
         # `--bench` already measures frames drawn at rest and writes
         # `idle_frames_2s`. Translate it onto the contract's shape.
         out = os.path.join(tempfile.mkdtemp(), "bench.json")
+        entry_env = {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
         p = subprocess.run(cmd + ["--bench-frames", "60", "--bench-out", out],
                            cwd=REPO, capture_output=True, text=True, timeout=180,
-                           env=PROBE_ENV)
+                           env=entry_env)
         if not os.path.exists(out):
             sys.stderr.write("bench produced no output:\n" + (p.stderr[-1000:] or p.stdout[-1000:]))
             return 1

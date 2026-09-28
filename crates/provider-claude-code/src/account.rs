@@ -71,6 +71,17 @@ impl RateLimitInfo {
     }
 }
 
+/// A `rateLimitType` in minutes, when the name is a known window length:
+/// the unified windows ride under these names, so the card can label the
+/// named window from its length instead of echoing the wire spelling.
+fn window_minutes(rate_limit_type: &str) -> Option<u64> {
+    match rate_limit_type {
+        "five_hour" => Some(300),
+        "seven_day" => Some(10080),
+        _ => None,
+    }
+}
+
 /// The latest meter reading, kept by the fold.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccountSnapshot {
@@ -89,6 +100,38 @@ impl AccountSnapshot {
     /// evidence of overage.
     pub fn is_using_overage(&self) -> bool {
         self.latest.as_ref().map(|info| info.is_using_overage).unwrap_or(false)
+    }
+
+    /// The structured usage reading for the seam: one window per reported
+    /// utilization, labelled from each window's length. The named window
+    /// first, then the unified five-hour and seven-day windows except the
+    /// one the named window already covers — the same window never cards
+    /// twice. `None` until the first reading arrives.
+    pub fn usage_report(&self) -> Option<provider::UsageReport> {
+        let info = self.latest.as_ref()?;
+        let mut windows = Vec::new();
+        let named_minutes = window_minutes(&info.rate_limit_type);
+        windows.push(provider::UsageWindow {
+            label: named_minutes
+                .map(provider::window_label)
+                .unwrap_or_else(|| info.rate_limit_type.clone()),
+            used_fraction: info.utilization.clamp(0.0, 1.0),
+            resets_at: info.resets_at,
+            window_minutes: named_minutes,
+        });
+        for (window, minutes) in [(&info.five_hour, 300u64), (&info.seven_day, 10080u64)] {
+            if Some(minutes) == named_minutes {
+                continue;
+            }
+            let Some(window) = window else { continue };
+            windows.push(provider::UsageWindow {
+                label: provider::window_label(minutes),
+                used_fraction: window.utilization.clamp(0.0, 1.0),
+                resets_at: window.resets_at,
+                window_minutes: Some(minutes),
+            });
+        }
+        Some(provider::UsageReport { plan: None, windows })
     }
 
     /// The display label for [`provider::Ack::Account`]: window, percentage,
@@ -133,6 +176,30 @@ mod tests {
         assert!((info.utilization - 0.79).abs() < f64::EPSILON);
         assert!(!info.is_using_overage);
         assert!(snapshot.label().expect("label").contains("79%"));
+    }
+
+    #[test]
+    fn usage_report_labels_windows_from_their_lengths() {
+        // The card's shape, not a label: the named seven-day window reads
+        // Weekly, the unified five-hour window reads Session · 5h, and
+        // the unified seven-day twin is skipped — the same window never
+        // cards twice.
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1790384400,"rateLimitType":"seven_day","utilization":0.97,"isUsingOverage":true,"surpassedThreshold":0.75,"unifiedWindows":{"five_hour":{"utilization":0.9,"resetsAt":1790187000},"seven_day":{"utilization":0.97,"resetsAt":1790384400}}}}"#;
+        let Frame::RateLimit(info) = decode_line(line).expect("decodes") else {
+            panic!("expected a rate-limit frame");
+        };
+        let mut snapshot = AccountSnapshot::default();
+        assert!(snapshot.usage_report().is_none(), "no reading, no report");
+        snapshot.observe(info);
+        let report = snapshot.usage_report().expect("a reading was seen");
+        assert_eq!(report.plan, None);
+        assert_eq!(report.windows.len(), 2);
+        assert_eq!(report.windows[0].label, "Weekly");
+        assert!((report.windows[0].used_fraction - 0.97).abs() < f64::EPSILON);
+        assert_eq!(report.windows[0].resets_at, Some(1790384400));
+        assert_eq!(report.windows[1].label, "Session · 5h");
+        assert!((report.windows[1].used_fraction - 0.9).abs() < f64::EPSILON);
+        assert_eq!(report.windows[1].resets_at, Some(1790187000));
     }
 
     #[test]

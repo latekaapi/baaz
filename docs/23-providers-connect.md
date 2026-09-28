@@ -1,6 +1,12 @@
 # 23 — Connecting and managing providers
 
-Status: design, 2026-09-28. Replaces the Muse-only sign-in gate. Research: T3 Code
+Status: design, 2026-09-28; Y5 (2026-09-28) implements §3's launch and §4's
+first bullet — the Connect your providers screen, the stored-facts launch
+decision, the quiet sign-out banner, and the row actions below. The rest
+(Settings cards, footer, usage card) stays design.
+Muse names no Install command: no installer is documented in this repo or in
+`muse --help`, so its missing row offers Docs (this repo) instead.
+Research: T3 Code
 (`pingdotgg/t3code`, `apps/server/src/provider/Layers/*Provider.ts`, `components/onboarding/*`,
 `settings/ProviderInstanceCard.tsx`) and Synara (`Emanuele-web04/synara`, MIT, T3-derived:
 `ProviderHealth.ts`, `OnboardingProvidersStep`, `providerSetupStatus.ts`). Backend surfaces below were
@@ -61,11 +67,22 @@ Re-check / Connected ✓) and a secondary "Docs". **Continue** enables once one 
 "Skip for now" always works. Install opens the dock terminal with the vendor's install command typed and
 not run (Claude: `curl -fsSL https://claude.ai/install.sh | bash`; Codex: `npm i -g @openai/codex`;
 Muse: its documented installer), and says so.
+(Y5: no Muse installer is documented anywhere this repo or `muse --help`
+can point at, so the Muse row offers Docs instead of Install; the Claude
+and Codex commands above are exact.)
 
 **Settings → Providers**: one card per provider — status dot + headline, "Signed in as <email> · <plan>",
 version (with a Too-old advisory), Enabled switch, Re-check, Sign in / Sign out (sign out confirms).
 Disabling hides the provider from the composer's provider menu and stops its probes; its sessions stay
 listed and readable. Sign-out of a CLI is a real `logout` of that CLI and the confirm says so.
+
+*Built (Y6): `crates/baaz/src/settings_providers.rs`. The library dialog only takes `SettingsRow`s, so
+the Settings rail's Providers row opens a dedicated Providers page (same modal layer, one
+`aui::screens::providers::provider_card` per provider) rather than hosting the cards inside the
+dialog. Sign-in is the spec fallbacks (Y5 is not on this branch): the Muse sheet, the Claude
+terminal prefill (`claude auth login` typed, not run), the Codex `account/login/start` browser flow —
+so there is no "Set up providers" row. Probe entry `settings-providers` in `scripts/uiprobe.py`
+(offline, scripted Connected / Signed out / Not installed; no baseline — capture and look).*
 
 **Account footer** (sidebar bottom): the person's avatar initial and email only — no account id, no inline
 meter. Its menu opens a **Usage** card listing every Connected provider: Codex from `account/rateLimits/read`

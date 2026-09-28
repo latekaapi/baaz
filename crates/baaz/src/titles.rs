@@ -186,7 +186,14 @@ pub fn should_title(
     }
     match meta {
         None => true,
-        Some(meta) => meta.name.is_none() && meta.generated_title.is_none() && !meta.title_attempted,
+        // A handoff destination keeps the chain title: no rename, no paid
+        // titler run (`docs/22-handoff.md` §8, Y2a).
+        Some(meta) => {
+            meta.name.is_none()
+                && meta.generated_title.is_none()
+                && !meta.title_attempted
+                && meta.handoff_from.is_none()
+        }
     }
 }
 
@@ -340,6 +347,18 @@ mod tests {
         let meta = meta_with(None, None, true);
         assert!(!should_title(true, true, Some(&meta), 0, false));
         assert!(!should_retry_title(TITLE_MAX_ATTEMPTS, true));
+    }
+
+    /// Y2a: a handoff destination keeps the chain title — no rename, no
+    /// paid titler run, whatever the turn count reads.
+    #[test]
+    fn a_handoff_destination_never_earns_a_generated_title() {
+        let meta = SessionMeta {
+            handoff_from: Some("chain-a".into()),
+            handoff_from_provider: Some("claude-code".into()),
+            ..Default::default()
+        };
+        assert!(!should_title(true, true, Some(&meta), 0, false));
     }
 
     #[test]

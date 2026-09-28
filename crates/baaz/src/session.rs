@@ -338,6 +338,9 @@ pub enum SessionEvent {
     },
     /// `/logout`.
     Logout,
+    /// "Enable" on a disabled-provider banner: the application owns the
+    /// Settings dialog.
+    OpenProviders,
     /// `/status` or `/usage`: the application owns the dialog stack.
     Status {
         /// The lines of the dialog body, already formatted.
@@ -775,11 +778,17 @@ pub struct SessionView {
     /// provider. A later pick (see [`SessionView::pending_model`]) or a
     /// live catalog row still wins; the muse lane never sets this.
     history_model: Option<String>,
-    /// The Codex catalog's per-model reasoning levels, folded from a
-    /// `model/list` answer: model id → its `supportedReasoningEfforts`, in
+    /// The Codex catalog's per-model reasoning levels, folded from the
+    /// neutral catalog: model id → its `supportedReasoningEfforts`, in
     /// provider order. A snapshot like [`SessionView::models`], keyed because
     /// the effort menu follows the *selected* model, not the provider.
     codex_efforts: HashMap<String, Vec<provider_codex::child::SupportedEffort>>,
+    /// The Claude Code catalog's per-model effort levels, folded from the
+    /// `initialize` answer's `models[]`: catalog `value` → its
+    /// `supportedEffortLevels`. A snapshot like [`SessionView::codex_efforts`];
+    /// a row that names no levels (Haiku) maps to an empty list, which the
+    /// effort menu explains instead of listing the launch flag's levels.
+    claude_efforts: HashMap<String, Vec<String>>,
     /// The session's reasoning effort. `None` is "Default", which omits the
     /// field; client-side, because nothing on the wire reflects it back.
     effort: Option<ReasoningEffort>,
@@ -855,6 +864,12 @@ pub struct SessionView {
     /// This session was retired by a handoff: the destination provider and
     /// session id. The composer refuses sends and names the new session.
     handed_off_to: Option<(ProviderId, String)>,
+    /// A provider switch is replacing this view (Y2b): sends are refused
+    /// while the replacement opens, keeping the old view drawable.
+    input_locked: bool,
+    /// The switch's pick, for the composer chip while this view is still
+    /// drawn: the lane itself never changes, only the displayed mark.
+    switching_to: Option<ProviderId>,
     /// This session started as a handoff's destination: where it came from.
     /// Drawn as the quiet marker at the top of the transcript.
     handoff_origin: Option<crate::handoff::HandoffOrigin>,
@@ -1034,6 +1049,7 @@ impl SessionView {
             claude_seed_label: std::cell::OnceCell::new(),
             history_model: None,
             codex_efforts: HashMap::new(),
+            claude_efforts: HashMap::new(),
             effort: None,
             plan: false,
             plan_previous_mode: None,
@@ -1063,6 +1079,8 @@ impl SessionView {
             ticker: None,
             handoff_card: None,
             handed_off_to: None,
+            input_locked: false,
+            switching_to: None,
             handoff_origin: None,
             handoff_prefix: Rc::new(Vec::new()),
             handoff_divider: None,
@@ -1763,6 +1781,28 @@ impl SessionView {
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.composer.focus_handle(cx), cx);
     }
+
+    /// Lock the composer while a provider switch replaces this view (Y2b).
+    pub(crate) fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.input_locked = locked;
+        cx.notify();
+    }
+
+    /// Whether sends are refused while the replacement opens.
+    pub(crate) fn is_input_locked(&self) -> bool {
+        self.input_locked
+    }
+
+    /// Show the switch's pick on the chip while this view is still drawn.
+    pub(crate) fn set_switching_to(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
+        self.switching_to = provider;
+        cx.notify();
+    }
+
+    /// The provider mark the composer chip draws (Y2b display override).
+    pub(crate) fn display_provider(&self) -> ProviderId {
+        self.switching_to.unwrap_or_else(|| self.provider_kind())
+    }
 }
 
 /// What the inline banner's action does, when the failure is one the person can
@@ -1773,6 +1813,8 @@ pub enum BannerAction {
     RetryTurn(String),
     /// Re-run a user shell command that never left.
     RetryShell(String),
+    /// Open Settings → Providers (a session on a disabled provider).
+    OpenProviders,
 }
 
 

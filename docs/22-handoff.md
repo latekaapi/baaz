@@ -248,11 +248,13 @@ provider session underneath. What changes is what the user sees:
 - **Collapse runs only on links.** `sidebar::needs_collapse` is true
   when the touched id carries a handoff link in either direction or is
   the endpoint of another session's link. `rejoin_provider_row` (the
-  per-turn settle path) and the override-write `rejoin` collapse only
-  then; `merge_provider_rows` collapses only when a merged or removed
-  record is link-adjacent. Unlinked settles keep the O(1) row refresh.
-  Full list builds (`session/list` replies, fixtures) still collapse
-  unconditionally — they already pay the full scan.
+  per-turn settle path) and the override-write `rejoin` re-derive the
+  view only then; `merge_provider_rows` re-derives only when a merged or
+  removed record is link-adjacent. Unlinked settles keep the O(1) row
+  refresh. Nothing collapses storage: "collapse" is the view
+  re-deriving in `visible_sessions` (§8.5), so these paths only
+  invalidate the list. Full list builds (`session/list` replies,
+  fixtures) invalidate unconditionally — they already pay the full scan.
 - **Counts match the transcript.** The transcript hides the pack
   exchange (the pack's user turn plus its one-sentence acknowledgement)
   while the stores count the acknowledgement as a settled turn, so every
@@ -268,3 +270,62 @@ provider session underneath. What changes is what the user sees:
   the index rows, the decision function and the counts. It does NOT
   prove what the palette or the sidebar draw — those remain unverified
   here.
+
+### 8.5 As built (Y2a3: view-time collapse, gated pack match, chain index)
+
+Supersedes the *presentation* in §8.3's collapse paragraph. Storage now
+keeps every member row; the one-row-per-chain view is derived in
+`visible_sessions` from the pure `collapse_handoff_chains`
+(`crates/baaz/src/sidebar.rs`), so collapsing is idempotent and
+order-independent — a second run, in any order, yields the same rows.
+Collapsing twice is a no-op on storage by construction: no view builder
+writes the collapsed rows back; `merge_provider_rows` and the rejoin
+paths update member rows in place, preserving each row's live facts (a
+running turn, pending words, attention) across the rebuild.
+
+- **Chain index.** `sidebar::ChainIndex` resolves every known id (both
+  stores plus the rows) to its head and every head to its sorted members
+  in one build, with the same dangling-link and cycle guards the walks
+  had. `Harness::chain_index` caches it per `list_epoch` — one build per
+  storage change, never per frame or per row — and `chain_head`,
+  `chain_members`, `visible_sessions`, the search palette rows, the
+  header/window title lookups and the selection key all read from it.
+- **One title.** At activation the destination records `handoff_title`
+  (provider record and/or override), copied from the source's current
+  display title — user name first, then its title — and carried forward
+  down chains of any length. The title ladder for a member reads: user
+  rename of the head, then `handoff_title`, then its own title. The
+  collapsed head row derives its label the same way, with the tail
+  member's row label as fallback. No handoff turn renames: `should_title`
+  is false for any session with `handoff_from`; `title_from_transcript`,
+  `first_send_update`, `note_first_prompt` and `maybe_start_title` skip
+  the pack turn, its acknowledgement and the destination's first real
+  message. The pack match is gated: `sidebar::is_pack_text` (the pack
+  header or the "Handed off from …" bubble) applies only to a session
+  with `handoff_from` — a normal message starting with that phrase keeps
+  its title, byline and first prompt.
+- **One row, one selection.** Header crumb, window title and the
+  sidebar's selected-row key all resolve the raw active/pending id
+  through the cached index; the header and window title read the
+  collapsed view row's label, so they name exactly what the sidebar's
+  one row wears. The active/pending head is never filtered as empty, so
+  the destination row stays highlighted while the pack runs.
+- **Row state.** The pack submit marks the row running and touches
+  `updated`, like `ProviderTurnAccepted`; activation copies pinned,
+  project, user name and archived from source to destination; the
+  collapsed head ORs running, needs-you attention and pinned/archived
+  across members, takes the newest time and sums the honest member
+  turns — so a live turn on any member shows on the one row.
+- **Restart.** A muse-lane destination exists only as an override until
+  the wire answers, so `merge_provider_rows` synthesises its row from
+  the local stores (chain-titled, hence kept by the empty filter); lane
+  destinations rebuild from their records, whose ladder already prefers
+  `handoff_title`.
+- **Byline.** `record_last_summary` and `maybe_rewrite_byline` skip the
+  pack turn and its acknowledgement on a handoff destination, so neither
+  becomes the byline; any other session's words land untouched.
+- **What the gate proves, and does not.** `cargo test -p baaz` proves
+  the derived rows, the title ladder, the gated skips and the
+  once-per-change index. It does NOT prove pixels, highlight colour or
+  real-child timing — only a live capture speaks to those, at that
+  moment.

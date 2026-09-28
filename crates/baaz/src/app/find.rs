@@ -143,9 +143,12 @@ impl Harness {
         // member's words join the body, so a match in an early member's
         // turns finds the head. Opening already redirects to the head, so
         // nothing changes there.
+        // One cached index build serves every head lookup below, never
+        // a walk per indexed session (Y2a3).
+        let chain_index = self.chain_index();
         let mut by_head: HashMap<String, Vec<String>> = HashMap::new();
         for id in per_session.keys() {
-            let head = crate::sidebar::chain_head(id, &self.provider_sessions, &self.overrides, &self.sessions);
+            let head = chain_index.head(id);
             by_head.entry(head).or_default().push(id.clone());
         }
         let mut heads: Vec<String> = by_head.keys().cloned().collect();
@@ -182,9 +185,7 @@ impl Harness {
             }
             // Provider-lane members carry no index entry: their ack title
             // and first prompt still name the chain.
-            for member in
-                crate::sidebar::chain_members(&head, &self.provider_sessions, &self.overrides, &self.sessions)
-            {
+            for member in chain_index.members(&head) {
                 if member == head || per_session.contains_key(&member) || self.is_side_session(&member) {
                     continue;
                 }

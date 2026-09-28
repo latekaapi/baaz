@@ -169,10 +169,42 @@ impl SessionView {
                 if session_id.as_deref() != Some(self.session_id.as_str()) {
                     return;
                 }
+                // Control-channel refusals arrive as generic cards, never
+                // as transcript: the Claude Code adapter banners the CLI's
+                // reason through these two kinds (see
+                // `provider_claude_code::controls`). Each one shows as the
+                // session banner and stays out of the fold — a refusal is
+                // not a turn. A model refusal also resyncs the chip from
+                // the adapter's catalog, which already rolled back; an
+                // effort refusal needs no resync, since the adapter
+                // re-sends the picked level on the next submit.
+                let mut rest = Vec::with_capacity(deltas.len());
+                let mut model_refused = false;
+                for delta in deltas {
+                    match delta {
+                        Delta::BlockAdded {
+                            block: Block::Generic { ref kind, ref text, .. },
+                            ..
+                        } if kind == provider_claude_code::CONTROL_MODEL_REJECTED_CARD
+                            || kind == provider_claude_code::CONTROL_EFFORT_REJECTED_CARD =>
+                        {
+                            self.set_banner(text, None, cx);
+                            model_refused |=
+                                kind == provider_claude_code::CONTROL_MODEL_REJECTED_CARD;
+                        }
+                        other => rest.push(other),
+                    }
+                }
+                if model_refused {
+                    self.resync_model_after_rejection(cx);
+                }
+                if rest.is_empty() {
+                    return;
+                }
                 // A replayed history echoes whole inputs the live adapter
                 // already substituted: show the recorded bubble text (the
                 // handoff summary, a plan-mode prompt) instead of the pack.
-                let deltas = deltas
+                let deltas = rest
                     .into_iter()
                     .map(|delta| match delta {
                         Delta::TurnStarted { turn: Turn::User { id, text, attachments, mentions, timestamp } } => {
@@ -290,11 +322,21 @@ impl SessionView {
     /// `turn_id` (`crates/provider-codex/src/lib.rs`) — both millisecond
     /// RPCs, after which the turn streams back as events. The mutex hold is
     /// that RPC, so a stop press waits behind at most one short send.
-    pub(super) fn lane_provider(&self) -> Option<SharedProvider> {
+    pub(crate) fn lane_provider(&self) -> Option<SharedProvider> {
         match &self.lane {
             Lane::Provider(lane) => Some(lane.provider.clone()),
             Lane::Muse => None,
         }
+    }
+
+    /// The lane's latest usage reading, if any. A peek only — no wire
+    /// call — and `None` while the lane is busy, so the account menu's
+    /// refresh never blocks the UI thread on a streaming turn. The
+    /// caller pairs it with [`SessionView::provider_kind`].
+    pub(crate) fn lane_usage(&self) -> Option<provider::UsageReport> {
+        let provider = self.lane_provider()?;
+        let guard = provider.try_lock().ok()?;
+        guard.read_usage()
     }
 
     /// Send one neutral command on the provider lane and hand its ack to
@@ -532,36 +574,78 @@ impl SessionView {
 
     /// Ask the lane's child for its model catalog after open, so the model
     /// menu lists what the child returns and the chip reads the effective
-    /// model's human name. Claude Code has no catalog surface — Baaz owns
-    /// its supplied alias list (the `Emulated` cell) — so that folds
-    /// synchronously instead of asking. A refusal or an empty answer
-    /// records the typed reason for the picker's stand-in row and stays
-    /// quiet otherwise: a background fetch never banners.
+    /// model's human name. A refusal or an empty answer records the typed
+    /// reason for the picker's stand-in row and stays quiet otherwise: a
+    /// background fetch never banners. A Claude Code lane whose child has
+    /// no catalog yet (no `initialize` answer landed) folds Baaz's supplied
+    /// alias list instead — the offline fallback, never served as the
+    /// child's own.
     pub(super) fn request_provider_models(&mut self, cx: &mut Context<Self>) {
-        if self.provider_kind() == ProviderId::ClaudeCode {
-            let current = self.model_id();
-            let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
-            let provider = self.provider_id.clone();
-            self.apply_model_catalog(rows, &provider, cx);
-            return;
-        }
         let command = provider::Command::ListModels { session: Some(self.session_id.clone()) };
         self.provider_send(command, cx, |this, result, cx| match result {
             Ok(provider::Ack::ModelCatalog { models, provider }) => {
-                this.apply_model_catalog(models, &provider, cx);
+                if models.is_empty() && this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.apply_model_catalog(models, &provider, cx);
+                }
             }
             Ok(_) => {
-                this.models = Vec::new();
-                this.models_error = Some("the model catalog answered without a catalog".to_owned());
-                cx.notify();
+                if this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.models = Vec::new();
+                    this.models_error =
+                        Some("the model catalog answered without a catalog".to_owned());
+                    cx.notify();
+                }
             }
             Err(error) => {
                 crate::baaz_log!("provider lane: ListModels refused: {error}");
-                this.models = Vec::new();
-                this.models_error = Some(error.to_string());
+                if this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.models = Vec::new();
+                    this.models_error = Some(error.to_string());
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    /// Resync the chip after a refused Claude Code model change: pull the
+    /// catalog and take the adapter's active row as the pending pick, so
+    /// the chip shows the model actually in effect. Only this refusal path
+    /// syncs the pick from a refold — a normal refold must never clobber a
+    /// fresh optimistic pick with a stale list. When the pull answers no
+    /// catalog (the initialize answer never landed), the banner the refusal
+    /// already set explains, so this stays quiet.
+    fn resync_model_after_rejection(&mut self, cx: &mut Context<Self>) {
+        let command = provider::Command::ListModels { session: Some(self.session_id.clone()) };
+        self.provider_send(command, cx, |this, result, cx| {
+            // A pull that answers no catalog (the initialize answer never
+            // landed) stays quiet: the refusal's banner already explains.
+            if let Ok(provider::Ack::ModelCatalog { models, provider }) = result {
+                let active = models.iter().find(|row| row.active).map(|row| row.id.clone());
+                this.apply_model_catalog(models, &provider, cx);
+                if let Some(active) = active {
+                    this.pending_model = Some(active.clone());
+                    for row in &mut this.models {
+                        row.is_active = row.model_id == active;
+                    }
+                }
                 cx.notify();
             }
         });
+    }
+
+    /// Fold Baaz's supplied Claude Code alias list: the offline fallback
+    /// when the lane's child has no catalog to serve.
+    fn apply_supplied_claude_catalog(&mut self, cx: &mut Context<Self>) {
+        let current = self.model_id();
+        let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
+        let provider = self.provider_id.clone();
+        self.apply_model_catalog(rows, &provider, cx);
     }
 
     /// Pull the lane's pending set on (re)open, so an approval or a
@@ -1957,8 +2041,18 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::with_catalog(vec![
-            provider::ModelSummary { id: "gx-1".into(), label: "GX One".into(), active: true },
-            provider::ModelSummary { id: "gx-2".into(), label: "GX Two".into(), active: false },
+            provider::ModelSummary {
+                id: "gx-1".into(),
+                label: "GX One".into(),
+                active: true,
+                ..Default::default()
+            },
+            provider::ModelSummary {
+                id: "gx-2".into(),
+                label: "GX Two".into(),
+                active: false,
+                ..Default::default()
+            },
         ]);
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
@@ -2014,6 +2108,126 @@ mod tests {
                 view.banner.as_deref().is_some_and(|banner| banner.contains("scripted providers only")),
                 "the refusal's reason reaches the banner, drew {:?}",
                 view.banner
+            );
+        });
+    }
+
+    /// Y1b: a model change the child refuses arrives as a control-error
+    /// card — the session banners the CLI's reason and the chip resyncs to
+    /// the adapter's active row, never keeps claiming the refused pick, and
+    /// never files the refusal as transcript.
+    #[gpui::test]
+    fn a_refused_control_model_resyncs_the_chip_and_banners(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::with_catalog(vec![
+            provider::ModelSummary {
+                id: "sonnet".into(),
+                label: "Sonnet".into(),
+                active: true,
+                efforts: vec!["high".into()],
+                hidden: false,
+                is_default: false,
+                description: None,
+            },
+            provider::ModelSummary {
+                id: "haiku".into(),
+                label: "Haiku".into(),
+                active: false,
+                efforts: Vec::new(),
+                hidden: false,
+                is_default: false,
+                description: None,
+            },
+        ]);
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        // The pick lands: the chip claims it at once, optimistically.
+        vc.update(|_, cx| view.update(cx, |view, cx| view.pick_model("opus-x", cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).pending_model.as_deref(),
+                Some("opus-x"),
+                "the optimistic pick records"
+            );
+        });
+        // The child's refusal arrives on the event stream exactly as the
+        // adapter emits it: a generic card of the documented kind.
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::BlockAdded {
+                    turn_id: "control-error".into(),
+                    block: aui_protocol::Block::Generic {
+                        kind: provider_claude_code::CONTROL_MODEL_REJECTED_CARD.into(),
+                        status: "error".into(),
+                        text: "Claude Code rejected the model change to \"opus-x\" (Model 'opus-x' not found); still on \"sonnet\".".into(),
+                    },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("Model 'opus-x' not found")),
+                "the CLI reason reaches the banner, drew {:?}",
+                view.banner
+            );
+            assert_eq!(
+                view.pending_model.as_deref(),
+                Some("sonnet"),
+                "the chip resyncs to the model in effect, drew {:?}",
+                view.pending_model
+            );
+            assert!(
+                view.models.iter().filter(|row| row.is_active).all(|row| row.model_id == "sonnet"),
+                "one checked row, the effective model: {:?}",
+                view.models.iter().map(|row| (&row.model_id, row.is_active)).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    /// Y1b: an effort refusal banners the CLI's reason and files nothing
+    /// as transcript — the chip keeps the picked level, which the adapter
+    /// re-sends on the next submit.
+    #[gpui::test]
+    fn a_refused_control_effort_banners_and_files_nothing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![aui_protocol::Delta::BlockAdded {
+                    turn_id: "control-error".into(),
+                    block: aui_protocol::Block::Generic {
+                        kind: provider_claude_code::CONTROL_EFFORT_REJECTED_CARD.into(),
+                        status: "error".into(),
+                        text: "Claude Code rejected the effort change to \"high\" (unsupported effort: high); falling back to a resume relaunch.".into(),
+                    },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("unsupported effort: high")),
+                "the CLI reason reaches the banner, drew {:?}",
+                view.banner
+            );
+            assert_eq!(
+                view.effort,
+                Some(aui_protocol::ReasoningEffort::High),
+                "the chip keeps the pick for the next submit to retry"
             );
         });
     }

@@ -475,6 +475,38 @@ pub struct Harness {
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
+    /// Y5: first-run connect screen state. `show_connect` is decided once at
+    /// boot from stored facts only; the shell renders immediately otherwise,
+    /// and Muse's `account/read` never gates the window.
+    pub(crate) show_connect: bool,
+    /// The statuses the connect screen renders: cache/script at boot, kept
+    /// fresh from the cache file while shown.
+    pub(crate) connect_statuses: Vec<crate::provider_status::ProviderStatus>,
+    /// Per-row notes appended under the account line (Codex waiting,
+    /// terminal-prefill confirmations).
+    pub(crate) connect_notes: HashMap<ProviderId, String>,
+    /// The Codex Sign in flow's state (Idle until its row starts it).
+    pub(crate) codex_login: crate::connect::CodexLogin,
+    /// Cancel for the running Codex login thread, replaced on every start.
+    pub(crate) codex_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Today's Muse login flow, presented as a sheet over the connect
+    /// screen (or over the shell from the account menu) — never the app's
+    /// first screen.
+    pub(crate) muse_sheet: bool,
+    /// Quiet per-provider banners for cached-Connected providers that later
+    /// probe Signed out: shown on that provider's composer, never a gate.
+    pub(crate) provider_banners: HashMap<ProviderId, String>,
+    /// Providers the cache has called Connected this launch: only these
+    /// earn a sign-out banner (a provider never connected gets none).
+    pub(crate) seen_connected: HashSet<ProviderId>,
+    /// A terminal prefill parked by a row action, run in `on_frame` where
+    /// the window lives.
+    pub(crate) pending_prefill: Option<String>,
+    /// A Codex login start parked by its row action, run in `on_frame`.
+    pub(crate) pending_codex_start: bool,
+    /// The provider-status cache's mtime when last read, so the connect
+    /// screen and banners follow background probes without polling reads.
+    pub(crate) connect_cache_mtime: Option<std::time::SystemTime>,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
     /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
@@ -485,6 +517,16 @@ pub struct Harness {
     list_epoch: u64,
     /// One sorted visible list and one grouping per change, not per frame.
     list_cache: RefCell<ListCache>,
+    /// The handoff chains over full storage, built once per `list_epoch`
+    /// and shared by the head, member and view lookups — never rebuilt per
+    /// frame or per row (Y2a3). `list_epoch` is the validity key: every
+    /// storage change invalidates the list, which retires the index with
+    /// it. Interior mutability because the readers (`visible_sessions`,
+    /// `chain_head`, the header) only hold `&self`.
+    chain_index: RefCell<Option<(u64, sidebar::ChainIndex)>>,
+    /// How many chain indexes this run built: the once-per-change proof
+    /// the Y2a3 tests read.
+    chain_index_builds: std::cell::Cell<u64>,
     pub(crate) index: HashMap<String, IndexEntry>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// The session the UI is pointed at: the sidebar click's target, set the
@@ -642,7 +684,7 @@ pub struct Harness {
     pub(crate) tier_probing: bool,
     /// Baaz's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
-    overrides: sessions::Overrides,
+    pub(crate) overrides: sessions::Overrides,
     /// The local record of provider-lane sessions: which provider serves
     /// each, where it ran, and when it last moved. `session/list` never
     /// names these sessions, so without this the sidebar forgets them on
@@ -775,12 +817,27 @@ pub struct Harness {
     /// Scripted (synchronous) opens bump it too, so the count also tells
     /// how many children one action spawned.
     pub(crate) provider_open_epoch: u64,
+    /// A one-shot: the next `finish_provider_open` lands its view with the
+    /// disabled-provider banner instead of a live child start having
+    /// happened (set when opening on a disabled provider, which routes
+    /// through the scripted lane).
+    pub(crate) pending_disabled_notice: Option<ProviderId>,
     /// The one `new_session` a provider switch is allowed to start while a
     /// switch is still pending: `SwitchProvider` / `NewSessionOnProvider`
     /// close the old view synchronously but start its replacement on a
     /// task, so they claim the next start up front — any other `new` while
     /// a switch is in flight is a duplicate and starts nothing.
     pub(crate) switch_claim: Option<String>,
+    /// The view a provider switch is replacing (Y2b): the old session id,
+    /// kept active and drawn — composer locked, chip already on the pick —
+    /// until the replacement activates in the same update. `None` outside
+    /// a switch.
+    pub(crate) replacing: Option<String>,
+    /// The old view's provider, to restore the chip when the open fails.
+    pub(crate) replacing_provider: Option<String>,
+    /// The drafts-map project that named the replaced view, to restore it
+    /// when the open fails.
+    pub(crate) replacing_draft_project: Option<String>,
     /// One handoff run per source session: the machine in
     /// [`crate::handoff`]. The source view mirrors the run's card; this
     /// map is the authority the ack and cancel paths advance.
@@ -955,9 +1012,22 @@ impl Harness {
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
+            show_connect: false,
+            connect_statuses: Vec::new(),
+            connect_notes: HashMap::new(),
+            codex_login: crate::connect::CodexLogin::Idle,
+            codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            muse_sheet: false,
+            provider_banners: HashMap::new(),
+            seen_connected: HashSet::new(),
+            pending_prefill: None,
+            pending_codex_start: false,
+            connect_cache_mtime: None,
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
+            chain_index: RefCell::new(None),
+            chain_index_builds: std::cell::Cell::new(0),
             index: HashMap::new(),
             active: None,
             pending_id: None,
@@ -1036,7 +1106,11 @@ impl Harness {
             pulse_task: None,
             session_switch_pending: false,
             provider_open_epoch: 0,
+            pending_disabled_notice: None,
             switch_claim: None,
+            replacing: None,
+            replacing_provider: None,
+            replacing_draft_project: None,
             handoffs: HashMap::new(),
             handoff_epoch: 0,
             pending_handoff: None,
@@ -1191,6 +1265,15 @@ impl Harness {
             }
             return this;
         }
+        // The launch decision from stored facts only: a first run shows the
+        // Connect your providers screen; every other launch renders the
+        // shell at once from the cached statuses. Muse's `account/read`
+        // still reports (and refreshes Muse's row), but never gates the
+        // window.
+        this.show_connect = crate::connect::decide_launch(crate::provider_status::is_first_run())
+            == crate::connect::LaunchDecision::Connect;
+        this.connect_statuses = crate::connect::initial_connect_statuses();
+        this.connect_cache_mtime = crate::connect::cache_mtime();
         this.connect(cx);
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
@@ -1244,16 +1327,36 @@ impl Harness {
             .or_else(|| self.projects.most_recent_available())
     }
 
+    /// The header and window title for a chain head: the collapsed view
+    /// row's label — the same one the sidebar's one row wears — so header
+    /// and row can never disagree (Y2a3). Falls back to the stored row's
+    /// title ladder when the head is filtered out of the view.
+    pub(crate) fn collapsed_head_label(&self, head: &str, cx: &gpui::App) -> Option<String> {
+        if let Some(entry) = self.visible_sessions(cx).iter().find(|e| e.id == head) {
+            let pending = entry.title_pending || self.titles_pending.contains(&entry.id);
+            return Some(crate::sidebar::display_label(&entry.label, pending).to_owned());
+        }
+        self.sessions.iter().find(|e| e.id == head).map(|e| {
+            let pending = e.title_pending || self.titles_pending.contains(&e.id);
+            let text = if !e.named {
+                sidebar::handoff_title_of(head, &self.provider_sessions, &self.overrides)
+                    .map(|t| sidebar::one_line(&t))
+                    .unwrap_or_else(|| e.label.clone())
+            } else {
+                e.label.clone()
+            };
+            crate::sidebar::display_label(&text, pending).to_owned()
+        })
+    }
+
     /// What the window's own title bar says: the open session against its
     /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
         let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
-        let label = session.and_then(|id| {
-            self.sessions.iter().find(|e| e.id == id).map(|e| {
-                let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                crate::sidebar::display_label(&e.label, pending).to_owned()
-            })
-        });
+        // One identity per chain: the raw view id resolves to its head,
+        // and the collapsed view row — the same label the sidebar's one
+        // row wears — names the window (Y2a, Y2a3).
+        let label = session.and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
         match self.current_project() {
             Some(project) => match label {
                 Some(label) => format!("{label} \u{2014} {}", project.name),
@@ -1561,7 +1664,9 @@ impl Harness {
                 // placeholder the `else` arm below still covers — either
                 // shape is invisible (`SessionEntry::is_empty`) until
                 // `first_send_update` runs (see its doc).
-                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local()) {
+                let handoff_dest =
+                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local(), handoff_dest) {
                     self.invalidate_list();
                     // The row just went from invisible to visible. A reveal
                     // armed when this session was opened may already have
@@ -1585,8 +1690,15 @@ impl Harness {
                 // names nothing this window can title, so it inserts no row.
                 let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
                 let workspace = self.session_workspace(&session_id);
-                let label =
-                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned());
+                // A handoff destination's rowless first turn is the pack, not
+                // the person's words: the row carries the chain title (Y2a).
+                let label = if sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides) {
+                    sidebar::handoff_title_of(&session_id, &self.provider_sessions, &self.overrides)
+                        .map(|t| sidebar::one_line(&t))
+                        .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
+                } else {
+                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned())
+                };
                 let row = sidebar::local_started_row(
                     &session_id,
                     label,
@@ -1856,9 +1968,12 @@ impl Harness {
             return;
         }
         let Some((root, _)) = self.right_project() else { return };
+        // The walk draws around this: a re-read never collapses a toggled
+        // directory or drops the preview's tree.
+        let expanded = self.right_cache.expanded_for(&root);
         if crate::clock::deterministic() {
             let at = std::time::Instant::now();
-            let snapshot = crate::right::read_snapshot(&root);
+            let snapshot = crate::right::read_snapshot_for(&root, &expanded);
             self.right_cache.apply_snapshot(snapshot, at);
             self.right_last_key = Some((true, kind, Some(root)));
             cx.notify();
@@ -1869,8 +1984,10 @@ impl Harness {
         }
         self.right_refresh_in_flight = true;
         cx.spawn(async move |this, cx| {
-            let snapshot =
-                cx.background_executor().spawn(async move { crate::right::read_snapshot(&root) }).await;
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { crate::right::read_snapshot_for(&root, &expanded) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.right_refresh_in_flight = false;
                 this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
@@ -2312,16 +2429,15 @@ impl Harness {
         // header answers on the click's own frame, before any page arrives.
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        // One identity per chain: header, window and selection all resolve
+        // the raw id to its head, and the collapsed view row names it —
+        // the same label the sidebar's one row wears (Y2a, Y2a3).
+        let target = target.map(|id| self.chain_head(&id));
         // The Skills page names itself after the crumb: "Skills · [project]".
         let label = if self.skills.open {
             Some("Skills".to_owned())
         } else {
-            target.and_then(|id| {
-                self.sessions.iter().find(|e| e.id == id).map(|e| {
-                    let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                    crate::sidebar::display_label(&e.label, pending).to_owned()
-                })
-            })
+            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
         };
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -2632,6 +2748,7 @@ impl Harness {
         // frame changes is in [`Self::on_frame`].
         self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
+        let provider_banner = self.render_provider_banner(cx);
         // The transcript column has its own cached entity boundary (owner
         // round 6, part 4): a sidebar-only frame reuses the retained
         // transcript instead of rebuilding it. The composer band and the
@@ -2732,6 +2849,7 @@ impl Harness {
                 this.with_session(cx, |view, cx| view.choose_nth(index, window, cx));
             }))
             .children(banner)
+            .children(provider_banner)
             .child(body)
             .children(dock)
             .into_any_element()
@@ -2799,6 +2917,13 @@ impl Harness {
     /// on. Remembered in the store, so the next launch starts where the
     /// person last chose.
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        // A disabled provider is never the default for new sessions: fall
+        // back to the first enabled one (Muse when none is).
+        let id = if crate::settings_providers::live_visible_provider_ids().contains(&id) {
+            id
+        } else {
+            crate::settings_providers::live_first_visible().unwrap_or(ProviderId::Muse)
+        };
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
         cx.notify();
@@ -3002,6 +3127,10 @@ impl Harness {
         // screen. Cheap when it is already running (one `is_some`) and when
         // nobody runs (one scan).
         self.ensure_pulse_task(cx);
+        // A regained window focus re-probes the provider statuses (Y4):
+        // edge-triggered inside, so steady active frames do no work of
+        // their own and probes run at most every 15s per provider.
+        crate::provider_status::note_window_active(window.is_window_active());
         // The window's title is the session's, so a person with three baaz
         // windows open can tell them apart in Mission Control. It is built
         // only when the list or the open session changed: the scan and the
@@ -3144,11 +3273,24 @@ impl Harness {
                 rehint,
             );
         }
-        // The shell's lifecycle only: the login screen owns the whole window
-        // and has no session behind it.
-        if !matches!(self.auth, Auth::SignedIn(_)) {
+        // The connect screen owns the whole window while it is up: it
+        // follows the status cache and runs parked row actions, nothing
+        // else. The login screen owns it the same way, but only for the
+        // offline/replay captures that still boot into it — a live launch
+        // never gates on Muse any more, so a signed-out shell runs the
+        // lifecycle below like a signed-in one.
+        if self.show_connect {
+            self.sync_provider_state(cx);
+            self.run_pending_connect_actions(window, cx);
             return;
         }
+        if !matches!(self.auth, Auth::SignedIn(_))
+            && (self.args.offline || self.args.replay.is_some())
+        {
+            return;
+        }
+        self.sync_provider_state(cx);
+        self.run_pending_connect_actions(window, cx);
         // The right pane's git and filesystem reads, reconciled off the render
         // path: at once on open, kind or project change, on the 2 s interval
         // while open on a data kind, never while closed or on Browser.
@@ -3180,8 +3322,16 @@ impl Render for Harness {
         self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.
+        // The connect screen owns it the same way on a first run. Any other
+        // launch renders the shell at once: a slow or signed-out Muse never
+        // gates the window (offline/replay captures still boot into the
+        // login screen for their sample states).
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let body: AnyElement = if signed_in {
+        let showing_login =
+            !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
+        let body: AnyElement = if self.show_connect {
+            self.render_connect(window, cx).into_any_element()
+        } else if !showing_login {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
             // `size_full` is what the column wears itself (`render_sidebar`
@@ -3299,6 +3449,7 @@ impl Render for Harness {
         };
         let dialog = self.render_dialog(window, cx);
         let settings = self.render_settings(cx);
+        let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
@@ -3447,6 +3598,7 @@ impl Render for Harness {
                 .children(palette)
                 .children(dialog)
                 .children(settings)
+                .children(muse_sheet)
                 .children(row_detail)
                 .children(overflow)
                 .children(view_options)
@@ -3553,6 +3705,13 @@ impl Harness {
         // above never saw it: Escape closes it here, before edits (V1).
         if let Some(view) = self.active.clone() {
             if view.update(cx, |view, cx| view.close_plus_menu(cx)) {
+                return;
+            }
+        }
+        // An open file preview is the next thing Escape takes back: back
+        // to the tree, keeping the selected marker and the scroll offset.
+        if let Some((root, _)) = self.right_project() {
+            if self.close_file_preview_for(&root, cx) {
                 return;
             }
         }
@@ -3733,6 +3892,7 @@ mod tests {
                         handoff_to: None,
                         handoff_from: None,
                         handoff_from_provider: None,
+            handoff_title: None,
                         display_texts: std::collections::HashMap::new(),
                     },
                 );

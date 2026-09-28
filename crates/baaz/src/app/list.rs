@@ -336,6 +336,17 @@ impl Harness {
         if summary.is_none() && ask.is_none() {
             return;
         }
+        // The pack turn and its acknowledgement never become the byline:
+        // when the newest ask is the destination's pack, the newest
+        // summary is its acknowledgement, so neither lands (Y2a). The
+        // skip is gated on the destination: any other session's words
+        // land untouched, even pack-shaped ones (Y2a3).
+        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+        let newest_ask_is_pack = dest && ask.as_deref().is_some_and(crate::sidebar::is_pack_text);
+        let (summary, ask) = crate::sidebar::byline_landable(summary, ask, newest_ask_is_pack);
+        if summary.is_none() && ask.is_none() {
+            return;
+        }
         let current = self.overrides.get(&session_id);
         if current.and_then(|m| m.last_summary.as_deref()) == summary.as_deref()
             && current.and_then(|m| m.last_ask.as_deref()) == ask.as_deref()
@@ -572,9 +583,25 @@ impl Harness {
         ) {
             return Rc::clone(&cache.visible);
         }
-        let mut rows: Vec<SessionEntry> = self
-            .sessions
-            .iter()
+        // Y2a: the chain collapses at view time. Storage keeps every
+        // member row; the collapsed head (one title, summed turns,
+        // derived flags) is what the list filters, sorts and draws, so
+        // the collapse is idempotent and order-independent. One index
+        // build serves the collapse and both head lookups below (Y2a3).
+        let index = self.chain_index();
+        let collapsed = sidebar::collapse_with_index(
+            self.sessions.clone(),
+            &index,
+            &self.provider_sessions,
+            &self.overrides,
+        );
+        // One identity for selection: the active/pending head is never
+        // filtered as empty, so the destination row stays highlighted
+        // while the pack runs.
+        let active_head = active.as_deref().map(|id| index.head(id));
+        let pending_head = pending.as_deref().map(|id| index.head(id));
+        let mut rows: Vec<SessionEntry> = collapsed
+            .into_iter()
             .filter(|entry| self.show_hidden || !entry.hidden)
             .filter(|entry| self.show_archived || !entry.archived)
             .filter(|entry| {
@@ -589,8 +616,9 @@ impl Harness {
                     || self.show_empty
                     || entry.provisional
                     || !entry.is_empty()
+                    || active_head.as_deref() == Some(entry.id.as_str())
+                    || pending_head.as_deref() == Some(entry.id.as_str())
             })
-            .cloned()
             .collect();
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
@@ -745,6 +773,11 @@ impl Harness {
     pub(super) fn title_from_transcript(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
+        // A handoff destination keeps the chain title: no rename from the
+        // pack or anything after it (Y2a).
+        if crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides) {
+            return;
+        }
         // The row may not be in the list yet — `session/list` is a round-trip
         // and the transcript is already here — so the question is not "does the
         // row need a title" but "does this session have one".
@@ -760,6 +793,9 @@ impl Harness {
             .first_user_title()
             .or_else(|| view.first_shell_title().map(|shell| crate::sidebar::one_line(&shell)));
         let Some(title) = title else { return };
+        // Destinations return above, so no pack turn can reach here: only
+        // a handoff destination ever has one, and any other session's own
+        // words title it, pack-shaped or not (Y2a3).
         self.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
     }
 }
