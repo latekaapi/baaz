@@ -475,6 +475,38 @@ pub struct Harness {
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
+    /// Y5: first-run connect screen state. `show_connect` is decided once at
+    /// boot from stored facts only; the shell renders immediately otherwise,
+    /// and Muse's `account/read` never gates the window.
+    pub(crate) show_connect: bool,
+    /// The statuses the connect screen renders: cache/script at boot, kept
+    /// fresh from the cache file while shown.
+    pub(crate) connect_statuses: Vec<crate::provider_status::ProviderStatus>,
+    /// Per-row notes appended under the account line (Codex waiting,
+    /// terminal-prefill confirmations).
+    pub(crate) connect_notes: HashMap<ProviderId, String>,
+    /// The Codex Sign in flow's state (Idle until its row starts it).
+    pub(crate) codex_login: crate::connect::CodexLogin,
+    /// Cancel for the running Codex login thread, replaced on every start.
+    pub(crate) codex_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Today's Muse login flow, presented as a sheet over the connect
+    /// screen (or over the shell from the account menu) — never the app's
+    /// first screen.
+    pub(crate) muse_sheet: bool,
+    /// Quiet per-provider banners for cached-Connected providers that later
+    /// probe Signed out: shown on that provider's composer, never a gate.
+    pub(crate) provider_banners: HashMap<ProviderId, String>,
+    /// Providers the cache has called Connected this launch: only these
+    /// earn a sign-out banner (a provider never connected gets none).
+    pub(crate) seen_connected: HashSet<ProviderId>,
+    /// A terminal prefill parked by a row action, run in `on_frame` where
+    /// the window lives.
+    pub(crate) pending_prefill: Option<String>,
+    /// A Codex login start parked by its row action, run in `on_frame`.
+    pub(crate) pending_codex_start: bool,
+    /// The provider-status cache's mtime when last read, so the connect
+    /// screen and banners follow background probes without polling reads.
+    pub(crate) connect_cache_mtime: Option<std::time::SystemTime>,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
     /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
@@ -955,6 +987,17 @@ impl Harness {
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
+            show_connect: false,
+            connect_statuses: Vec::new(),
+            connect_notes: HashMap::new(),
+            codex_login: crate::connect::CodexLogin::Idle,
+            codex_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            muse_sheet: false,
+            provider_banners: HashMap::new(),
+            seen_connected: HashSet::new(),
+            pending_prefill: None,
+            pending_codex_start: false,
+            connect_cache_mtime: None,
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
@@ -1191,6 +1234,15 @@ impl Harness {
             }
             return this;
         }
+        // The launch decision from stored facts only: a first run shows the
+        // Connect your providers screen; every other launch renders the
+        // shell at once from the cached statuses. Muse's `account/read`
+        // still reports (and refreshes Muse's row), but never gates the
+        // window.
+        this.show_connect = crate::connect::decide_launch(crate::provider_status::is_first_run())
+            == crate::connect::LaunchDecision::Connect;
+        this.connect_statuses = crate::connect::initial_connect_statuses();
+        this.connect_cache_mtime = crate::connect::cache_mtime();
         this.connect(cx);
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
@@ -2637,6 +2689,7 @@ impl Harness {
         // frame changes is in [`Self::on_frame`].
         self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
+        let provider_banner = self.render_provider_banner(cx);
         // The transcript column has its own cached entity boundary (owner
         // round 6, part 4): a sidebar-only frame reuses the retained
         // transcript instead of rebuilding it. The composer band and the
@@ -2737,6 +2790,7 @@ impl Harness {
                 this.with_session(cx, |view, cx| view.choose_nth(index, window, cx));
             }))
             .children(banner)
+            .children(provider_banner)
             .child(body)
             .children(dock)
             .into_any_element()
@@ -3153,11 +3207,24 @@ impl Harness {
                 rehint,
             );
         }
-        // The shell's lifecycle only: the login screen owns the whole window
-        // and has no session behind it.
-        if !matches!(self.auth, Auth::SignedIn(_)) {
+        // The connect screen owns the whole window while it is up: it
+        // follows the status cache and runs parked row actions, nothing
+        // else. The login screen owns it the same way, but only for the
+        // offline/replay captures that still boot into it — a live launch
+        // never gates on Muse any more, so a signed-out shell runs the
+        // lifecycle below like a signed-in one.
+        if self.show_connect {
+            self.sync_provider_state(cx);
+            self.run_pending_connect_actions(window, cx);
             return;
         }
+        if !matches!(self.auth, Auth::SignedIn(_))
+            && (self.args.offline || self.args.replay.is_some())
+        {
+            return;
+        }
+        self.sync_provider_state(cx);
+        self.run_pending_connect_actions(window, cx);
         // The right pane's git and filesystem reads, reconciled off the render
         // path: at once on open, kind or project change, on the 2 s interval
         // while open on a data kind, never while closed or on Browser.
@@ -3189,8 +3256,16 @@ impl Render for Harness {
         self.on_frame(window, cx);
         // The login screen owns the whole window; the shell is not built behind
         // it, so nothing of the signed-in state can leak into a capture.
+        // The connect screen owns it the same way on a first run. Any other
+        // launch renders the shell at once: a slow or signed-out Muse never
+        // gates the window (offline/replay captures still boot into the
+        // login screen for their sample states).
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let body: AnyElement = if signed_in {
+        let showing_login =
+            !signed_in && (self.args.offline || self.args.replay.is_some()) && !self.show_connect;
+        let body: AnyElement = if self.show_connect {
+            self.render_connect(window, cx).into_any_element()
+        } else if !showing_login {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
             // `size_full` is what the column wears itself (`render_sidebar`
@@ -3308,6 +3383,7 @@ impl Render for Harness {
         };
         let dialog = self.render_dialog(window, cx);
         let settings = self.render_settings(cx);
+        let muse_sheet = self.render_muse_sheet(window, cx);
         let palette = self.render_palette(cx);
         let toasts = self.render_toasts(cx);
         // Mid-drag the overlay covers the window, so the drag survives the
@@ -3456,6 +3532,7 @@ impl Render for Harness {
                 .children(palette)
                 .children(dialog)
                 .children(settings)
+                .children(muse_sheet)
                 .children(row_detail)
                 .children(overflow)
                 .children(view_options)
