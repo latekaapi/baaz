@@ -2925,8 +2925,10 @@ impl Harness {
         } else {
             match self.active.clone() {
             Some(view) => {
-                // No `.cached(...)` while assistive tech is on: reuse replays the retained
-                // subtree without layout, so a11y bounds are never refilled (see the report).
+                // No `.cached(...)` while assistive tech is on: gpui-pre's reuse replays
+                // hitboxes and mouse listeners but not a11y node bounds, and an AXPress is
+                // a synthetic click at those bounds — so every press in a clean cached pane
+                // did nothing. gpui refreshes the window when a screen reader (de)activates.
                 let transcript = if window.is_a11y_active() {
                     view.clone().into_any_element()
                 } else {
@@ -3595,8 +3597,7 @@ impl Render for Harness {
             // fills its cell), so the cached layout resolves to the same
             // bounds the shell offers and any resize re-renders through the
             // bounds key.
-            // No `.cached(...)` while assistive tech is on: reuse replays the retained
-            // subtree without layout, so a11y bounds are never refilled (see the report).
+            // No `.cached(...)` while assistive tech is on — see `render_centre`.
             let sidebar: AnyElement = if window.is_a11y_active() {
                 self.sidebar_pane.clone().into_any_element()
             } else {
