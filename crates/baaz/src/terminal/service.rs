@@ -31,12 +31,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -104,6 +105,89 @@ pub const UNAVAILABLE: &str = "Baaz isn't running; the terminal is unavailable";
 /// `<support_dir>/run/terminal-<pid>.sock`.
 pub fn socket_path_for(support_dir: &Path, pid: u32) -> PathBuf {
     support_dir.join("run").join(format!("terminal-{pid}.sock"))
+}
+
+/// The longest socket path that can ever bind: `sun_path` holds 104 bytes
+/// with the trailing NUL, so 103 bytes of path is the ceiling (macOS and
+/// Linux agree here). Anything longer fails the bind outright.
+const MAX_SOCKET_PATH_LEN: usize = 103;
+
+/// A socket path's length in bytes, as the kernel measures it.
+fn socket_path_len(path: &Path) -> usize {
+    path.as_os_str().as_bytes().len()
+}
+
+/// One lifecycle line on stderr with the app's `baaz: ` prefix: binds and
+/// bind errors only — never terminal output bytes, which must not reach a
+/// log line (see the module header). Spelled with a direct stderr write on
+/// purpose: the no-logging pin (`crates/baaz/tests/terminal_service.rs`)
+/// forbids log-macro tokens anywhere in this file, and this helper keeps
+/// that pin green while the bind path stays loud.
+fn terminal_note(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = std::io::stderr().write_fmt(format_args!("baaz: {message}\n"));
+}
+
+/// A 32-bit FNV-1a hash: stable across processes (unlike the default
+/// hasher), so two windows over the same support dir reroute at the same
+/// fallback name and the second still recognises the first's live socket.
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// The short private dir the over-long fallback lives under:
+/// `/tmp/baaz-<uid>/`. Created `0700`, and refused unless it is a directory
+/// this uid owns with exactly `0700` — a foreign or loosened directory is
+/// never trusted with the socket, and the caller serves nothing instead.
+fn fallback_dir() -> Option<PathBuf> {
+    // SAFETY: `getuid` takes no arguments and always succeeds.
+    let uid = unsafe { libc::getuid() };
+    let dir = PathBuf::from(format!("/tmp/baaz-{uid}"));
+    let _ = std::fs::create_dir_all(&dir);
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() || meta.uid() != uid {
+        return None;
+    }
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        return None;
+    }
+    Some(dir)
+}
+
+/// The short fallback for an over-long socket path:
+/// `/tmp/baaz-<uid>/t-<8 hex of the support dir>-<pid>.sock`. `None` when
+/// the private dir cannot be trusted (see [`fallback_dir`]).
+fn fallback_socket_path(support_dir: &Path, pid: u32) -> Option<PathBuf> {
+    let dir = fallback_dir()?;
+    let hash = fnv1a32(support_dir.as_os_str().as_bytes());
+    Some(dir.join(format!("t-{hash:08x}-{pid}.sock")))
+}
+
+/// A process-unique fake pid for test Harnesses: each Harness serves a
+/// socket name no other Harness in this test process shares, so Harness
+/// tests never race for ownership of one pid name. Test-only in practice
+/// (production always passes the real pid through [`TerminalService::start`]).
+pub(crate) fn next_isolated_pid() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1_000_000);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A unique short socket dir per test Harness (`/tmp/bh-<pid>-<counter>`):
+/// short so the socket always binds, unique so no two Harnesses in one test
+/// process share it.
+#[cfg(test)]
+pub(crate) fn test_socket_dir() -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(format!("/tmp/bh-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("test socket dir");
+    dir
 }
 
 /// A restrictive process umask held while the run dir and socket are
@@ -281,9 +365,12 @@ impl TerminalService {
     }
 
     /// Serve on [`socket_path_for`]`(support_dir, pid)`: the seam the tests
-    /// drive with a temp dir standing in for the support dir.
+    /// drive with a temp dir standing in for the support dir. A computed
+    /// path longer than [`MAX_SOCKET_PATH_LEN`] bytes can never bind, so
+    /// the service reroutes at the short private fallback
+    /// ([`fallback_socket_path`]) instead of silently disabling the tools.
     pub fn start_at(host: Entity<TerminalHost>, support_dir: &Path, pid: u32) -> Self {
-        let path = socket_path_for(support_dir, pid);
+        let primary = socket_path_for(support_dir, pid);
         // No world-readable window: a restrictive umask holds from the run
         // dir's creation through the bind and its chmod, so neither the dir
         // nor the socket ever carries group/other bits. `DirBuilder::mode`
@@ -292,10 +379,6 @@ impl TerminalService {
         // choose. The trailing `set_permissions` tightens pre-existing
         // dirs; the guard restores the mask on every return below.
         let _umask = UmaskGuard::restrict();
-        if let Some(run_dir) = path.parent() {
-            let _ = std::fs::DirBuilder::new().mode(0o700).create(run_dir);
-            let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
-        }
         let shared = Arc::new(Shared {
             host,
             sessions: Mutex::new(HashMap::new()),
@@ -311,6 +394,37 @@ impl TerminalService {
             browser_open: Mutex::new(None),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
+        // A computed path past the kernel's `sun_path` limit can never
+        // bind: reroute at the short private fallback rather than serving
+        // nothing with no trace. The stored path is whatever is bound (or
+        // would be), so cleanup and the relay follow the reroute.
+        let path = if socket_path_len(&primary) > MAX_SOCKET_PATH_LEN {
+            match fallback_socket_path(support_dir, pid) {
+                Some(short) => {
+                    terminal_note(format_args!(
+                        "terminal socket path {} is {} bytes; serving {} instead",
+                        primary.display(),
+                        socket_path_len(&primary),
+                        short.display()
+                    ));
+                    short
+                }
+                None => {
+                    terminal_note(format_args!(
+                        "terminal socket path {} is {} bytes and the short fallback is unusable; the terminal is unavailable",
+                        primary.display(),
+                        socket_path_len(&primary)
+                    ));
+                    return Self { shared, socket_path: primary, shutdown, owned: false, accept: Mutex::new(None) };
+                }
+            }
+        } else {
+            primary
+        };
+        if let Some(run_dir) = path.parent() {
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(run_dir);
+            let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
+        }
         // A leftover file from a crashed run binds fine once removed; a
         // live socket means another window owns the name, so keep hands off.
         if path.exists() && UnixStream::connect(&path).is_ok() {
@@ -321,6 +435,7 @@ impl TerminalService {
             Ok(listener) => {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 let _ = listener.set_nonblocking(true);
+                terminal_note(format_args!("terminal socket bound at {}", path.display()));
                 let worker = shared.clone();
                 let done = shutdown.clone();
                 let accept =
@@ -333,9 +448,17 @@ impl TerminalService {
                     accept: Mutex::new(Some(accept)),
                 }
             }
-            Err(_) => {
-                // No listener (permissions, a second window that raced us):
-                // the object still works, the socket just is not ours.
+            Err(error) => {
+                // No listener (permissions, a path the kernel refuses, a
+                // second window that raced us): loud, with the path and its
+                // length — the relay answers against this same stored path,
+                // so silence here would misroute every agent tool with no
+                // trace. The object still works; the socket just is not ours.
+                terminal_note(format_args!(
+                    "terminal socket bind failed for {} ({} bytes): {error}",
+                    path.display(),
+                    socket_path_len(&path)
+                ));
                 Self { shared, socket_path: path, shutdown, owned: false, accept: Mutex::new(None) }
             }
         }
@@ -2377,36 +2500,31 @@ mod tests {
             bench_out: None,
             sidebar_fixture: None,
             no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
         }
     }
 
-    /// A real Harness whose service owns the pid socket name. The name is
-    /// process-wide, so when a parallel Harness test holds it ours is a
-    /// guest and its requests would land on the other service: build until
-    /// ours binds, waiting the other out. A guest drops without removing
-    /// anything, so retries are cheap.
+    /// A real Harness with its own isolated socket: the test args carry a
+    /// unique short dir and the Harness serves it under a unique fake pid,
+    /// so this Harness always owns its socket — no ownership loop, no wait
+    /// on a parallel Harness test holding one pid-wide name.
     fn harness_with_socket(
         vc: &mut gpui::VisualTestContext,
         dir: &Path,
     ) -> gpui::Entity<crate::app::Harness> {
-        for _ in 0..600 {
-            let harness = vc.update(|window, cx| {
-                cx.new(|cx| {
-                    crate::app::Harness::new(
-                        harness_args(dir),
-                        crate::shot::CaptureToken::default(),
-                        window,
-                        cx,
-                    )
-                })
-            });
-            let owned = vc.update(|_, cx| harness.read(cx).terminal_service.owned);
-            if owned {
-                return harness;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("no Harness owned the terminal socket after 60s");
+        let harness = vc.update(|window, cx| {
+            cx.new(|cx| {
+                crate::app::Harness::new(
+                    harness_args(dir),
+                    crate::shot::CaptureToken::default(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        let owned = vc.update(|_, cx| harness.read(cx).terminal_service.owned);
+        assert!(owned, "the isolated Harness owns its terminal socket");
+        harness
     }
 
     /// `terminal_run` through the real Harness wiring: the Harness `new`
@@ -2468,6 +2586,95 @@ mod tests {
                 "the run opens the dock for the person to watch"
             );
         });
+    }
+
+    /// A support dir whose computed socket path runs past the kernel's
+    /// `sun_path` limit still serves: the service reroutes at a short
+    /// private path, owns it, and answers a client there.
+    #[gpui::test]
+    fn overlong_support_dir_serves_a_short_owned_socket(cx: &mut gpui::TestAppContext) {
+        let base = PathBuf::from(format!("/tmp/bt-long-{}", std::process::id()));
+        let long = base.join("d".repeat(160));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&long).expect("long dir");
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let primary = socket_path_for(&long, pid);
+        assert!(
+            socket_path_len(&primary) > 104,
+            "the primary path must really be over the limit, or this proves nothing"
+        );
+        let host = cx.new(|_| TerminalHost::new());
+        let service = TerminalService::start_at(host, &long, pid);
+        assert!(service.owned, "the rerouted socket binds");
+        let bound = service.socket_path().to_path_buf();
+        assert_ne!(bound, primary, "the bound path is the fallback, not the primary");
+        assert!(
+            socket_path_len(&bound) <= 103,
+            "the fallback fits the bind: {}",
+            bound.display()
+        );
+        let name = bound.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        assert!(
+            name.starts_with("t-") && name.ends_with(".sock"),
+            "the fallback is the short private name: {name}"
+        );
+        assert!(UnixStream::connect(&bound).is_ok(), "a client reaches the fallback socket");
+        drop(service);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Two Harnesses built in one test both own distinct sockets: the
+    /// per-Harness isolation holds, so parallel Harness tests never race
+    /// for one pid-wide name.
+    #[gpui::test]
+    fn two_harnesses_in_one_test_both_own_distinct_sockets(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let tmp_a = TmpDir::new();
+        let tmp_b = TmpDir::new();
+        let vc = cx.add_empty_window();
+        let first = harness_with_socket(vc, &tmp_a.path);
+        let second = harness_with_socket(vc, &tmp_b.path);
+        let (path_a, path_b) = vc.update(|_, cx| {
+            (
+                first.read(cx).terminal_service.socket_path().to_path_buf(),
+                second.read(cx).terminal_service.socket_path().to_path_buf(),
+            )
+        });
+        assert_ne!(path_a, path_b, "each Harness serves its own socket");
+        for path in [&path_a, &path_b] {
+            assert!(UnixStream::connect(path).is_ok(), "both sockets answer: {}", path.display());
+        }
+    }
+
+    /// The Claude Code and Codex relays point at the socket the service
+    /// actually bound — not a recomputed support-dir path.
+    #[gpui::test]
+    fn relay_sockets_equal_the_bound_service_socket(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let tmp = TmpDir::new();
+        let vc = cx.add_empty_window();
+        let harness = harness_with_socket(vc, &tmp.path);
+        let socket = vc.update(|_, cx| harness.read(cx).terminal_service.socket_path().to_path_buf());
+        let stale = socket_path_for(&crate::store::support_dir(), std::process::id());
+        assert_ne!(
+            socket, stale,
+            "the isolated Harness does not serve the recomputed production name"
+        );
+        assert_eq!(
+            crate::providers::terminal_socket_path(&socket),
+            socket,
+            "the relay seam carries the bound socket through"
+        );
+        assert_eq!(
+            crate::providers::claude_terminal_relay(&socket).socket,
+            socket,
+            "the Claude Code relay points at the bound socket"
+        );
+        assert_eq!(
+            crate::providers::codex_terminal_relay(&socket).socket,
+            socket,
+            "the Codex relay points at the bound socket"
+        );
     }
 
     /// One browser request over a real socket, draining until the reply

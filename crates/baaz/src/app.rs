@@ -1055,7 +1055,17 @@ impl Harness {
         // how the agent's routes reach the tabs, and a relay started
         // beside the app must find it already listening.
         let terminal_host = cx.new(|_| TerminalHost::new());
-        let terminal_service = TerminalService::start(terminal_host.clone(), &crate::store::support_dir());
+        // Tests isolate the socket per Harness (a unique short dir plus a
+        // unique fake pid): no two Harnesses in one test process share a
+        // name, so none races for ownership.
+        let terminal_service = match args.terminal_socket_dir.clone() {
+            Some(dir) => TerminalService::start_at(
+                terminal_host.clone(),
+                &dir,
+                crate::terminal::service::next_isolated_pid(),
+            ),
+            None => TerminalService::start(terminal_host.clone(), &crate::store::support_dir()),
+        };
         // Where this window's agent tools listen: the relay T2 spawns is
         // pointed at exactly this path, so a second window keeping another
         // window's name shows up here rather than as a silent misroute.
@@ -1077,7 +1087,9 @@ impl Harness {
             args,
             client: None,
             provider: None,
-            provider_factory: crate::providers::default_provider_factory(),
+            provider_factory: crate::providers::default_provider_factory(
+                terminal_service.socket_path().to_path_buf(),
+            ),
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
@@ -4132,6 +4144,7 @@ mod tests {
             bench_shell: false,
             sidebar_fixture: None,
             no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
         }
     }
 
