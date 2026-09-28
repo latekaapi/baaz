@@ -11,8 +11,9 @@ use serde_json::Value;
 /// One usage window inside a `rate_limit_event`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageWindow {
-    /// Fraction used, 0.0–1.0.
-    pub utilization: f64,
+    /// Fraction used, 0.0–1.0. `None` when the event omitted
+    /// `utilization`: unknown is unknown, never a 0 % bar.
+    pub utilization: Option<f64>,
     /// Unix time the window resets.
     pub resets_at: Option<i64>,
 }
@@ -24,8 +25,9 @@ pub struct RateLimitInfo {
     pub status: String,
     /// e.g. `seven_day`.
     pub rate_limit_type: String,
-    /// Utilization of the named window.
-    pub utilization: f64,
+    /// Utilization of the named window. `None` when the event omitted
+    /// it: a missing number is not a zero reading.
+    pub utilization: Option<f64>,
     /// Resets-at of the named window.
     pub resets_at: Option<i64>,
     /// **True means turns are billing beyond the plan.** Preserved and
@@ -39,15 +41,13 @@ pub struct RateLimitInfo {
 
 impl RateLimitInfo {
     /// Decode the wire `rate_limit_info` object. Unknown fields are ignored;
-    /// absent numbers default to zero rather than failing the fold.
+    /// an absent `utilization` decodes to `None` (unknown) rather than
+    /// zero: a missing number must never render as a 0 % bar.
     pub fn decode(info: &Value) -> Self {
         let window = |key: &str| {
             info.get("unifiedWindows").and_then(|windows| windows.get(key)).map(|window| {
                 UsageWindow {
-                    utilization: window
-                        .get("utilization")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(0.0),
+                    utilization: window.get("utilization").and_then(Value::as_f64),
                     resets_at: window.get("resetsAt").and_then(Value::as_i64),
                 }
             })
@@ -59,7 +59,7 @@ impl RateLimitInfo {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            utilization: info.get("utilization").and_then(Value::as_f64).unwrap_or(0.0),
+            utilization: info.get("utilization").and_then(Value::as_f64),
             resets_at: info.get("resetsAt").and_then(Value::as_i64),
             is_using_overage: info
                 .get("isUsingOverage")
@@ -68,6 +68,21 @@ impl RateLimitInfo {
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
         }
+    }
+}
+
+/// The meter's status text for a person: `allowed_warning` reads
+/// "Allowed warning", `allowed` reads "Allowed". An empty status reads
+/// "Unknown" rather than a blank row.
+pub fn humanize_status(status: &str) -> String {
+    if status.trim().is_empty() {
+        return "Unknown".into();
+    }
+    let spaced = status.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Unknown".into(),
     }
 }
 
@@ -106,29 +121,42 @@ impl AccountSnapshot {
     /// utilization, labelled from each window's length. The named window
     /// first, then the unified five-hour and seven-day windows except the
     /// one the named window already covers — the same window never cards
-    /// twice. `None` until the first reading arrives.
+    /// twice. Windows whose utilization is unknown are skipped, never
+    /// drawn as a 0 % bar. When a reading was seen but no window reports
+    /// a usable number, the report carries no windows and the meter's
+    /// status text as the plan slot, so the row reads e.g. "Allowed"
+    /// instead of a fake bar. `None` until the first reading arrives.
     pub fn usage_report(&self) -> Option<provider::UsageReport> {
         let info = self.latest.as_ref()?;
         let mut windows = Vec::new();
         let named_minutes = window_minutes(&info.rate_limit_type);
-        windows.push(provider::UsageWindow {
-            label: named_minutes
-                .map(provider::window_label)
-                .unwrap_or_else(|| info.rate_limit_type.clone()),
-            used_fraction: info.utilization.clamp(0.0, 1.0),
-            resets_at: info.resets_at,
-            window_minutes: named_minutes,
-        });
+        if let Some(used) = info.utilization {
+            windows.push(provider::UsageWindow {
+                label: named_minutes
+                    .map(provider::window_label)
+                    .unwrap_or_else(|| info.rate_limit_type.clone()),
+                used_fraction: used.clamp(0.0, 1.0),
+                resets_at: info.resets_at,
+                window_minutes: named_minutes,
+            });
+        }
         for (window, minutes) in [(&info.five_hour, 300u64), (&info.seven_day, 10080u64)] {
             if Some(minutes) == named_minutes {
                 continue;
             }
             let Some(window) = window else { continue };
+            let Some(used) = window.utilization else { continue };
             windows.push(provider::UsageWindow {
                 label: provider::window_label(minutes),
-                used_fraction: window.utilization.clamp(0.0, 1.0),
+                used_fraction: used.clamp(0.0, 1.0),
                 resets_at: window.resets_at,
                 window_minutes: Some(minutes),
+            });
+        }
+        if windows.is_empty() {
+            return Some(provider::UsageReport {
+                plan: Some(humanize_status(&info.status)),
+                windows: Vec::new(),
             });
         }
         Some(provider::UsageReport { plan: None, windows })
@@ -136,15 +164,22 @@ impl AccountSnapshot {
 
     /// The display label for [`provider::Ack::Account`]: window, percentage,
     /// and reset time, with an overage banner when billing beyond the plan.
+    /// When the reading carries no usable utilization the label reads the
+    /// meter's status text (e.g. "Allowed") instead of a fabricated 0 %.
     /// `None` until the first reading arrives.
     pub fn label(&self) -> Option<String> {
         let info = self.latest.as_ref()?;
-        let percent = (info.utilization * 100.0).round() as u64;
-        let mut label = match info.resets_at {
-            Some(resets) => {
-                format!("Claude Code {} {percent}% (resets {resets})", info.rate_limit_type)
+        let mut label = match info.utilization {
+            Some(used) => {
+                let percent = (used * 100.0).round() as u64;
+                match info.resets_at {
+                    Some(resets) => {
+                        format!("Claude Code {} {percent}% (resets {resets})", info.rate_limit_type)
+                    }
+                    None => format!("Claude Code {} {percent}%", info.rate_limit_type),
+                }
             }
-            None => format!("Claude Code {} {percent}%", info.rate_limit_type),
+            None => format!("Claude Code {} {}", info.rate_limit_type, humanize_status(&info.status)),
         };
         if info.is_using_overage {
             label.push_str(" · using overage");
@@ -173,7 +208,8 @@ mod tests {
         }
         let info = snapshot.latest.as_ref().expect("partial.jsonl carries a reading");
         assert_eq!(info.rate_limit_type, "seven_day");
-        assert!((info.utilization - 0.79).abs() < f64::EPSILON);
+        let used = info.utilization.expect("partial.jsonl reports a number");
+        assert!((used - 0.79).abs() < f64::EPSILON);
         assert!(!info.is_using_overage);
         assert!(snapshot.label().expect("label").contains("79%"));
     }
@@ -200,6 +236,28 @@ mod tests {
         assert_eq!(report.windows[1].label, "Session · 5h");
         assert!((report.windows[1].used_fraction - 0.9).abs() < f64::EPSILON);
         assert_eq!(report.windows[1].resets_at, Some(1790187000));
+    }
+
+    #[test]
+    fn missing_utilization_is_unknown_and_draws_no_bar() {
+        // A `rate_limit_event` without any `utilization` decodes to
+        // unknown, not 0.0: the report carries no windows (no fake bar)
+        // and the status text instead, and the label reads the status
+        // rather than "0%".
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","isUsingOverage":false,"unifiedWindows":{"five_hour":{"resetsAt":1790187000},"seven_day":{"resetsAt":1790384400}}}}"#;
+        let Frame::RateLimit(info) = decode_line(line).expect("decodes") else {
+            panic!("expected a rate-limit frame");
+        };
+        assert_eq!(info.utilization, None, "a missing number is unknown, never zero");
+        assert_eq!(info.five_hour.as_ref().and_then(|window| window.utilization), None);
+        let mut snapshot = AccountSnapshot::default();
+        snapshot.observe(info);
+        let report = snapshot.usage_report().expect("a reading was seen");
+        assert!(report.windows.is_empty(), "unknown windows draw no bar");
+        assert_eq!(report.plan.as_deref(), Some("Allowed"), "the row reads the status text instead");
+        let label = snapshot.label().expect("label");
+        assert!(label.contains("Allowed"), "the label reads the status, not 0%: {label}");
+        assert!(!label.contains("0%"), "no fabricated percentage: {label}");
     }
 
     #[test]
