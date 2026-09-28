@@ -449,6 +449,34 @@ impl Harness {
         }
         closed
     }
+
+    /// Open the right pane on the Browser kind because the agent navigated
+    /// `session_id` there (Z7b): like a person's click would — the pane
+    /// stands open on Browser and the session's saved state says so — but
+    /// without the toggle (`show_right` would close a pane already showing
+    /// Browser) and without arming URL focus (the person's keyboard stays
+    /// where it was). Works for a session that is not active: the saved
+    /// state is written onto `session_id` directly.
+    pub(crate) fn show_browser_for_agent(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // Only the session on screen changes what is on screen (review): an
+        // agent in a background session must not flip the person's visible
+        // pane — its session's saved state below is all that changes, and
+        // it shows when the person switches there.
+        let foreground = self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id);
+        if foreground {
+            self.right_snap = false;
+            self.layout.right_kind = Some(RightKind::Browser);
+            self.layout.right_open = true;
+            crate::layout::write(&self.layout);
+        }
+        let mut right =
+            self.overrides.get(session_id).and_then(|meta| meta.right.clone()).unwrap_or_default();
+        right.open = true;
+        right.kind = RightKind::Browser;
+        self.set_override(session_id, |meta| meta.right = Some(right), cx);
+        self.refresh_right_now(cx);
+        cx.notify();
+    }
 }
 
 /// Select `id` for `root` from the tree's action closure, which only holds

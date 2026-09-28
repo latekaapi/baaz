@@ -1,8 +1,9 @@
-//! The terminal relay over a test socket: tools listed with schemas and
-//! steering, calls forwarded to Baaz's socket, absence answered — all
-//! through the real `serve_loop` path on in-memory buffers, against a
-//! background thread speaking the service's `{id, session, tool, params}`
-//! protocol. `ping` keeps working beside the seven tools.
+//! The terminal and browser relays over a test socket: tools listed with
+//! schemas and steering, calls forwarded to Baaz's socket, absence
+//! answered — all through the real `serve_loop` path on in-memory buffers,
+//! against a background thread speaking the service's
+//! `{id, session, tool, params}` protocol. `ping` keeps working beside the
+//! thirteen tools.
 
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mcp_bridge::{
-    ToolOutcome, ToolRegistry, serve_loop,
+    ToolOutcome, ToolRegistry, browser as browser_relay, serve_loop,
     terminal::{INSTRUCTIONS, TOOL_NAMES, TerminalTarget, UNAVAILABLE, register_terminal_tools},
 };
+use mcp_bridge::browser::{BROWSER_TOOL_NAMES, register_browser_tools};
 use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -101,11 +103,10 @@ fn serve(path: &std::path::Path, script: &Script) -> std::thread::JoinHandle<()>
 
 fn registry_for(socket: &std::path::Path, session: &str) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.set_instructions(INSTRUCTIONS);
-    register_terminal_tools(
-        &mut registry,
-        &TerminalTarget { socket: socket.to_owned(), session: session.to_owned() },
-    );
+    registry.set_instructions(format!("{INSTRUCTIONS}\n{}", browser_relay::INSTRUCTIONS));
+    let target = TerminalTarget { socket: socket.to_owned(), session: session.to_owned() };
+    register_terminal_tools(&mut registry, &target);
+    register_browser_tools(&mut registry, &target);
     registry
         .register(
             "ping",
@@ -164,7 +165,14 @@ fn initialize_carries_the_steering_instructions() {
     let replies = run_session(&[rpc(1, "initialize", json!({}))], &registry);
     let instructions =
         result_of(&replies[0]).get("instructions").and_then(Value::as_str).expect("instructions");
-    assert_eq!(instructions, INSTRUCTIONS);
+    assert!(
+        instructions.contains(INSTRUCTIONS),
+        "the terminal steering travels with initialize: {instructions}"
+    );
+    assert!(
+        instructions.contains(browser_relay::INSTRUCTIONS),
+        "the browser steering travels with initialize: {instructions}"
+    );
     assert!(
         instructions.contains("Use the terminal"),
         "the D50 steering travels with initialize: {instructions}"
@@ -174,7 +182,7 @@ fn initialize_carries_the_steering_instructions() {
 }
 
 #[test]
-fn tools_list_advertises_the_seven_tools_with_schemas() {
+fn tools_list_advertises_all_thirteen_tools_with_schemas() {
     let path = socket_path();
     let script =
         Script { heard: Arc::default(), refuse_tool: None, shutdown: Arc::default() };
@@ -187,8 +195,13 @@ fn tools_list_advertises_the_seven_tools_with_schemas() {
     for name in TOOL_NAMES {
         assert!(names.contains(&name), "listed: {names:?}");
     }
+    for name in BROWSER_TOOL_NAMES {
+        assert!(names.contains(&name), "listed: {names:?}");
+    }
     assert!(names.contains(&"ping"), "ping stays: {names:?}");
     assert_eq!(TOOL_NAMES.len(), 7);
+    assert_eq!(BROWSER_TOOL_NAMES.len(), 6);
+    assert_eq!(tools.len(), TOOL_NAMES.len() + BROWSER_TOOL_NAMES.len() + 1);
     for tool in tools {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
         assert!(
@@ -275,9 +288,13 @@ fn a_gone_socket_answers_unavailable_not_a_crash() {
         "terminal_read" | "terminal_screen" | "terminal_send" | "terminal_close" => {
             json!({"tab": "t1"})
         }
+        "browser_open" => json!({"url": "https://example.com"}),
+        "browser_click" => json!({"selector": "h1"}),
+        "browser_type" => json!({"selector": "input", "text": "hi"}),
         _ => json!({}),
     };
-    let mut lines: Vec<String> = TOOL_NAMES
+    let all: Vec<&&str> = TOOL_NAMES.iter().chain(BROWSER_TOOL_NAMES.iter()).collect();
+    let mut lines: Vec<String> = all
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -286,7 +303,7 @@ fn a_gone_socket_answers_unavailable_not_a_crash() {
         .collect();
     lines.push(rpc(100, "tools/call", json!({"name": "ping", "arguments": {}})));
     let replies = run_session(&lines, &registry);
-    for (i, name) in TOOL_NAMES.iter().enumerate() {
+    for (i, name) in all.iter().enumerate() {
         assert_eq!(
             content_text(result_of(&replies[i])),
             UNAVAILABLE,
@@ -295,7 +312,7 @@ fn a_gone_socket_answers_unavailable_not_a_crash() {
     }
     // `ping` is the bridge's own diagnostic, not a forwarded tool: it
     // answers even with Baaz gone.
-    assert_eq!(content_text(result_of(&replies[TOOL_NAMES.len()])), "PONG");
+    assert_eq!(content_text(result_of(&replies[all.len()])), "PONG");
 }
 
 #[test]
