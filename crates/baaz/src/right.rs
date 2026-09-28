@@ -399,6 +399,7 @@ impl Harness {
     /// the toggle draws its children (or hides them) on the next frame.
     pub(crate) fn toggle_files_dir(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
         toggle_expanded(&mut self.right_cache, root, id);
+        self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
     }
@@ -409,9 +410,11 @@ impl Harness {
     /// thread on file content — only on one metadata call.
     pub(crate) fn begin_file_preview_for(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
         if !begin_file_preview(&mut self.right_cache, root, id) {
+            self.save_right_for_active(cx);
             cx.notify();
             return;
         }
+        self.save_right_for_active(cx);
         cx.notify();
         let root = root.to_path_buf();
         let id = id.to_string();
@@ -432,6 +435,7 @@ impl Harness {
     pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
         let closed = close_file_preview(&mut self.right_cache, root);
         if closed {
+            self.save_right_for_active(cx);
             cx.notify();
         }
         closed

@@ -610,6 +610,12 @@ pub struct Harness {
     /// What the pane showed the last time the refresh state was reconciled:
     /// open, kind, and project root. Any change re-reads at once.
     right_last_key: Option<(bool, layout::RightKind, Option<std::path::PathBuf>)>,
+    /// A session-switch restore just moved the pane: the next frame renders
+    /// it at its target with no open/close animation (Z2). Set by the
+    /// restore when it flips open/closed, consumed once by `render` through
+    /// the shell's `resizing` bypass. User toggles never set it, so they
+    /// keep animating exactly as today.
+    pub(crate) right_snap: bool,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1059,6 +1065,7 @@ impl Harness {
             right_cache: crate::right::RightCache::default(),
             right_refresh_in_flight: false,
             right_last_key: None,
+            right_snap: false,
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -1924,9 +1931,13 @@ impl Harness {
     /// flips the open state, persists it, notifies, and re-reads the pane's
     /// data off the render path when it ends up open.
     pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        // A user toggle always animates, even when a restore armed the
+        // snap and no frame has consumed it yet.
+        self.right_snap = false;
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         layout::write(&self.layout);
+        self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
     }
@@ -1939,6 +1950,8 @@ impl Harness {
     /// Either way the pane's data is re-read off the render path when it ends
     /// up open.
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        // A user pick always animates (see `toggle_right`).
+        self.right_snap = false;
         if self.layout.right_open && self.layout.right_kind == Some(kind) {
             self.layout.right_open = false;
         } else {
@@ -1947,8 +1960,97 @@ impl Harness {
         }
         crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
         layout::write(&self.layout);
+        self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
+    }
+
+    /// Save the live pane state onto the active session (Z2): open, kind,
+    /// and the Files preview/selection/expansion for the current project.
+    /// Called on every user change while a session is active — toggle,
+    /// show, close, preview, select, expand/collapse, the matching `--steps`
+    /// verbs. With no session active (home/empty state) this is a no-op and
+    /// today's global `layout.json` behaviour stands. `right_width` stays
+    /// global and is never saved here.
+    pub(crate) fn save_right_for_active(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active.clone() else { return };
+        let session_id = view.read(cx).session_id.clone();
+        let (files_preview, files_selected, files_expanded) = match self.right_project() {
+            Some((root, _)) => {
+                let preview = self.right_cache.preview_for(&root).map(|preview| preview.path.clone());
+                let selected = self.right_cache.selected_for(&root);
+                let mut expanded: Vec<String> =
+                    self.right_cache.expanded_for(&root).into_iter().collect();
+                expanded.sort();
+                (preview, selected, expanded)
+            }
+            None => (None, None, Vec::new()),
+        };
+        let state = crate::sessions::RightState {
+            open: self.layout.right_open,
+            kind: layout::right_kind(&self.layout),
+            files_preview,
+            files_selected,
+            files_expanded,
+        };
+        self.set_override(&session_id, |meta| meta.right = Some(state), cx);
+    }
+
+    /// Restore the live pane state from `session_id`'s stored [`RightState`]
+    /// (Z2): what a session view's activation calls, so every switch — click,
+    /// resume, reopen, provider reopen, handoff landing, launch restore —
+    /// shows the pane exactly as that session left it. A session with no
+    /// stored state shows the pane closed, as does a brand-new session. The
+    /// Files preview/selection/expansion restore onto the current project
+    /// root (the tree listing/diff/git caches stay per root), and the pane's
+    /// data refreshes. Flipping open/closed arms [`Self::right_snap`] so the
+    /// next frame lands with no animation; user toggles never arm it.
+    pub(crate) fn restore_right_for_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
+        let open = stored.as_ref().is_some_and(|state| state.open);
+        if self.layout.right_open != open {
+            self.layout.right_open = open;
+            self.right_snap = true;
+        }
+        if let Some(state) = &stored {
+            self.layout.right_kind = Some(state.kind);
+        }
+        if let Some((root, _)) = self.right_project() {
+            match &stored {
+                Some(state) => {
+                    let expanded: std::collections::HashSet<String> =
+                        state.files_expanded.iter().cloned().collect();
+                    if expanded.is_empty() {
+                        self.right_cache.expanded.remove(&root);
+                    } else {
+                        self.right_cache.expanded.insert(root.clone(), expanded);
+                    }
+                    match &state.files_selected {
+                        Some(selected) => {
+                            self.right_cache.selected.insert(root.clone(), selected.clone());
+                        }
+                        None => {
+                            self.right_cache.selected.remove(&root);
+                        }
+                    }
+                    match &state.files_preview {
+                        Some(preview) => {
+                            let preview = preview.clone();
+                            self.begin_file_preview_for(&root, &preview, cx);
+                        }
+                        None => {
+                            crate::right::close_file_preview(&mut self.right_cache, &root);
+                        }
+                    }
+                }
+                None => {
+                    self.right_cache.expanded.remove(&root);
+                    self.right_cache.selected.remove(&root);
+                    crate::right::close_file_preview(&mut self.right_cache, &root);
+                }
+            }
+        }
+        self.refresh_right_now(cx);
     }
 
     /// How often the open pane re-reads git and the filesystem while it sits
@@ -3372,7 +3474,7 @@ impl Render for Harness {
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
-                .resizing(self.resize.active || self.right_resize.active)
+                .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
                 .traffic_lights(false)
                 .sidebar_open(self.sidebar_open)
                 // The header row stands still while the pane collapses: the
@@ -4077,6 +4179,146 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).layout.right_kind),
             Some(crate::layout::RightKind::Diff)
         );
+        restore_state(state);
+    }
+
+    /// Z2: the right pane belongs to each session and a switch restores it
+    /// without animating. A shows Diff while B shows Browser; every switch
+    /// restores the shown session's pane (B first shows it closed); a
+    /// restart restores from the store; the restore arms `right_snap` for
+    /// exactly one frame while user toggles never arm it; a new session
+    /// starts closed; Files previews are per session too.
+    #[gpui::test]
+    fn the_right_pane_is_per_session_and_restores_without_animating(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use gpui::prelude::*;
+        let state = hermetic_state("right-per-session");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        // The shell (and its snap-consuming frame) only renders signed in.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        std::fs::write(state.2.join("Cargo.toml"), "[package]\n").expect("preview fixture");
+        // Small helpers as macros: closures would all borrow `vc` mutably
+        // and refuse to coexist.
+        macro_rules! open_session {
+            ($id:expr) => {
+                vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume($id.to_owned(), window, cx)))
+            };
+        }
+        macro_rules! show {
+            ($kind:expr) => {
+                vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right($kind, cx)))
+            };
+        }
+        macro_rules! pane {
+            () => {
+                vc.update(|_, cx| {
+                    let h = baaz.read(cx);
+                    (h.layout.right_open, h.layout.right_kind, h.right_snap)
+                })
+            };
+        }
+        macro_rules! draw {
+            () => {
+                vc.draw(
+                    gpui::point(gpui::px(0.), gpui::px(0.)),
+                    gpui::size(gpui::px(1440.), gpui::px(900.)),
+                    |_, _| baaz.clone().into_any_element(),
+                )
+            };
+        }
+        // Session A shows Diff; a user change never arms the snap.
+        open_session!("sess-a");
+        show!(crate::layout::RightKind::Diff);
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        // Switching to B (no stored state) closes the pane, snapped — and
+        // one frame consumes the snap.
+        open_session!("sess-b");
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Diff), true));
+        draw!();
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
+        // Browser in B; a user change still does not snap.
+        show!(crate::layout::RightKind::Browser);
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
+        // Back to A: Diff again — open throughout, so no snap. Back to B:
+        // Browser again, no snap either.
+        open_session!("sess-a");
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        open_session!("sess-b");
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
+        draw!();
+        // Closed to open snaps too: close in B, then return to A.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), false));
+        open_session!("sess-a");
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), true));
+        draw!();
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
+        // A user toggle after the snap is consumed never re-arms it.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        // A restore arms the snap; a user toggle BEFORE any frame consumes it
+        // must still animate (review finding): the toggle disarms it.
+        open_session!("sess-b");
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), true));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a toggle before the frame still animates");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        open_session!("sess-a");
+        draw!();
+        // Restart: the store carries A home as Diff.
+        let disk = crate::sessions::read();
+        assert_eq!(
+            disk.get("sess-a").and_then(|meta| meta.right.clone()),
+            Some(crate::sessions::RightState {
+                open: true,
+                kind: crate::layout::RightKind::Diff,
+                files_preview: None,
+                files_selected: None,
+                files_expanded: Vec::new(),
+            })
+        );
+        let baaz2 = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
+        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Diff after restart");
+        assert_eq!(
+            vc.update(|_, cx| baaz2.read(cx).layout.right_kind),
+            Some(crate::layout::RightKind::Diff)
+        );
+        // A brand-new session starts closed.
+        vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-c".to_owned(), window, cx)));
+        assert!(!vc.update(|_, cx| baaz2.read(cx).layout.right_open), "a new session starts closed");
+        // Files previews are per session: A previews Cargo.toml, B nothing.
+        open_session!("sess-a");
+        show!(crate::layout::RightKind::Files);
+        let root =
+            vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root).expect("a project"));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.begin_file_preview_for(&root, "Cargo.toml", cx)));
+        macro_rules! previewed {
+            () => {
+                vc.update(|_, cx| {
+                    baaz.read(cx).right_cache.preview_for(&root).map(|preview| preview.path.clone())
+                })
+            };
+        }
+        assert_eq!(previewed!().as_deref(), Some("Cargo.toml"));
+        open_session!("sess-b");
+        assert_eq!(previewed!(), None, "B previews nothing");
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), true));
+        open_session!("sess-a");
+        assert_eq!(previewed!().as_deref(), Some("Cargo.toml"), "A previews Cargo.toml again");
         restore_state(state);
     }
 

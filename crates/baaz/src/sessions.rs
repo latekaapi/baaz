@@ -24,6 +24,32 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::RightKind;
+
+/// The right pane as one session left it: whether it stood open, on which
+/// kind, and the Files sub-state (open preview, selection, expansion) for
+/// that session. A session with no stored state shows the pane closed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RightState {
+    /// Whether the pane stood open. Closed by default: the pane is asked
+    /// for, never assumed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open: bool,
+    /// Which kind the pane showed. Files when nothing was ever stored.
+    #[serde(default)]
+    pub kind: RightKind,
+    /// The tree id of the open Files preview, if one stood open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_preview: Option<String>,
+    /// The last selected file id, kept when the preview closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_selected: Option<String>,
+    /// The directory ids standing open in the Files tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_expanded: Vec<String>,
+}
+
 /// Baaz's own facts about one session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +137,10 @@ pub struct SessionMeta {
     /// title, so the chain keeps one title across providers and restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_title: Option<String>,
+    /// The right pane as this session left it (Z2): open, kind, and the
+    /// Files preview/selection/expansion. `None` shows the pane closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<RightState>,
 }
 
 impl SessionMeta {
@@ -133,6 +163,7 @@ impl SessionMeta {
             && self.handoff_from.is_none()
             && self.handoff_from_provider.is_none()
             && self.handoff_title.is_none()
+            && self.right.is_none()
     }
 }
 
@@ -249,6 +280,34 @@ mod tests {
         // Old files without the fields still read.
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
         assert!(!old.pinned && !old.archived && old.last_summary.is_none() && old.project.is_none());
+    }
+
+    #[test]
+    fn the_right_pane_state_round_trips_as_camel_case() {
+        let meta = SessionMeta {
+            right: Some(RightState {
+                open: true,
+                kind: crate::layout::RightKind::Diff,
+                files_preview: Some("Cargo.toml".into()),
+                files_selected: Some("Cargo.toml".into()),
+                files_expanded: vec!["src".into()],
+            }),
+            ..SessionMeta::default()
+        };
+        assert!(!meta.is_empty(), "a stored pane keeps its entry");
+        let text = serde_json::to_string(&meta).unwrap();
+        assert!(text.contains("\"right\":{"));
+        assert!(text.contains("\"open\":true"));
+        assert!(text.contains("\"kind\":\"diff\""));
+        assert!(text.contains("\"filesPreview\":\"Cargo.toml\""));
+        assert!(text.contains("\"filesSelected\":\"Cargo.toml\""));
+        assert!(text.contains("\"filesExpanded\":[\"src\"]"));
+        let back: SessionMeta = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, meta);
+        // Old files without the pane still read, showing the pane closed.
+        let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
+        assert!(old.right.is_none());
+        assert!(SessionMeta::default().is_empty());
     }
 
     #[test]
