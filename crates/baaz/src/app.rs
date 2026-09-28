@@ -682,6 +682,16 @@ pub struct Harness {
     sessions_list_stale: bool,
     /// Window preferences: the sidebar grouping, closed groups, search scope.
     pub(crate) layout: layout::Layout,
+    /// The Settings Shortcuts section's live rows, re-read when the dialog
+    /// opens and after every shortcut edit. The dialog builds from state
+    /// every frame, and a file read per frame is not state.
+    pub(crate) shortcuts_cache: Vec<crate::keymap::EffectiveBinding>,
+    /// Which Shortcuts row is capturing the next keystroke, by row id. The
+    /// dialog owns no state of its own; exactly one row arms at a time.
+    pub(crate) recording_shortcut: Option<String>,
+    /// The last refused write per Shortcuts row, by row id: shown as the
+    /// row's detail until the next edit on that row.
+    pub(crate) shortcut_errors: HashMap<String, String>,
     /// The terminal tabs behind the dock, keyed by project root (D43).
     pub(crate) terminal_host: Entity<TerminalHost>,
     /// The agent's seven tools over the unix socket (D46): sessions the
@@ -995,6 +1005,9 @@ impl Harness {
             sessions_list_in_flight: false,
             sessions_list_stale: false,
             layout: layout::read(),
+            shortcuts_cache: crate::keymap::effective_bindings(),
+            recording_shortcut: None,
+            shortcut_errors: HashMap::new(),
             terminal_host,
             terminal_service,
             terminal_focus: cx.focus_handle(),
@@ -4055,5 +4068,181 @@ mod tests {
             None,
             "no docs anywhere and no exe to search from is None",
         );
+    }
+
+    /// The live action behind one `(keystroke, context)`: the last installed
+    /// row wins the tie, so the tail is what the key fires.
+    fn live_action_for(cx: &mut gpui::App, keystroke: &str, context: &str) -> Option<String> {
+        let map = cx.key_bindings();
+        let borrowed = map.borrow();
+        borrowed
+            .bindings()
+            .filter(|binding| {
+                let id = binding
+                    .keystrokes()
+                    .iter()
+                    .map(|stroke| {
+                        let modifiers = stroke.modifiers();
+                        format!(
+                            "{}{}{}{}{}",
+                            if modifiers.control { "ctrl-" } else { "" },
+                            if modifiers.alt { "alt-" } else { "" },
+                            if modifiers.platform { "cmd-" } else { "" },
+                            if modifiers.shift { "shift-" } else { "" },
+                            stroke.key(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let binding_context = binding.predicate().map(|predicate| predicate.to_string());
+                id == keystroke && binding_context.as_deref() == Some(context)
+            })
+            .last()
+            .map(|binding| binding.action().name().rsplit("::").next().unwrap_or("").to_string())
+    }
+
+    /// Point `BAAZ_STATE_DIR` at a fresh temp dir for a Shortcuts handler
+    /// test, with the deterministic flag off so the user file reads. The
+    /// caller restores both through `restore_state`'s return contract.
+    fn shortcut_state(name: &str) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf) {
+        let state = hermetic_state(name);
+        let old_det = std::env::var_os("BAAZ_DETERMINISTIC");
+        std::env::remove_var("BAAZ_DETERMINISTIC");
+        if let Some(value) = old_det {
+            std::env::set_var("BAAZ_SHORTCUTS_SAVED_DETERMINISTIC", value);
+        } else {
+            std::env::remove_var("BAAZ_SHORTCUTS_SAVED_DETERMINISTIC");
+        }
+        state
+    }
+
+    /// Undo [`shortcut_state`]: put the deterministic flag back, then the
+    /// state dir and the lock through [`restore_state`].
+    fn restore_shortcut_state(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf),
+    ) {
+        match std::env::var_os("BAAZ_SHORTCUTS_SAVED_DETERMINISTIC") {
+            Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+            None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+        }
+        std::env::remove_var("BAAZ_SHORTCUTS_SAVED_DETERMINISTIC");
+        restore_state(state);
+    }
+
+    /// A [`Harness`] on a hermetic state dir, through the same boot the
+    /// overlay tests use.
+    fn shortcut_harness<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (&'a mut gpui::VisualTestContext, gpui::Entity<Harness>) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(dir), crate::shot::CaptureToken::default(), window, cx))
+        });
+        (vc, baaz)
+    }
+
+    /// X5: setting a binding through the handler path writes the temp keymap
+    /// file, moves the effective binding, and reloads the live bindings so
+    /// the new key fires without a restart.
+    #[gpui::test]
+    fn settings_shortcut_set_rebinds_through_the_file_and_reloads(cx: &mut gpui::TestAppContext) {
+        let state = shortcut_state("shortcut-set");
+        let (vc, baaz) = shortcut_harness(cx, &state.2);
+        let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx);
+            });
+        });
+        let file = std::fs::read_to_string(state.2.join("keymap.json")).expect("the handler writes the file");
+        assert!(
+            file.contains("cmd-t") && file.contains("NewSession"),
+            "the file holds the rebind: {file}"
+        );
+        let current = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("rebound");
+        assert_eq!(current.keystroke, "cmd-t", "the effective binding moved");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).shortcut_errors.is_empty()),
+            "a good write hangs no error on the row"
+        );
+        assert_eq!(
+            cx.update(|cx| live_action_for(cx, "cmd-t", "AuiRoot")),
+            Some("NewSession".to_string()),
+            "the reloaded bindings fire the new key at once"
+        );
+        restore_shortcut_state(state);
+    }
+
+    /// X5: a reserved keystroke is refused through the handler path with its
+    /// reason on the row, and the file and the effective binding keep the old
+    /// key.
+    #[gpui::test]
+    fn settings_shortcut_reserved_set_is_refused_with_its_reason(cx: &mut gpui::TestAppContext) {
+        let state = shortcut_state("shortcut-reserved");
+        let (vc, baaz) = shortcut_harness(cx, &state.2);
+        let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-q".into()), cx);
+            });
+        });
+        let error = vc.update(|_, cx| baaz.read(cx).shortcut_errors.get(id.as_ref()).cloned());
+        let error = error.expect("the refusal hangs on the row");
+        assert!(
+            error.contains("reserved") && error.contains("Quits the app"),
+            "the reserved reason travels to the row: {error}"
+        );
+        let file = std::fs::read_to_string(state.2.join("keymap.json")).unwrap_or_default();
+        assert!(!file.contains("cmd-q"), "the refused write lands nowhere: {file}");
+        let current = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("still bound");
+        assert_eq!(current.keystroke, "cmd-n", "the old binding stands");
+        restore_shortcut_state(state);
+    }
+
+    /// X5: Clear through the handler path drops the rebind from the file and
+    /// the default fires again; Record arms the row and Cancel disarms it.
+    #[gpui::test]
+    fn settings_shortcut_clear_restores_the_default(cx: &mut gpui::TestAppContext) {
+        let state = shortcut_state("shortcut-clear");
+        let (vc, baaz) = shortcut_harness(cx, &state.2);
+        let id = gpui::SharedString::from(crate::settings::shortcut_row_id("NewSession", Some("AuiRoot")));
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Record, cx);
+            });
+        });
+        assert_eq!(
+            vc.update(|_, cx| baaz.read(cx).recording_shortcut.clone()),
+            Some(id.to_string()),
+            "Record arms the row"
+        );
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Cancel, cx);
+            });
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).recording_shortcut.clone()).is_none(),
+            "Cancel disarms it"
+        );
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Set("cmd-t".into()), cx);
+            });
+        });
+        let rebound = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("rebound");
+        assert_eq!(rebound.keystroke, "cmd-t");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.handle_shortcut(&id, &aui::overlay::ShortcutEdit::Clear, cx);
+            });
+        });
+        let file = std::fs::read_to_string(state.2.join("keymap.json")).unwrap_or_default();
+        assert!(!file.contains("cmd-t"), "Clear drops the rebind from the file: {file}");
+        let current = crate::keymap::effective_binding("NewSession", Some("AuiRoot")).expect("still bound");
+        assert_eq!(current.keystroke, "cmd-n", "Clear restores the default");
+        restore_shortcut_state(state);
     }
 }

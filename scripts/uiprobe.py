@@ -58,6 +58,12 @@ ENTRIES = {
     # that never scrolls to its selection went unseen: nothing ever drew it.
     "palette":              {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "palette"]},
+    # The Settings dialog's Shortcuts section: the live keymap rows grouped
+    # by category. `settings:` is a window-only steps verb, so it runs with
+    # no session open. No baseline yet — generate on main after merge, never
+    # to silence a finding.
+    "settings-shortcuts":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:shortcuts"]},
     # The composer's three pickers, each open over a fresh session. `new`
     # heads every script: offline no boot session opens, so a bare session
     # verb never becomes ready — and the head is what makes these start.

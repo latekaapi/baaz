@@ -9,8 +9,13 @@
 //! Extensibility: a later section is one more arm in
 //! [`crate::app::Harness::settings_sections`], one more id in
 //! [`apply_setting`], and one more row below.
+//!
+//! The Shortcuts section is the exception to that shape: its rows come from
+//! [`crate::keymap::effective_bindings`], cached on [`Harness`](crate::app::Harness)
+//! (`shortcuts_cache`) and rebuilt per frame, and its edits go through
+//! [`Harness::handle_shortcut`](crate::app::Harness::handle_shortcut).
 
-use aui::overlay::{popover_layer, settings_dialog, SettingsRow, SettingsSection};
+use aui::overlay::{popover_layer, settings_dialog, SettingsRow, SettingsSection, ShortcutEdit};
 use gpui::{prelude::*, AnyElement, Context, SharedString};
 
 use crate::app::Harness;
@@ -78,7 +83,13 @@ impl Harness {
                     on: self.layout.auto_summary,
                 },
             ],
-        }]
+        },
+        shortcuts_section(
+            &self.shortcuts_cache,
+            self.recording_shortcut.as_deref(),
+            &self.shortcut_errors,
+        ),
+        ]
     }
 
     /// Open the Settings dialog on `section`, closing whatever it covers.
@@ -87,12 +98,83 @@ impl Harness {
     /// plain modal go first, the way the archive dialog owns the overlay
     /// slot.
     pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
+        self.refresh_shortcuts();
+        self.recording_shortcut = None;
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = None;
             overlays.palette = None;
             overlays.dialog = None;
             overlays.settings = Some(Settings { section });
         });
+        cx.notify();
+    }
+
+    /// Re-read the Shortcuts cache, so the section shows the file as it is
+    /// now — after a write, or after a hand edit while the dialog stood open.
+    fn refresh_shortcuts(&mut self) {
+        self.shortcuts_cache = crate::keymap::effective_bindings();
+    }
+
+    /// A Shortcuts row edit, reported through the dialog's `on_shortcut`
+    /// intent. `Record` arms the row — exactly one arms at a time; `Set`
+    /// rebinds through [`crate::keymap::set_binding`] and reloads the live
+    /// bindings, so the new key fires without a restart; `Clear` restores
+    /// the default through [`crate::keymap::clear_binding`] and reloads;
+    /// `Cancel` disarms. A refused write keeps the old binding and hangs
+    /// the error text on the row's detail.
+    pub(crate) fn handle_shortcut(&mut self, id: &SharedString, edit: &ShortcutEdit, cx: &mut Context<Self>) {
+        match edit {
+            ShortcutEdit::Record => {
+                if shortcut_is_editable(id) {
+                    self.recording_shortcut = Some(id.to_string());
+                    self.shortcut_errors.remove(id.as_ref());
+                }
+            }
+            ShortcutEdit::Set(keystroke) => {
+                let accepted = parse_shortcut_row_id(id)
+                    .map(|(action, context)| match crate::keymap::set_binding(&action, keystroke, context.as_deref())
+                    {
+                        Ok(()) => {
+                            self.shortcut_errors.remove(id.as_ref());
+                            true
+                        }
+                        Err(error) => {
+                            self.shortcut_errors.insert(id.to_string(), error.to_string());
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                self.recording_shortcut = None;
+                if accepted {
+                    self.refresh_shortcuts();
+                    crate::app::bind_keys(cx);
+                }
+            }
+            ShortcutEdit::Clear => {
+                let accepted = parse_shortcut_row_id(id)
+                    .map(|(action, context)| match crate::keymap::clear_binding(&action, context.as_deref()) {
+                        Ok(()) => {
+                            self.shortcut_errors.remove(id.as_ref());
+                            true
+                        }
+                        Err(error) => {
+                            self.shortcut_errors.insert(id.to_string(), error.to_string());
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                self.recording_shortcut = None;
+                if accepted {
+                    self.refresh_shortcuts();
+                    crate::app::bind_keys(cx);
+                }
+            }
+            ShortcutEdit::Cancel => {
+                if self.recording_shortcut.as_deref() == Some(id.as_ref()) {
+                    self.recording_shortcut = None;
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -164,10 +246,17 @@ impl Harness {
             let (id, on) = event;
             this.flip_setting(id, *on, cx);
         });
+        let shortcut = cx.listener(
+            move |this: &mut Self, event: &(SharedString, ShortcutEdit), _, cx| {
+                let (id, edit) = event;
+                this.handle_shortcut(id, edit, cx);
+            },
+        );
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
         let mut card = settings_dialog("settings", sections, selected)
             .on_select_section(move |i, w, cx| select(&i, w, cx))
             .on_switch(move |id, on, w, cx| flip(&(id.clone(), on), w, cx))
+            .on_shortcut(move |id, edit, w, cx| shortcut(&(id.clone(), edit.clone()), w, cx))
             .on_dismiss(move |w, cx| dismiss(&(), w, cx));
         if self.still() {
             card = card.at_rest();
@@ -183,6 +272,95 @@ pub(crate) fn settings_section_index(sections: &[SettingsSection], id: &str) -> 
         return 0;
     }
     sections.iter().position(|s| s.id.as_ref() == id).unwrap_or(0)
+}
+
+/// A Shortcuts row's stable id: the action and its context, joined on a
+/// separator neither may contain, so [`parse_shortcut_row_id`] recovers both
+/// for [`Harness::handle_shortcut`](crate::app::Harness::handle_shortcut).
+pub(crate) fn shortcut_row_id(action: &str, context: Option<&str>) -> String {
+    format!("{action}\u{1f}{}", context.unwrap_or(""))
+}
+
+/// The `(action, context)` a [`shortcut_row_id`] names. `None` is a corrupt
+/// id, which the handler ignores rather than writing.
+pub(crate) fn parse_shortcut_row_id(id: &str) -> Option<(String, Option<String>)> {
+    let (action, context) = id.split_once('\u{1f}')?;
+    if action.is_empty() {
+        return None;
+    }
+    Some((
+        action.to_string(),
+        if context.is_empty() {
+            None
+        } else {
+            Some(context.to_string())
+        },
+    ))
+}
+
+/// Whether the row may arm: it names a live binding that is not reserved.
+/// The dialog never reports `Record` for a reserved row; this keeps a
+/// scripted one honest too.
+fn shortcut_is_editable(id: &str) -> bool {
+    parse_shortcut_row_id(id).is_some_and(|(action, context)| {
+        crate::keymap::effective_binding(&action, context.as_deref()).is_some_and(|binding| binding.editable)
+    })
+}
+
+/// The Settings Shortcuts section: one [`SettingsRow::Shortcut`] per live
+/// binding, under a caps heading per keymap category, in table order — so a
+/// rebound row stays beside its siblings instead of sinking to the end of
+/// the effective list. The row label is the binding's label; the detail is
+/// the last refusal on that row, else the reserved reason, else the context
+/// when off-global. Pure, so tests drive it without a window.
+pub(crate) fn shortcuts_section(
+    bindings: &[crate::keymap::EffectiveBinding],
+    recording: Option<&str>,
+    errors: &std::collections::HashMap<String, String>,
+) -> SettingsSection {
+    let mut ordered: Vec<&crate::keymap::EffectiveBinding> = bindings.iter().collect();
+    ordered.sort_by_key(|binding| {
+        let category_at = crate::keymap::KEYMAP
+            .iter()
+            .position(|row| row.category == binding.category)
+            .unwrap_or(usize::MAX);
+        let action_at = crate::keymap::KEYMAP
+            .iter()
+            .position(|row| row.action == binding.action)
+            .unwrap_or(usize::MAX);
+        (category_at, action_at)
+    });
+    let mut rows = Vec::new();
+    let mut last_category: Option<&str> = None;
+    for binding in ordered {
+        if last_category != Some(binding.category.as_str()) {
+            rows.push(SettingsRow::Heading {
+                text: SharedString::from(binding.category.clone()),
+            });
+            last_category = Some(binding.category.as_str());
+        }
+        let id = shortcut_row_id(&binding.action, binding.context.as_deref());
+        let detail = if let Some(error) = errors.get(&id) {
+            Some(SharedString::from(error.clone()))
+        } else if !binding.editable {
+            binding.reserved_reason.clone().map(SharedString::from)
+        } else {
+            binding.context.clone().map(SharedString::from)
+        };
+        rows.push(SettingsRow::Shortcut {
+            id: SharedString::from(id.clone()),
+            label: SharedString::from(binding.label.clone()),
+            detail,
+            keystroke: Some(SharedString::from(binding.keystroke.clone())),
+            recording: recording == Some(id.as_str()),
+            editable: binding.editable,
+        });
+    }
+    SettingsSection {
+        id: SharedString::from("shortcuts"),
+        label: SharedString::from("Shortcuts"),
+        rows,
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +413,166 @@ mod tests {
         assert!(apply_setting(&mut layout, "auto_summary", false));
         assert!(!layout.auto_summary);
         assert!(!apply_setting(&mut layout, "nope", true));
+    }
+
+    /// A row id round-trips to the action and context the handler writes
+    /// with — and a corrupt id parses to nothing, which the handler ignores.
+    #[test]
+    fn a_shortcut_row_id_round_trips_action_and_context() {
+        assert_eq!(
+            parse_shortcut_row_id(&shortcut_row_id("NewSession", Some("AuiRoot"))),
+            Some(("NewSession".to_string(), Some("AuiRoot".to_string())))
+        );
+        assert_eq!(
+            parse_shortcut_row_id(&shortcut_row_id("OpenSettings", None)),
+            Some(("OpenSettings".to_string(), None))
+        );
+        assert_eq!(parse_shortcut_row_id("no-separator"), None);
+        assert_eq!(parse_shortcut_row_id("\u{1f}AuiRoot"), None);
+    }
+
+    /// Holds [`crate::store::test_env_lock`] while a test points
+    /// `BAAZ_STATE_DIR` at a fresh temp dir, restoring both after: the
+    /// variables are process-global, so two such tests at once would read
+    /// each other's state.
+    struct ShortcutEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        state_dir: Option<std::ffi::OsString>,
+        deterministic: Option<std::ffi::OsString>,
+    }
+
+    impl ShortcutEnv {
+        fn hold(name: &str) -> (Self, std::path::PathBuf) {
+            let env = Self {
+                _guard: crate::store::test_env_lock(),
+                state_dir: std::env::var_os("BAAZ_STATE_DIR"),
+                deterministic: std::env::var_os("BAAZ_DETERMINISTIC"),
+            };
+            std::env::remove_var("BAAZ_DETERMINISTIC");
+            let dir = std::env::temp_dir().join(format!("baaz-shortcuts-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("shortcuts test state dir");
+            std::env::set_var("BAAZ_STATE_DIR", &dir);
+            (env, dir)
+        }
+    }
+
+    impl Drop for ShortcutEnv {
+        fn drop(&mut self) {
+            match &self.state_dir {
+                Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+                None => std::env::remove_var("BAAZ_STATE_DIR"),
+            }
+            match &self.deterministic {
+                Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+                None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+            }
+        }
+    }
+
+    /// One [`SettingsRow::Shortcut`] per live binding, carrying its label:
+    /// the section lists every default binding and nothing else, under a
+    /// heading per category.
+    #[test]
+    fn the_shortcuts_section_lists_every_default_binding_with_its_label() {
+        let (_env, _dir) = ShortcutEnv::hold("section");
+        let bindings = crate::keymap::effective_bindings();
+        assert!(!bindings.is_empty(), "the defaults list something");
+        let section = shortcuts_section(&bindings, None, &std::collections::HashMap::new());
+        assert_eq!(section.id.as_ref(), "shortcuts");
+        let mut shortcuts = Vec::new();
+        let mut headings = Vec::new();
+        for row in &section.rows {
+            match row {
+                SettingsRow::Shortcut { id, label, keystroke, .. } => {
+                    shortcuts.push((id.to_string(), label.to_string(), keystroke.clone()));
+                }
+                SettingsRow::Heading { text } => headings.push(text.to_string()),
+                SettingsRow::Switch { .. } | SettingsRow::Note { .. } => {
+                    panic!("the Shortcuts section holds only shortcut rows and headings");
+                }
+            }
+        }
+        assert_eq!(
+            shortcuts.len(),
+            bindings.len(),
+            "one row per live binding, no more and no fewer"
+        );
+        for binding in &bindings {
+            let id = shortcut_row_id(&binding.action, binding.context.as_deref());
+            let (_, label, keystroke) = shortcuts
+                .iter()
+                .find(|(row_id, _, _)| row_id == &id)
+                .unwrap_or_else(|| panic!("no row for {} in {:?}", binding.action, shortcuts));
+            assert_eq!(label, &binding.label, "the row carries the binding's label");
+            assert_eq!(
+                keystroke.as_deref(),
+                Some(binding.keystroke.as_str()),
+                "the row shows the live keystroke"
+            );
+        }
+        let mut categories: Vec<&str> = Vec::new();
+        for binding in &bindings {
+            if !categories.contains(&binding.category.as_str()) {
+                categories.push(binding.category.as_str());
+            }
+        }
+        assert_eq!(headings, categories, "one heading per category, in first-seen order");
+    }
+
+    /// Reserved rows are read-only with their reason as detail; an
+    /// off-global row names its context; a global row has no detail; exactly
+    /// one recording row arms.
+    #[test]
+    fn shortcut_rows_mark_recording_reserved_and_context() {
+        let (_env, _dir) = ShortcutEnv::hold("rows");
+        let bindings = crate::keymap::effective_bindings();
+        let recording = shortcut_row_id("NewSession", Some("AuiRoot"));
+        let section = shortcuts_section(&bindings, Some(&recording), &std::collections::HashMap::new());
+        let mut saw_recording = 0;
+        for row in &section.rows {
+            if let SettingsRow::Shortcut { id, detail, recording: armed, editable, .. } = row {
+                if *armed {
+                    saw_recording += 1;
+                    assert_eq!(id.as_ref(), recording, "only the named row arms");
+                }
+                let parsed = parse_shortcut_row_id(id).expect("every row id parses");
+                let binding = bindings
+                    .iter()
+                    .find(|binding| {
+                        binding.action == parsed.0 && binding.context == parsed.1
+                    })
+                    .expect("every row names a live binding");
+                assert_eq!(*editable, binding.editable);
+                if !binding.editable {
+                    let reason = binding.reserved_reason.clone().expect("a reserved row says why");
+                    assert_eq!(detail.as_deref(), Some(reason.as_str()), "reserved detail is the reason");
+                } else if binding.action == "OpenSettings" {
+                    assert_eq!(detail, &None, "a global row has no detail");
+                } else if binding.action == "NewSession" {
+                    assert_eq!(detail.as_deref(), Some("AuiRoot"), "an off-global row names its context");
+                }
+            }
+        }
+        assert_eq!(saw_recording, 1, "exactly one row arms at a time");
+        let reserved = bindings.iter().find(|binding| !binding.editable).expect("a default is reserved");
+        assert!(!reserved.reserved_reason.clone().unwrap_or_default().is_empty());
+    }
+
+    /// A refusal hangs on the row's detail, over whatever it showed before.
+    #[test]
+    fn a_shortcut_error_becomes_the_row_detail() {
+        let (_env, _dir) = ShortcutEnv::hold("error");
+        let bindings = crate::keymap::effective_bindings();
+        let id = shortcut_row_id("NewSession", Some("AuiRoot"));
+        let mut errors = std::collections::HashMap::new();
+        errors.insert(id.clone(), "cmd-q is reserved".to_string());
+        let section = shortcuts_section(&bindings, None, &errors);
+        let detail = section.rows.iter().find_map(|row| match row {
+            SettingsRow::Shortcut { id: row_id, detail, .. } if row_id.as_ref() == id => detail.clone(),
+            _ => None,
+        });
+        assert_eq!(detail.as_deref(), Some("cmd-q is reserved"));
     }
 
     /// Off means no model call ever for that feature: the flipped layout
