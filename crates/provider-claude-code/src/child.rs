@@ -11,11 +11,10 @@
 use std::io::{BufReader, BufRead as _, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use crossbeam_channel::Sender;
 use provider::ProviderEvent;
 
 use crate::argv::SessionLaunch;
-use crate::fold::{step_line, ClaudeFold};
+use crate::controls::ControlHub;
 
 /// A running session child: stdin for turns, a pump thread for stdout.
 pub struct RunningChild {
@@ -27,15 +26,16 @@ pub struct RunningChild {
 impl RunningChild {
     /// Spawn `program` with `launch.argv` in `launch.cwd`, holding stdin
     /// open (a closed stdin is not the same as no stdin — doc §1) and
-    /// pumping stdout through the shared per-line fold path into `events`.
-    /// The fold is shared with the adapter (for `ReadAccount`) and locked
-    /// one line at a time, never for the whole stream.
+    /// pumping stdout through the shared ingest path
+    /// ([`ControlHub::ingest_line`], the same function the scripted-frame
+    /// tests drive) into `events`. The fold is shared with the adapter
+    /// (for `ReadAccount`) and locked one line at a time, never for the
+    /// whole stream.
     /// Blocking: run it on the background executor.
     pub fn spawn(
         program: &str,
         launch: &SessionLaunch,
-        fold: std::sync::Arc<std::sync::Mutex<ClaudeFold>>,
-        events: Sender<ProviderEvent>,
+        hub: &std::sync::Arc<ControlHub>,
     ) -> std::io::Result<Self> {
         let mut command = Command::new(program);
         command
@@ -49,17 +49,15 @@ impl RunningChild {
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
         let stdin = child.stdin.take().expect("stdin piped");
+        let hub = std::sync::Arc::clone(hub);
         let pump = std::thread::Builder::new()
             .name("provider-claude-code-pump".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
-                    let Ok(mut fold) = fold.lock() else { break };
-                    step_line(&mut fold, &line, &mut |event| {
-                        let _ = events.send(event);
-                    });
+                    hub.ingest_line(&line);
                 }
-                let _ = events.send(ProviderEvent::ConnectionLost {
+                let _ = hub.tx.send(ProviderEvent::ConnectionLost {
                     reason: "the agent process exited".into(),
                 });
             })

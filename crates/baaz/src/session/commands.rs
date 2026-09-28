@@ -1652,6 +1652,41 @@ mod tests {
         });
     }
 
+    /// Y1b, claude-code: the session runs `claude-opus-9[1m]`, which the
+    /// catalog omits. The effort menu offers the catalog's union with the
+    /// muted note — the same kind Codex carries — never "unavailable".
+    #[gpui::test]
+    fn claude_code_off_catalog_model_offers_the_union_with_a_note(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "claude-code", "s-claude-off-catalog");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+            });
+            // The session runs a model the catalog omits.
+            view.update(cx, |view, cx| view.set_model("claude-opus-9[1m]", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+                else {
+                    panic!("an off-catalog model still gets an effort list");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(
+                    ids,
+                    ["default", "Low", "Medium", "High", "Xhigh", "Max"],
+                    "the union of levels the catalog reports: {ids:?}"
+                );
+                assert_eq!(note, "Not in Claude Code's model list — Claude Code validates the level");
+            });
+            // The open menu counts the union, note included in no extra row.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
+            let rows = view.read(cx).menu_rows(cx);
+            assert_eq!(rows, 6, "Default plus the five union levels");
+        });
+    }
+
     /// W4c, claude-code: the effort menu lists Default plus the five levels
     /// the `--effort` launch flag accepts — the installed CLI's own list,
     /// not a guess — and picking one moves the chip at once.
