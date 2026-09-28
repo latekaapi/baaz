@@ -606,8 +606,13 @@ impl Harness {
     }
 
     /// Open a header/footer menu, replacing whatever is open. Clicking its
-    /// own button again closes it.
+    /// own button again closes it. Opening the account menu refreshes its
+    /// usage cards first (throttled): the popover renders from the live
+    /// statuses, so the refresh must land before this frame's render.
     pub(crate) fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        if kind == MenuKind::Account {
+            self.refresh_account_usage(cx);
+        }
         let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };

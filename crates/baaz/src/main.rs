@@ -35,6 +35,7 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod account_usage;
 mod app;
 mod attachments;
 mod auth;

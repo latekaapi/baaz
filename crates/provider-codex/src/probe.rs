@@ -75,7 +75,9 @@ pub fn parse_account_read(result: &Value) -> CodexAccount {
 /// One Codex usage window in the neutral shape the status service stores.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RateWindow {
-    /// e.g. `Primary · 7d`, labelled from `windowDurationMins`.
+    /// Labelled from `windowDurationMins` ([`provider::window_label`]):
+    /// `Weekly`, `Session · 5h`, … — the same words every lane's card
+    /// uses for the same window length.
     pub label: String,
     /// Fraction used, 0.0–1.0.
     pub used_fraction: f64,
@@ -83,24 +85,11 @@ pub struct RateWindow {
     pub resets_at: Option<i64>,
 }
 
-/// Name one `windowDurationMins`: 10080 reads `7d`, 60 reads `1h`. A
-/// week (10080) is a multiple of a day (1440), so one day-branch names
-/// every whole-day window — weekly, monthly (`30d`) and otherwise.
-fn duration_label(mins: u64) -> String {
-    if mins % 1440 == 0 {
-        format!("{}d", mins / 1440)
-    } else if mins % 60 == 0 {
-        format!("{}h", mins / 60)
-    } else {
-        format!("{mins}m")
-    }
-}
-
-fn decode_window(name: &str, window: &Value) -> Option<RateWindow> {
+fn decode_window(window: &Value) -> Option<RateWindow> {
     let mins = window.get("windowDurationMins").and_then(Value::as_u64)?;
     let used = window.get("usedPercent").and_then(Value::as_f64).unwrap_or(0.0);
     Some(RateWindow {
-        label: format!("{name} · {}", duration_label(mins)),
+        label: provider::window_label(mins),
         used_fraction: (used / 100.0).clamp(0.0, 1.0),
         resets_at: window.get("resetsAt").and_then(Value::as_i64),
     })
@@ -116,12 +105,12 @@ pub fn parse_rate_limit_windows(result: &Value) -> (Option<String>, Vec<RateWind
     let plan = text_field(limits, "planType");
     let mut windows = Vec::new();
     if let Some(primary) = limits.get("primary") {
-        if let Some(window) = decode_window("Primary", primary) {
+        if let Some(window) = decode_window(primary) {
             windows.push(window);
         }
     }
     if let Some(secondary) = limits.get("secondary") {
-        if let Some(window) = decode_window("Secondary", secondary) {
+        if let Some(window) = decode_window(secondary) {
             windows.push(window);
         }
     }
@@ -229,10 +218,10 @@ mod tests {
         let (plan, windows) = parse_rate_limit_windows(&result);
         assert_eq!(plan.as_deref(), Some("pro"));
         assert_eq!(windows.len(), 2);
-        assert!(windows[0].label.contains("7d"), "unexpected label {}", windows[0].label);
+        assert_eq!(windows[0].label, "Weekly", "a 10080-minute window is the weekly one");
         assert!((windows[0].used_fraction - 0.19).abs() < 1e-9);
         assert_eq!(windows[0].resets_at, Some(1790588038));
-        assert!(windows[1].label.contains('h'), "unexpected label {}", windows[1].label);
+        assert_eq!(windows[1].label, "1h", "an hour window reads as its duration");
     }
 
     #[test]
