@@ -298,7 +298,6 @@ mod tests {
 
     #[test]
     fn nothing_found_is_none() {
-        let empty: Vec<PathBuf> = Vec::new();
         assert_eq!(resolve_muse_program_with(None, &[], &[]), None);
         assert_eq!(
             resolve_muse_program_with(Some(Path::new("/no/such/place")), &[], &[]),
@@ -343,7 +342,7 @@ mod tests {
         let program = home_bin.join(MUSE_BINARY);
         // Program dir on `PATH`, existing fallback covered: no repair.
         let current = vec![home_bin.clone(), PathBuf::from("/usr/bin")];
-        assert!(!child_path_needs_repair(&program, &current, &[home_bin.clone()]));
+        assert!(!child_path_needs_repair(&program, &current, std::slice::from_ref(&home_bin)));
         // Program dir missing from `PATH`: repair.
         assert!(child_path_needs_repair(&program, &[PathBuf::from("/usr/bin")], &[]));
         // An existing fallback missing from `PATH`: repair.
@@ -383,7 +382,6 @@ mod tests {
 
     #[test]
     fn spawn_resolution_errors_where_it_looked() {
-        let empty: Vec<PathBuf> = Vec::new();
         let err = resolve_spawn_program(Path::new(MUSE_BINARY), &[], &[]).expect_err("nothing found");
         let text = err.to_string();
         assert!(
