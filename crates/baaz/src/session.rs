@@ -338,6 +338,9 @@ pub enum SessionEvent {
     },
     /// `/logout`.
     Logout,
+    /// "Enable" on a disabled-provider banner: the application owns the
+    /// Settings dialog.
+    OpenProviders,
     /// `/status` or `/usage`: the application owns the dialog stack.
     Status {
         /// The lines of the dialog body, already formatted.
@@ -1810,6 +1813,8 @@ pub enum BannerAction {
     RetryTurn(String),
     /// Re-run a user shell command that never left.
     RetryShell(String),
+    /// Open Settings → Providers (a session on a disabled provider).
+    OpenProviders,
 }
 
 

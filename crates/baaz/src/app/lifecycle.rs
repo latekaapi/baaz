@@ -2035,6 +2035,14 @@ impl Harness {
         // drops any finish that is no longer current.
         self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
         let epoch = self.provider_open_epoch;
+        // A disabled provider opens with no child: the scripted lane plus
+        // the quiet banner, like offline chrome — readable, resumable,
+        // and sending nothing anywhere.
+        if !crate::provider_status::provider_enabled(provider_id) {
+            self.pending_disabled_notice = Some(provider_id);
+            self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
+            return;
+        }
         // Scripted chrome (`--no-connect` / `--replay`): no child to spawn,
         // so the lane opens over a connected scripted provider — the same
         // stand-in `open_local_draft` uses for muse, and what lets
@@ -2224,6 +2232,13 @@ impl Harness {
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
         });
+        // A disabled open lands readable with the quiet banner instead of
+        // a live child: the view above rides the scripted lane, so there
+        // is no child to hang up and nothing was ever sent.
+        if self.pending_disabled_notice == Some(provider_id) {
+            self.pending_disabled_notice = None;
+            view.update(cx, |view, cx| view.show_disabled_notice(provider_id, cx));
+        }
         // Like the muse path: the session groups under the project it
         // started in, and the drafts map names it while it is unsent so a
         // repeated ⌘N reopens it instead of spawning another child.
@@ -2480,10 +2495,17 @@ impl Harness {
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
+        // A disabled provider reopens with no child either: the scripted
+        // resume below replays the stored transcript read-only, and the
+        // landing view wears the quiet banner.
+        let disabled = !crate::provider_status::provider_enabled(provider_id);
+        if disabled {
+            self.pending_disabled_notice = Some(provider_id);
+        }
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the reopen still goes
         // through `ResumeSession` so the failure is the honest one.
-        if self.client.is_none() {
+        if self.client.is_none() || disabled {
             use provider::ProviderAdapter as _;
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
@@ -3357,6 +3379,16 @@ impl Harness {
                 }));
             }
             SessionEvent::Logout => self.logout(cx),
+            // "Enable" on a disabled-provider banner: Settings on the
+            // Providers page, where the switch lives.
+            SessionEvent::OpenProviders => {
+                let sections = self.settings_sections();
+                let section = crate::settings::settings_section_index(
+                    &sections,
+                    crate::settings_providers::PROVIDERS_SECTION_ID,
+                );
+                self.open_settings(section, cx);
+            }
             SessionEvent::Status { detail } => {
                 // What the login is entitled to belongs at the top of
                 // `/status` and `/usage`: it is the first thing that decides
