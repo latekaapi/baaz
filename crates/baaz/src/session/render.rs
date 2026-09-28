@@ -1525,6 +1525,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     pub(super) fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let message = self.banner.clone()?;
         let label = match self.banner_action {
+            Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(_) => "Retry",
             None => "Dismiss",
         };
@@ -1910,7 +1911,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
         // The chip wears the session's own provider mark: a Codex session
         // never shows the Muse "M".
-        let mut element = composer("composer", &self.composer, self.provider_kind().icon(), self.model())
+        let mut element = composer("composer", &self.composer, self.display_provider().icon(), self.model())
             .docked(true)
             .mode(self.mode_label())
             .effort(crate::overlays::effort_label(self.effort))
@@ -1946,6 +1947,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // `performance-8`).
             .can_send(
                 !blocked
+                    && !self.input_locked
                     && !self.attachments_pending()
                     && (!self.draft_empty || !self.images.is_empty() || !self.files.is_empty()),
             )
@@ -2029,23 +2031,46 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // never from a constant: a model change re-derives them.
                 // With no control the menu carries the typed reason row,
                 // the way the model picker does for an empty catalog.
-                let rows: Vec<PickerRow> = match self.effort_options() {
-                    crate::overlays::EffortOptions::Available(options) => options
-                        .iter()
-                        .map(|option| {
-                            PickerRow::new(
-                                crate::overlays::effort_row_id(option.effort),
-                                crate::overlays::effort_label(option.effort),
-                                option.detail.clone(),
-                            )
-                        })
-                        .collect(),
-                    crate::overlays::EffortOptions::Unavailable(reason) => vec![PickerRow::new(
-                        crate::overlays::EFFORT_UNAVAILABLE_ROW.to_owned(),
-                        "Effort unavailable".to_owned(),
-                        reason,
-                    )],
-                };
+                let listed = self.effort_options();
+                let mut rows: Vec<PickerRow> = listed
+                    .options()
+                    .map(|options| {
+                        options
+                            .iter()
+                            .map(|option| {
+                                PickerRow::new(
+                                    crate::overlays::effort_row_id(option.effort),
+                                    crate::overlays::effort_label(option.effort),
+                                    option.detail.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    if let crate::overlays::EffortOptions::Unavailable(reason) = &listed {
+                        rows.push(PickerRow::new(
+                            crate::overlays::EFFORT_UNAVAILABLE_ROW.to_owned(),
+                            "Effort unavailable".to_owned(),
+                            reason.clone(),
+                        ));
+                    }
+                }
+                // The off-catalog note rides the Default row's muted detail
+                // line: the rows stay the levels, and the note explains
+                // whose validation they carry.
+                if let Some(note) = listed.note() {
+                    if let Some(first) = rows.first_mut() {
+                        *first = PickerRow::new(
+                            crate::overlays::effort_row_id(None),
+                            crate::overlays::effort_label(None),
+                            format!(
+                                "{} — {note}",
+                                crate::overlays::effort_detail(None)
+                            ),
+                        );
+                    }
+                }
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     if id.as_ref() == crate::overlays::EFFORT_UNAVAILABLE_ROW {
                         if let crate::overlays::EffortOptions::Unavailable(reason) =
@@ -2056,8 +2081,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         this.close_menu(cx);
                         return;
                     }
-                    if let crate::overlays::EffortOptions::Available(options) = this.effort_options()
-                    {
+                    if let Some(options) = this.effort_options().options() {
                         if let Some(option) = options
                             .iter()
                             .find(|o| crate::overlays::effort_row_id(o.effort) == id.as_ref())
@@ -2120,10 +2144,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 /// rides as prose (the way an `Unavailable` capability explains itself)
 /// and every row still acts on click.
 fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
-    SessionView::provider_rows(current, has_turns)
-        .into_iter()
-        .map(|row| PickerRow::new(row.id, row.label, row.detail))
-        .collect()
+    SessionView::provider_rows_for(
+        current,
+        has_turns,
+        &crate::settings_providers::live_visible_provider_ids(),
+    )
+    .into_iter()
+    .map(|row| PickerRow::new(row.id, row.label, row.detail))
+    .collect()
 }
 
 /// Resolve a markdown link target to a filesystem path, without touching the

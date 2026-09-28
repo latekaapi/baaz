@@ -236,6 +236,7 @@ impl SessionView {
         match action {
             Some(BannerAction::RetryTurn(text)) => self.submit(text, cx),
             Some(BannerAction::RetryShell(command)) => self.run_user_shell(command, cx),
+            Some(BannerAction::OpenProviders) => cx.emit(SessionEvent::OpenProviders),
             None => cx.notify(),
         }
     }
@@ -246,6 +247,16 @@ impl SessionView {
         self.banner = Some(message.to_owned());
         self.banner_action = action;
         cx.notify();
+    }
+
+    /// A session opened on a disabled provider: readable, but no child
+    /// starts — the quiet banner with the way back instead.
+    pub fn show_disabled_notice(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        self.set_banner(
+            &crate::settings_providers::disabled_banner(provider),
+            Some(BannerAction::OpenProviders),
+            cx,
+        );
     }
 }
 

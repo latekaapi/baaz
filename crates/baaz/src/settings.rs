@@ -89,7 +89,15 @@ impl Harness {
             self.recording_shortcut.as_deref(),
             &self.shortcut_errors,
         ),
+        crate::settings_providers::providers_section(),
         ]
+    }
+
+    /// Open the Settings dialog on the Providers section, closing whatever
+    /// it covers: where the account menu's "Providers…" row lands.
+    pub(crate) fn open_providers(&mut self, cx: &mut Context<Self>) {
+        let section = settings_section_index(&self.settings_sections(), "providers");
+        self.open_settings(section, cx);
     }
 
     /// Open the Settings dialog on `section`, closing whatever it covers.
@@ -198,6 +206,10 @@ impl Harness {
     /// Unknown ids are ignored: a later section adds its own id to
     /// [`apply_setting`].
     pub(crate) fn flip_setting(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if let Some(provider) = crate::settings_providers::parse_enabled_row(id) {
+            self.flip_provider_enabled(provider, on, cx);
+            return;
+        }
         if !apply_setting(&mut self.layout, id, on) {
             return;
         }
@@ -233,6 +245,14 @@ impl Harness {
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let selected = self.overlays.read(cx).settings.as_ref()?.section;
         let sections = self.settings_sections();
+        // The Providers section renders its own page of provider cards:
+        // the library dialog only takes `SettingsRow`s, so the rail row
+        // opens this sheet instead (see `settings_providers`).
+        if sections.get(selected).is_some_and(|section| {
+            section.id.as_ref() == crate::settings_providers::PROVIDERS_SECTION_ID
+        }) {
+            return Some(self.render_providers_page(cx));
+        }
         let select = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
             let index = *index;
             this.overlays.update(cx, |overlays, _| {

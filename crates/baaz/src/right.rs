@@ -3,14 +3,17 @@
 //! [`render`] dispatches on [`RightKind`](crate::layout::RightKind) to one
 //! builder per pane. It never touches a subprocess or the filesystem: it draws
 //! whatever [`RightCache`] holds, and an empty cache draws the pane's loading
-//! state. The reads — a one-level directory walk, a handful of read-only `git`
-//! invocations each with a timeout — happen in [`read_snapshot`], which the
-//! [`Harness`](crate::app::Harness) refresh path runs on a background task and
-//! applies with an update + notify. Every action button is inert by owner
-//! decision and says so through [`inert`], except the file tree's Refresh,
-//! which asks for a real re-read through [`refresh_files`].
+//! state. The reads — an expansion-aware directory walk, a handful of
+//! read-only `git` invocations each with a timeout — happen in
+//! [`read_snapshot`], which the [`Harness`](crate::app::Harness) refresh path
+//! runs on a background task and applies with an update + notify. The file
+//! tree's Refresh, Toggle and Select are wired (re-read, expand, preview);
+//! a previewed text file's bytes arrive on a second background task through
+//! [`complete_file_preview`]. Every other action button is inert by owner
+//! decision and says so through [`inert`].
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -18,14 +21,20 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use aui::data::button;
+use aui::transcript::code_block;
 use aui::workbench::{
-    browser_nav, diff_review, file_tree, git_changes, pr_form, BrowserAction, DiffReviewAction, DiffScope,
-    DiffView, FileNode, FileTreeAction, GitAction, PrAction, PrDescription, ReviewFile,
+    browser_nav, diff_review, doc_pane, file_card, file_tree, git_changes, pr_form, ArtifactKind,
+    BrowserAction, DiffReviewAction, DiffScope, DiffView, DocBlock, DocPage, FileNode, FileTreeAction,
+    GitAction, PrAction, PrDescription, ReviewFile,
 };
 use aui_icons::FileType;
 use aui_protocol::{ChangeKind, Diff, DiffKind, DiffLine, FileChange, Hunk};
-use gpui::{div, prelude::*, px, AnyElement, App, Context, ElementId, SharedString, WeakEntity, Window};
-use gpui_kit::base::v_flex;
+use gpui::{
+    div, prelude::*, px, AnyElement, App, Context, ElementId, ScrollHandle, SharedString, WeakEntity,
+    Window,
+};
+use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::layout::RightKind;
@@ -41,6 +50,12 @@ pub(crate) const DIFF_LINES_PER_FILE_CAP: usize = 500;
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Directory names never walked into, so a naive walk stays small.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
+/// A preview reads at most this much: anything larger gets the summary card
+/// with Open / Reveal instead of its bytes.
+pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
+/// How many markdown blocks the `.md` preview builds before stopping: a
+/// 1 MB note must not turn into ten thousand elements.
+const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
 /// Render-path I/O probe: incremented by [`run_git`] and [`walk_root_capped`],
 /// the two blocking reads, and by nothing else. [`render`] must never move it;
@@ -87,6 +102,45 @@ pub(crate) struct Stamped<T> {
 /// instant it was read. [`render`] only reads this; the
 /// [`Harness`](crate::app::Harness) refresh path writes it from a background
 /// task.
+/// What the Files pane previews, and how.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PreviewContent {
+    /// Selected, and the background read has not landed yet.
+    Loading,
+    /// A non-markdown text file: its bytes in a `code_block`.
+    Text {
+        /// The `code_block` language label, from the extension.
+        language: String,
+        /// The file's UTF-8 bytes.
+        code: String,
+    },
+    /// A `.md` file: its bytes in a `doc_pane`.
+    Markdown {
+        /// The file's UTF-8 bytes.
+        text: String,
+    },
+    /// Anything without previewable bytes: binary, too large, unreadable.
+    Card {
+        /// The card's meta line, e.g. why there are no bytes.
+        meta: String,
+    },
+}
+
+/// One open file preview: which file, and what the pane shows for it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FilePreview {
+    /// The tree id: the root-relative path, e.g. `uiprobe.json`.
+    pub path: String,
+    /// The last segment, shown in the preview header.
+    pub name: String,
+    /// The language label for text previews, from the extension.
+    pub language: String,
+    /// The file's bytes, when small enough.
+    pub size: u64,
+    /// What the pane draws.
+    pub content: PreviewContent,
+}
+
 #[derive(Default)]
 pub(crate) struct RightCache {
     /// The last git status read, by root.
@@ -95,6 +149,18 @@ pub(crate) struct RightCache {
     pub diffs: Option<Stamped<ParsedDiffs>>,
     /// The last file-tree listing and whether the cap cut it, by root.
     pub files: Option<Stamped<(Vec<FileNode>, bool)>>,
+    /// Directory ids standing open, per project root: the session's
+    /// expansion state. Refresh re-reads around it — [`apply_snapshot`]
+    /// leaves it alone — so a re-read never collapses the tree.
+    pub expanded: HashMap<PathBuf, HashSet<String>>,
+    /// The last selected file id per root: the tree's selected marker,
+    /// kept when the preview closes.
+    pub selected: HashMap<PathBuf, String>,
+    /// The open preview per root, if the pane is previewing a file.
+    pub previews: HashMap<PathBuf, FilePreview>,
+    /// The pane's scroll handles, per root: the tree and the preview share
+    /// one handle, so Escape/back returns to the tree where it was.
+    files_scroll: RefCell<HashMap<PathBuf, ScrollHandle>>,
 }
 
 impl RightCache {
@@ -113,6 +179,28 @@ impl RightCache {
     /// fetched for it.
     pub(crate) fn files_for(&self, root: &Path) -> Option<(Vec<FileNode>, bool)> {
         self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.value.clone())
+    }
+
+    /// The directory ids standing open for `root`: empty when nothing was
+    /// ever toggled there.
+    pub(crate) fn expanded_for(&self, root: &Path) -> HashSet<String> {
+        self.expanded.get(root).cloned().unwrap_or_default()
+    }
+
+    /// The open preview for `root`, if the pane is previewing a file.
+    pub(crate) fn preview_for(&self, root: &Path) -> Option<FilePreview> {
+        self.previews.get(root).cloned()
+    }
+
+    /// The last selected file id for `root`, if any.
+    pub(crate) fn selected_for(&self, root: &Path) -> Option<String> {
+        self.selected.get(root).cloned()
+    }
+
+    /// The scroll handle the Files pane shares between its tree and its
+    /// preview for `root`, created on first use.
+    pub(crate) fn files_scroll_for(&self, root: &Path) -> ScrollHandle {
+        self.files_scroll.borrow_mut().entry(root.to_path_buf()).or_default().clone()
     }
 
     /// When the slot backing `kind` last landed for `root`, if it ever did.
@@ -159,9 +247,17 @@ pub(crate) struct RightSnapshot {
 /// [`Harness`](crate::app::Harness) refresh path runs it on the background
 /// executor (inline under `BAAZ_DETERMINISTIC`, where the git reads are
 /// fixtures and the walk is the only real I/O).
+#[cfg(test)]
 pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
+    read_snapshot_for(root, &HashSet::new())
+}
+
+/// [`read_snapshot`] with the session's expansion state: open directories
+/// walk one level deeper each, so a toggle survives the re-read that draws
+/// it. Blocking, like [`read_snapshot`].
+pub(crate) fn read_snapshot_for(root: &Path, expanded: &HashSet<String>) -> RightSnapshot {
     if crate::clock::deterministic() {
-        let (files, files_truncated) = walk_root_capped(root, FILE_WALK_CAP);
+        let (files, files_truncated) = walk_root_expanded(root, FILE_WALK_CAP, expanded);
         return RightSnapshot {
             root: root.to_path_buf(),
             git: Some(fixture_git_status()),
@@ -178,7 +274,7 @@ pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
         }
         _ => ParsedDiffs { diffs: Vec::new(), truncated: false },
     };
-    let (files, files_truncated) = walk_root_capped(root, FILE_WALK_CAP);
+    let (files, files_truncated) = walk_root_expanded(root, FILE_WALK_CAP, expanded);
     RightSnapshot { root: root.to_path_buf(), git, diffs, files, files_truncated }
 }
 
@@ -275,7 +371,11 @@ pub(crate) fn render(
                     "Loading files",
                     "The pane re-reads the project in the background and fills in on its own.",
                 ),
-                Some((nodes, truncated)) => files_pane_from(&nodes, truncated, &name, &notify, harness),
+                Some((nodes, truncated)) => {
+                    let selected = cache.selected_for(&root);
+                    let nodes = mark_selected(nodes, selected.as_deref());
+                    files_pane_from(&nodes, truncated, &name, &root, cache, &notify, harness)
+                }
             },
             None => empty_state(
                 "right-files-empty",
@@ -292,6 +392,74 @@ pub(crate) fn render(
 /// Silent when the window is already gone.
 pub(crate) fn refresh_files(harness: WeakEntity<Harness>, cx: &mut App) {
     let _ = harness.update(cx, |this, cx| this.refresh_right_now(cx));
+}
+
+impl Harness {
+    /// Flip the directory `id` open or closed for `root` and re-read, so
+    /// the toggle draws its children (or hides them) on the next frame.
+    pub(crate) fn toggle_files_dir(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        toggle_expanded(&mut self.right_cache, root, id);
+        self.refresh_right_now(cx);
+        cx.notify();
+    }
+
+    /// Start previewing `id` for `root` from a click or a step verb: the
+    /// selection and the loading (or card) state land at once, and a text
+    /// file's bytes follow on a background task. Never blocks the UI
+    /// thread on file content — only on one metadata call.
+    pub(crate) fn begin_file_preview_for(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        if !begin_file_preview(&mut self.right_cache, root, id) {
+            cx.notify();
+            return;
+        }
+        cx.notify();
+        let root = root.to_path_buf();
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let path = root.join(&id);
+            let bytes = cx.background_executor().spawn(async move { std::fs::read(path).ok() }).await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                complete_file_preview(&mut this.right_cache, &root, &id, bytes);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Close the open preview for `root`, returning to the tree with the
+    /// selected marker kept. What the preview's back control and Escape
+    /// call. Returns whether one was open.
+    pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        let closed = close_file_preview(&mut self.right_cache, root);
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+}
+
+/// Select `id` for `root` from the tree's action closure, which only holds
+/// `&mut App`: upgrade the weak [`Harness`] and run the preview through it.
+/// Silent when the window is already gone.
+pub(crate) fn select_file_preview(harness: WeakEntity<Harness>, root: PathBuf, id: String, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.begin_file_preview_for(&root, &id, cx));
+}
+
+/// Open `path` in its default app: a file in its editor or viewer, a
+/// folder in Finder. Only an existing path opens — never executed, never
+/// created — through the OS dispatch.
+fn open_path(path: &Path, cx: &mut App) {
+    if std::fs::metadata(path).is_ok() {
+        cx.open_with_system(path);
+    }
+}
+
+/// Select `path` in Finder: the card's "Reveal in Finder" control. A
+/// missing path does nothing.
+fn reveal_in_finder(path: &Path) {
+    if std::fs::metadata(path).is_ok() {
+        let _ = Command::new("open").arg("-R").arg(path).spawn();
+    }
 }
 
 /// The transient placeholder while the background re-read is still out: the
@@ -448,16 +616,29 @@ fn diff_action_name(action: &DiffReviewAction) -> String {
     }
 }
 
-/// One handler per component, each a thin call to [`inert`]. Factored as
-/// named functions (rather than inline closures) so tests can invoke the
-/// exact handler the pane wires up.
-///
-/// The live Files pane intercepts `Refresh` before it reaches this mapping
-/// and re-reads through [`refresh_files`] instead, so the `Refresh` arm below
-/// only fires in tests — it pins the shape the other three actions share.
-fn files_handler(notify: ToastSink) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
-    move |action, _window, cx| {
-        inert("Files", &files_action_name(action), &notify, cx);
+/// One handler per component, each a thin call to [`inert`] — except the
+/// Files pane's, which wires `Refresh`, `Toggle` and `Select` to the real
+/// views and leaves only `Search` inert. Factored as named functions (rather
+/// than inline closures) so tests can invoke the exact handler the pane
+/// wires up.
+fn files_handler(
+    notify: ToastSink,
+    harness: WeakEntity<Harness>,
+    root: PathBuf,
+) -> impl Fn(&FileTreeAction, &mut Window, &mut App) + 'static {
+    move |action, _window, cx| match action {
+        FileTreeAction::Refresh => refresh_files(harness.clone(), cx),
+        FileTreeAction::Toggle(id) => {
+            let id = id.to_string();
+            let root = root.clone();
+            let _ = harness.update(cx, |this, cx| this.toggle_files_dir(&root, &id, cx));
+        }
+        FileTreeAction::Select(id) => {
+            select_file_preview(harness.clone(), root.clone(), id.to_string(), cx);
+        }
+        FileTreeAction::Search => {
+            inert("Files", &files_action_name(action), &notify, cx);
+        }
     }
 }
 
@@ -708,39 +889,315 @@ fn file_type_for(name: &str) -> FileType {
     }
 }
 
-/// One level of `root`, sorted by name, skipping [`SKIP_DIRS`]. Directories
-/// arrive closed: expansion state lives in `Harness`, which this task may not
-/// touch, so expansion is not functional (see the report). Returns the nodes
-/// and whether the [`FILE_WALK_CAP`] cut the listing short.
+/// One level of `root`, sorted by name, skipping [`SKIP_DIRS`]. Returns the
+/// nodes and whether the [`FILE_WALK_CAP`] cut the listing short.
+#[cfg(test)]
 fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
+    walk_root_expanded(root, cap, &HashSet::new())
+}
+
+/// [`walk_root_capped`] with the session's expansion state: every id in
+/// `expanded` walks one level deeper, recursively, so an open directory
+/// shows its children under it. Ids are root-relative paths (`sub`,
+/// `sub/nested`); names stay the last segment. Directories absent from
+/// `expanded` arrive closed. Returns the nodes and whether `cap` cut the
+/// listing short.
+fn walk_root_expanded(root: &Path, cap: usize, expanded: &HashSet<String>) -> (Vec<FileNode>, bool) {
     note_io();
-    let mut dir = match std::fs::read_dir(root) {
-        Ok(dir) => dir.filter_map(Result::ok).collect::<Vec<_>>(),
-        Err(_) => return (Vec::new(), false),
-    };
-    dir.sort_by_key(|entry| entry.file_name());
     let mut nodes = Vec::new();
-    for entry in dir {
+    let mut truncated = false;
+    walk_level(root, root, 0, cap, expanded, &mut nodes, &mut truncated);
+    (nodes, truncated)
+}
+
+/// One level of `dir` appended to `nodes`: sorted by name, skipping
+/// [`SKIP_DIRS`] by name at every level — whatever the entry is on disk,
+/// so a worktree's file-shaped `.git` never lists. Stops appending once
+/// `nodes` reaches `cap` and reports it in `truncated`.
+fn walk_level(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    cap: usize,
+    expanded: &HashSet<String>,
+    nodes: &mut Vec<FileNode>,
+    truncated: &mut bool,
+) {
+    let mut entries = match std::fs::read_dir(dir) {
+        Ok(dir) => dir.filter_map(Result::ok).collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         if nodes.len() >= cap {
-            return (nodes, true);
+            *truncated = true;
+            return;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
-        // By name, whatever it is on disk. In a git WORKTREE `.git` is a
-        // file holding a `gitdir:` pointer, not a directory, so an
-        // `is_dir &&` guard here would list it — which is exactly what it
-        // did until a capture showed `.git` sitting at the top of the tree.
         if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
+        let id = dir
+            .strip_prefix(root)
+            .ok()
+            .map(|relative| relative.join(&name))
+            .and_then(|relative| relative.to_str().map(str::to_string))
+            .unwrap_or_else(|| name.clone());
+        let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
         if is_dir {
-            nodes.push(FileNode::dir(name.clone(), name, false).depth(0));
+            let open = expanded.contains(&id);
+            nodes.push(FileNode::dir(id.clone(), name, open).depth(depth));
+            if open {
+                walk_level(root, &dir.join(entry.file_name()), depth + 1, cap, expanded, nodes, truncated);
+                if nodes.len() >= cap {
+                    *truncated = true;
+                    return;
+                }
+            }
         } else {
             let kind = file_type_for(&name);
-            nodes.push(FileNode::file(name.clone(), name, kind).depth(0));
+            nodes.push(FileNode::file(id, name, kind).depth(depth));
         }
     }
-    (nodes, false)
+}
+
+/// Mark the node carrying `selected` (a root-relative id) selected: what
+/// the tree draws after the preview closes.
+fn mark_selected(nodes: Vec<FileNode>, selected: Option<&str>) -> Vec<FileNode> {
+    let Some(selected) = selected else {
+        return nodes;
+    };
+    nodes
+        .into_iter()
+        .map(|node| {
+            let marked = node.id.as_ref() == selected;
+            node.selected(marked)
+        })
+        .collect()
+}
+
+// ── the file preview ───────────────────────────────────────────────────
+
+/// The `code_block` language label for a file name, by extension.
+pub(crate) fn preview_language(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let extension = lower.rsplit('.').next().unwrap_or("");
+    // A leading-dot name (`.gitignore`) has no extension: `rsplit` returns
+    // the whole name, which must not read as a language.
+    let extension = if lower.len() > extension.len() + 1 { extension } else { "" };
+    match extension {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "json" => "json",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "sh" | "bash" | "zsh" => "bash",
+        "css" => "css",
+        "html" | "htm" => "html",
+        "xml" | "svg" => "xml",
+        "c" | "h" => "c",
+        "cpp" | "hpp" | "cc" => "cpp",
+        "go" => "go",
+        "rb" => "ruby",
+        "java" => "java",
+        "kt" => "kotlin",
+        "swift" => "swift",
+        "sql" => "sql",
+        "lua" => "lua",
+        "lock" => "lock",
+        "" => "text",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Whether `name` previews as a document rather than as code.
+fn is_markdown(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
+/// Whether `name` previews as an image card rather than as code.
+fn is_image(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".ico")
+}
+
+/// Flip the directory `id` open or closed for `root`. Returns the new
+/// state: `true` when the directory now stands open.
+pub(crate) fn toggle_expanded(cache: &mut RightCache, root: &Path, id: &str) -> bool {
+    let open = cache.expanded.entry(root.to_path_buf()).or_default();
+    if open.remove(id) {
+        false
+    } else {
+        open.insert(id.to_string());
+        true
+    }
+}
+
+/// Forget the open preview for `root`, keeping the selected marker so the
+/// tree still shows which file was previewed. Returns whether one was open.
+pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
+    cache.previews.remove(root).is_some()
+}
+
+/// Start previewing `id` for `root`: the tree's selected marker moves at
+/// once, and a text file under [`PREVIEW_MAX_BYTES`] opens in `Loading`
+/// for the background read to complete. A directory toggles instead and
+/// clears any preview; a missing, oversized or unreadable path opens the
+/// card straight away. Returns whether the caller must read the file off
+/// the render path and land it with [`complete_file_preview`].
+pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) -> bool {
+    let path = root.join(id);
+    let name = id.rsplit('/').next().unwrap_or(id).to_string();
+    let meta = std::fs::metadata(&path);
+    let Ok(meta) = meta else {
+        cache.selected.insert(root.to_path_buf(), id.to_string());
+        cache.previews.insert(
+            root.to_path_buf(),
+            FilePreview {
+                path: id.to_string(),
+                name,
+                language: preview_language(id),
+                size: 0,
+                content: PreviewContent::Card { meta: "The file is gone — it may have been moved or deleted.".into() },
+            },
+        );
+        return false;
+    };
+    if meta.is_dir() {
+        toggle_expanded(cache, root, id);
+        cache.previews.remove(root);
+        return false;
+    }
+    cache.selected.insert(root.to_path_buf(), id.to_string());
+    let size = meta.len();
+    if size > PREVIEW_MAX_BYTES {
+        cache.previews.insert(
+            root.to_path_buf(),
+            FilePreview {
+                path: id.to_string(),
+                name,
+                language: preview_language(id),
+                size,
+                content: PreviewContent::Card {
+                    meta: format!("{} — too large to preview", friendly_size(size)),
+                },
+            },
+        );
+        return false;
+    }
+    cache.previews.insert(
+        root.to_path_buf(),
+        FilePreview {
+            path: id.to_string(),
+            name,
+            language: preview_language(id),
+            size,
+            content: PreviewContent::Loading,
+        },
+    );
+    true
+}
+
+/// Land a background read started by [`begin_file_preview`]: `None` is a
+/// failed read, non-UTF-8 bytes are binary — both get the card. Stale
+/// landings (the selection moved on, or the preview closed) change
+/// nothing. Returns whether a preview was updated.
+pub(crate) fn complete_file_preview(
+    cache: &mut RightCache,
+    root: &Path,
+    id: &str,
+    bytes: Option<Vec<u8>>,
+) -> bool {
+    let Some(current) = cache.previews.get(root) else {
+        return false;
+    };
+    if current.path != id || current.content != PreviewContent::Loading {
+        return false;
+    }
+    let name = current.name.clone();
+    let language = current.language.clone();
+    let content = match bytes {
+        None => PreviewContent::Card { meta: "The file could not be read.".into() },
+        Some(bytes) if bytes.len() as u64 > PREVIEW_MAX_BYTES => PreviewContent::Card {
+            meta: format!("{} — too large to preview", friendly_size(bytes.len() as u64)),
+        },
+        Some(bytes) => match String::from_utf8(bytes) {
+            Ok(text) if is_markdown(&name) => PreviewContent::Markdown { text },
+            Ok(code) => PreviewContent::Text { language: language.clone(), code },
+            Err(_) => PreviewContent::Card { meta: format!("{} — a binary file", friendly_size(current.size)) },
+        },
+    };
+    cache.previews.insert(
+        root.to_path_buf(),
+        FilePreview { path: id.to_string(), name, language, size: current.size, content },
+    );
+    true
+}
+
+/// `1536` reads as `1.5 KB`: the card's meta line for sizes.
+fn friendly_size(size: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The `.md` bytes as document blocks: `#`-led lines become headings,
+/// blank-line-separated runs become paragraphs, capped at
+/// [`PREVIEW_MD_BLOCKS_CAP`] so a huge note stays a pane, not a freeze.
+fn markdown_blocks(text: &str) -> Vec<DocBlock> {
+    let mut blocks = Vec::new();
+    let mut paragraph = String::new();
+    let push_paragraph = |paragraph: &mut String, blocks: &mut Vec<DocBlock>| {
+        let trimmed = paragraph.trim();
+        if !trimmed.is_empty() && blocks.len() < PREVIEW_MD_BLOCKS_CAP {
+            blocks.push(DocBlock::text(trimmed.to_string()));
+        }
+        paragraph.clear();
+    };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            push_paragraph(&mut paragraph, &mut blocks);
+            continue;
+        }
+        let hashes = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+        if hashes > 0 && hashes <= 3 && trimmed[hashes..].starts_with(' ') {
+            push_paragraph(&mut paragraph, &mut blocks);
+            if blocks.len() < PREVIEW_MD_BLOCKS_CAP {
+                blocks.push(DocBlock::heading(hashes as u8, trimmed[hashes + 1..].trim().to_string()));
+            }
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push('\n');
+        }
+        paragraph.push_str(trimmed);
+    }
+    push_paragraph(&mut paragraph, &mut blocks);
+    if blocks.is_empty() {
+        blocks.push(DocBlock::text("(empty note)"));
+    }
+    blocks
 }
 
 // ── the unified-diff parser ──────────────────────────────────────────────
@@ -891,17 +1348,26 @@ fn parse_unified_diff(text: &str) -> ParsedDiffs {
 
 // ── the four panes ───────────────────────────────────────────────────
 
-/// The file tree, real: one level of the project root, already read by the
-/// refresh path. Header names the project's directory; the footer counts the
-/// nodes and names the cap. `Refresh` is the one wired action and re-reads
-/// through [`refresh_files`]; the rest stay inert through [`files_handler`].
+/// The file tree, real: one level of the project root plus a level per open
+/// directory, already read by the refresh path. Header names the project's
+/// directory; the footer counts the nodes and names the cap. `Refresh`
+/// re-reads through [`refresh_files`], `Toggle` flips expansion,
+/// `Select` previews the file — only `Search` stays inert through
+/// [`files_handler`]. While a file is selected the pane previews it instead
+/// of the tree, with a header carrying the file name, a back control and
+/// an Open control.
 fn files_pane_from(
     nodes: &[FileNode],
     truncated: bool,
     name: &str,
+    root: &Path,
+    cache: &RightCache,
     notify: &ToastSink,
     harness: WeakEntity<Harness>,
 ) -> AnyElement {
+    if let Some(preview) = cache.preview_for(root) {
+        return file_preview_pane(&preview, root, cache, harness);
+    }
     let count = nodes.len();
     let footer = if truncated {
         format!("{count} shown — capped at the first {FILE_WALK_CAP} entries")
@@ -910,7 +1376,7 @@ fn files_pane_from(
     } else {
         format!("{count} files and folders")
     };
-    let inert_handler = files_handler(notify.clone());
+    let handler = files_handler(notify.clone(), harness, root.to_path_buf());
     // Flush: these are panes and stacked panels, not cards floating on a
     // surface. Their own rounded border inside a column that already has
     // edges is what the owner saw as "extra borders and rounded corners".
@@ -918,19 +1384,125 @@ fn files_pane_from(
         .flush()
         .header(name)
         .footer(footer)
-        .on_action(move |action, window, cx| {
-            if matches!(action, FileTreeAction::Refresh) {
-                refresh_files(harness.clone(), cx);
-                return;
-            }
-            inert_handler(action, window, cx);
-        });
+        .on_action(move |action, window, cx| handler(action, window, cx));
+    let scroll = cache.files_scroll_for(root);
     v_flex()
         .id("right-files-pane")
         .role(gpui::Role::Group)
         .aria_label("Files")
         .size_full()
+        .overflow_y_scroll()
+        .track_scroll(&scroll)
         .child(tree)
+        .into_any_element()
+}
+
+/// The preview half of the Files pane: a header naming the file with a
+/// back control and an Open control, then the file itself — a `doc_pane`
+/// for `.md`, a `code_block` for other text, a `file_card` with Open and
+/// Reveal in Finder for binary or oversized files. Every control carries
+/// its role and label; no action here toasts.
+fn file_preview_pane(
+    preview: &FilePreview,
+    root: &Path,
+    cache: &RightCache,
+    harness: WeakEntity<Harness>,
+) -> AnyElement {
+    let path = root.join(&preview.path);
+    let back_harness = harness.clone();
+    let back_root = root.to_path_buf();
+    let open_target = path.clone();
+    let back = button("right-file-back", "Back")
+        .accessibility_label("Back to files")
+        .on_click(move |_, _, cx| {
+            let _ = back_harness.update(cx, |this, cx| {
+                this.close_file_preview_for(&back_root, cx);
+            });
+        });
+    let open = button("right-file-open", "Open")
+        .accessibility_label(format!("Open {} in its default app", preview.name))
+        .on_click(move |_, _, cx| open_path(&open_target, cx));
+    let header = h_flex()
+        .id("right-file-header")
+        .role(gpui::Role::Group)
+        .aria_label(format!("Previewing {}", preview.name))
+        .w_full()
+        .flex_none()
+        .items_center()
+        .gap(px(8.0))
+        .p(px(8.0))
+        .child(back)
+        .child(
+            div()
+                .id("right-file-name")
+                .role(gpui::Role::Label)
+                .aria_label(format!("Previewing {}", preview.name))
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .child(preview.name.clone()),
+        )
+        .child(open);
+    let body: AnyElement = match &preview.content {
+        PreviewContent::Loading => div()
+            .id("right-file-loading")
+            .role(gpui::Role::Label)
+            .aria_label(format!("Loading {}", preview.name))
+            .p(px(16.0))
+            .child(format!("Loading {}…", preview.name))
+            .into_any_element(),
+        PreviewContent::Text { language, code } => code_block(
+            "right-file-code",
+            preview.path.clone(),
+            code.clone(),
+        )
+        .language(language.clone())
+        .into_any_element(),
+        PreviewContent::Markdown { text } => {
+            let page = DocPage::new(
+                preview.name.clone(),
+                preview.path.clone(),
+                markdown_blocks(text),
+            );
+            doc_pane("right-file-doc", page).into_any_element()
+        }
+        PreviewContent::Card { meta } => {
+            let kind = if is_markdown(&preview.name) {
+                ArtifactKind::Note
+            } else if is_image(&preview.name) {
+                ArtifactKind::Image
+            } else if preview.language != "text" {
+                ArtifactKind::Code
+            } else {
+                ArtifactKind::Other
+            };
+            let open_target = path.clone();
+            let reveal_path = path.clone();
+            file_card("right-file-card", preview.name.clone())
+                .kind(kind)
+                .meta(meta.clone())
+                .action("open", "Open")
+                .action("reveal", "Reveal in Finder")
+                .on_action(move |action, _, cx| {
+                    if action.as_ref() == "open" {
+                        open_path(&open_target, cx);
+                    } else if action.as_ref() == "reveal" {
+                        reveal_in_finder(&reveal_path);
+                    }
+                })
+                .into_any_element()
+        }
+    };
+    let scroll = cache.files_scroll_for(root);
+    v_flex()
+        .id("right-files-pane")
+        .role(gpui::Role::Group)
+        .aria_label(format!("File preview: {}", preview.name))
+        .size_full()
+        .overflow_y_scroll()
+        .track_scroll(&scroll)
+        .child(header)
+        .child(body)
         .into_any_element()
 }
 
@@ -1219,15 +1791,232 @@ mod tests {
         assert_eq!(file_type_for("main.rs"), FileType::File);
     }
 
+    // ── the file preview ──
+
+    #[test]
+    fn preview_languages_come_from_the_extension() {
+        assert_eq!(preview_language("main.rs"), "rust");
+        assert_eq!(preview_language("probe.py"), "python");
+        assert_eq!(preview_language("app.tsx"), "tsx");
+        assert_eq!(preview_language("data.json"), "json");
+        assert_eq!(preview_language("note.md"), "markdown");
+        assert_eq!(preview_language("run.sh"), "bash");
+        assert_eq!(preview_language("Makefile"), "text");
+        assert_eq!(preview_language(".gitignore"), "text");
+    }
+
+    #[test]
+    fn selecting_a_text_file_holds_its_path_and_language() {
+        let root = temp_root("preview-text");
+        std::fs::write(root.join("hello.rs"), "fn main() {}\n").unwrap();
+        let mut cache = RightCache::default();
+        // The click lands the selection and the loading state at once and
+        // asks for the background read.
+        assert!(begin_file_preview(&mut cache, &root, "hello.rs"));
+        let preview = cache.preview_for(&root).expect("a preview must be open");
+        assert_eq!(preview.path, "hello.rs");
+        assert_eq!(preview.name, "hello.rs");
+        assert_eq!(preview.language, "rust");
+        assert_eq!(preview.content, PreviewContent::Loading);
+        assert_eq!(cache.selected_for(&root).as_deref(), Some("hello.rs"));
+        // The background read lands the bytes as text with the language.
+        let bytes = std::fs::read(root.join("hello.rs")).ok();
+        assert!(complete_file_preview(&mut cache, &root, "hello.rs", bytes));
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Text { language, code }
+                if language == "rust" && code.contains("fn main")),
+            "unexpected content: {:?}",
+            preview.content
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn selecting_a_markdown_file_holds_markdown() {
+        let root = temp_root("preview-md");
+        std::fs::write(root.join("note.md"), "# Title\n\nbody\n").unwrap();
+        let mut cache = RightCache::default();
+        assert!(begin_file_preview(&mut cache, &root, "note.md"));
+        let bytes = std::fs::read(root.join("note.md")).ok();
+        assert!(complete_file_preview(&mut cache, &root, "note.md", bytes));
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert_eq!(preview.language, "markdown");
+        assert!(
+            matches!(&preview.content, PreviewContent::Markdown { text } if text.contains("body")),
+            "unexpected content: {:?}",
+            preview.content
+        );
+        let blocks = markdown_blocks(match &preview.content {
+            PreviewContent::Markdown { text } => text,
+            other => panic!("expected markdown, got {other:?}"),
+        });
+        assert!(matches!(blocks[0], DocBlock::Heading { level: 1, .. }), "first block: {:?}", blocks[0]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_toggles_open_and_closed() {
+        let root = temp_root("preview-toggle");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("inner.txt"), "inner\n").unwrap();
+        let mut cache = RightCache::default();
+        // Closed: one level only.
+        let (nodes, _) = walk_root_expanded(&root, FILE_WALK_CAP, &cache.expanded_for(&root));
+        assert!(nodes.iter().all(|node| node.depth == 0));
+        assert!(!nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt"));
+        // Open: the child row arrives under its directory.
+        assert!(toggle_expanded(&mut cache, &root, "sub"));
+        let (nodes, _) = walk_root_expanded(&root, FILE_WALK_CAP, &cache.expanded_for(&root));
+        assert!(nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1));
+        assert!(nodes.iter().find(|node| node.id.as_ref() == "sub").is_some_and(|node| node.open == Some(true)));
+        // Closed again: back to one level.
+        assert!(!toggle_expanded(&mut cache, &root, "sub"));
+        let (nodes, _) = walk_root_expanded(&root, FILE_WALK_CAP, &cache.expanded_for(&root));
+        assert!(!nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_large_or_binary_file_gets_the_card() {
+        let root = temp_root("preview-card");
+        let mut cache = RightCache::default();
+        // Oversized: the card opens straight away, no background read.
+        let big = root.join("big.bin");
+        std::fs::write(&big, vec![b'x'; (PREVIEW_MAX_BYTES + 1) as usize]).unwrap();
+        assert!(!begin_file_preview(&mut cache, &root, "big.bin"));
+        let preview = cache.preview_for(&root).expect("a preview must be open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("too large")),
+            "unexpected content: {:?}",
+            preview.content
+        );
+        // Binary: small enough to read, but not UTF-8 — the landing cards it.
+        std::fs::write(root.join("blob"), [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]).unwrap();
+        assert!(begin_file_preview(&mut cache, &root, "blob"));
+        let bytes = std::fs::read(root.join("blob")).ok();
+        assert!(complete_file_preview(&mut cache, &root, "blob", bytes));
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("binary")),
+            "unexpected content: {:?}",
+            preview.content
+        );
+        // A failed read cards it too.
+        assert!(begin_file_preview(&mut cache, &root, "blob"));
+        assert!(complete_file_preview(&mut cache, &root, "blob", None));
+        assert!(matches!(
+            cache.preview_for(&root).map(|preview| preview.content),
+            Some(PreviewContent::Card { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn closing_a_preview_keeps_the_selected_marker() {
+        let root = temp_root("preview-close");
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let mut cache = RightCache::default();
+        assert!(begin_file_preview(&mut cache, &root, "a.txt"));
+        assert!(close_file_preview(&mut cache, &root));
+        assert!(cache.preview_for(&root).is_none(), "the preview must be gone");
+        assert!(!close_file_preview(&mut cache, &root), "closing twice reports nothing open");
+        // The tree still marks the row the preview showed.
+        let (nodes, _) = walk_root_capped(&root, FILE_WALK_CAP);
+        let nodes = mark_selected(nodes, cache.selected_for(&root).as_deref());
+        assert!(nodes.iter().any(|node| node.id.as_ref() == "a.txt" && node.selected));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_preview_landing_changes_nothing() {
+        let root = temp_root("preview-stale");
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        let mut cache = RightCache::default();
+        assert!(begin_file_preview(&mut cache, &root, "a.txt"));
+        // The selection moved on before the first read landed.
+        assert!(begin_file_preview(&mut cache, &root, "b.txt"));
+        assert!(!complete_file_preview(&mut cache, &root, "a.txt", Some(b"a\n".to_vec())));
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert_eq!(preview.path, "b.txt");
+        assert_eq!(preview.content, PreviewContent::Loading);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bootable [`crate::Args`] pointed at a hermetic state dir, mirroring
+    /// the app tests' own helper for the one handler test that needs a real
+    /// [`Harness`](crate::app::Harness).
+    fn harness_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        }
+    }
+
+    /// Point `BAAZ_STATE_DIR` at a fresh temp dir, restoring whatever was
+    /// there before. The caller restores with [`restore_harness_dir`].
+    fn hermetic_harness_dir(
+        name: &str,
+    ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-right-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    /// Undo [`hermetic_harness_dir`].
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_harness_dir(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
+    ) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
     // ── the inert handlers, invoked directly ──
 
     /// A [`ToastSink`] that records titles and bodies instead of toasting.
-    /// The four `*_actions_all_reach_inert` tests share one process-global
-    /// log ([`inert_log_store`]), and each clears it and then asserts an exact
+    /// The inert-action tests share one process-global log
+    /// ([`inert_log_store`]), and each clears it and then asserts an exact
     /// length. Run concurrently they see each other's entries: filtered to
-    /// just those four they failed every time, while the full suite passed on
-    /// lucky scheduling — which is how they shipped and how they later failed
-    /// a lane's gate for a change that had nothing to do with them.
+    /// just those tests they failed every time, while the full suite passed
+    /// on lucky scheduling — which is how they shipped and how they later
+    /// failed a lane's gate for a change that had nothing to do with them.
     ///
     /// Taking this lock for the whole of each test is what makes the exact
     /// length assertions mean anything.
@@ -1240,29 +2029,80 @@ mod tests {
         Rc::new(move |title, body, _| toasts.borrow_mut().push((title, body)))
     }
 
+    /// Select and Toggle no longer toast: they preview and expand through
+    /// the exact handler the pane wires up, on a hermetic [`Harness`].
+    /// Only Search stays inert.
     #[gpui::test]
-    fn files_actions_all_reach_inert(cx: &mut TestAppContext) {
+    fn files_select_and_toggle_act_instead_of_toasting(cx: &mut TestAppContext) {
         let _serial = inert_guard();
+        let state = hermetic_harness_dir("files-actions");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            use gpui::AppContext as _;
+            cx.new(|cx| {
+                Harness::new(
+                    harness_args(&state.2),
+                    crate::shot::CaptureToken::default(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        std::fs::write(state.2.join("note.md"), "# Note\n\nhello\n").unwrap();
+        std::fs::create_dir_all(state.2.join("sub")).unwrap();
+        std::fs::write(state.2.join("sub").join("inner.txt"), "inner\n").unwrap();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+        });
+        vc.run_until_parked();
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
         clear_inert_log();
         let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
         vc.update(|window, cx| {
-            let handle = files_handler(test_sink(toasts.clone()));
-            handle(&FileTreeAction::Select(SharedString::from("src/main.rs")), window, cx);
-            handle(&FileTreeAction::Toggle(SharedString::from("src")), window, cx);
+            let handle = files_handler(test_sink(toasts.clone()), baaz.downgrade(), root.clone());
+            handle(&FileTreeAction::Select(SharedString::from("note.md")), window, cx);
+            handle(&FileTreeAction::Toggle(SharedString::from("sub")), window, cx);
             handle(&FileTreeAction::Search, window, cx);
             handle(&FileTreeAction::Refresh, window, cx);
         });
+        vc.run_until_parked();
+        // Select opened the markdown preview (bytes land off the click),
+        // Toggle expanded the directory — neither toasted.
+        let preview = vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root));
+        let Some(preview) = preview else {
+            panic!("selecting note.md must open a preview");
+        };
+        assert_eq!(preview.path, "note.md");
+        assert!(
+            matches!(&preview.content, PreviewContent::Markdown { text } if text.contains("hello")),
+            "unexpected preview content: {:?}",
+            preview.content
+        );
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).right_cache.expanded_for(&root).contains("sub")),
+            "toggling sub must expand it"
+        );
+        // The re-read the toggle requested draws the child row.
+        let nodes = vc
+            .update(|_, cx| baaz.read(cx).right_cache.files_for(&root))
+            .expect("the refresh lands the listing")
+            .0;
+        assert!(
+            nodes.iter().any(|node| node.id.as_ref() == "sub/inner.txt" && node.depth == 1),
+            "an open directory shows its children: {:?}",
+            nodes.iter().map(|node| node.id.to_string()).collect::<Vec<_>>()
+        );
+        // Only Search reached the toast.
         let log = inert_log();
-        assert_eq!(log.len(), 4);
-        assert!(log[0].contains("Files") && log[0].contains("Select src/main.rs"), "unexpected: {}", log[0]);
-        assert!(log[1].contains("Toggle src"), "unexpected: {}", log[1]);
-        assert!(log[2].contains("Search"), "unexpected: {}", log[2]);
-        assert!(log[3].contains("Refresh"), "unexpected: {}", log[3]);
+        assert_eq!(log.len(), 1, "unexpected inert actions: {log:?}");
+        assert!(log[0].contains("Files") && log[0].contains("Search"), "unexpected: {}", log[0]);
         let toasts = toasts.borrow();
-        assert_eq!(toasts.len(), 4);
-        assert!(toasts.iter().all(|(title, body)| title == "Not wired yet" && body.contains("Files")));
-        assert!(toasts[0].1.contains("Select src/main.rs"));
+        assert_eq!(toasts.len(), 1);
+        assert!(toasts[0].1.contains("Search"));
+        restore_harness_dir(state);
     }
 
     #[gpui::test]

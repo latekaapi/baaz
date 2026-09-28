@@ -34,16 +34,21 @@ when stdin closed.
            [--resume <uuid> | --session-id <uuid>] [--fork-session] \
            [--permission-prompts host --permission-prompt-tool <tool>]
 
-`--effort` is a launch flag, not a per-turn channel: nothing over
-stream-json stdin carries a level. The effort chip therefore rides
-`SubmitInput`, and the adapter maps it onto the flag — spawning with it
-when set, and, when the pick changes mid-session, relaunching the child
-with `--resume <session-id> --effort <new>` before the turn's text goes
-to stdin. The fold lives on the adapter, not the child, so the
-transcript survives the swap, and a resumed child replays no history,
-so nothing folds twice. Accepted live by the installed CLI (W4c
-real-turn check); the gate proves the argv, not that the model reasons
-harder.
+`--effort` is a launch flag, and raising the level mid-session rides the
+control channel instead: `SubmitInput` maps a changed pick onto
+`apply_flag_settings{"settings":{"effortLevel":…}}`, which takes effect
+from the next turn with no relaunch (probed live 2026-09-28 — set to
+`high` on sonnet, the next turn's session jsonl carried
+`"effort":"high"`; `system/init` and the `result` frame carry no effort
+field, so the jsonl is the evidence). Same level — or none anywhere —
+sends nothing and the turn goes straight in. Clearing back to Default
+has no verified control-channel reset, so only that direction keeps the
+`--resume <session-id>` relaunch (spawning without `--effort`); the fold
+lives on the adapter, not the child, so the transcript survives the swap
+and nothing folds twice. The model pick rides `set_model` the same way
+(no relaunch; probed live 2026-09-28 — haiku → sonnet answered success
+and the assistant message reported `claude-sonnet-5`). A rejected level
+fails the submit loudly, never silently.
 
 So the adapter owns **one child per session**, writes user turns to its stdin
 as NDJSON, and reads frames from its stdout. This is the shape that makes
@@ -300,7 +305,7 @@ which is honest ignorance and is still attempted.
 | `SubmitTurn` | Native | `bidi.jsonl`: two turns, one child |
 | `SteerTurn` | Unverified | a second stdin frame mid-turn was **not** probed. Do not claim it |
 | `TurnControl` | Unverified | interrupt/cancel over stdin not probed |
-| `ModelCatalog` | Emulated | `--model` takes aliases and ids, but no fixture enumerates them; Baaz supplies the list |
+| `ModelCatalog` | Native | the adapter sends `initialize` after every spawn and answers `ListModels` from the answer's `models[]` (`value` = id, `displayName` = label, description + `resolvedModel` = detail, `supportedEffortLevels` per row; fixture `permission.jsonl`; probed live 2026-09-28). Baaz's supplied alias list stays as the offline/failure fallback |
 | `Approvals` | Native | `--permission-prompts host --permission-prompt-tool <tool>`; `result.permission_denials[]` exists and was empty |
 | `Questions` | Unavailable | Claude Code has no question channel distinct from the transcript. Reason: "Claude Code asks in prose; there is no question id to answer" |
 | `Transcript` | Native | `stream_event` + `assistant`, plus the stored `.jsonl` (§3) |

@@ -483,10 +483,9 @@ impl Harness {
                     join_at.elapsed().as_millis(),
                     wire.len()
                 ));
-                // A handoff chain is one row: collapse before the unchanged
-                // check, or every reply re-applies wholesale around the
-                // hidden members instead of proving nothing changed.
-                let wire = sidebar::collapse_handoff_chains(wire, &this.provider_sessions, &this.overrides);
+                // Storage keeps one row per session, chain members included:
+                // the chain collapses at view time (`visible_sessions`), so
+                // the unchanged check compares full member rows (Y2a).
                 // Provisional rows are never local, so they never survive
                 // this comparison: the first reply always applies wholesale.
                 // (`SessionEntry` equality includes the provisional flag.)
@@ -1069,10 +1068,10 @@ impl Harness {
             self.sessions[ix] = row;
             self.invalidate_list();
         }
-        // A settled turn on a linked session re-sums its chain: the
-        // one-row refresh above rebuilt head-only facts, the collapse
-        // restores the original title and the total count. An unlinked
-        // settle stops at the O(1) refresh above (X3d).
+        // A settled turn on a linked session re-derives its chain's head:
+        // the one-row refresh above rebuilt member facts, and the view
+        // model re-sums the chain (title, turns, flags) from them. An
+        // unlinked settle stops at the O(1) refresh above (X3d).
         if sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides) {
             self.collapse_handoff_chains();
         }
@@ -1178,10 +1177,10 @@ impl Harness {
             }
             entry.named = name.is_some();
         }
-        // A handoff chain is one row: rejoined member rows collapse back to
-        // the head here, so an override write never resurfaces one — but
-        // only when a link is in play, so link-free rejoins keep the O(1)
-        // row refresh (X3d).
+        // A handoff chain is one row at view time: member rows stay in
+        // storage, so a rejoin never resurfaces one — but the derived
+        // head still re-reads, so invalidate when a link is in play.
+        // Link-free rejoins keep the O(1) row refresh (X3d).
         let touched_link = self
             .sessions
             .iter()
@@ -1464,6 +1463,7 @@ impl Harness {
                 // place this failure would otherwise appear.
                 crate::baaz_log!("session/start failed: {error}");
                 this.session_switch_pending = false;
+                this.abort_replacing(cx);
                 this.fail_pending_handoff(error.to_string(), cx);
                 this.report(&error, cx);
             }
@@ -1556,6 +1556,7 @@ impl Harness {
             Err(error) => {
                 crate::baaz_log!("new-in: session/start failed: {error}");
                 this.session_switch_pending = false;
+                this.abort_replacing(cx);
                 this.report(&error, cx);
             }
         });
@@ -2016,6 +2017,39 @@ impl Harness {
     /// A failure surfaces the same error dialog a failed `session/start`
     /// gets, titled with the provider's name — and opens nothing, never a
     /// silent muse fallback.
+    /// Refresh the account menu's usage cards from what the app already
+    /// knows: a peek at every open provider lane plus Muse's tier — no
+    /// probe, no spend, no blocking (a busy lane simply keeps its last
+    /// reading). Throttled to one refresh per minute and skipped entirely
+    /// in deterministic mode, where the scripted statuses are the cards.
+    pub(crate) fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
+        if crate::provider_status::deterministic() {
+            return;
+        }
+        if !crate::provider_status::note_usage_refresh() {
+            return;
+        }
+        let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
+        let mut views: Vec<Entity<SessionView>> =
+            self.session_cache.iter().map(|(_, view)| view.clone()).collect();
+        if let Some(view) = &self.active {
+            views.push(view.clone());
+        }
+        for view in &views {
+            let seen = view.read(cx);
+            if let Some(report) = seen.lane_usage() {
+                lanes.push((seen.provider_kind(), report));
+            }
+        }
+        let muse = self.tier.as_ref().map(|tier| {
+            (
+                Some(tier.footer_label()),
+                tier.weekly_fraction().map(|fraction| fraction as f64),
+            )
+        });
+        crate::provider_status::record_refreshed_usage(&lanes, muse);
+    }
+
     pub(crate) fn open_on_provider(
         &mut self,
         provider_id: ProviderId,
@@ -2034,6 +2068,14 @@ impl Harness {
         // drops any finish that is no longer current.
         self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
         let epoch = self.provider_open_epoch;
+        // A disabled provider opens with no child: the scripted lane plus
+        // the quiet banner, like offline chrome — readable, resumable,
+        // and sending nothing anywhere.
+        if !crate::provider_status::provider_enabled(provider_id) {
+            self.pending_disabled_notice = Some(provider_id);
+            self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
+            return;
+        }
         // Scripted chrome (`--no-connect` / `--replay`): no child to spawn,
         // so the lane opens over a connected scripted provider — the same
         // stand-in `open_local_draft` uses for muse, and what lets
@@ -2097,6 +2139,7 @@ impl Harness {
                 // it, like the failed `session/start` arm does.
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
                 this.session_switch_pending = false;
+                this.abort_replacing(cx);
                 this.fail_pending_handoff(error.to_string(), cx);
                 this.set_dialog(
                     cx,
@@ -2165,6 +2208,7 @@ impl Harness {
             Err(reason) => {
                 crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
                 self.session_switch_pending = false;
+                self.abort_replacing(cx);
                 self.fail_pending_handoff(reason.clone(), cx);
                 self.set_dialog(
                     cx,
@@ -2221,6 +2265,13 @@ impl Harness {
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
         });
+        // A disabled open lands readable with the quiet banner instead of
+        // a live child: the view above rides the scripted lane, so there
+        // is no child to hang up and nothing was ever sent.
+        if self.pending_disabled_notice == Some(provider_id) {
+            self.pending_disabled_notice = None;
+            view.update(cx, |view, cx| view.show_disabled_notice(provider_id, cx));
+        }
         // Like the muse path: the session groups under the project it
         // started in, and the drafts map names it while it is unsent so a
         // repeated ⌘N reopens it instead of spawning another child.
@@ -2269,40 +2320,62 @@ impl Harness {
         );
     }
 
+    /// The handoff chains over full storage, built once per storage
+    /// change and shared by every lookup on this frame. The build is keyed
+    /// on `list_epoch`: each rebuild, rejoin or override edit invalidates
+    /// the list, which retires the index with it — so repeated frames and
+    /// repeated rows never rebuild (Y2a3).
+    pub(crate) fn chain_index(&self) -> sidebar::ChainIndex {
+        let mut cache = self.chain_index.borrow_mut();
+        if let Some((epoch, index)) = cache.as_ref() {
+            if *epoch == self.list_epoch {
+                return index.clone();
+            }
+        }
+        let index = sidebar::ChainIndex::build(&self.provider_sessions, &self.overrides, &self.sessions);
+        self.chain_index_builds.set(self.chain_index_builds.get() + 1);
+        cache.replace((self.list_epoch, index.clone()));
+        index
+    }
+
     /// Follow `handoff_to` links across both stores to the chain head
     /// (`docs/22-handoff.md` §8): any member id opens the head instead. A
     /// dangling destination resolves to the id itself, so its source stays
-    /// listed and openable.
+    /// listed and openable. Reads the cached per-change index, never a
+    /// fresh walk (Y2a3).
     pub(crate) fn chain_head(&self, session_id: &str) -> String {
-        sidebar::chain_head(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+        self.chain_index().head(session_id)
     }
 
     /// Every member of `session_id`'s chain, sorted: what archiving the head
-    /// covers so no member resurfaces.
+    /// covers so no member resurfaces. Reads the cached per-change index,
+    /// never a fresh walk (Y2a3).
     pub(crate) fn chain_members(&self, session_id: &str) -> Vec<String> {
-        sidebar::chain_members(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+        self.chain_index().members(session_id)
     }
 
-    /// Collapse the rows to one per handoff chain (see
-    /// [`sidebar::collapse_handoff_chains`]). Returns whether the list
-    /// changed.
+    /// Storage keeps every chain member row; the one-row-per-chain view
+    /// is derived in [`Self::visible_sessions`](crate::app::Harness::visible_sessions)
+    /// (see [`sidebar::collapse_handoff_chains`]). Kept as a named step so
+    /// call sites read the same — it only invalidates when a link is in
+    /// play, never removes rows. Returns whether the list changed.
     pub(crate) fn collapse_handoff_chains(&mut self) -> bool {
-        let collapsed =
-            sidebar::collapse_handoff_chains(self.sessions.clone(), &self.provider_sessions, &self.overrides);
-        if collapsed == self.sessions {
-            return false;
+        let touched = self
+            .sessions
+            .iter()
+            .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
+        if touched {
+            self.invalidate_list();
         }
-        self.sessions = collapsed;
-        self.invalidate_list();
-        true
+        touched
     }
 
     /// Rebuild the sidebar rows the provider record owns: one row per
     /// stored session, joined with the overrides, preserving each row's
     /// live facts (a running turn, pending approvals) across the rebuild.
-    /// Rows whose record is gone (deleted) leave with it. A handoff chain
-    /// then collapses to its head row, in the source row's place. Returns
-    /// whether the list changed.
+    /// Rows whose record is gone (deleted) leave with it. Chain members
+    /// stay as rows; the one-row-per-chain view derives in
+    /// `visible_sessions` (Y2a). Returns whether the list changed.
     pub(crate) fn merge_provider_rows(&mut self) -> bool {
         // A deleted record that anchored a chain still needs the collapse:
         // its row leaves, the chain re-sums without it.
@@ -2350,13 +2423,71 @@ impl Harness {
                 }
             }
         }
+        // Restart before the wire: a muse-lane destination exists only as
+        // an override yet — synthesise its row from the local stores so
+        // the chain shows with the right title before `session/list`
+        // arrives (Y2a). Named by the chain title, so the empty filter
+        // keeps it.
+        {
+            let missing: Vec<String> = self
+                .overrides
+                .keys()
+                .filter(|id| {
+                    !self.sessions.iter().any(|e| e.id == **id)
+                        && sidebar::needs_collapse(id, &self.provider_sessions, &self.overrides)
+                })
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                let now = crate::clock::now_local();
+                for id in missing {
+                    let meta = self.overrides.get(&id);
+                    let title = meta
+                        .and_then(|m| m.handoff_title.clone())
+                        .or_else(|| meta.and_then(|m| m.name.clone()))
+                        .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
+                    let named = meta.and_then(|m| m.handoff_title.clone()).is_some();
+                    self.sessions.push(sidebar::SessionEntry {
+                        id: id.clone(),
+                        label: sidebar::one_line(&title),
+                        updated: now,
+                        running: false,
+                        turns: 0,
+                        hidden: meta.is_some_and(|m| m.hidden),
+                        pinned: meta.is_some_and(|m| m.pinned),
+                        archived: meta.is_some_and(|m| m.archived),
+                        description: String::new(),
+                        replayed: false,
+                        provider: None,
+                        named,
+                        needs_title: false,
+                        side_marker: false,
+                        title_pending: false,
+                        last_ask: None,
+                        local: false,
+                        provisional: false,
+                        workspace: None,
+                        project: meta.and_then(|m| m.project.clone()),
+                        project_name: None,
+                        attention: Vec::new(),
+                        approval_command: None,
+                        pending_question: None,
+                        turn_started: None,
+                        last_error: None,
+                        branch: None,
+                        terminals_running: 0,
+                    });
+                    changed = true;
+                }
+            }
+        }
         if changed {
             self.invalidate_list();
         }
-        // A handoff chain is one row: the activation swap lands in this
-        // same build, the destination taking the source row's place — but
-        // only when a merged or removed record is link-adjacent, so
-        // link-free merges stop at the row refresh (X3d).
+        // A handoff chain is one row at view time: invalidate so the
+        // derived head re-reads the rebuilt rows — but only when a merged
+        // or removed record is link-adjacent, so link-free merges stop at
+        // the row refresh (X3d).
         let collapsed = if touched_link { self.collapse_handoff_chains() } else { false };
         changed | collapsed
     }
@@ -2385,6 +2516,7 @@ impl Harness {
         if provider_id == ProviderId::Muse {
             crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
             self.session_switch_pending = false;
+            self.abort_replacing(cx);
             self.set_dialog(
                 cx,
                 Dialog {
@@ -2416,10 +2548,17 @@ impl Harness {
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
+        // A disabled provider reopens with no child either: the scripted
+        // resume below replays the stored transcript read-only, and the
+        // landing view wears the quiet banner.
+        let disabled = !crate::provider_status::provider_enabled(provider_id);
+        if disabled {
+            self.pending_disabled_notice = Some(provider_id);
+        }
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the reopen still goes
         // through `ResumeSession` so the failure is the honest one.
-        if self.client.is_none() {
+        if self.client.is_none() || disabled {
             use provider::ProviderAdapter as _;
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
@@ -2457,6 +2596,7 @@ impl Harness {
                 Err(reason) => {
                     crate::baaz_log!("scripted provider resume failed ({}): {reason}", provider_id.label());
                     self.session_switch_pending = false;
+                    self.abort_replacing(cx);
                     self.set_dialog(
                         cx,
                         Dialog {
@@ -2510,6 +2650,7 @@ impl Harness {
             Err(error) => {
                 crate::baaz_log!("provider resume failed ({}): {error}", provider_id.label());
                 this.session_switch_pending = false;
+                this.abort_replacing(cx);
                 this.set_dialog(
                     cx,
                     Dialog {
@@ -2615,6 +2756,7 @@ impl Harness {
                 Err(reason) => {
                     crate::baaz_log!("scripted fork resume failed ({}): {reason}", provider_id.label());
                     self.session_switch_pending = false;
+                    self.abort_replacing(cx);
                     self.set_dialog(
                         cx,
                         Dialog {
@@ -2678,6 +2820,7 @@ impl Harness {
             Err(error) => {
                 crate::baaz_log!("provider fork resume failed ({}): {error}", provider_id.label());
                 this.session_switch_pending = false;
+                this.abort_replacing(cx);
                 this.set_dialog(
                     cx,
                     Dialog {
@@ -2696,8 +2839,9 @@ impl Harness {
     /// Forget `session_id`'s view wherever it lives — open or parked. A
     /// provider lane's child is hung up first, so a discarded session leaves
     /// no orphaned `claude` / `codex` process; a muse draft has no child to
-    /// hang up. What `SwitchProvider` calls for the empty draft it replaces,
-    /// so the replacement (not a parking) is what survives.
+    /// hang up. A landed `SwitchProvider` closes the replaced view through
+    /// `close_replaced` in the same update instead, so no frame renders
+    /// without a session.
     pub(crate) fn close_view(&mut self, session_id: &str, cx: &mut Context<Self>) {
         // The next `activate` re-points the event subscription at the new
         // view; the dropped view's subscription fires nothing after this,
@@ -2752,6 +2896,103 @@ impl Harness {
     /// "nearest" })` semantics). A sidebar or rail click
     /// comes through here with `quiet == true` and never arms: the clicked
     /// row is under the cursor, hence visible, and any stale arm is dropped.
+    /// Abort an in-place provider switch (Y2b): keep the old view, unlock
+    /// its composer, restore the chip and the drafts name, and drop the
+    /// claim state. The caller still dialogs the reason.
+    pub(crate) fn abort_replacing(&mut self, cx: &mut Context<Self>) {
+        let Some(old_id) = self.replacing.take() else { return };
+        self.replacing_provider = None;
+        if let Some(project) = self.replacing_draft_project.take() {
+            if !self.drafts.values().any(|id| id == &old_id) {
+                self.drafts.insert(project, old_id.clone());
+            }
+        }
+        if let Some(old) = self.active.clone().filter(|v| v.read(cx).session_id == old_id) {
+            let provider = old.read(cx).provider_kind();
+            self.new_provider = provider.as_str().to_owned();
+            crate::providers::write_last_provider(provider);
+            old.update(cx, |v, cx| {
+                v.set_input_locked(false, cx);
+                v.set_switching_to(None, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Close the view a landed switch replaced, in the same update that
+    /// installs the replacement (Y2b): the old view never parks, and no
+    /// frame renders without a session. Carries an unsent draft across.
+    /// Returns true when the caller must skip `park_active` (the old view
+    /// was taken instead of parked).
+    fn close_replaced(
+        &mut self,
+        old_id: &str,
+        new_view: &Entity<SessionView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Same entity reopened (draft reuse): nothing to close.
+        if self.active.as_ref().is_some_and(|v| *v == *new_view) {
+            self.replacing = None;
+            self.replacing_provider = None;
+            self.replacing_draft_project = None;
+            return false;
+        }
+        let old_view = self.active.take().filter(|v| v.read(cx).session_id == old_id);
+        let Some(old_view) = old_view else {
+            self.replacing = None;
+            self.replacing_provider = None;
+            self.replacing_draft_project = None;
+            return false;
+        };
+        let new_id = new_view.read(cx).session_id.clone();
+        // Carry the unsent draft across when the replacement holds nothing.
+        let moving = old_view.update(cx, |v, vc| {
+            if v.draft_content_empty(vc) { None } else { Some(v.take_draft(window, vc)) }
+        });
+        if let Some(draft) = moving {
+            new_view.update(cx, |v, vc| {
+                if v.draft_content_empty(vc) {
+                    v.put_draft(draft, window, vc);
+                }
+            });
+        }
+        old_view.update(cx, |v, _| v.shutdown_lane());
+        if let Some(cached) = self.cache_take(old_id) {
+            // A stale parked copy under the same id never survives the swap
+            // — unless it IS the replacement (shared scripted id in tests),
+            // which is never parked, so this only drops the old duplicate.
+            if cached != *new_view && cached != old_view {
+                cached.update(cx, |v, _| v.shutdown_lane());
+            }
+        }
+        // An unsent provider draft leaves no transcript anywhere, so its
+        // record leaves with its view — except when the replacement shares
+        // the id (the scripted double mints one fixed id), where the record
+        // now belongs to the new view.
+        if new_id != old_id {
+            let unsent = self
+                .provider_sessions
+                .get(old_id)
+                .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
+            if unsent {
+                self.session_cache.retain(|(id, _)| id != old_id);
+                self.sessions.retain(|entry| entry.id != old_id);
+                self.overrides.remove(old_id);
+                if crate::provider_sessions::remove(&mut self.provider_sessions, old_id) {
+                    crate::provider_sessions::write(&self.provider_sessions);
+                }
+                crate::sessions::write(&self.overrides);
+                self.rejoin();
+                self.invalidate_list();
+            }
+        }
+        self.replacing = None;
+        self.replacing_provider = None;
+        self.replacing_draft_project = None;
+        true
+    }
+
     fn activate(&mut self, view: Entity<SessionView>, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Whatever switch the scripts were waiting for has landed: session
         // verbs run against this view from here on.
@@ -2781,7 +3022,21 @@ impl Harness {
         }
         let project_name = self.project_name_for(&session_id);
         view.update(cx, |view, _| view.set_project_name(project_name));
-        self.park_active(cx);
+        // Y2b: a landed switch closes the replaced view in this same update,
+        // so no frame renders without a session. Otherwise park as usual.
+        let replaced = self.replacing.clone().is_some_and(|old_id| {
+            self.close_replaced(&old_id, &view, window, cx)
+        });
+        if self.replacing.is_some() {
+            // The old view was already gone (or the same entity reopened):
+            // drop the marker without parking anything extra.
+            self.replacing = None;
+            self.replacing_provider = None;
+            self.replacing_draft_project = None;
+        }
+        if !replaced {
+            self.park_active(cx);
+        }
         // A parked view's client predates a reconnect; the current child is
         // the one that can page. Provider-lane views own their own child,
         // so the muse reconnect refuses on them — skip it outright.
@@ -3047,16 +3302,23 @@ impl Harness {
                 // A turn that started is a session made real: it is no
                 // draft any more, whether it already had a row or not.
                 self.drafts.retain(|_, named| named != &session_id);
-                crate::provider_sessions::note_first_prompt(
-                    &mut self.provider_sessions,
-                    &session_id,
-                    &prompt,
-                );
+                let handoff_dest =
+                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+                // A handoff destination's first words are the pack, then the
+                // person's next message on the same chain: neither is the
+                // session's own first prompt (Y2a).
+                if !handoff_dest {
+                    crate::provider_sessions::note_first_prompt(
+                        &mut self.provider_sessions,
+                        &session_id,
+                        &prompt,
+                    );
+                }
                 if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
                 if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local()) {
+                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest) {
                         self.invalidate_list();
                     }
                 } else {
@@ -3064,7 +3326,7 @@ impl Harness {
                     // send): build it now, titled from the prompt.
                     self.merge_provider_rows();
                     if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local());
+                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest);
                         self.invalidate_list();
                     }
                 }
@@ -3170,6 +3432,16 @@ impl Harness {
                 }));
             }
             SessionEvent::Logout => self.logout(cx),
+            // "Enable" on a disabled-provider banner: Settings on the
+            // Providers page, where the switch lives.
+            SessionEvent::OpenProviders => {
+                let sections = self.settings_sections();
+                let section = crate::settings::settings_section_index(
+                    &sections,
+                    crate::settings_providers::PROVIDERS_SECTION_ID,
+                );
+                self.open_settings(section, cx);
+            }
             SessionEvent::Status { detail } => {
                 // What the login is entitled to belongs at the top of
                 // `/status` and `/usage`: it is the first thing that decides
@@ -3224,16 +3496,28 @@ impl Harness {
             // A fresh session's composer chip picked another provider:
             // nothing was ever sent, so the pick becomes the default and a
             // new session starts on it — on the provider lane when the pick
-            // is not muse. The abandoned draft's view is closed outright
-            // (hanging up its child when it owns one) so the replacement
-            // below never parks — and never leaks — the view just left; it
-            // also stops being this project's draft, without which the
-            // start below would reopen that very view.
+            // is not muse. Y2b: the old view stays active and drawn (composer
+            // locked, chip already on the pick) until the replacement
+            // activates in the same update — no empty-state frame between.
             SessionEvent::SwitchProvider { provider } => {
                 let old = view.read(cx).session_id.clone();
+                let old_provider = view.read(cx).provider_kind();
+                let draft_project =
+                    self.drafts.iter().find(|(_, id)| *id == &old).map(|(p, _)| p.clone());
+                self.replacing = Some(old.clone());
+                self.replacing_provider = Some(old_provider.as_str().to_owned());
+                self.replacing_draft_project = draft_project;
                 self.select_new_provider(*provider, cx);
-                self.drafts.retain(|_, id| *id != old);
-                self.close_view(&old, cx);
+                view.update(cx, |v, cx| {
+                    v.set_input_locked(true, cx);
+                    v.set_switching_to(Some(*provider), cx);
+                });
+                if let Some(active) = self.active.clone().filter(|v| v.read(cx).session_id == old) {
+                    active.update(cx, |v, cx| {
+                        v.set_input_locked(true, cx);
+                        v.set_switching_to(Some(*provider), cx);
+                    });
+                }
                 // The replacement starts on a task, but the switch is
                 // already in flight as far as scripted verbs are concerned:
                 // claiming it now keeps a following `send:` waiting for the
@@ -3687,6 +3971,28 @@ impl Harness {
             view.note_handoff_pack(text.clone(), display.clone(), cx);
             view.submit_pack(text, display, cx);
         });
+        // The pack is a live turn: the row reads running with a fresh time
+        // from the submit, exactly like `ProviderTurnAccepted` (Y2a) — so
+        // the head row shows "Working" and is never filtered as empty.
+        if crate::provider_sessions::touch(&mut self.provider_sessions, &dest) {
+            crate::provider_sessions::write(&self.provider_sessions);
+        }
+        let now = crate::clock::now_local();
+        if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
+            entry.running = true;
+            entry.updated = now;
+            entry.turn_started = Some(now);
+            entry.last_error = None;
+        } else {
+            self.merge_provider_rows();
+            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
+                entry.running = true;
+                entry.updated = now;
+                entry.turn_started = Some(now);
+                entry.last_error = None;
+            }
+        }
+        self.invalidate_list();
     }
 
     /// The pack's submit ack on the destination: the run holding that
@@ -3928,8 +4234,78 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let _ = to;
+        // The chain's one title: the source's current display title (a
+        // user name first, then its title — the row label already reads
+        // that order), carried forward down chains of any length.
+        let chain_title = self
+            .sessions
+            .iter()
+            .find(|e| e.id == source)
+            .map(|e| e.label.clone())
+            .or_else(|| {
+                self.overrides.get(source).and_then(|m| {
+                    m.name
+                        .clone()
+                        .or_else(|| m.handoff_title.clone())
+                        .or_else(|| m.generated_title.clone())
+                        .or_else(|| m.derived_title.clone())
+                })
+            })
+            .or_else(|| {
+                self.provider_sessions.get(source).and_then(|r| {
+                    r.handoff_title
+                        .clone()
+                        .or_else(|| r.title.clone())
+                        .or_else(|| r.first_prompt.clone())
+                })
+            })
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty());
+        let source_meta = self.overrides.get(source).cloned();
+        let source_record = self.provider_sessions.get(source).cloned();
         if self.provider_sessions.contains_key(source) || self.provider_sessions.contains_key(dest) {
             crate::provider_sessions::note_handoff(&mut self.provider_sessions, source, from.as_str(), dest);
+            if let Some(title) = chain_title.clone() {
+                if let Some(record) = self.provider_sessions.get_mut(dest) {
+                    record.handoff_title = Some(title);
+                }
+            }
+            // Row state rides to the destination: pinned, project, user
+            // name and archived survive the hop (Y2a). Pinned/archived
+            // live in the overrides even for lane sessions, so they land
+            // there whatever the destination lane is.
+            if let Some(dest_record) = self.provider_sessions.get_mut(dest) {
+                if let Some(meta) = source_meta.as_ref() {
+                    if dest_record.project.is_none() {
+                        dest_record.project = meta.project.clone();
+                    }
+                }
+                if let Some(record) = source_record.as_ref() {
+                    if dest_record.project.is_none() {
+                        dest_record.project = record.project.clone();
+                    }
+                }
+            }
+            if let Some(src) = source_meta.clone() {
+                self.set_override(
+                    dest,
+                    |meta| {
+                        if !meta.pinned {
+                            meta.pinned = src.pinned;
+                        }
+                        if !meta.archived {
+                            meta.archived = src.archived;
+                        }
+                        if meta.project.is_none() {
+                            meta.project = src.project.clone();
+                        }
+                        if meta.name.is_none() {
+                            meta.name = src.name.clone();
+                        }
+                    },
+                    cx,
+                );
+            }
             crate::provider_sessions::write(&self.provider_sessions);
         }
         let solo_source = !self.provider_sessions.contains_key(source);
@@ -3939,11 +4315,38 @@ impl Harness {
                 self.set_override(source, |meta| meta.handoff_to = Some(dest.to_owned()), cx);
             }
             if solo_dest {
+                let title = chain_title.clone();
+                let src = source_meta.clone();
+                let src_record = source_record.clone();
                 self.set_override(
                     dest,
                     |meta| {
                         meta.handoff_from = Some(source.to_owned());
                         meta.handoff_from_provider = Some(from.as_str().to_owned());
+                        if meta.handoff_title.is_none() {
+                            meta.handoff_title = title.clone();
+                        }
+                        // A muse destination inherits the source's row
+                        // state it does not already name itself.
+                        if let Some(s) = src.as_ref() {
+                            if !meta.pinned {
+                                meta.pinned = s.pinned;
+                            }
+                            if !meta.archived {
+                                meta.archived = s.archived;
+                            }
+                            if meta.project.is_none() {
+                                meta.project = s.project.clone();
+                            }
+                            if meta.name.is_none() {
+                                meta.name = s.name.clone();
+                            }
+                        }
+                        if let Some(r) = src_record.as_ref() {
+                            if meta.project.is_none() {
+                                meta.project = r.project.clone();
+                            }
+                        }
                     },
                     cx,
                 );
@@ -4845,6 +5248,147 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Y2b: `SwitchProvider` swaps the view in place. Before the open
+    /// completes the old view stays active (no empty-state frame: `active`
+    /// is still `Some` and the header still names the session), the composer
+    /// refuses sends and the chip already shows the pick; when the open lands
+    /// the replacement installs in the same update, carrying the unsent draft.
+    /// Before the fix the handler closed the old view synchronously, so the
+    /// mid-switch `active` was `None` and the draft never carried.
+    #[gpui::test]
+    fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2b-inplace");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, opens) = counting_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session(window, cx));
+        });
+        vc.run_until_parked();
+        let old = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the draft opened").read(cx).session_id.clone()
+        });
+        // An unsent draft waiting on the old view.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the draft is open");
+                view.update(cx, |view, cx| view.set_draft("hello unsent".to_owned(), window, cx));
+            });
+        });
+        // Through the real event: the replacement starts on a task.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the draft is open");
+                harness.on_session_event(
+                    view,
+                    &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
+                    cx,
+                );
+            });
+        });
+        // Before the open completes: no intermediate empty frame.
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("old view stays until the open lands");
+            assert_eq!(view.read(cx).session_id, old, "still the old view mid-switch");
+            assert_eq!(
+                harness.pending_id.as_deref(),
+                Some(old.as_str()),
+                "the header still names the session mid-switch"
+            );
+            assert_eq!(harness.replacing.as_deref(), Some(old.as_str()));
+            assert!(view.read(cx).is_input_locked(), "composer input disabled mid-switch");
+            assert_eq!(
+                view.read(cx).display_provider(),
+                ProviderId::ClaudeCode,
+                "chip already shows the pick mid-switch"
+            );
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(opens_of(&opens), 2, "draft plus exactly one replacement");
+            let view = harness.active.clone().expect("the replacement opened");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
+            assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "unsent draft carries across");
+            assert!(!view.read(cx).is_input_locked(), "the new view takes sends");
+            assert!(harness.replacing.is_none(), "the marker clears on landing");
+            let total = usize::from(harness.active.is_some()) + harness.session_cache.len();
+            assert_eq!(total, 1, "exactly one view exists after the swap");
+            assert!(!harness.session_switch_pending, "the switch landed");
+        });
+        lane_restore(state);
+    }
+
+    /// Y2b: a failed open keeps the old view, restores the chip and dialogs
+    /// the reason. Before the fix the old view was already closed, so the
+    /// failure left `active` as `None` on the empty state.
+    #[gpui::test]
+    fn y2b_failed_open_restores_old_view_and_chip(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2b-fail");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = scripted_factory();
+                harness.client = Some(dead_client());
+                harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.new_session(window, cx));
+        });
+        vc.run_until_parked();
+        let old = vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the lane opened");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+            view.read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = failing_factory("no child here");
+            });
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the lane is open");
+                harness.on_session_event(
+                    view,
+                    &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
+                    cx,
+                );
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness.active.clone().expect("the old view survives a failed open");
+            assert_eq!(view.read(cx).session_id, old, "still the old view");
+            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+            assert!(!view.read(cx).is_input_locked(), "sends resume after the failure");
+            assert_eq!(harness.new_provider, ProviderId::Codex.as_str(), "the chip is restored");
+            assert!(harness.replacing.is_none(), "the marker clears on failure");
+            assert!(!harness.session_switch_pending, "the verbs are released");
+            let dialog =
+                harness.overlays.read(cx).dialog.as_ref().expect("the failure is dialogued");
+            assert_eq!(dialog.title, "Couldn't start Claude Code");
+            assert!(dialog.detail.contains("no child here"), "the reason survives: {}", dialog.detail);
+        });
+        lane_restore(state);
+    }
+
     #[gpui::test]
     fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -5225,7 +5769,8 @@ mod tests {
 
     /// Seeds the 2-hop mixed chain every X3b test drives: claude-code (A) →
     /// codex (B) → muse (C, head). Lane halves in the provider store, the
-    /// muse destination's half in the overrides — what activation writes.
+    /// muse destination's half in the overrides — what activation writes,
+    /// including the carried chain title (Y2a).
     fn seed_mixed_chain(harness: &mut Harness) {
         use std::collections::HashMap;
         let record = |id: &str,
@@ -5247,6 +5792,7 @@ mod tests {
                 handoff_to: to.map(str::to_owned),
                 handoff_from: from.map(|(source, _)| source.to_owned()),
                 handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            handoff_title: None,
                 display_texts: HashMap::new(),
             }
         };
@@ -5258,29 +5804,42 @@ mod tests {
             "chain-b".into(),
             record("chain-b", "codex", 3, Some("Second leg"), Some("chain-c"), Some(("chain-a", "claude-code"))),
         );
+        // Activation carries the source's display title onto every
+        // destination down the chain — the head reads it, not its own
+        // words ("Later words" below stays the stored label).
+        if let Some(record) = harness.provider_sessions.get_mut("chain-b") {
+            record.handoff_title = Some("Chart the Greyport ferry routes".into());
+        }
         harness.overrides.insert(
             "chain-c".into(),
             crate::sessions::SessionMeta {
                 handoff_from: Some("chain-b".into()),
                 handoff_from_provider: Some("codex".into()),
+                handoff_title: Some("Chart the Greyport ferry routes".into()),
                 ..Default::default()
             },
         );
         // Activation order: the members first, the head appended, then the
-        // collapse puts the head row in the source row's place. The head
-        // shows visible turns: the wire's 5 minus the hidden pack exchange.
-        harness.merge_provider_rows();
+        // provider rebuild (which also synthesises a muse-lane head row
+        // from the stores when the wire has not listed it yet — skipped
+        // here because the head row is already present). Storage keeps
+        // every member row (Y2a); the one-row view derives in
+        // `visible_sessions`. The head shows visible turns: the wire's 5
+        // minus the hidden pack exchange.
         harness.sessions.push(chain_muse_entry(
             "chain-c",
             "Later words",
             sidebar::visible_turns(5, true),
         ));
+        harness.merge_provider_rows();
         harness.collapse_handoff_chains();
     }
 
-    /// X3b, sidebar half: a handoff chain is one sidebar row, opening a
-    /// member id opens the head, and archiving the head hides all members.
-    /// Offline, so the opens are local views and the factory never runs.
+    /// X3b, sidebar half (Y2a: view-time collapse): storage keeps every
+    /// member row, the list shows one head row with the chain title,
+    /// opening a member id opens the head, and archiving the head hides
+    /// all members. Offline, so the opens are local views and the factory
+    /// never runs.
     #[gpui::test]
     fn opening_a_chain_member_opens_the_head(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -5292,11 +5851,24 @@ mod tests {
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.sessions.len(), 1, "three members, one row");
-            let row = &harness.sessions[0];
-            assert_eq!(row.id, "chain-c", "the head is what is listed");
-            assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
-            assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
+            assert_eq!(harness.sessions.len(), 3, "storage keeps every member row");
+            assert!(
+                harness.sessions.iter().any(|entry| entry.id == "chain-c" && entry.label == "Later words"),
+                "the head's stored row keeps its own words; the title derives at view time"
+            );
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert_eq!(
+                    row.label, "Chart the Greyport ferry routes",
+                    "the chain keeps its carried title, not the head's own words"
+                );
+                assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
+            });
         });
         // Opening the tail member lands on the head, selected.
         vc.update(|window, cx| {
@@ -5308,6 +5880,23 @@ mod tests {
             let view = harness.active.clone().expect("the member open lands somewhere");
             assert_eq!(view.read(cx).session_id, "chain-c", "a member id opens the head");
             assert_eq!(harness.pending_id.as_deref(), Some("chain-c"), "the head row is selected");
+        });
+        // Y2a, one identity: header, window title and selection all
+        // resolve through the head — Y2a3 reads the collapsed view row
+        // itself, so the header names the chain title the one visible
+        // row wears, by construction.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let pending = harness.pending_id.clone().expect("the head row is selected");
+                let head = harness.chain_head(&pending);
+                let visible = harness.visible_sessions(cx);
+                let row =
+                    visible.iter().find(|entry| entry.id == head).expect("the head is the one listed row");
+                assert_eq!(visible.len(), 1);
+                let header_text = harness.collapsed_head_label(&head, cx).expect("head label");
+                assert_eq!(header_text, row.label, "header title == selected row title");
+                assert_eq!(row.label, "Chart the Greyport ferry routes");
+            });
         });
         // Archiving the head flags every member, so none resurfaces.
         vc.update(|window, cx| {
@@ -5333,6 +5922,266 @@ mod tests {
         lane_restore(state);
     }
 
+    /// Y2a: restart from the local stores alone — before any wire list —
+    /// shows the titled chain row, and the source's pin survives on it.
+    #[gpui::test]
+    fn a_restart_from_stores_shows_the_titled_chain_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a-restart");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                // Pinned before the hop, the way a person leaves it.
+                harness.set_override("chain-a", |meta| meta.pinned = true, cx);
+                // The restart: rows gone, stores re-read, no wire yet.
+                crate::provider_sessions::write(&harness.provider_sessions);
+                harness.sessions.clear();
+                harness.provider_sessions = crate::provider_sessions::read();
+                harness.merge_provider_rows();
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "one chain, one row, before any wire list");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert_eq!(
+                    row.label, "Chart the Greyport ferry routes",
+                    "the chain title from local stores alone"
+                );
+                assert!(row.pinned, "the source's pin survives the hop");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a: the destination's first real message is a live turn, never a
+    /// first send — the stored row keeps the chain title, the paid
+    /// titler stands down, and the pack turn never becomes the byline.
+    #[gpui::test]
+    fn a_destinations_first_real_message_keeps_the_chain_title(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a-first-send");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                seed_mixed_chain(harness);
+                let dest = "chain-c";
+                assert!(
+                    sidebar::is_handoff_dest(dest, &harness.provider_sessions, &harness.overrides),
+                    "the seeded head is a handoff destination"
+                );
+                let turns = {
+                    let row = harness
+                        .sessions
+                        .iter_mut()
+                        .find(|entry| entry.id == dest)
+                        .expect("the head has a stored row");
+                    // The ack-only destination reads no visible turns, so
+                    // the next message is the old "first send" shape.
+                    row.turns = 0;
+                    row.running = false;
+                    assert!(sidebar::first_send_update(
+                        row,
+                        Some("my next message"),
+                        crate::clock::now_local(),
+                        true
+                    ));
+                    assert_eq!(row.label, "Later words", "no rename from the first real message");
+                    assert!(row.running, "the live turn still shows");
+                    row.turns
+                };
+                assert!(
+                    !crate::titles::should_title(true, true, harness.overrides.get(dest), turns, false),
+                    "the paid titler never runs on a destination"
+                );
+                assert!(
+                    sidebar::is_pack_text("Handed off from Codex: Second leg (2 recent turns, 0 open todos, 0 files touched)"),
+                    "the pack acknowledgement matches the byline skip"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: storage keeps every member row across a provider rebuild, a
+    /// member's live facts survive it, and the one view row carries them —
+    /// a live turn and needs-you attention on any member show on the head.
+    #[gpui::test]
+    fn y2a3_storage_survives_a_rebuild_and_live_state_ors_into_the_head(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-live");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                // A live turn on a non-head member, with needs-you attention.
+                let now = crate::clock::now_local();
+                {
+                    let member =
+                        harness.sessions.iter_mut().find(|entry| entry.id == "chain-a").expect("member row");
+                    member.running = true;
+                    member.turn_started = Some(now);
+                    member.attention = vec![muse_client::schema::AttentionFlag::ApprovalPending];
+                }
+                // The rebuild re-reads the records around the live rows.
+                harness.merge_provider_rows();
+                assert_eq!(
+                    harness.sessions.len(),
+                    3,
+                    "storage keeps every member row across a rebuild"
+                );
+                let member = harness.sessions.iter().find(|entry| entry.id == "chain-a").expect("member row");
+                assert!(member.running, "a member's live turn survives the rebuild");
+                assert_eq!(member.turn_started, Some(now));
+                assert_eq!(
+                    member.attention,
+                    vec![muse_client::schema::AttentionFlag::ApprovalPending],
+                    "a member's attention survives the rebuild"
+                );
+                // One view row, carrying the member's live state.
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert!(row.running, "the head row shows the member's live turn");
+                assert!(
+                    row.attention.contains(&muse_client::schema::AttentionFlag::ApprovalPending),
+                    "the head row ORs the member's attention, drew {:?}",
+                    row.attention
+                );
+                let header = harness.collapsed_head_label("chain-c", cx).expect("head label");
+                assert_eq!(header, row.label, "header title == selected row title");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: a non-handoff session whose first words start with
+    /// "Handed off from " keeps them — the record keeps the first prompt,
+    /// the row titles from it, and the byline skip does not fire. Only a
+    /// handoff destination ever has a pack turn.
+    #[gpui::test]
+    fn y2a3_a_non_handoff_pack_shaped_message_keeps_title_and_byline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-prefix");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                use std::collections::HashMap;
+                // A provider-lane session with no handoff link anywhere.
+                harness.provider_sessions.insert(
+                    "plain-1".into(),
+                    crate::provider_sessions::ProviderSessionRecord {
+                        provider: "codex".to_owned(),
+                        session_id: "plain-1".to_owned(),
+                        workspace: None,
+                        project: None,
+                        created_ms: 1_700_000_000_000,
+                        updated_ms: 1_700_000_000_000,
+                        turns: 0,
+                        title: None,
+                        first_prompt: None,
+                        handoff_to: None,
+                        handoff_from: None,
+                        handoff_from_provider: None,
+                        handoff_title: None,
+                        display_texts: HashMap::new(),
+                    },
+                );
+                let prompt = "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)";
+                assert!(
+                    !sidebar::is_handoff_dest("plain-1", &harness.provider_sessions, &harness.overrides),
+                    "the fixture session is no destination"
+                );
+                crate::provider_sessions::note_first_prompt(&mut harness.provider_sessions, "plain-1", prompt);
+                assert_eq!(
+                    harness.provider_sessions["plain-1"].first_prompt.as_deref(),
+                    Some(prompt),
+                    "a non-destination keeps pack-shaped words as its first prompt"
+                );
+                harness.merge_provider_rows();
+                {
+                    let row =
+                        harness.sessions.iter_mut().find(|entry| entry.id == "plain-1").expect("member row");
+                    row.label = sidebar::UNNAMED.to_owned();
+                    row.named = false;
+                    assert!(sidebar::first_send_update(
+                        row,
+                        Some(prompt),
+                        crate::clock::now_local(),
+                        false
+                    ));
+                    assert_eq!(row.label, prompt, "a non-destination titles from its own words");
+                }
+                let (summary, ask) = sidebar::byline_landable(
+                    Some("Context received.".into()),
+                    Some(prompt.into()),
+                    false,
+                );
+                assert_eq!(summary.as_deref(), Some("Context received."));
+                assert_eq!(ask.as_deref(), Some(prompt), "no byline skip off a destination");
+                let visible = harness.visible_sessions(cx);
+                assert!(
+                    visible.iter().any(|entry| entry.id == "plain-1"),
+                    "the session stays listed"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: the chain index builds once per storage change — repeated
+    /// frames and repeated row lookups never rebuild; the next storage
+    /// change retires it exactly once.
+    #[gpui::test]
+    fn y2a3_the_chain_index_builds_once_per_storage_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-index");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                let base = harness.chain_index_builds.get();
+                let _ = harness.visible_sessions(cx);
+                let after_first = harness.chain_index_builds.get();
+                assert_eq!(after_first, base + 1, "one index build serves the frame");
+                let _ = harness.visible_sessions(cx);
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_first,
+                    "a second frame on unchanged storage rebuilds nothing"
+                );
+                assert_eq!(harness.chain_head("chain-a"), "chain-c");
+                assert_eq!(
+                    harness.chain_members("chain-b"),
+                    vec!["chain-a".to_owned(), "chain-b".to_owned(), "chain-c".to_owned()]
+                );
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_first,
+                    "row lookups reuse the frame's build"
+                );
+                // A storage change retires the index exactly once.
+                harness.provider_sessions.get_mut("chain-a").expect("member record").turns = 99;
+                harness.merge_provider_rows();
+                let _ = harness.visible_sessions(cx);
+                let after_change = harness.chain_index_builds.get();
+                assert_eq!(after_change, after_first + 1, "one rebuild for the storage change");
+                let _ = harness.visible_sessions(cx);
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_change,
+                    "the rebuilt index serves every later frame"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
     /// X3b, sidebar half: the fallback divider's source link bypasses the
     /// head redirect and opens the retired source itself.
     #[gpui::test]
@@ -5342,7 +6191,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 harness.overrides.insert(
                     "old-muse".into(),
                     crate::sessions::SessionMeta {
@@ -5355,6 +6204,7 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("old-muse".into()),
                         handoff_from_provider: Some("muse".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );
@@ -5365,8 +6215,11 @@ mod tests {
                     sidebar::visible_turns(1, true),
                 ));
                 harness.collapse_handoff_chains();
-                assert_eq!(harness.sessions.len(), 1, "the pair is one row");
+                assert_eq!(harness.sessions.len(), 2, "storage keeps both member rows");
                 assert_eq!(harness.chain_head("old-muse"), "new-muse");
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "the pair is one row");
+                assert_eq!(visible[0].id, "new-muse");
             });
         });
         vc.update(|window, cx| {
@@ -5407,6 +6260,7 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("search-old".into()),
                         handoff_from_provider: Some("muse".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );
@@ -5457,7 +6311,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 use std::collections::HashMap;
                 let record =
                     |id: &str, provider: &str, turns: u64, to: Option<&str>, from: Option<(&str, &str)>| {
@@ -5474,6 +6328,7 @@ mod tests {
                             handoff_to: to.map(str::to_owned),
                             handoff_from: from.map(|(source, _)| source.to_owned()),
                             handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            handoff_title: None,
                             display_texts: HashMap::new(),
                         }
                     };
@@ -5490,11 +6345,14 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("count-b".into()),
                         handoff_from_provider: Some("codex".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );
-                harness.merge_provider_rows();
                 // The muse head through the real join, wire count 2 incl. pack.
+                // Built before the provider rebuild so the restart synth
+                // below does not double it (Y2a: storage keeps one row per
+                // session).
                 let wire = muse_client::schema::Session {
                     active_turn_id: None,
                     approval_mode: None,
@@ -5522,10 +6380,13 @@ mod tests {
                     &crate::projects::Projects::default(),
                 );
                 harness.sessions.push(head);
+                harness.merge_provider_rows();
                 harness.collapse_handoff_chains();
-                assert_eq!(harness.sessions.len(), 1, "three members, one row");
+                assert_eq!(harness.sessions.len(), 3, "storage keeps every member row");
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
                 assert_eq!(
-                    harness.sessions[0].turns, 3,
+                    visible[0].turns, 3,
                     "1 + (2 - 1) + (2 - 1): each destination hides its pack exchange"
                 );
             });

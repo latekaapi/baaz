@@ -432,14 +432,23 @@ Each task compiles and leaves the app working; muse sessions stay on
     the child returns, the chip shows the effective model's human name
     (never the provider id), and a pick sends `SelectModel` at once —
     recorded in `pending_model` until the ack, un-recorded with a banner
-    on refusal. Claude Code keeps Baaz's supplied alias list (no catalog
-    surface was ever probed). **W4c update:** effort no longer stays
+    on refusal. **Y1 update:** both lanes serve a real catalog now. Codex
+    pages `model/list` with `includeHidden: true`, following `nextCursor`
+    (probed live 2026-09-28: six rows, `gpt-reserve` hidden, `nextCursor`
+    null; `gpt-6-*` runs while listed nowhere); hidden rows list only when
+    active, and a session model the catalog omits still lists as a checked
+    row while its effort menu offers the catalog's union with the note
+    "Not in Codex's model list — Codex validates the level". Claude Code
+    sends `initialize` after every spawn and answers `ListModels` from the
+    answer's `models[]`; Baaz's supplied alias list stays as the
+    offline/failure fallback. **W4c update:** effort no longer stays
     client-side — the pick rides `SubmitInput.effort` and each adapter
     maps it onto its own channel: Codex `turn/start`'s `effort`
-    (`child::turn_start_request`, omitted when Default), Claude Code's
-    `--effort` launch flag with a `--resume` relaunch when the pick
-    changed (`lib.rs::resume_launch_for_effort`); the baaz lane sends the
-    chip's level on every submit (lane test
+    (`child::turn_start_request`, omitted when Default; persists for the
+    session from the next turn), Claude Code's `apply_flag_settings`
+    (probed live 2026-09-28: the next turn's session jsonl carried
+    `"effort":"high"`; clearing to Default keeps the `--resume` relaunch);
+    the baaz lane sends the chip's level on every submit (lane test
     `the_chips_effort_rides_submit_input`). The Codex per-model levels
     still derive from the catalog through the existing
     `codex_effort_options` path, and the Claude Code menu lists the
@@ -458,15 +467,15 @@ Each task compiles and leaves the app working; muse sessions stay on
     use (the steer/stop/shell/compact/fork controls banner the
     registry's own reason when invoked), and "Answer questions" has no
     control, so it simply disappears. `Unverified` is attempted, never
-    advertised. Known seam gap, stated not hidden: the
-    `ModelCatalog` ack carries ids, labels and the active flag but no
-    per-model reasoning levels, so a production Codex lane fills the
-    model menu live while its effort menu still waits on the raw
-    `model/list` answer — until the seam extends the ack, that menu
-    shows the typed reason. Verified by lane tests over recording
-    doubles in baaz test code (adapter crates untouched): catalog,
-    pick, meter, compact/fork, mode/plan, the point-of-use refusal, and
-    the table-equality pin — each failing with its arm removed.
+    advertised. **Y1 update — the seam gap is closed:** the `ModelCatalog`
+    ack carries per-model effort levels plus `hidden`, `is_default` and
+    `description`, so a production Codex lane fills the model menu live
+    *and* its effort menu from the same answer; an off-catalog session
+    model still lists checked with the union menu. Verified by lane tests
+    over recording doubles in baaz test code (adapter crates untouched):
+    catalog, pick, meter, compact/fork, mode/plan, the point-of-use
+    refusal, and the table-equality pin — each failing with its arm
+    removed.
 - **W5 — Sidebar/persistence/ledger for lane sessions.** Title: local rows,
   resume, titles, byline, ledger tagging. Globs:
   `crates/baaz/src/sessions.rs`, `crates/baaz/src/sidebar.rs`,
