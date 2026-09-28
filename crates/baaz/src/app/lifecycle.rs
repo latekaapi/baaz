@@ -2272,18 +2272,38 @@ impl Harness {
         );
     }
 
+    /// The handoff chains over full storage, built once per storage
+    /// change and shared by every lookup on this frame. The build is keyed
+    /// on `list_epoch`: each rebuild, rejoin or override edit invalidates
+    /// the list, which retires the index with it — so repeated frames and
+    /// repeated rows never rebuild (Y2a3).
+    pub(crate) fn chain_index(&self) -> sidebar::ChainIndex {
+        let mut cache = self.chain_index.borrow_mut();
+        if let Some((epoch, index)) = cache.as_ref() {
+            if *epoch == self.list_epoch {
+                return index.clone();
+            }
+        }
+        let index = sidebar::ChainIndex::build(&self.provider_sessions, &self.overrides, &self.sessions);
+        self.chain_index_builds.set(self.chain_index_builds.get() + 1);
+        cache.replace((self.list_epoch, index.clone()));
+        index
+    }
+
     /// Follow `handoff_to` links across both stores to the chain head
     /// (`docs/22-handoff.md` §8): any member id opens the head instead. A
     /// dangling destination resolves to the id itself, so its source stays
-    /// listed and openable.
+    /// listed and openable. Reads the cached per-change index, never a
+    /// fresh walk (Y2a3).
     pub(crate) fn chain_head(&self, session_id: &str) -> String {
-        sidebar::chain_head(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+        self.chain_index().head(session_id)
     }
 
     /// Every member of `session_id`'s chain, sorted: what archiving the head
-    /// covers so no member resurfaces.
+    /// covers so no member resurfaces. Reads the cached per-change index,
+    /// never a fresh walk (Y2a3).
     pub(crate) fn chain_members(&self, session_id: &str) -> Vec<String> {
-        sidebar::chain_members(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
+        self.chain_index().members(session_id)
     }
 
     /// Storage keeps every chain member row; the one-row-per-chain view
@@ -5797,9 +5817,9 @@ mod tests {
             assert_eq!(harness.pending_id.as_deref(), Some("chain-c"), "the head row is selected");
         });
         // Y2a, one identity: header, window title and selection all
-        // resolve through the head — the same inputs
-        // `render_centre_header` reads — so the header names the chain
-        // title the one visible row wears.
+        // resolve through the head — Y2a3 reads the collapsed view row
+        // itself, so the header names the chain title the one visible
+        // row wears, by construction.
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 let pending = harness.pending_id.clone().expect("the head row is selected");
@@ -5808,13 +5828,7 @@ mod tests {
                 let row =
                     visible.iter().find(|entry| entry.id == head).expect("the head is the one listed row");
                 assert_eq!(visible.len(), 1);
-                let header_text = if !row.named {
-                    sidebar::handoff_title_of(&head, &harness.provider_sessions, &harness.overrides)
-                        .map(|t| sidebar::one_line(&t))
-                        .unwrap_or_else(|| row.label.clone())
-                } else {
-                    row.label.clone()
-                };
+                let header_text = harness.collapsed_head_label(&head, cx).expect("head label");
                 assert_eq!(header_text, row.label, "header title == selected row title");
                 assert_eq!(row.label, "Chart the Greyport ferry routes");
             });
@@ -5919,6 +5933,184 @@ mod tests {
                 assert!(
                     sidebar::is_pack_text("Handed off from Codex: Second leg (2 recent turns, 0 open todos, 0 files touched)"),
                     "the pack acknowledgement matches the byline skip"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: storage keeps every member row across a provider rebuild, a
+    /// member's live facts survive it, and the one view row carries them —
+    /// a live turn and needs-you attention on any member show on the head.
+    #[gpui::test]
+    fn y2a3_storage_survives_a_rebuild_and_live_state_ors_into_the_head(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-live");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                // A live turn on a non-head member, with needs-you attention.
+                let now = crate::clock::now_local();
+                {
+                    let member =
+                        harness.sessions.iter_mut().find(|entry| entry.id == "chain-a").expect("member row");
+                    member.running = true;
+                    member.turn_started = Some(now);
+                    member.attention = vec![muse_client::schema::AttentionFlag::ApprovalPending];
+                }
+                // The rebuild re-reads the records around the live rows.
+                harness.merge_provider_rows();
+                assert_eq!(
+                    harness.sessions.len(),
+                    3,
+                    "storage keeps every member row across a rebuild"
+                );
+                let member = harness.sessions.iter().find(|entry| entry.id == "chain-a").expect("member row");
+                assert!(member.running, "a member's live turn survives the rebuild");
+                assert_eq!(member.turn_started, Some(now));
+                assert_eq!(
+                    member.attention,
+                    vec![muse_client::schema::AttentionFlag::ApprovalPending],
+                    "a member's attention survives the rebuild"
+                );
+                // One view row, carrying the member's live state.
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "three members, one row");
+                let row = &visible[0];
+                assert_eq!(row.id, "chain-c", "the head is what is listed");
+                assert!(row.running, "the head row shows the member's live turn");
+                assert!(
+                    row.attention.contains(&muse_client::schema::AttentionFlag::ApprovalPending),
+                    "the head row ORs the member's attention, drew {:?}",
+                    row.attention
+                );
+                let header = harness.collapsed_head_label("chain-c", cx).expect("head label");
+                assert_eq!(header, row.label, "header title == selected row title");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: a non-handoff session whose first words start with
+    /// "Handed off from " keeps them — the record keeps the first prompt,
+    /// the row titles from it, and the byline skip does not fire. Only a
+    /// handoff destination ever has a pack turn.
+    #[gpui::test]
+    fn y2a3_a_non_handoff_pack_shaped_message_keeps_title_and_byline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-prefix");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                use std::collections::HashMap;
+                // A provider-lane session with no handoff link anywhere.
+                harness.provider_sessions.insert(
+                    "plain-1".into(),
+                    crate::provider_sessions::ProviderSessionRecord {
+                        provider: "codex".to_owned(),
+                        session_id: "plain-1".to_owned(),
+                        workspace: None,
+                        project: None,
+                        created_ms: 1_700_000_000_000,
+                        updated_ms: 1_700_000_000_000,
+                        turns: 0,
+                        title: None,
+                        first_prompt: None,
+                        handoff_to: None,
+                        handoff_from: None,
+                        handoff_from_provider: None,
+                        handoff_title: None,
+                        display_texts: HashMap::new(),
+                    },
+                );
+                let prompt = "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)";
+                assert!(
+                    !sidebar::is_handoff_dest("plain-1", &harness.provider_sessions, &harness.overrides),
+                    "the fixture session is no destination"
+                );
+                crate::provider_sessions::note_first_prompt(&mut harness.provider_sessions, "plain-1", prompt);
+                assert_eq!(
+                    harness.provider_sessions["plain-1"].first_prompt.as_deref(),
+                    Some(prompt),
+                    "a non-destination keeps pack-shaped words as its first prompt"
+                );
+                harness.merge_provider_rows();
+                {
+                    let row =
+                        harness.sessions.iter_mut().find(|entry| entry.id == "plain-1").expect("member row");
+                    row.label = sidebar::UNNAMED.to_owned();
+                    row.named = false;
+                    assert!(sidebar::first_send_update(
+                        row,
+                        Some(prompt),
+                        crate::clock::now_local(),
+                        false
+                    ));
+                    assert_eq!(row.label, prompt, "a non-destination titles from its own words");
+                }
+                let (summary, ask) = sidebar::byline_landable(
+                    Some("Context received.".into()),
+                    Some(prompt.into()),
+                    false,
+                );
+                assert_eq!(summary.as_deref(), Some("Context received."));
+                assert_eq!(ask.as_deref(), Some(prompt), "no byline skip off a destination");
+                let visible = harness.visible_sessions(cx);
+                assert!(
+                    visible.iter().any(|entry| entry.id == "plain-1"),
+                    "the session stays listed"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Y2a3: the chain index builds once per storage change — repeated
+    /// frames and repeated row lookups never rebuild; the next storage
+    /// change retires it exactly once.
+    #[gpui::test]
+    fn y2a3_the_chain_index_builds_once_per_storage_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("y2a3-index");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                seed_mixed_chain(harness);
+                let base = harness.chain_index_builds.get();
+                let _ = harness.visible_sessions(cx);
+                let after_first = harness.chain_index_builds.get();
+                assert_eq!(after_first, base + 1, "one index build serves the frame");
+                let _ = harness.visible_sessions(cx);
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_first,
+                    "a second frame on unchanged storage rebuilds nothing"
+                );
+                assert_eq!(harness.chain_head("chain-a"), "chain-c");
+                assert_eq!(
+                    harness.chain_members("chain-b"),
+                    vec!["chain-a".to_owned(), "chain-b".to_owned(), "chain-c".to_owned()]
+                );
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_first,
+                    "row lookups reuse the frame's build"
+                );
+                // A storage change retires the index exactly once.
+                harness.provider_sessions.get_mut("chain-a").expect("member record").turns = 99;
+                harness.merge_provider_rows();
+                let _ = harness.visible_sessions(cx);
+                let after_change = harness.chain_index_builds.get();
+                assert_eq!(after_change, after_first + 1, "one rebuild for the storage change");
+                let _ = harness.visible_sessions(cx);
+                assert_eq!(
+                    harness.chain_index_builds.get(),
+                    after_change,
+                    "the rebuilt index serves every later frame"
                 );
             });
         });
