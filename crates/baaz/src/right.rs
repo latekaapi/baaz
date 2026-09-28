@@ -1016,6 +1016,7 @@ fn diff_pane_from(status: &GitStatus, parsed: &ParsedDiffs, notify: &ToastSink) 
     };
     let review = diff_review("right-diff", review_files, shown, Vec::new(), DiffScope::Unstaged, DiffView::Unified)
         .flush()
+        .fill()
         .summary(lead, status.added, status.removed)
         .on_action(diff_handler(notify.clone()));
     v_flex()
