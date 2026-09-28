@@ -1525,6 +1525,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     pub(super) fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let message = self.banner.clone()?;
         let label = match self.banner_action {
+            Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(_) => "Retry",
             None => "Dismiss",
         };
@@ -2143,10 +2144,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 /// rides as prose (the way an `Unavailable` capability explains itself)
 /// and every row still acts on click.
 fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
-    SessionView::provider_rows(current, has_turns)
-        .into_iter()
-        .map(|row| PickerRow::new(row.id, row.label, row.detail))
-        .collect()
+    SessionView::provider_rows_for(
+        current,
+        has_turns,
+        &crate::settings_providers::live_visible_provider_ids(),
+    )
+    .into_iter()
+    .map(|row| PickerRow::new(row.id, row.label, row.detail))
+    .collect()
 }
 
 /// Resolve a markdown link target to a filesystem path, without touching the

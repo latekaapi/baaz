@@ -169,7 +169,11 @@ impl SessionView {
                 }
             }
             MenuKind::Provider => {
-                let rows = Self::provider_rows(self.provider_kind(), self.has_turns());
+                let rows = Self::provider_rows_for(
+                    self.provider_kind(),
+                    self.has_turns(),
+                    &crate::settings_providers::live_visible_provider_ids(),
+                );
                 if let Some(row) = rows.get(selected) {
                     self.pick_provider(&row.id.clone(), cx);
                 }
@@ -476,6 +480,17 @@ impl SessionView {
             self.close_menu(cx);
             return;
         }
+        // A disabled provider left the menu, but a scripted verb can still
+        // name it: refuse with the way back instead of switching.
+        if !crate::settings_providers::live_visible_provider_ids().contains(&picked) {
+            self.toast(
+                format!("{} is disabled", picked.label()),
+                "Enable it in Settings → Providers first.",
+                cx,
+            );
+            self.close_menu(cx);
+            return;
+        }
         if self.has_turns() {
             cx.emit(SessionEvent::NewSessionOnProvider { provider: picked });
         } else {
@@ -520,8 +535,27 @@ impl SessionView {
     /// explains itself — and row ids are what [`Self::pick_provider`]
     /// parses back; only the labels differ.
     pub(super) fn provider_rows(current: ProviderId, has_turns: bool) -> Vec<ProviderRow> {
+        Self::provider_rows_for(current, has_turns, &ProviderId::all())
+    }
+
+    /// [`Self::provider_rows`] over `ids`: the live menu passes only the
+    /// enabled providers, so a disabled provider disappears from the
+    /// composer's provider menu (and from the new-session provider
+    /// choice, which opens the same menu).
+    pub(super) fn provider_rows_for(
+        current: ProviderId,
+        has_turns: bool,
+        ids: &[ProviderId],
+    ) -> Vec<ProviderRow> {
         let mut rows = Vec::new();
-        for id in ProviderId::all() {
+        // The session's own lane always stays, even switched off mid-run:
+        // its rows explain the lane it already rides.
+        let mut ids: Vec<ProviderId> = ids.to_vec();
+        if !ids.contains(&current) {
+            ids.push(current);
+        }
+        ids.sort_by_key(|id| ProviderId::all().iter().position(|all| all == id).unwrap_or(99));
+        for id in ids {
             if has_turns && id != current {
                 rows.push(ProviderRow {
                     id: format!("handoff:{}", id.as_str()),

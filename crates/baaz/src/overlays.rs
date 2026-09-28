@@ -62,6 +62,10 @@ pub enum DialogAction {
     /// application (`Harness::handoff_confirm`), not on this action, so
     /// dismissing any other way confirms nothing.
     HandoffConfirm,
+    /// Sign out of the provider in `archive_target` (its wire id): a
+    /// real CLI logout, confirmed first. Dismissing any other way signs
+    /// out nothing.
+    ProviderSignOut,
 }
 
 /// Which popover is open over the composer.

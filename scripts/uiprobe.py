@@ -107,6 +107,20 @@ ENTRIES = {
                                       "--steps", "new;setprovider:claude-code"]},
     "lane-codex":            {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;setprovider:codex"]},
+    # Settings → Providers, open on scripted statuses covering Connected
+    # (Muse), Signed out (Claude Code) and Not installed (Codex):
+    # offline, deterministic, no baseline yet — generate on main after
+    # merge, never to silence a finding. Capture and look.
+    "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:providers"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":
+                                      '[{"provider":"muse","installed":{"Yes":{"version":"1.4.0","path":"/bin/muse"}},'
+                                      '"auth":{"SignedIn":{"email":"ada@example.com","plan":"Pro","method":"oauth"}},'
+                                      '"enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                      '{"provider":"claude-code","installed":{"Yes":{"version":"2.1.276","path":"/bin/claude"}},'
+                                      '"auth":"SignedOut","enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                      '{"provider":"codex","installed":"No",'
+                                      '"auth":"Unknown","enabled":true,"advisory":"None","checked_at":1,"usage":null}]'}},
     # The Skills page, open on a fixture catalog (no CLI, deterministic,
     # offline): the full page with its detail pane, and the empty-project
     # state. `skills:` is a window-only steps verb, so `--login signed-in
@@ -172,10 +186,11 @@ def main():
         tmp, prev = tempfile.mkdtemp(), None
         for attempt in range(SETTLE_TRIES):
             shot = os.path.join(tmp, f"s{attempt}.png")
+            entry_env = {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
             p = subprocess.run(cmd + ["--screenshot", shot,
                                       "--screenshot-delay", str(a.delay_ms)],
                                cwd=REPO, capture_output=True, text=True,
-                               timeout=180, env=PROBE_ENV)
+                               timeout=180, env=entry_env)
             if p.returncode != 0 or not os.path.exists(shot):
                 sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
                 return 1
@@ -193,9 +208,10 @@ def main():
         # `--bench` already measures frames drawn at rest and writes
         # `idle_frames_2s`. Translate it onto the contract's shape.
         out = os.path.join(tempfile.mkdtemp(), "bench.json")
+        entry_env = {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
         p = subprocess.run(cmd + ["--bench-frames", "60", "--bench-out", out],
                            cwd=REPO, capture_output=True, text=True, timeout=180,
-                           env=PROBE_ENV)
+                           env=entry_env)
         if not os.path.exists(out):
             sys.stderr.write("bench produced no output:\n" + (p.stderr[-1000:] or p.stdout[-1000:]))
             return 1
