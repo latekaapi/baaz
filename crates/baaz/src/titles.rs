@@ -186,7 +186,14 @@ pub fn should_title(
     }
     match meta {
         None => true,
-        Some(meta) => meta.name.is_none() && meta.generated_title.is_none() && !meta.title_attempted,
+        // A handoff destination keeps the chain title: no rename, no paid
+        // titler run (`docs/22-handoff.md` §8, Y2a).
+        Some(meta) => {
+            meta.name.is_none()
+                && meta.generated_title.is_none()
+                && !meta.title_attempted
+                && meta.handoff_from.is_none()
+        }
     }
 }
 

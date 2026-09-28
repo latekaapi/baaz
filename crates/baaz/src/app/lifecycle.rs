@@ -2283,18 +2283,20 @@ impl Harness {
         sidebar::chain_members(session_id, &self.provider_sessions, &self.overrides, &self.sessions)
     }
 
-    /// Collapse the rows to one per handoff chain (see
-    /// [`sidebar::collapse_handoff_chains`]). Returns whether the list
-    /// changed.
+    /// Storage keeps every chain member row; the one-row-per-chain view
+    /// is derived in [`Self::visible_sessions`](crate::app::Harness::visible_sessions)
+    /// (see [`sidebar::collapse_handoff_chains`]). Kept as a named step so
+    /// call sites read the same — it only invalidates when a link is in
+    /// play, never removes rows. Returns whether the list changed.
     pub(crate) fn collapse_handoff_chains(&mut self) -> bool {
-        let collapsed =
-            sidebar::collapse_handoff_chains(self.sessions.clone(), &self.provider_sessions, &self.overrides);
-        if collapsed == self.sessions {
-            return false;
+        let touched = self
+            .sessions
+            .iter()
+            .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
+        if touched {
+            self.invalidate_list();
         }
-        self.sessions = collapsed;
-        self.invalidate_list();
-        true
+        touched
     }
 
     /// Rebuild the sidebar rows the provider record owns: one row per
@@ -2350,13 +2352,72 @@ impl Harness {
                 }
             }
         }
+        // Restart before the wire: a muse-lane destination exists only as
+        // an override yet — synthesise its row from the local stores so
+        // the chain shows with the right title before `session/list`
+        // arrives (Y2a). Named by the chain title, so the empty filter
+        // keeps it.
+        {
+            let missing: Vec<String> = self
+                .overrides
+                .keys()
+                .filter(|id| {
+                    !self.sessions.iter().any(|e| e.id == **id)
+                        && sidebar::needs_collapse(id, &self.provider_sessions, &self.overrides)
+                })
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                let now = crate::clock::now_local();
+                for id in missing {
+                    let meta = self.overrides.get(&id);
+                    let title = meta
+                        .and_then(|m| m.handoff_title.clone())
+                        .or_else(|| meta.and_then(|m| m.name.clone()))
+                        .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
+                    let named = meta.and_then(|m| m.handoff_title.clone()).is_some();
+                    self.sessions.push(sidebar::SessionEntry {
+                        id: id.clone(),
+                        label: sidebar::one_line(&title),
+                        updated: now,
+                        running: false,
+                        turns: 0,
+                        hidden: meta.is_some_and(|m| m.hidden),
+                        pinned: meta.is_some_and(|m| m.pinned),
+                        archived: meta.is_some_and(|m| m.archived),
+                        description: String::new(),
+                        replayed: false,
+                        provider: None,
+                        named,
+                        needs_title: false,
+                        side_marker: false,
+                        title_pending: false,
+                        last_ask: None,
+                        local: false,
+                        provisional: false,
+                        workspace: None,
+                        project: meta.and_then(|m| m.project.clone()),
+                        project_name: None,
+                        attention: Vec::n
+ew(),
+                        approval_command: None,
+                        pending_question: None,
+                        turn_started: None,
+                        last_error: None,
+                        branch: None,
+                        terminals_running: 0,
+                    });
+                    changed = true;
+                }
+            }
+        }
         if changed {
             self.invalidate_list();
         }
-        // A handoff chain is one row: the activation swap lands in this
-        // same build, the destination taking the source row's place — but
-        // only when a merged or removed record is link-adjacent, so
-        // link-free merges stop at the row refresh (X3d).
+        // A handoff chain is one row at view time: invalidate so the
+        // derived head re-reads the rebuilt rows — but only when a merged
+        // or removed record is link-adjacent, so link-free merges stop at
+        // the row refresh (X3d).
         let collapsed = if touched_link { self.collapse_handoff_chains() } else { false };
         changed | collapsed
     }
@@ -3055,8 +3116,10 @@ impl Harness {
                 if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
                     crate::provider_sessions::write(&self.provider_sessions);
                 }
+                let handoff_dest =
+                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
                 if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local()) {
+                    if sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest) {
                         self.invalidate_list();
                     }
                 } else {
@@ -3064,7 +3127,7 @@ impl Harness {
                     // send): build it now, titled from the prompt.
                     self.merge_provider_rows();
                     if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local());
+                        sidebar::first_send_update(entry, Some(&prompt), crate::clock::now_local(), handoff_dest);
                         self.invalidate_list();
                     }
                 }
@@ -3687,6 +3750,28 @@ impl Harness {
             view.note_handoff_pack(text.clone(), display.clone(), cx);
             view.submit_pack(text, display, cx);
         });
+        // The pack is a live turn: the row reads running with a fresh time
+        // from the submit, exactly like `ProviderTurnAccepted` (Y2a) — so
+        // the head row shows "Working" and is never filtered as empty.
+        if crate::provider_sessions::touch(&mut self.provider_sessions, &dest) {
+            crate::provider_sessions::write(&self.provider_sessions);
+        }
+        let now = crate::clock::now_local();
+        if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
+            entry.running = true;
+            entry.updated = now;
+            entry.turn_started = Some(now);
+            entry.last_error = None;
+        } else {
+            self.merge_provider_rows();
+            if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
+                entry.running = true;
+                entry.updated = now;
+                entry.turn_started = Some(now);
+                entry.last_error = None;
+            }
+        }
+        self.invalidate_list();
     }
 
     /// The pack's submit ack on the destination: the run holding that
@@ -3928,8 +4013,78 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let _ = to;
+        // The chain's one title: the source's current display title (a
+        // user name first, then its title — the row label already reads
+        // that order), carried forward down chains of any length.
+        let chain_title = self
+            .sessions
+            .iter()
+            .find(|e| e.id == source)
+            .map(|e| e.label.clone())
+            .or_else(|| {
+                self.overrides.get(source).and_then(|m| {
+                    m.name
+                        .clone()
+                        .or_else(|| m.handoff_title.clone())
+                        .or_else(|| m.generated_title.clone())
+                        .or_else(|| m.derived_title.clone())
+                })
+            })
+            .or_else(|| {
+                self.provider_sessions.get(source).and_then(|r| {
+                    r.handoff_title
+                        .clone()
+                        .or_else(|| r.title.clone())
+                        .or_else(|| r.first_prompt.clone())
+                })
+            })
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty());
+        let source_meta = self.overrides.get(source).cloned();
+        let source_record = self.provider_sessions.get(source).cloned();
         if self.provider_sessions.contains_key(source) || self.provider_sessions.contains_key(dest) {
             crate::provider_sessions::note_handoff(&mut self.provider_sessions, source, from.as_str(), dest);
+            if let Some(title) = chain_title.clone() {
+                if let Some(record) = self.provider_sessions.get_mut(dest) {
+                    record.handoff_title = Some(title);
+                }
+            }
+            // Row state rides to the destination: pinned, project, user
+            // name and archived survive the hop (Y2a). Pinned/archived
+            // live in the overrides even for lane sessions, so they land
+            // there whatever the destination lane is.
+            if let Some(dest_record) = self.provider_sessions.get_mut(dest) {
+                if let Some(meta) = source_meta.as_ref() {
+                    if dest_record.project.is_none() {
+                        dest_record.project = meta.project.clone();
+                    }
+                }
+                if let Some(record) = source_record.as_ref() {
+                    if dest_record.project.is_none() {
+                        dest_record.project = record.project.clone();
+                    }
+                }
+            }
+            if let Some(src) = source_meta.clone() {
+                self.set_override(
+                    dest,
+                    |meta| {
+                        if !meta.pinned {
+                            meta.pinned = src.pinned;
+                        }
+                        if !meta.archived {
+                            meta.archived = src.archived;
+                        }
+                        if meta.project.is_none() {
+                            meta.project = src.project.clone();
+                        }
+                        if meta.name.is_none() {
+                            meta.name = src.name.clone();
+                        }
+                    },
+                    cx,
+                );
+            }
             crate::provider_sessions::write(&self.provider_sessions);
         }
         let solo_source = !self.provider_sessions.contains_key(source);
@@ -3939,11 +4094,38 @@ impl Harness {
                 self.set_override(source, |meta| meta.handoff_to = Some(dest.to_owned()), cx);
             }
             if solo_dest {
+                let title = chain_title.clone();
+                let src = source_meta.clone();
+                let src_record = source_record.clone();
                 self.set_override(
                     dest,
                     |meta| {
                         meta.handoff_from = Some(source.to_owned());
                         meta.handoff_from_provider = Some(from.as_str().to_owned());
+                        if meta.handoff_title.is_none() {
+                            meta.handoff_title = title.clone();
+                        }
+                        // A muse destination inherits the source's row
+                        // state it does not already name itself.
+                        if let Some(s) = src.as_ref() {
+                            if !meta.pinned {
+                                meta.pinned = s.pinned;
+                            }
+                            if !meta.archived {
+                                meta.archived = s.archived;
+                            }
+                            if meta.project.is_none() {
+                                meta.project = s.project.clone();
+                            }
+                            if meta.name.is_none() {
+                                meta.name = s.name.clone();
+                            }
+                        }
+                        if let Some(r) = src_record.as_ref() {
+                            if meta.project.is_none() {
+                                meta.project = r.project.clone();
+                            }
+                        }
                     },
                     cx,
                 );
@@ -5247,6 +5429,7 @@ mod tests {
                 handoff_to: to.map(str::to_owned),
                 handoff_from: from.map(|(source, _)| source.to_owned()),
                 handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            handoff_title: None,
                 display_texts: HashMap::new(),
             }
         };
@@ -5263,6 +5446,7 @@ mod tests {
             crate::sessions::SessionMeta {
                 handoff_from: Some("chain-b".into()),
                 handoff_from_provider: Some("codex".into()),
+            handoff_title: None,
                 ..Default::default()
             },
         );
@@ -5355,6 +5539,7 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("old-muse".into()),
                         handoff_from_provider: Some("muse".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );
@@ -5407,6 +5592,7 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("search-old".into()),
                         handoff_from_provider: Some("muse".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );
@@ -5474,6 +5660,7 @@ mod tests {
                             handoff_to: to.map(str::to_owned),
                             handoff_from: from.map(|(source, _)| source.to_owned()),
                             handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            handoff_title: None,
                             display_texts: HashMap::new(),
                         }
                     };
@@ -5490,6 +5677,7 @@ mod tests {
                     crate::sessions::SessionMeta {
                         handoff_from: Some("count-b".into()),
                         handoff_from_provider: Some("codex".into()),
+            handoff_title: None,
                         ..Default::default()
                     },
                 );

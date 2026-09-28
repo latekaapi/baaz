@@ -1248,10 +1248,20 @@ impl Harness {
     /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
         let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
+        // One identity per chain: the raw view id resolves to its head,
+        // whose row (chain-titled at view time) names the window (Y2a).
         let label = session.and_then(|id| {
-            self.sessions.iter().find(|e| e.id == id).map(|e| {
+            let head = sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions);
+            self.sessions.iter().find(|e| e.id == head).map(|e| {
                 let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                crate::sidebar::display_label(&e.label, pending).to_owned()
+                let text = if !e.named {
+                    sidebar::handoff_title_of(&head, &self.provider_sessions, &self.overrides)
+                        .map(|t| sidebar::one_line(&t))
+                        .unwrap_or_else(|| e.label.clone())
+                } else {
+                    e.label.clone()
+                };
+                crate::sidebar::display_label(&text, pending).to_owned()
             })
         });
         match self.current_project() {
@@ -1561,7 +1571,9 @@ impl Harness {
                 // placeholder the `else` arm below still covers — either
                 // shape is invisible (`SessionEntry::is_empty`) until
                 // `first_send_update` runs (see its doc).
-                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local()) {
+                let handoff_dest =
+                    sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+                if sidebar::first_send_update(entry, prompt.as_deref(), crate::clock::now_local(), handoff_dest) {
                     self.invalidate_list();
                     // The row just went from invisible to visible. A reveal
                     // armed when this session was opened may already have
@@ -2312,6 +2324,9 @@ impl Harness {
         // header answers on the click's own frame, before any page arrives.
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+        // One identity per chain: header, window and selection all resolve
+        // the raw id to its head (Y2a).
+        let target = target.map(|id| sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions));
         // The Skills page names itself after the crumb: "Skills · [project]".
         let label = if self.skills.open {
             Some("Skills".to_owned())
@@ -2319,7 +2334,14 @@ impl Harness {
             target.and_then(|id| {
                 self.sessions.iter().find(|e| e.id == id).map(|e| {
                     let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                    crate::sidebar::display_label(&e.label, pending).to_owned()
+                    let text = if !e.named {
+                        sidebar::handoff_title_of(&id, &self.provider_sessions, &self.overrides)
+                            .map(|t| sidebar::one_line(&t))
+                            .unwrap_or_else(|| e.label.clone())
+                    } else {
+                        e.label.clone()
+                    };
+                    crate::sidebar::display_label(&text, pending).to_owned()
                 })
             })
         };
@@ -3733,6 +3755,7 @@ mod tests {
                         handoff_to: None,
                         handoff_from: None,
                         handoff_from_provider: None,
+            handoff_title: None,
                         display_texts: std::collections::HashMap::new(),
                     },
                 );

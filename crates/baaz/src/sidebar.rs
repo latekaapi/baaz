@@ -217,6 +217,7 @@ impl SessionEntry {
         }
         let name = pick(meta.and_then(|m| m.name.as_deref()));
         let label = name
+            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
             .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
             .or_else(|| pick(session.name.as_deref()))
             .or_else(|| pick(session.title.as_deref()))
@@ -335,6 +336,7 @@ impl SessionEntry {
         }
         let name = pick(meta.and_then(|m| m.name.as_deref()));
         let label = name
+            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
             .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
             .or_else(|| index.label())
             .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
@@ -432,6 +434,8 @@ impl SessionEntry {
         }
         let name = pick(meta.and_then(|m| m.name.as_deref()));
         let label = name
+            .or_else(|| pick(record.handoff_title.as_deref()))
+            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
             .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
             .or_else(|| pick(record.title.as_deref()))
             .or_else(|| pick(record.first_prompt.as_deref()))
@@ -906,12 +910,20 @@ pub fn local_started_row(
 /// turn on a session whose row is already showing — so it is left untouched
 /// and this returns `false`. The caller reads the return to decide whether
 /// the list needs invalidating and the sidebar reveal re-arming.
-pub fn first_send_update(entry: &mut SessionEntry, prompt: Option<&str>, now: DateTime<Local>) -> bool {
+pub fn first_send_update(
+    entry: &mut SessionEntry,
+    prompt: Option<&str>,
+    now: DateTime<Local>,
+    handoff_dest: bool,
+) -> bool {
     if entry.turns > 0 {
         return false;
     }
     entry.running = true;
-    if !entry.named {
+    // A handoff destination is never titled from a send: the pack submit
+    // reveals the row, and the destination's first real message keeps the
+    // chain title (`docs/22-handoff.md` §8, Y2a).
+    if !handoff_dest && !is_pack_text(prompt.unwrap_or_default()) && !entry.named {
         if let Some(prompt) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
             entry.label = one_line(prompt);
         }
@@ -920,6 +932,40 @@ pub fn first_send_update(entry: &mut SessionEntry, prompt: Option<&str>, now: Da
     entry.turn_started = Some(now);
     entry.last_error = None;
     true
+}
+
+/// Whether `text` is a handoff pack turn or its short display summary: the
+/// full pack starts with the pack header (`PACK_HEAD_PREFIX`), the bubble
+/// with "Handed off from …" (`handoff::display_text`). Either one is the
+/// handoff itself speaking, never words to title or byline from (Y2a).
+pub fn is_pack_text(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with(crate::handoff_snapshot::PACK_HEAD_PREFIX) || t.starts_with("Handed off from ")
+}
+
+/// Whether `id` was born from a handoff (whichever store holds the link).
+pub fn is_handoff_dest(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> bool {
+    handoff_from_of(id, provider_sessions, overrides).is_some()
+}
+
+/// The persisted chain title for `id`, whichever store holds it: the
+/// record's own half first, then the override's, so mixed chains read it
+/// either way.
+pub fn handoff_title_of(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> Option<String> {
+    provider_sessions
+        .get(id)
+        .and_then(|r| r.handoff_title.clone())
+        .or_else(|| overrides.get(id).and_then(|m| m.handoff_title.clone()))
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
 }
 
 /// The wire id's sidebar mark. `None` is the muse lane or an id no
@@ -1161,22 +1207,63 @@ pub fn collapse_handoff_chains(
     if collapsible.is_empty() {
         return entries;
     }
-    // The collapsed head rows, built before the rows move: the head's own
-    // row (its `updated`, provider badge and flags), relabelled with the
-    // tail member's title unless the head was user-renamed, and counting the
-    // chain's total turns.
+    // The collapsed head rows, built before the rows move (Y2a: one
+    // identity per chain). The head's own row keeps its provider badge;
+    // the display derives from the whole chain: the title ladder (a user
+    // rename of the head, else the persisted `handoff_title`, else the
+    // tail member's row label, else the head's own label), the summed
+    // visible turns, the newest time, pinned/archived ORed across members
+    // (copied at activation, so usually already on the head), and
+    // needs-you attention ORed across members. Pure and idempotent: a
+    // second run over collapsed rows changes nothing, whatever order the
+    // rows arrived in.
     let mut collapsed: HashMap<String, SessionEntry> = HashMap::new();
     for head in &collapsible {
         let mut row = entries.iter().find(|entry| entry.id == *head).expect("collapsible heads have a row").clone();
         if !row.named {
-            let original = chain_tail(head, provider_sessions, overrides, &entries)
-                .filter(|tail| tail != head)
-                .and_then(|tail| entries.iter().find(|entry| entry.id == tail).map(|tail_row| tail_row.label.clone()));
-            if let Some(original) = original {
-                row.label = original;
+            if let Some(kept) = handoff_title_of(head, provider_sessions, overrides) {
+                row.label = one_line(&kept);
+            } else {
+                let original = chain_tail(head, provider_sessions, overrides, &entries)
+                    .filter(|tail| tail != head)
+                    .and_then(|tail| entries.iter().find(|entry| entry.id == tail).map(|tail_row| tail_row.label.clone()));
+                if let Some(original) = original {
+                    row.label = original;
+                }
             }
         }
         row.turns = by_head[head].iter().map(|ix| entries[*ix].turns).sum();
+        let mut newest = row.updated;
+        let mut pinned = row.pinned;
+        let mut archived = row.archived;
+        let mut attention = row.attention.clone();
+        let mut approval = row.approval_command.clone();
+        let mut question = row.pending_question.clone();
+        for ix in &by_head[head] {
+            let member = &entries[*ix];
+            if member.updated > newest {
+                newest = member.updated;
+            }
+            pinned |= member.pinned;
+            archived |= member.archived;
+            for flag in &member.attention {
+                if !attention.contains(flag) {
+                    attention.push(flag.clone());
+                }
+            }
+            if approval.is_none() {
+                approval = member.approval_command.clone();
+            }
+            if question.is_none() {
+                question = member.pending_question.clone();
+            }
+        }
+        row.updated = newest;
+        row.pinned = pinned;
+        row.archived = archived;
+        row.attention = attention;
+        row.approval_command = approval;
+        row.pending_question = question;
         collapsed.insert(head.clone(), row);
     }
     let mut emitted: HashSet<String> = HashSet::new();
@@ -2976,6 +3063,7 @@ mod tests {
             handoff_to: None,
             handoff_from: None,
             handoff_from_provider: None,
+            handoff_title: None,
             display_texts: std::collections::HashMap::new(),
         }
     }
@@ -3077,6 +3165,7 @@ mod tests {
             handoff_to: to.map(str::to_owned),
             handoff_from: from.map(|(source, _)| source.to_owned()),
             handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+            handoff_title: None,
             display_texts: std::collections::HashMap::new(),
         }
     }
@@ -3104,6 +3193,7 @@ mod tests {
             SessionMeta {
                 handoff_from: Some("chain-b".into()),
                 handoff_from_provider: Some("codex".into()),
+            handoff_title: None,
                 ..SessionMeta::default()
             },
         );
