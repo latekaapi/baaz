@@ -1146,7 +1146,10 @@ impl Harness {
                 None if !entry.replayed => entry.label = crate::sidebar::UNNAMED.to_owned(),
                 None => {}
             }
-            entry.hidden = meta.is_some_and(|m| m.hidden);
+            // The wire-alone mark survives the rejoin: a side started by any
+            // other state dir carries no override here, so its own row flag
+            // is what keeps it hidden.
+            entry.hidden = meta.is_some_and(|m| m.hidden) || entry.side_marker;
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);
             // A generation in flight still reads pending after the rejoin,
@@ -5167,6 +5170,7 @@ mod tests {
             provider: None,
             named: false,
             needs_title: false,
+            side_marker: false,
             title_pending: false,
             last_ask: None,
             local: false,

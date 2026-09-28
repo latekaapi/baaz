@@ -395,14 +395,20 @@ row's own name/title/prompt, the index's name/title/prompt (its literal "New
 session" is a placeholder and counts as nothing), then the derived title,
 then "New session". The generated title is one cheap model call
 (`muse-spark-1.3` when listed, else the server default) on the first send,
-run as one turn in a throwaway side session in the same workspace — a
+run as one turn in a throwaway side session in the `side-sessions` folder
+under Baaz's own state dir — never a project, since the prompt already
+carries the user's message and the side session needs no repo — a
 bare-UUIDv7 client id (muse 1.3.0 rejects any `session/start` id that is not
 its own shape), recorded in memory and as `side_session` in `sessions.json`
 before the start runs, hidden from the first moment so it never reaches the
 sidebar, the palette, the search index or the counts, including across a
 restart mid-flight — asking for a 3–6 word
 title for the user's first message and harvesting `turn/completed` with a
-free `session/read`. It lands in `sessions.json` as `generated_title` (never
+free `session/read`. The side session stays recognisable from what muse
+itself lists back — its prompt prefix or its side workspace — so one started
+by any other state dir (a scratch run, a relay lane, a second install, a
+restored backup) hides with no local record; the local override keeps
+working as before. It lands in `sessions.json` as `generated_title` (never
 via `session/rename`), ranked as above; while in flight the row reads
 `Naming this session…` and an untitled header crumb borrows it, and both
 update in place when it lands. Failure (a 90 s timeout — grounded in the

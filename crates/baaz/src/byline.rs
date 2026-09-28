@@ -99,6 +99,11 @@ pub fn should_rewrite(
     }
 }
 
+/// The first line of [`rewrite_prompt`], kept beside it so the hide rule
+/// recognises a byline side session from the wire alone, exactly like a
+/// title one ([`crate::titles::is_side_prompt`]).
+pub const REWRITE_PROMPT_PREFIX: &str = "Rewrite these two sidebar lines about a chat session";
+
 /// The rewrite prompt: the two poor lines, quoted, asking for two short
 /// replacements and nothing else. Bounded like the title prompt, for the
 /// same cost reason.
@@ -106,7 +111,7 @@ pub fn rewrite_prompt(ask: &str, result: &str) -> String {
     let ask: String = ask.chars().take(crate::titles::TITLE_PROMPT_CHARS).collect();
     let result: String = result.chars().take(crate::titles::TITLE_PROMPT_CHARS).collect();
     format!(
-        "Rewrite these two sidebar lines about a chat session — first what the user last asked, then what the assistant replied — as two short lines, each under 12 words:\n\nask: {ask}\nresult: {result}\n\nReply with exactly two lines, the rewritten ask then the rewritten result, no quotes, no numbering, no explanation."
+        "{REWRITE_PROMPT_PREFIX} — first what the user last asked, then what the assistant replied — as two short lines, each under 12 words:\n\nask: {ask}\nresult: {result}\n\nReply with exactly two lines, the rewritten ask then the rewritten result, no quotes, no numbering, no explanation."
     )
 }
 

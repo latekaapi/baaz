@@ -85,6 +85,14 @@ pub struct SessionEntry {
     /// Whether anything but the fallback was found, which is what tells the
     /// application a `session/read` is worth making (finding F10).
     pub needs_title: bool,
+    /// Set at join time when the wire (or the index) itself marks this row
+    /// as one of Baaz's throwaway title/summary side sessions — the
+    /// side-session prompt prefix or the side workspace — with no local
+    /// record. What keeps such a row hidden across a restart, a scratch
+    /// state dir, a relay lane, or a store that never saw it start:
+    /// `hidden` is re-derived from this flag on every join and rejoin, and
+    /// the app's side-session checks read it beside the explicit record.
+    pub side_marker: bool,
     /// A generated title is in flight for this session (auto-titles): the
     /// second line reads the pending placeholder until it lands. Owned by
     /// the titler, which sets it on `turn/started` and clears it on harvest,
@@ -236,13 +244,20 @@ impl SessionEntry {
         );
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
+        // A side session hides from the wire alone: the prompt prefix or
+        // the side workspace marks it with no local record, so one started
+        // by any other state dir never draws a row here.
+        let side_marker = crate::titles::looks_like_side_session(
+            session.first_user_prompt.as_deref(),
+            session.workspace_root.as_deref(),
+        );
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
             updated: parse_time(&session.updated_at),
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             turns: session.turn_count,
-            hidden: meta.is_some_and(|m| m.hidden),
+            hidden: meta.is_some_and(|m| m.hidden) || side_marker,
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
             description: with_handoff_origin(
@@ -258,6 +273,7 @@ impl SessionEntry {
             provider: None,
             named: name.is_some(),
             needs_title: label.is_none(),
+            side_marker,
             title_pending: false,
             local: false,
             provisional: false,
@@ -337,13 +353,20 @@ impl SessionEntry {
         );
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
+        // Same wire-alone rule as the joined rows, from what the index
+        // knows — so a side session never flashes into view before the
+        // wire answers either.
+        let side_marker = crate::titles::looks_like_side_session(
+            index.first_user_prompt.as_deref(),
+            index.workspace_root.as_deref(),
+        );
         Some(Self {
             id: session_id.to_owned(),
             label: one_line(text),
             updated,
             running: false,
             turns: 0,
-            hidden: meta.is_some_and(|m| m.hidden),
+            hidden: meta.is_some_and(|m| m.hidden) || side_marker,
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
             description: with_handoff_origin(
@@ -359,6 +382,7 @@ impl SessionEntry {
             provider: None,
             named: name.is_some(),
             needs_title: false,
+            side_marker,
             title_pending: false,
             local: false,
             provisional: true,
@@ -439,6 +463,7 @@ impl SessionEntry {
             provider: Some(record.provider.clone()),
             named: name.is_some(),
             needs_title: false,
+            side_marker: false,
             title_pending: false,
             local: false,
             provisional: false,
@@ -475,13 +500,16 @@ impl SessionEntry {
             .and_then(|root| projects.resolve_available(Some(root), None));
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
+        // A capture is labelled by file, never by the wire — but its
+        // workspace still speaks: the same wire-alone rule as live rows.
+        let side_marker = crate::titles::looks_like_side_session(None, workspace.as_deref());
         Self {
             id: session_id.to_owned(),
             label,
             updated: crate::clock::now_local(),
             running: false,
             turns: 0,
-            hidden: false,
+            hidden: side_marker,
             pinned: false,
             archived: false,
             description: String::new(),
@@ -489,6 +517,7 @@ impl SessionEntry {
             provider: None,
             named: false,
             needs_title: false,
+            side_marker,
             title_pending: false,
             last_ask: None,
             local: false,
@@ -832,6 +861,7 @@ pub fn local_started_row(
         provider: None,
         named: false,
         needs_title: false,
+        side_marker: false,
         title_pending: false,
         last_ask: None,
         local: true,
@@ -1996,6 +2026,49 @@ mod tests {
         assert_eq!(display_label("Fix the header", true), "Fix the header");
     }
 
+    #[test]
+    fn a_side_session_hides_from_the_wire_alone_with_no_local_record() {
+        let projects = Projects::default();
+        // The observed bug: a title side session listed with no override
+        // drew a row titled with its own prompt.
+        let mut side = wire_session();
+        side.first_user_prompt = Some(crate::titles::title_prompt("Explain the layout"));
+        let row = SessionEntry::join(&side, None, None, &projects);
+        assert!(row.label.starts_with("Suggest a short title"), "the symptom: titled with its own prompt");
+        assert!(row.side_marker, "recognised from the prompt prefix");
+        assert!(row.hidden, "hidden with no local record");
+        // The merge keeps it a hidden row, which is what the sidebar filter drops.
+        let merged = merge_session_list(vec![row], &[]);
+        assert!(merged.iter().all(|entry| entry.hidden));
+        // The byline kind hides the same way; ordinary sessions are unaffected.
+        let mut byline = wire_session();
+        byline.first_user_prompt = Some(crate::byline::rewrite_prompt("fix it", "patched it"));
+        let row = SessionEntry::join(&byline, None, None, &projects);
+        assert!(row.hidden && row.side_marker);
+        let mut ordinary = wire_session();
+        ordinary.first_user_prompt = Some("Explain the layout".into());
+        let row = SessionEntry::join(&ordinary, None, None, &projects);
+        assert!(!row.hidden && !row.side_marker);
+        // A side workspace marks the row even when the prompt is underivable.
+        let mut rootless = wire_session();
+        rootless.workspace_root =
+            Some(crate::titles::side_workspace_dir().to_string_lossy().into_owned());
+        let row = SessionEntry::join(&rootless, None, None, &projects);
+        assert!(row.hidden && row.side_marker);
+        // The local override path still hides exactly as before.
+        let mut named = wire_session();
+        named.first_user_prompt = Some("Explain the layout".into());
+        let meta = SessionMeta { hidden: true, ..SessionMeta::default() };
+        let row = SessionEntry::join(&named, None, Some(&meta), &projects);
+        assert!(row.hidden && !row.side_marker);
+        // Provisional rows hide the same way before the wire answers.
+        let mut cache = crate::projects::CanonicalCache::default();
+        let index = index_entry("", Some(&crate::titles::title_prompt("Explain the layout")));
+        let row =
+            SessionEntry::provisional("s", &index, None, &projects, &mut cache).expect("labelled");
+        assert!(row.hidden && row.side_marker);
+    }
+
     fn entry(id: &str) -> SessionEntry {
         SessionEntry {
             id: id.to_owned(),
@@ -2011,6 +2084,7 @@ mod tests {
             provider: None,
             named: false,
             needs_title: false,
+            side_marker: false,
             title_pending: false,
             last_ask: None,
             local: false,
