@@ -389,9 +389,21 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
                     return Some(candidate);
                 }
             }
-            // The same resolver Muse sessions and the tier probe use, so the
-            // Providers page can never disagree with a session that works.
-            if let Some(program) = muse_client::resolve_muse_program() {
+            // The override Muse sessions honour too (`MUSE_BIN`), so the
+            // Providers page never disagrees with a session that works —
+            // named here rather than called through `muse_client`, which the
+            // seam ratchet keeps out of this file.
+            if let Some(program) = std::env::var_os("MUSE_BIN") {
+                let candidate = PathBuf::from(&program);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
+                    candidate.is_file()
+                })
+            }) {
                 return Some(program);
             }
             provider::env_path::find_program("muse")
