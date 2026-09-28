@@ -779,8 +779,16 @@ pub struct Harness {
     /// switch is still pending: `SwitchProvider` / `NewSessionOnProvider`
     /// close the old view synchronously but start its replacement on a
     /// task, so they claim the next start up front — any other `new` while
-    /// a switch is in flight is a duplicate and starts nothing.
-    pub(crate) switch_claim: Option<String>,
+    /// a switch is in flight is a duplicate and starts nothing. The claim
+    /// carries the switch epoch that stamped it, so a superseded switch's
+    /// still-queued task cannot steal its replacement's claim.
+    pub(crate) switch_claim: Option<(String, u64)>,
+    /// Switch generation (Y2b2): bumped on every `SwitchProvider` start
+    /// and on every cancellation. The switch's open carries the value, and
+    /// only an open whose epoch is still current may `close_replaced` and
+    /// activate as the switch result — anything the person does meanwhile
+    /// cancels the switch (bumping this) and the stale open is discarded.
+    pub(crate) switch_epoch: u64,
     /// The view a provider switch is replacing (Y2b): the old session id,
     /// kept active and drawn — composer locked, chip already on the pick —
     /// until the replacement activates in the same update. `None` outside
@@ -791,6 +799,11 @@ pub struct Harness {
     /// The drafts-map project that named the replaced view, to restore it
     /// when the open fails.
     pub(crate) replacing_draft_project: Option<String>,
+    /// The switch epoch stamped when `replacing` was set: `activate` only
+    /// honours the marker while it still matches `switch_epoch`, so a view
+    /// that lands after a cancel or a superseding switch never closes a
+    /// view it did not replace. `None` outside a switch, like `replacing`.
+    pub(crate) replacing_epoch: Option<u64>,
     /// One handoff run per source session: the machine in
     /// [`crate::handoff`]. The source view mirrors the run's card; this
     /// map is the authority the ack and cancel paths advance.
@@ -1047,9 +1060,11 @@ impl Harness {
             session_switch_pending: false,
             provider_open_epoch: 0,
             switch_claim: None,
+            switch_epoch: 0,
             replacing: None,
             replacing_provider: None,
             replacing_draft_project: None,
+            replacing_epoch: None,
             handoffs: HashMap::new(),
             handoff_epoch: 0,
             pending_handoff: None,
@@ -2855,8 +2870,10 @@ impl Harness {
     /// and every parked one. What app quit calls so no `claude` or `codex`
     /// child outlives the app; dropping the views would do the same through
     /// [`Drop`](crate::session::SessionView), but quit should not rely on
-    /// teardown order.
+    /// teardown order. Quitting with a switch pending cancels it too, so an
+    /// open that lands after teardown is discarded instead of activating.
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
+        self.cancel_pending_switch(cx);
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, _| view.shutdown_lane());
         }
