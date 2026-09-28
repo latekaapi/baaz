@@ -775,6 +775,11 @@ pub struct Harness {
     /// Scripted (synchronous) opens bump it too, so the count also tells
     /// how many children one action spawned.
     pub(crate) provider_open_epoch: u64,
+    /// A one-shot: the next `finish_provider_open` lands its view with the
+    /// disabled-provider banner instead of a live child start having
+    /// happened (set when opening on a disabled provider, which routes
+    /// through the scripted lane).
+    pub(crate) pending_disabled_notice: Option<ProviderId>,
     /// The one `new_session` a provider switch is allowed to start while a
     /// switch is still pending: `SwitchProvider` / `NewSessionOnProvider`
     /// close the old view synchronously but start its replacement on a
@@ -1036,6 +1041,7 @@ impl Harness {
             pulse_task: None,
             session_switch_pending: false,
             provider_open_epoch: 0,
+            pending_disabled_notice: None,
             switch_claim: None,
             handoffs: HashMap::new(),
             handoff_epoch: 0,
@@ -2804,6 +2810,13 @@ impl Harness {
     /// on. Remembered in the store, so the next launch starts where the
     /// person last chose.
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        // A disabled provider is never the default for new sessions: fall
+        // back to the first enabled one (Muse when none is).
+        let id = if crate::settings_providers::live_visible_provider_ids().contains(&id) {
+            id
+        } else {
+            crate::settings_providers::live_first_visible().unwrap_or(ProviderId::Muse)
+        };
         self.new_provider = id.as_str().to_owned();
         crate::providers::write_last_provider(id);
         cx.notify();

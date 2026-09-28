@@ -979,13 +979,22 @@ impl Harness {
         if self.overlays.read(cx).dialog.as_ref().is_some_and(|m| m.action == DialogAction::HandoffConfirm) {
             return self.render_handoff_confirm(window, cx);
         }
-        let (title, detail, kind, primary_label, action, danger) = {
+        let (title, detail, kind, primary_label, action, target, danger) = {
             let modal = self.overlays.read(cx).dialog.as_ref()?;
             let danger = modal.action == DialogAction::Archive
                 || modal.action == DialogAction::RemoveProject
                 || modal.action == DialogAction::QuitWithRunningTerminal
-                || modal.action == DialogAction::CloseTerminalTab;
-            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, danger)
+                || modal.action == DialogAction::CloseTerminalTab
+                || modal.action == DialogAction::ProviderSignOut;
+            (
+                modal.title.clone(),
+                modal.detail.clone(),
+                modal.kind,
+                modal.primary,
+                modal.action,
+                modal.archive_target.clone(),
+                danger,
+            )
         };
         // The archive target stays on the dialog until its own button runs:
         // closing it any other way drops the target with it.
@@ -1001,6 +1010,17 @@ impl Harness {
         let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
             if action == DialogAction::Archive {
                 this.confirm_archive_dialog(window, cx);
+                return;
+            }
+            // The provider wire id rode the dialog: confirming signs that
+            // provider out for real, then re-probes so its card follows.
+            if action == DialogAction::ProviderSignOut {
+                let id = target.as_deref().map(crate::providers::ProviderId::parse);
+                if let Some(id) = id {
+                    this.confirm_provider_signout(id, window, cx);
+                } else {
+                    this.close_dialog(cx);
+                }
                 return;
             }
             if action == DialogAction::RemoveProject {
@@ -1041,6 +1061,8 @@ impl Harness {
                 }
                 // Confirmed through the early return above, like Archive.
                 DialogAction::CloseTerminalTab => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::ProviderSignOut => {}
             }
             cx.notify();
         });

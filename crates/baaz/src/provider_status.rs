@@ -392,6 +392,12 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
     }
 }
 
+/// Resolve one provider's binary the way the probes do. Used for the
+/// sign-out/sign-in commands that reuse the probe's resolution.
+pub fn binary_path(id: ProviderId) -> Option<PathBuf> {
+    default_resolve(id)
+}
+
 /// A `PATH` lookup for `binary`, honouring nothing else.
 fn find_on_path(binary: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
@@ -553,6 +559,16 @@ impl Service {
         write_cache(&statuses);
     }
 
+    /// Flip the person's Enabled switch and persist it: the cache carries
+    /// `enabled`, so the next launch remembers. Probing keeps the flag —
+    /// a re-probe never re-enables a disabled provider.
+    pub fn set_enabled(&mut self, id: ProviderId, on: bool) {
+        let mut status = self.status(id);
+        status.enabled = on;
+        self.statuses.insert(id, status);
+        self.save_cache();
+    }
+
     /// Probe one provider now, whatever the throttle says, and write the
     /// cache after. In deterministic mode this only applies the scripted
     /// source — no binary is resolved, no command runs.
@@ -561,7 +577,11 @@ impl Service {
             self.apply_scripted();
             return;
         }
-        let status = probe_provider(id, &self.probes, self.muse_auth.clone());
+        let enabled = self.status(id).enabled;
+        let mut status = probe_provider(id, &self.probes, self.muse_auth.clone());
+        // A re-probe never re-enables: the switch is the person's, not
+        // the probe's.
+        status.enabled = enabled;
         self.statuses.insert(id, status);
         self.last_probe.insert(id, Instant::now());
         self.save_cache();
@@ -1048,14 +1068,9 @@ fn muse_live() -> MutexGuard<'static, Option<MuseAccount>> {
 }
 
 fn live_service() -> MutexGuard<'static, LiveService> {
-    LIVE.get_or_init(|| {
-        Mutex::new(LiveService {
-            was_active: false,
-            service: Service::with_probes(Probes::real()),
-        })
-    })
-    .lock()
-    .unwrap_or_else(|poisoned| poisoned.into_inner())
+    LIVE.get_or_init(|| Mutex::new(LiveService { was_active: false, service: seeded_live_service() }))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Remember the existing muse connection's account state: the Muse auth
@@ -1067,6 +1082,45 @@ pub fn note_muse_account(account: Option<MuseAccount>) {
 /// The live connection's account, for seeding a refresh's Muse probe.
 fn live_muse_auth() -> Option<MuseAccount> {
     muse_live().clone()
+}
+
+/// Seed a fresh live service from what boot renders from (cache, or the
+/// scripted source in deterministic mode), so reads before the first
+/// probe lands still answer.
+fn seeded_live_service() -> Service {
+    let mut service = Service::with_probes(Probes::real());
+    service.set_muse_auth(live_muse_auth());
+    for (_, status) in boot_statuses() {
+        service.put(status);
+    }
+    service
+}
+
+/// Every provider's status as the live service last knew it, in switcher
+/// order. What the Settings → Providers page renders.
+pub fn live_statuses() -> Vec<ProviderStatus> {
+    let live = live_service();
+    ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
+}
+
+/// Whether the person's Enabled switch is on for `id`.
+pub fn provider_enabled(id: ProviderId) -> bool {
+    live_service().service.status(id).enabled
+}
+
+/// Flip the person's Enabled switch and persist it through the cache.
+pub fn set_provider_enabled(id: ProviderId, on: bool) {
+    live_service().service.set_enabled(id, on);
+}
+
+/// Re-probe one provider in the background (the card's Re-check), and
+/// re-log the line when it lands. Read-only probes only.
+pub fn recheck_provider(id: ProviderId) {
+    if deterministic() {
+        live_service().service.recheck(id);
+        return;
+    }
+    refresh_in_background(vec![id]);
 }
 
 /// Re-probe `ids` off this thread, publish into the live service, and
@@ -1418,6 +1472,49 @@ mod tests {
         assert_eq!(loaded.installed, Installed::yes("1.4.0", "/bin/muse"));
         assert_eq!(loaded.headline_text(), "Connected · a@x.com · Ultra");
         assert_eq!(loaded.usage.as_ref().unwrap().windows.len(), 1);
+    }
+
+    #[test]
+    fn set_enabled_persists_through_the_cache() {
+        let _env = sandbox();
+        let mut service = Service::with_probes(Probes::never());
+        service.set_enabled(ProviderId::Codex, false);
+        assert!(!service.status(ProviderId::Codex).enabled);
+        let mut reread = Service::with_probes(Probes::never());
+        reread.load_cache();
+        assert!(
+            !reread.status(ProviderId::Codex).enabled,
+            "the switch survives a restart through the cache"
+        );
+    }
+
+    #[test]
+    fn recheck_probes_and_keeps_the_switch_off() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _env = sandbox();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        let probes = Probes {
+            resolve: Arc::new(|_| Some(PathBuf::from("/bin/muse"))),
+            run: Arc::new(move |_, _| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                ok_version("1.4.0")
+            }),
+            codex_server: Arc::new(|_, _| Err("unused".into())),
+        };
+        let mut service = Service::with_probes(probes);
+        service.set_muse_auth(Some(MuseAccount {
+            email: Some("a@x.com".into()),
+            plan: Some("Pro".into()),
+        }));
+        service.set_enabled(ProviderId::Muse, false);
+        service.recheck(ProviderId::Muse);
+        assert_eq!(runs.load(Ordering::Relaxed), 1, "re-check probes once");
+        assert!(
+            !service.status(ProviderId::Muse).enabled,
+            "a re-probe never re-enables a disabled provider"
+        );
     }
 
     #[test]
