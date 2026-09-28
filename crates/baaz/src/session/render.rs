@@ -464,6 +464,9 @@ impl SessionView {
             // host and cards render their folded result text.
             terminal_mirror: Rc::new(mirror),
             terminal_live: live,
+            // Z6b: file-card headers shorten against this workspace.
+            // Display only — the blocks keep their full targets.
+            workspace_root: self.workspace.clone(),
         }
     }
 
