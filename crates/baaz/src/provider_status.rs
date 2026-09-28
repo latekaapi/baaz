@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use provider_codex::probe::CodexProbe;
@@ -38,6 +38,7 @@ pub fn deterministic() -> bool {
 }
 
 /// Which provider `program` names, for routing scripted runs.
+#[cfg(test)]
 pub fn provider_for_program(program: &str) -> ProviderId {
     if program.contains("codex") {
         ProviderId::Codex
@@ -320,6 +321,11 @@ pub enum RunOutcome {
     },
 }
 
+/// Run `program` with `args` (a `--version` or `auth status` call).
+pub type RunCommand = Arc<dyn Fn(&str, &[String]) -> RunOutcome + Send + Sync>;
+/// Run the short-lived `codex app-server` probe against `program`.
+pub type ProbeCodexServer = Arc<dyn Fn(&str, Duration) -> Result<CodexProbe, String> + Send + Sync>;
+
 /// The injectable command surface: scripted outputs in tests, real
 /// processes in production.
 #[derive(Clone)]
@@ -327,10 +333,9 @@ pub struct Probes {
     /// Resolve the provider's binary, or `None` when it is not installed.
     pub resolve: Arc<dyn Fn(ProviderId) -> Option<PathBuf> + Send + Sync>,
     /// Run `program` with `args` (a `--version` or `auth status` call).
-    pub run: Arc<dyn Fn(&str, &[String]) -> RunOutcome + Send + Sync>,
+    pub run: RunCommand,
     /// Run the short-lived `codex app-server` probe against `program`.
-    pub codex_server:
-        Arc<dyn Fn(&str, Duration) -> Result<CodexProbe, String> + Send + Sync>,
+    pub codex_server: ProbeCodexServer,
 }
 
 impl Probes {
@@ -637,6 +642,9 @@ impl Service {
     }
 
     /// Store a usage snapshot a probe or a live session yielded.
+    /// Kept for the later usage-cards task; the probe path stores its
+    /// snapshots inline today.
+    #[allow(dead_code)]
     pub fn record_usage(&mut self, snapshot: UsageSnapshot) {
         let id = ProviderId::parse(&snapshot.provider);
         if let Some(status) = self.statuses.get_mut(&id) {
@@ -646,6 +654,8 @@ impl Service {
 
     /// Store Codex windows from an `account/rateLimits/read` result or an
     /// `account/rateLimits/updated` push (same object shape).
+    /// Kept for the later usage-cards task, which will feed live pushes.
+    #[allow(dead_code)]
     pub fn record_codex_rate_limits(&mut self, result: &serde_json::Value) {
         let (plan, windows) = provider_codex::probe::parse_rate_limit_windows(result);
         self.record_usage(UsageSnapshot {
@@ -665,6 +675,8 @@ impl Service {
 
     /// Store Claude Code's latest `rate_limit_event` info: the named
     /// window plus its five-hour and seven-day windows, when reported.
+    /// Kept for the later usage-cards task, which will feed live events.
+    #[allow(dead_code)]
     pub fn record_claude_rate_limit(&mut self, info: &serde_json::Value) {
         let mut windows = Vec::new();
         let utilization = info.get("utilization").and_then(serde_json::Value::as_f64);
@@ -701,7 +713,8 @@ impl Service {
     }
 
     /// Store Muse's usage in the neutral shape: what its tier probe and
-    /// account state report today.
+    /// account state report today. Kept for the later usage-cards task.
+    #[allow(dead_code)]
     pub fn record_muse_usage(
         &mut self,
         plan: Option<String>,
@@ -866,6 +879,8 @@ pub fn onboarding_completed_path() -> PathBuf {
 }
 
 /// Set the first-run flag. Best-effort, and never in deterministic mode.
+/// Settable by the later first-run screen; nothing sets it yet.
+#[allow(dead_code)]
 pub fn set_onboarding_completed() {
     if deterministic() {
         return;
@@ -1005,23 +1020,152 @@ impl Drop for TestSandbox {
     }
 }
 
+// ------------------------------------------------------------- live wiring
+
+/// What the live muse connection last reported, without ever opening a
+/// second one: `None` until `account/read` or `account/changed` speaks.
+/// Background refreshes seed their Muse probe from this, so a normal
+/// launch reports Muse Connected once the connection signs in.
+static MUSE_LIVE: OnceLock<Mutex<Option<MuseAccount>>> = OnceLock::new();
+
+/// The window-activation edge plus the service behind it: the same
+/// service boot probes, so focus refreshes reuse its per-provider
+/// throttle instead of keeping a second clock.
+struct LiveService {
+    /// Whether the window was active on the last frame.
+    was_active: bool,
+    /// The statuses boot probed, refreshed on focus regain.
+    service: Service,
+}
+
+static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
+
+fn muse_live() -> MutexGuard<'static, Option<MuseAccount>> {
+    MUSE_LIVE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn live_service() -> MutexGuard<'static, LiveService> {
+    LIVE.get_or_init(|| {
+        Mutex::new(LiveService {
+            was_active: false,
+            service: Service::with_probes(Probes::real()),
+        })
+    })
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Remember the existing muse connection's account state: the Muse auth
+/// probe. Read-only — it never opens a second connection.
+pub fn note_muse_account(account: Option<MuseAccount>) {
+    *muse_live() = account;
+}
+
+/// The live connection's account, for seeding a refresh's Muse probe.
+fn live_muse_auth() -> Option<MuseAccount> {
+    muse_live().clone()
+}
+
+/// Re-probe `ids` off this thread, publish into the live service, and
+/// re-log the line. Read-only probes only — never a login, logout or
+/// other auth-changing call.
+fn refresh_in_background(ids: Vec<ProviderId>) {
+    std::thread::spawn(move || {
+        let mut probed = Service::with_probes(Probes::real());
+        probed.set_muse_auth(live_muse_auth());
+        probed.load_cache();
+        for id in &ids {
+            probed.recheck(*id);
+        }
+        let statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
+            .into_iter()
+            .map(|id| (id, probed.status(id)))
+            .collect();
+        {
+            let mut live = live_service();
+            let now = Instant::now();
+            for id in &ids {
+                if let Some(status) = statuses.get(id) {
+                    live.service.put(status.clone());
+                    live.service.mark_probed(*id, now);
+                }
+            }
+        }
+        log_statuses(&statuses);
+    });
+}
+
+/// The live muse connection spoke (`account/read` or `account/changed`):
+/// re-probe Muse now that [`note_muse_account`] holds what it said, so
+/// the logged line follows sign-in and sign-out. A no-op in
+/// deterministic mode.
+pub fn refresh_muse_status() {
+    if deterministic() {
+        return;
+    }
+    refresh_in_background(vec![ProviderId::Muse]);
+}
+
+/// A window-activation edge, called every frame with
+/// `window.is_window_active()`: a regained focus re-probes what is due
+/// (at most every [`FOCUS_THROTTLE`] per provider) off this thread and
+/// re-logs the line. Steady frames do nothing; deterministic runs do
+/// nothing at all.
+pub fn note_window_active(active: bool) {
+    if deterministic() {
+        return;
+    }
+    let due = {
+        let mut live = live_service();
+        let regained = active && !live.was_active;
+        live.was_active = active;
+        if !regained {
+            return;
+        }
+        let due = live.service.note_focus_regained(Instant::now());
+        due.into_iter().filter(|id| live.service.status(*id).enabled).collect::<Vec<_>>()
+    };
+    if due.is_empty() {
+        return;
+    }
+    refresh_in_background(due);
+}
+
 /// Boot the status service: read the cache before any probe, log
-/// `baaz: providers → …`, and probe all providers in parallel off the UI
-/// thread (each probe re-logs the line as it lands). Deterministic runs
-/// report the scripted source and never probe, read or write.
+/// `baaz: providers → …` (plus the stored-facts first-run line), and
+/// probe all providers in parallel off the UI thread (each probe
+/// re-logs the line as it lands). Deterministic runs report the
+/// scripted source and never probe, read or write.
 pub fn boot() {
     log_statuses(&boot_statuses());
+    // The first-run fact is stored facts only, never a live probe — log
+    // it here so the next task can wire the screen; nothing shown changes.
+    eprintln!("baaz: first_run={}", is_first_run());
     if deterministic() {
         return;
     }
     std::thread::spawn(|| {
         let mut service = Service::with_probes(Probes::real());
+        service.set_muse_auth(live_muse_auth());
         service.load_cache();
         service.probe_all();
+        let now = Instant::now();
         let statuses: HashMap<ProviderId, ProviderStatus> = ProviderId::all()
             .into_iter()
             .map(|id| (id, service.status(id)))
             .collect();
+        {
+            let mut live = live_service();
+            for id in ProviderId::all() {
+                if let Some(status) = statuses.get(&id) {
+                    live.service.put(status.clone());
+                    live.service.mark_probed(id, now);
+                }
+            }
+        }
         log_statuses(&statuses);
     });
 }
@@ -1059,8 +1203,12 @@ mod tests {
                     ProviderId::Codex => "/bin/codex",
                 }))
             }),
-            run: Arc::new(move |program, _args| {
-                if program.contains("claude") && !program.contains("codex") {
+            run: Arc::new(move |program, args| {
+                // The auth-status call and the `--version` call share one
+                // program: route by argv, so a failing auth probe does not
+                // masquerade as a failing binary.
+                let is_version = args.first().is_some_and(|arg| arg == "--version");
+                if !is_version && program.contains("claude") && !program.contains("codex") {
                     return claude_auth.clone();
                 }
                 versions
@@ -1080,6 +1228,10 @@ mod tests {
         statuses.insert(ProviderId::Muse, ProviderStatus::checking(ProviderId::Muse));
         let mut disabled = ProviderStatus::checking(ProviderId::ClaudeCode);
         disabled.enabled = false;
+        // Disabled still needs a probe result (or cache) behind it:
+        // with nothing known yet the headline is Checking, per the §2
+        // precedence.
+        disabled.checked_at = Some(1);
         statuses.insert(ProviderId::ClaudeCode, disabled);
         let mut missing = ProviderStatus::checking(ProviderId::Codex);
         missing.installed = Installed::No;
@@ -1258,7 +1410,10 @@ mod tests {
         service.put(status);
         service.save_cache();
         assert!(env.state_dir().join("provider-status.json").is_file());
-        let reread = Service::with_probes(Probes::never());
+        let mut reread = Service::with_probes(Probes::never());
+        // A fresh service knows nothing until it overlays the cache —
+        // that read is what boot does before any probe.
+        reread.load_cache();
         let loaded = reread.status(ProviderId::Muse);
         assert_eq!(loaded.installed, Installed::yes("1.4.0", "/bin/muse"));
         assert_eq!(loaded.headline_text(), "Connected · a@x.com · Ultra");
