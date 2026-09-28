@@ -464,6 +464,45 @@ fn file_change_diff(path: &str, changes: &[FileChangeEntry]) -> Diff {
     Diff { path: path.to_owned(), hunks, added: total_added, removed: total_removed }
 }
 
+/// The most preview lines a `fileChange` approval card carries: one
+/// per-file stat line plus its diff rows, across all files. Anything
+/// past the cap folds into a "… N more lines" tail.
+const FILE_CHANGE_APPROVAL_PREVIEW_LINES: usize = 40;
+
+/// The text preview of remembered `fileChange` changes for an approval
+/// card: first one `<path> (+A/−R)` stat line per file (via
+/// [`file_change_stat`]) — every path always listed, no matter how long
+/// the diff — then the diff rows as `+`/`-`/context text (via
+/// [`file_change_diff`]): the same numbers and rows the completing
+/// `ToolCall` card renders, flattened because [`Block::Approval`] has no
+/// structured diff field. The cap ([`FILE_CHANGE_APPROVAL_PREVIEW_LINES`]
+/// total lines) cuts diff rows only, folding the hidden ones into a
+/// "… N more lines" tail after the last kept row.
+fn file_change_approval_preview(changes: &[FileChangeEntry]) -> String {
+    let diff = file_change_diff("", changes);
+    let mut lines = Vec::new();
+    let mut body = Vec::new();
+    for (change, hunk) in changes.iter().zip(diff.hunks.iter()) {
+        let stat = file_change_stat(std::slice::from_ref(change));
+        lines.push(format!("{} (+{}/−{})", change.path, stat.added, stat.removed));
+        for line in &hunk.lines {
+            body.push(match line.kind {
+                DiffKind::Add => format!("+ {}", line.text),
+                DiffKind::Del => format!("- {}", line.text),
+                DiffKind::Context => format!("  {}", line.text),
+            });
+        }
+    }
+    let room = FILE_CHANGE_APPROVAL_PREVIEW_LINES.saturating_sub(lines.len());
+    if body.len() > room {
+        let hidden = body.len() - room;
+        body.truncate(room);
+        body.push(format!("… {hidden} more lines"));
+    }
+    lines.extend(body);
+    lines.join("\n")
+}
+
 /// The money guard's feed: the latest `account/rateLimits/updated` push, kept
 /// beside the seam's account shape. The window lengths ride along with the
 /// percents so the usage card can label each window from its length.
@@ -744,6 +783,12 @@ pub struct CodexFold {
     /// answer through `DecideApproval`; only the completing item moves
     /// the card — never the press.
     approval_sites: HashMap<String, CodexApprovalSite>,
+    /// Wire item id → the `fileChange` item's `changes` as its
+    /// `item/started` reported them. The `item/fileChange/requestApproval`
+    /// names no path and no diff — both ride the item — so the approval
+    /// reads this back to face its card with the paths and a bounded
+    /// diff preview. Dropped when the item completes.
+    file_changes: HashMap<String, Vec<FileChangeEntry>>,
     /// `(turn, server, tool)` → the pending MCP tool-call elicitation
     /// gating that call (its card's approval id). The elicitation names
     /// no item id, so this is the join its `mcpToolCall` item settles
@@ -990,9 +1035,12 @@ impl CodexFold {
     }
 
     /// `item/fileChange/requestApproval`: the request itself names no path
-    /// and no diff (both arrive on the completing item), so the pending
-    /// card carries the model's reason — or says it has none — and the
-    /// completion below it carries the path and the diff.
+    /// and no diff — both rode the item's `item/started`, remembered by
+    /// item id — so the pending card faces with the path (one file) or
+    /// "N files" (several, paths listed in the reason) plus the model's
+    /// reason when it gave one, then the per-file stat and a bounded
+    /// diff preview. An ask for an item never seen keeps the honest
+    /// text: the reason, or that the model said nothing.
     fn apply_file_change_approval(&mut self, params: &Value) -> Vec<Delta> {
         let mut deltas = Vec::new();
         let decoded = FileChangeApprovalParams::decode(params);
@@ -1011,16 +1059,43 @@ impl CodexFold {
             .as_ref()
             .and_then(|decoded| decoded.grant_root.clone())
             .unwrap_or_default();
-        let command =
-            if grant.trim().is_empty() { "File change".to_owned() } else { grant.trim().to_owned() };
-        let reason = if reason.trim().is_empty() {
-            if grant.trim().is_empty() {
-                "The model did not say why.".to_owned()
-            } else {
-                format!("Write access under {}", grant.trim())
+        let remembered =
+            self.file_changes.get(&item_id).filter(|changes| !changes.is_empty()).cloned();
+        let (command, reason) = match remembered {
+            Some(changes) => {
+                let command = if changes.len() == 1 {
+                    changes[0].path.clone()
+                } else {
+                    format!("{} files", changes.len())
+                };
+                let mut parts = Vec::new();
+                if reason.trim().is_empty() {
+                    if !grant.trim().is_empty() {
+                        parts.push(format!("Write access under {}", grant.trim()));
+                    }
+                } else {
+                    parts.push(reason);
+                }
+                parts.push(file_change_approval_preview(&changes));
+                (command, parts.join("\n"))
             }
-        } else {
-            reason
+            None => {
+                let command = if grant.trim().is_empty() {
+                    "File change".to_owned()
+                } else {
+                    grant.trim().to_owned()
+                };
+                let reason = if reason.trim().is_empty() {
+                    if grant.trim().is_empty() {
+                        "The model did not say why.".to_owned()
+                    } else {
+                        format!("Write access under {}", grant.trim())
+                    }
+                } else {
+                    reason
+                };
+                (command, reason)
+            }
         };
         self.card_approval(
             &item_id,
@@ -1313,6 +1388,7 @@ impl CodexFold {
                 }
                 Vec::new()
             }
+            Notification::ItemStarted { .. } => self.remember_item(notification),
             Notification::ItemCompleted { .. } => self.apply_item(notification),
             Notification::PlanUpdated { .. } => self.apply_plan(notification),
             Notification::AgentMessageDelta { turn_id, item_id, delta, .. } => {
@@ -1420,6 +1496,21 @@ impl CodexFold {
         }
         self.delta_order = kept;
         pending
+    }
+
+    /// Carry one started item's `fileChange` changes by item id, so the
+    /// `item/fileChange/requestApproval` that follows can face its card
+    /// with the paths and the diff. Carried, never rendered: no deltas.
+    fn remember_item(&mut self, notification: &Notification) -> Vec<Delta> {
+        if let Some(item) = notification.item() {
+            let changes = item.changes();
+            if item.kind() == "fileChange" && !changes.is_empty() {
+                if self.file_changes.len() < 64 {
+                    self.file_changes.insert(item.id().to_owned(), changes.to_owned());
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn apply_item(&mut self, notification: &Notification) -> Vec<Delta> {
@@ -1598,8 +1689,10 @@ impl CodexFold {
                     &mut deltas,
                 );
                 // A terminal completion settles the approval that gated this
-                // change, the way executions settle theirs.
+                // change, the way executions settle theirs, and drops the
+                // remembered `item/started` changes — the ask is answered.
                 if !matches!(status, ToolStatus::Running) {
+                    self.file_changes.remove(item.id());
                     let state = match status {
                         ToolStatus::Cancelled => ApprovalState::Denied,
                         _ => ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 },
@@ -2292,8 +2385,9 @@ mod tests {
     /// `edit.jsonl`: the `fileChange` item folds to a Wrote card with a
     /// `+2/−0` chip, and the wire shows the approval that preceded it —
     /// a `fileChange/requestApproval` the client accepted, then the
-    /// completed change. The fold cards the change; the request itself is
-    /// the pump's routing business (answered, never rendered).
+    /// completed change. The fold cards both: the pending approval faces
+    /// with the path and the diff its `item/started` already reported,
+    /// and the completed change below it.
     #[test]
     fn file_change_folds_to_write_card_with_diff_stat() {
         let (_, deltas) = replay("edit.jsonl");
@@ -2775,9 +2869,12 @@ mod tests {
         );
     }
 
-    /// `edit.jsonl`: the `fileChange` request names no path and no diff,
-    /// so the pending card says so honestly — and the completing change
-    /// settles it to allowed with the path and the diff on the card below.
+    /// `edit.jsonl`: the `fileChange` request itself names no path and
+    /// no diff, but its item's `item/started` arrived first with both —
+    /// so the pending card faces with the path and a bounded diff
+    /// preview, and the completing change settles it to allowed with the
+    /// path and the diff on the card below. An ask for an item never
+    /// seen keeps the honest reasonless text.
     #[test]
     fn file_change_approval_cards_honestly_then_settles_with_diff() {
         let lines = fixture_lines("edit.jsonl");
@@ -2787,10 +2884,21 @@ mod tests {
                 assert_eq!(tool, "Edit");
                 assert_eq!(body_kind, ApprovalBodyKind::FileWrite, "a file-change ask reads as a file write");
                 assert_eq!(state, ApprovalState::Pending);
-                assert_eq!(command, "File change");
                 assert!(
-                    reason.contains("did not say why"),
-                    "no path is forged from a reasonless ask: {reason}"
+                    command.ends_with("greet-codex.txt"),
+                    "the remembered path faces the card: {command}"
+                );
+                assert!(
+                    reason.contains("greet-codex.txt (+2/−0)"),
+                    "the per-file stat rides the reason: {reason}"
+                );
+                assert!(
+                    reason.contains("+ hello there"),
+                    "the remembered diff previews in the reason: {reason}"
+                );
+                assert!(
+                    !reason.contains("did not say why"),
+                    "a previewed ask no longer pleads ignorance: {reason}"
                 );
                 assert_eq!(choices.len(), 4, "the full choice set the lane answers");
             }
@@ -2818,6 +2926,97 @@ mod tests {
             )),
             "the path and the diff land on the Wrote card below"
         );
+    }
+
+    /// Two remembered files face as "2 files" with both paths listed, and
+    /// a 50-line addition caps at 40 preview lines with a "… N more
+    /// lines" tail. Without the `item/started` memory the same ask would
+    /// card a bare "File change" — that is the assertion that fails
+    /// before the change.
+    #[test]
+    fn file_change_approval_lists_two_files_and_caps_a_long_diff() {
+        let long_add: String =
+            (1..=50).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "th", "turnId": "t-1",
+                "item": {
+                    "type": "fileChange", "id": "fc-2", "status": "inProgress",
+                    "changes": [
+                        {"path": "/tmp/w/a.txt", "kind": {"type": "add"}, "diff": long_add},
+                        {"path": "/tmp/w/b.txt", "kind": "modify",
+                         "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n"},
+                    ],
+                },
+            },
+        })
+        .to_string();
+        let ask = serde_json::json!({
+            "id": 7,
+            "method": "item/fileChange/requestApproval",
+            "params": {
+                "threadId": "th", "turnId": "t-1", "itemId": "fc-2",
+                "startedAtMs": 1, "reason": "Please?", "grantRoot": null,
+            },
+        })
+        .to_string();
+        let mut fold = CodexFold::new();
+        let mut deltas = Vec::new();
+        for line in [&started, &ask] {
+            let frame = crate::frame::decode_line(line).expect("synthetic frame decodes");
+            deltas.extend(fold.apply(&frame));
+        }
+        match added_approval(&deltas) {
+            Block::Approval { command, reason, .. } => {
+                assert_eq!(command, "2 files", "two files face as a count: {command}");
+                assert!(reason.starts_with("Please?\n"), "the model reason heads: {reason}");
+                assert!(
+                    reason.contains("/tmp/w/a.txt (+50/−0)"),
+                    "the first path lists with its stat: {reason}"
+                );
+                assert!(
+                    reason.contains("/tmp/w/b.txt (+1/−1)"),
+                    "the second path lists with its stat: {reason}"
+                );
+                assert!(
+                    reason.contains("… 16 more lines"),
+                    "51 + 5 preview lines cap at 40 with the tail: {reason}"
+                );
+                // The reason head plus 40 capped lines plus the tail.
+                assert_eq!(reason.lines().count(), 42, "the cap holds: {reason}");
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
+        // The completion drops the memory: a re-ask for the settled item
+        // falls back to the honest reasonless text.
+        let completed = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "th", "turnId": "t-1",
+                "item": {
+                    "type": "fileChange", "id": "fc-2", "status": "completed",
+                    "changes": [
+                        {"path": "/tmp/w/a.txt", "kind": {"type": "add"}, "diff": long_add},
+                    ],
+                },
+            },
+        })
+        .to_string();
+        let frame = crate::frame::decode_line(&completed).expect("completion decodes");
+        deltas.extend(fold.apply(&frame));
+        let frame = crate::frame::decode_line(&ask).expect("ask decodes");
+        let reasked = fold.apply(&frame);
+        match added_approval(&reasked) {
+            Block::Approval { command, reason, .. } => {
+                assert_eq!(command, "File change", "the memory is dropped: {command}");
+                assert!(
+                    reason.contains("Please?"),
+                    "the re-ask keeps only its own reason: {reason}"
+                );
+            }
+            other => panic!("an approval card, got {other:?}"),
+        }
     }
 
     /// The fold contributes exactly one approval surface: `step_line` over
