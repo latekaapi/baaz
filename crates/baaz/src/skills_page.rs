@@ -1866,7 +1866,16 @@ impl Harness {
             div()
                 .absolute()
                 .inset_0()
-                .child(div().id("skills-add-scrim").occlude().absolute().inset_0().on_click(dismiss))
+                .child(
+                    div()
+                        .id("skills-add-scrim")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .role(gpui::Role::Button)
+                        .aria_label("Dismiss menu")
+                        .on_click(dismiss),
+                )
                 .child(div().absolute().top(px(52.0)).right(px(12.0)).child(card)),
         )
         .into_any_element()
