@@ -518,8 +518,8 @@ impl SessionView {
         true
     }
 
-    /// Whether the `+` menu stands open, for the Escape test.
-    #[cfg(test)]
+    /// Whether the `+` menu stands open: the Escape test, and the browser
+    /// pane's cover check (a native view cannot sit under a gpui popover).
     pub(crate) fn plus_open(&self) -> bool {
         self.plus_open
     }
@@ -849,6 +849,32 @@ impl SessionView {
     /// keeps the send button down until it lands (finding `performance-14`).
     pub fn attachments_pending(&self) -> bool {
         self.images.iter().any(|image| image.pending)
+    }
+
+    /// Z7a: attach already-held screenshot bytes (a browser page capture) as
+    /// an image chip. The existing image path owns the decode off the frame;
+    /// this is its entry point for bytes that never touched the filesystem.
+    pub(crate) fn attach_screenshot(&mut self, name: String, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.attach_bytes(&name, bytes, cx);
+    }
+
+    /// Z7a: append a text block (browser annotations) to the draft without
+    /// clobbering what is already typed. An empty draft takes the block as
+    /// is; otherwise a blank line separates the two.
+    pub(crate) fn append_draft_block(
+        &mut self,
+        block: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.draft_text(cx);
+        let next = if current.trim().is_empty() {
+            block
+        } else {
+            format!("{}\n\n{block}", current.trim_end())
+        };
+        self.set_draft(next, window, cx);
+        self.on_draft_changed(cx);
     }
 
     /// Open the system picker for a file. Image extensions attach as images;

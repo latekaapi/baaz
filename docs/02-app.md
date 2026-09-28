@@ -613,8 +613,26 @@ The panes show real read-only data — the working tree's unstaged diff, its git
 one-level file walk — but every action in them is deliberately inert in this stage: each
 button logs `right pane: <pane> action <action> is not wired yet` and raises a toast
 saying nothing happened. A button that looked live and did nothing would be worse than one
-that says plainly it is not wired yet. The browser pane has no web engine attached, so it
-is chrome over a placeholder that says so; the address bar does nothing for now.
+that says plainly it is not wired yet. The Browser pane is the exception: it runs a
+real engine (`aui-webview`) — a WKWebView child of the window in the app, the scripted
+fake page under `--screenshot` and in tests, chosen once at boot. Each session keeps its
+own live webview (plus one for the no-session/home case), created lazily the first time
+the Browser kind shows for that session; switching sessions hides the old page without
+destroying it, and the session's last URL persists in `sessions.json` (`browserUrl`) so a
+fresh webview reopens where that session left off (`about:blank` with the URL field
+focused when it never navigated). The nav row, annotate mode, screenshots and the
+annotations panel all work: Screenshot attaches the PNG to the session's composer draft,
+Send hands the pins over as draft text (`1. <element path> — <note>`, plus the URL) with
+the screenshot attached, and nothing auto-sends. Console is the one control that still
+toasts "not available yet". `browse:<url>` navigates the active (or home) browser from
+`--steps`, idempotently.
+
+The native-overlay rule: the WKWebView is composited ABOVE the gpui scene, so no gpui
+pixels — palettes, menus, dialogs, the drop overlay, the terminal dock — can draw over
+the page. While any of those covers the pane (or the pane closes, switches kind or
+session, or the window goes inactive) the host hides the native view with
+`set_obscured(true)` and its last screenshot stands in; the predicate is
+`browser_visible` in `crates/baaz/src/browser.rs`.
 
 The pane's open state and last-shown kind belong to each session, not the window:
 every user change while a session is active is saved onto that session in

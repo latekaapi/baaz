@@ -379,6 +379,7 @@ pub fn set_menus(cx: &mut App) {
                 });
         }
         crate::tier::cleanup_probes();
+        crate::browser::cleanup_screenshots();
         cx.quit();
     });
     cx.set_menus([
@@ -642,6 +643,16 @@ pub struct Harness {
     /// the shell's `resizing` bypass. User toggles never set it, so they
     /// keep animating exactly as today.
     pub(crate) right_snap: bool,
+    /// The browser pane's engines (Z7a): one live `WebviewState` per session
+    /// plus the no-session/home one, created lazily, hidden on switch, never
+    /// destroyed. The boot flag picks WKWebView vs the scripted page.
+    pub(crate) browser: crate::browser::BrowserRegistry,
+    /// The person's own Browser open still owes the URL field its focus
+    /// (Z7a2). Armed by `show_right`/`toggle_right` when they land open on
+    /// Browser, consumed once by the next frame's webview ensure — and only
+    /// there, so activation, restore and boot never steal the keyboard into
+    /// the URL field. Never persists.
+    pub(crate) browser_url_focus_armed: bool,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1056,6 +1067,11 @@ impl Harness {
                 .map(|id| id.as_str().to_owned())
                 .unwrap_or_else(|| args.provider.clone())
         };
+        // Z7a, read once at boot: captures (`--screenshot`) and tests run the
+        // scripted browser page — a native view never appears in a gpui
+        // screenshot, and captures must be deterministic — while the app runs
+        // WKWebView. Never sniffed in render.
+        let browser_fake = args.screenshot.is_some();
         let mut this = Self {
             new_provider,
             args,
@@ -1097,6 +1113,8 @@ impl Harness {
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
             right_cache: crate::right::RightCache::default(),
+            browser: crate::browser::BrowserRegistry::new(browser_fake),
+            browser_url_focus_armed: false,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -1971,6 +1989,7 @@ impl Harness {
         self.right_snap = false;
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
+        self.arm_browser_url_focus();
         layout::write(&self.layout);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
@@ -1994,10 +2013,21 @@ impl Harness {
             self.layout.right_open = true;
         }
         crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
+        self.arm_browser_url_focus();
         layout::write(&self.layout);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
+    }
+
+    /// Arm the URL-field focus the next Browser frame owes (Z7a2): only a
+    /// person's own open — a click, the palette, a shortcut — earns it, and
+    /// only landing open on Browser. Restores never arm it, so a restored
+    /// Browser pane leaves the keyboard where activation put it.
+    fn arm_browser_url_focus(&mut self) {
+        if self.layout.right_open && layout::right_kind(&self.layout) == layout::RightKind::Browser {
+            self.browser_url_focus_armed = true;
+        }
     }
 
     /// Save the live pane state onto the active session (Z2): open, kind,
@@ -2021,12 +2051,20 @@ impl Harness {
             }
             None => (None, None, Vec::new()),
         };
+        // Z7a: the session's last browser URL rides along untouched — the
+        // navigation sync owns it, and a pane toggle must never clear it.
+        let browser_url = self
+            .overrides
+            .get(&session_id)
+            .and_then(|meta| meta.right.clone())
+            .and_then(|right| right.browser_url);
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
             kind: layout::right_kind(&self.layout),
             files_preview,
             files_selected,
             files_expanded,
+            browser_url,
         };
         self.set_override(&session_id, |meta| meta.right = Some(state), cx);
     }
@@ -2947,10 +2985,14 @@ impl Harness {
                     // down again.
                     .on_drag_move(cx.listener(
                         |this: &mut Self, _: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
+                            // Z7a: an external drag covers the browser pane —
+                            // the native view hides while it lasts.
+                            this.browser.drop_cover = true;
                             this.with_session(cx, |view, cx| view.note_drag_over(cx));
                         },
                     ))
                     .on_drop(cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
+                        this.browser.drop_cover = false;
                         this.with_session(cx, |view, cx| view.drop_external(paths, cx));
                     }))
                     .into_any_element()
@@ -3615,7 +3657,15 @@ impl Render for Harness {
             // key/invalidation to avoid going stale — while the subtree
             // rebuild itself is cheap once the reads are gone.
             let right_project = self.right_project();
-            let right = right::render(kind, &self.right_cache, right_project, cx);
+            // Z7a2: the Browser kind draws the active session's live
+            // webview (created lazily here, where the window is at
+            // hand), every other kind draws from the read cache as
+            // before. Gated on pane-open-on-Browser: activation, boot
+            // and every other kind never create a webview as a render
+            // side effect — creation happens only where the pane shows.
+            let browser = (self.layout.right_open && kind == layout::RightKind::Browser)
+                .then(|| self.ensure_browser_person(window, cx));
+            let right = right::render(kind, &self.right_cache, right_project, browser.as_ref(), cx);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -3754,6 +3804,18 @@ impl Render for Harness {
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
         let project_menu = self.render_project_menu(cx);
+        // Z7a, the native-overlay rule: persist real navigations, resolve
+        // pending screenshot attaches, and hide every native webview this
+        // frame covers (the page is composited above gpui, so gpui cannot
+        // draw over it — the host takes the view out instead).
+        self.sync_browser(
+            overflow.is_some(),
+            view_options.is_some(),
+            account.is_some(),
+            project_menu.is_some(),
+            window,
+            cx,
+        );
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the
@@ -4182,6 +4244,184 @@ mod tests {
         restore_state(state);
     }
 
+    /// Z7a2: open a local session view the way the scripted chrome does —
+    /// what the browser tests activate without a provider child.
+    fn open_test_session(
+        vc: &mut gpui::VisualTestContext,
+        baaz: &gpui::Entity<Harness>,
+        workspace: &std::path::Path,
+    ) {
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: workspace.to_string_lossy().into_owned(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| {
+                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                });
+                h.active = Some(view);
+            })
+        });
+    }
+
+    /// Z7a2: draw the signed-in shell once, the way the focus tests do.
+    fn draw_shell(vc: &mut gpui::VisualTestContext, baaz: &gpui::Entity<Harness>) {
+        use gpui::IntoElement as _;
+        vc.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1440.), gpui::px(900.)),
+            |_, _| baaz.clone().into_any_element(),
+        );
+    }
+
+    /// Z7a2: no webview exists until the pane shows Browser — neither boot
+    /// nor a session switch with no Browser state creates one.
+    #[gpui::test]
+    fn browser_webviews_wait_for_their_pane(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browser-lazy");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()
+                && baaz.read(cx).browser.home.is_none()),
+            "boot draws no webview"
+        );
+        // A session switch with no Browser state: the activate tail —
+        // focus the composer, restore the (absent) pane state.
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.focus_composer = true;
+                h.restore_right_for_session("s-1", cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()
+                && baaz.read(cx).browser.home.is_none()),
+            "a switch with no Browser state creates no webview"
+        );
+        restore_state(state);
+    }
+
+    /// Z7a2: a restore onto Browser creates the webview (lazy, on show)
+    /// without moving focus off the composer.
+    #[gpui::test]
+    fn restoring_browser_keeps_the_composers_focus(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browser-restore-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.set_override(
+                    "s-1",
+                    |meta| {
+                        meta.right = Some(crate::sessions::RightState {
+                            open: true,
+                            kind: crate::layout::RightKind::Browser,
+                            ..Default::default()
+                        });
+                    },
+                    cx,
+                );
+                // What `activate` sets before the restore below.
+                h.focus_composer = true;
+                h.restore_right_for_session("s-1", cx);
+            })
+        });
+        draw_shell(&mut *vc, &baaz);
+        let url_focus = vc.update(|_, cx| {
+            baaz.read(cx)
+                .browser
+                .states
+                .get("s-1")
+                .cloned()
+                .expect("restore onto Browser creates the webview")
+                .read(cx)
+                .focus_handle()
+                .clone()
+        });
+        let composer_focus = vc.update(|_, cx| {
+            baaz.read(cx)
+                .active
+                .clone()
+                .expect("a session is open")
+                .update(cx, |view, cx| view.composer_focus_handle(cx))
+        });
+        let focused = vc.update(|window, cx| window.focused(cx));
+        assert_eq!(
+            focused,
+            Some(composer_focus),
+            "a restored Browser pane leaves focus where activation put it"
+        );
+        assert_ne!(focused, Some(url_focus), "restore must not steal into the URL field");
+        restore_state(state);
+    }
+
+    /// Z7a2: the person opening Browser on a blank page lands in the URL
+    /// field — the one focus move the pane is allowed.
+    #[gpui::test]
+    fn opening_browser_by_hand_focuses_the_url(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browser-person-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        draw_shell(&mut *vc, &baaz);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        draw_shell(&mut *vc, &baaz);
+        let url_focus = vc.update(|_, cx| {
+            baaz.read(cx)
+                .browser
+                .states
+                .get("s-1")
+                .cloned()
+                .expect("opening Browser creates the webview")
+                .read(cx)
+                .focus_handle()
+                .clone()
+        });
+        let focused = vc.update(|window, cx| window.focused(cx));
+        assert_eq!(
+            focused,
+            Some(url_focus),
+            "the person's own open onto a blank page focuses the URL field"
+        );
+        restore_state(state);
+    }
+
     /// `toggle_right` twice returns the pane to its start.
     #[gpui::test]
     fn toggling_the_right_pane_twice_returns_to_its_start(cx: &mut gpui::TestAppContext) {
@@ -4431,6 +4671,7 @@ mod tests {
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
+                browser_url: None,
             })
         );
         let baaz2 = vc.update(|window, cx| {
@@ -4490,7 +4731,7 @@ mod tests {
             for _ in 0..2 {
                 vc.update(|_, cx| {
                     baaz.update(cx, |harness, cx| {
-                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), cx);
+                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), None, cx);
                     });
                 });
             }

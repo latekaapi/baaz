@@ -52,6 +52,7 @@ aui-motion = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.7" }
 aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.7" }
 aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.7" }
 aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.7", features = ["pty", "tui"] }
+aui-webview = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.7", features = ["wry"] }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }

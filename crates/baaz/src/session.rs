@@ -1782,6 +1782,12 @@ impl SessionView {
         window.focus(&self.composer.focus_handle(cx), cx);
     }
 
+    /// The composer's focus handle, for the browser-focus tests.
+    #[cfg(test)]
+    pub(crate) fn composer_focus_handle(&self, cx: &mut Context<Self>) -> FocusHandle {
+        self.composer.focus_handle(cx).clone()
+    }
+
     /// Lock the composer while a provider switch replaces this view (Y2b).
     pub(crate) fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
         self.input_locked = locked;

@@ -95,6 +95,11 @@ ENTRIES = {
     "signed-in":            {"shot": ["--no-connect", "--login", "signed-in"]},
     "right-browser":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:browser"]},
+    # The Browser pane on a loaded page: `browse:` navigates the scripted
+    # backend (captures always run the fake page, never a native view), so
+    # the entry captures deterministically like `right-browser` does.
+    "right-browser-page":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:browser;browse:https://example.com"]},
     "right-diff":           {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:diff"]},
     "right-git":            {"shot": ["--no-connect", "--login", "signed-in",
