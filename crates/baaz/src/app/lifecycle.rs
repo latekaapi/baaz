@@ -4155,6 +4155,37 @@ impl Harness {
         run.note_checkpointed(pack);
         self.handoffs.insert(source.clone(), run.clone());
         view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
+        // Z8: with the switch on and a Muse sign-in, a cheap model writes
+        // the pack's summary in a hidden side session (one short turn, the
+        // title mechanism). The run stays Checkpointed — the card reads
+        // "Summarising…" — until the summary lands or the 20 s watchdog
+        // keeps the extractive text; only then does the destination open.
+        // Cancel during the wait abandons the side session and never opens
+        // the destination. Otherwise the pack keeps its extractive summary
+        // and the destination opens below, exactly as before.
+        let summary_prompt = crate::handoff::should_model_summary(
+            self.layout.handoff_model_summary,
+            self.client.is_some(),
+        )
+        .then(|| {
+            self.handoffs.get(&source).and_then(|run| run.pack.as_ref()).map(|pack| {
+                crate::handoff::summary_prompt(&crate::handoff::summary_input(pack))
+            })
+        })
+        .flatten();
+        if let Some(prompt) = summary_prompt {
+            if let Some(run) = self.handoffs.get_mut(&source) {
+                run.note_summary_pending();
+            }
+            if let Some(run) = self.handoffs.get(&source) {
+                let card = run.card();
+                let card_id = run.card_id.clone();
+                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            }
+            crate::baaz_log!("handoff requested epoch={epoch} {source} -> {} (summarising)", to.as_str());
+            self.start_handoff_summary(source.clone(), epoch, prompt, cx);
+            return;
+        }
         crate::baaz_log!("handoff requested epoch={epoch} {source} -> {}", to.as_str());
         // Prepared next: the destination opens in the source's workspace,
         // and the pack submits when it lands.

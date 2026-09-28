@@ -1,7 +1,7 @@
 //! The Settings dialog (⌘,, File → Settings…, the account menu's
 //! "Settings…" row, `--steps settings[:<section>]`).
 //!
-//! The five sidebar flags stay in `layout.json` — there is no second store.
+//! The six sidebar flags stay in `layout.json` — there is no second store.
 //! [`crate::app::Harness::settings_sections`] builds the dialog's sections
 //! from that state every frame, and the dialog's `on_switch` intent flips
 //! the matching layout field back through [`crate::layout::write`].
@@ -33,6 +33,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "group_branch" => layout.group_branch = on,
         "auto_title" => layout.auto_title = on,
         "auto_summary" => layout.auto_summary = on,
+        "handoff_model_summary" => layout.handoff_model_summary = on,
         _ => return false,
     }
     true
@@ -81,6 +82,14 @@ impl Harness {
                         "Show the last request beside the last reply; rewrite poor ones",
                     )),
                     on: self.layout.auto_summary,
+                },
+                SettingsRow::Switch {
+                    id: SharedString::from("handoff_model_summary"),
+                    label: SharedString::from("Summarise handoffs with a model"),
+                    detail: Some(SharedString::from(
+                        "A cheap model writes the summary the next provider reads (one short turn). Off: the first lines of the earliest replies.",
+                    )),
+                    on: self.layout.handoff_model_summary,
                 },
             ],
         },
@@ -495,6 +504,8 @@ mod tests {
         assert!(!layout.auto_title);
         assert!(apply_setting(&mut layout, "auto_summary", false));
         assert!(!layout.auto_summary);
+        assert!(apply_setting(&mut layout, "handoff_model_summary", false));
+        assert!(!layout.handoff_model_summary);
         assert!(!apply_setting(&mut layout, "nope", true));
     }
 
