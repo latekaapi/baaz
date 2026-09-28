@@ -33,9 +33,12 @@ fn engine_tag_carries_the_agent_api() {
         .lines()
         .find(|line| line.starts_with("aui = "))
         .expect("workspace pins aui to a tag");
+    // At least v0.3.8 (the eval API); later tags keep it (additive).
+    let tag = aui_line.split("tag = \"v").nth(1).and_then(|rest| rest.split('"').next()).expect("a vX.Y.Z tag");
+    let parts: Vec<u32> = tag.split('.').map(|part| part.parse().expect("numeric tag")).collect();
     assert!(
-        aui_line.contains("tag = \"v0.3.8\""),
-        "Z7b builds on the tag with the eval API: {aui_line}"
+        parts.as_slice() >= [0, 3, 8].as_slice(),
+        "Z7b builds on a tag with the eval API (>= v0.3.8): {aui_line}"
     );
     let service = source("terminal/service.rs");
     for item in [

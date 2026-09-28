@@ -462,7 +462,8 @@ impl Harness {
         // agent in a background session must not flip the person's visible
         // pane — its session's saved state below is all that changes, and
         // it shows when the person switches there.
-        let foreground = self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id);
+        let active = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let foreground = agent_open_flips_visible_pane(active.as_deref(), session_id);
         if foreground {
             self.right_snap = false;
             self.layout.right_kind = Some(RightKind::Browser);
@@ -477,6 +478,13 @@ impl Harness {
         self.refresh_right_now(cx);
         cx.notify();
     }
+}
+
+/// Whether an agent's `browser_open` for `session_id` changes what is on
+/// screen: only when that session is the one showing. A background
+/// session's agent changes only its own saved pane state.
+pub(crate) fn agent_open_flips_visible_pane(active: Option<&str>, session_id: &str) -> bool {
+    active == Some(session_id)
 }
 
 /// Select `id` for `root` from the tree's action closure, which only holds
@@ -1623,6 +1631,16 @@ fn diff_pane_from(status: &GitStatus, parsed: &ParsedDiffs, notify: &ToastSink) 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_the_foreground_agent_flips_the_visible_pane() {
+        // Review finding (Z7b): a background session's agent opening its
+        // browser must not flip the person's visible pane.
+        assert!(super::agent_open_flips_visible_pane(Some("a"), "a"));
+        assert!(!super::agent_open_flips_visible_pane(Some("a"), "b"));
+        assert!(!super::agent_open_flips_visible_pane(None, "b"));
+    }
+
     use super::*;
     use gpui::TestAppContext;
 
