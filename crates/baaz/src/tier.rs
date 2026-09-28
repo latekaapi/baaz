@@ -992,13 +992,37 @@ fn flatten(raw: &str) -> String {
 // The pseudo-terminal
 // ---------------------------------------------------------------------------
 
+/// Which `muse` the probe spawns: an explicit path that names a file wins
+/// as-is, else the `muse` search (env override, then `PATH`, then the Dock
+/// fallbacks) and the login-shell `PATH` — never a bare `"muse"`, which a
+/// Dock launch (minimal `PATH`) cannot execute.
+fn resolve_probe_muse(muse: &str) -> PathBuf {
+    let candidate = Path::new(muse);
+    if !muse.is_empty() && candidate.is_file() {
+        return candidate.to_path_buf();
+    }
+    if let Some(program) = muse_client::resolve_muse_program() {
+        return program;
+    }
+    if let Some(program) = provider::env_path::find_program("muse") {
+        return program;
+    }
+    PathBuf::from(muse)
+}
+
 /// The `muse` invocation the probe spawns: the throwaway workspace, sized
 /// for the card's own lines, and trusted for this run only.
 ///
 /// A pure builder — no process touched — so the trust flag is a unit-testable
 /// fact rather than something only a live probe could catch a regression in.
+///
+/// The command runs the resolved absolute `muse` with the login-shell
+/// `PATH` (the program's own directory first), so a Dock launch still runs
+/// a home install. No other env var is changed.
 fn probe_command(muse: &str) -> std::process::Command {
-    let mut command = std::process::Command::new(muse);
+    let program = resolve_probe_muse(muse);
+    let mut command = std::process::Command::new(&program);
+    command.env("PATH", provider::env_path::child_path_for(&program));
     command
         .arg("--workspace")
         .arg(probe_workspace())
@@ -1379,6 +1403,39 @@ mod tests {
         let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.contains(&"--trust-workspace".to_owned()), "{args:?}");
         assert!(args.contains(&"--workspace".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn the_probe_spawns_with_a_repaired_path() {
+        // A Dock launch cannot run the probe's child on the inherited
+        // `PATH`, so the command carries the login-shell `PATH` itself —
+        // and no other env var is added here beyond the pre-existing
+        // TERM/LINES/COLUMNS.
+        let command = probe_command("muse");
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .expect("the probe sets PATH");
+        assert!(!path.is_empty(), "PATH is never emptied");
+    }
+
+    #[test]
+    fn an_explicit_muse_file_wins_as_is() {
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-tier-muse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("muse");
+        std::fs::write(&file, b"fake").expect("seed muse");
+        assert_eq!(resolve_probe_muse(&file.to_string_lossy()), file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

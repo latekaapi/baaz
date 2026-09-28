@@ -37,9 +37,13 @@ impl RunningChild {
         launch: &SessionLaunch,
         hub: &std::sync::Arc<ControlHub>,
     ) -> std::io::Result<Self> {
+        // The child's `PATH` is the login-shell `PATH` with the program's
+        // own directory first, so a Dock launch still runs a home install
+        // and its `env`-shebang neighbours. No other env var is changed.
         let mut command = Command::new(program);
         command
             .args(&launch.argv)
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

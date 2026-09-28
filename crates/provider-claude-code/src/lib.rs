@@ -799,6 +799,25 @@ impl ClaudeCodeAdapter {
     }
 }
 
+/// The human line behind a failed `--version`: the stream's first
+/// non-empty line, trimmed to 200 characters — never the whole stream, and
+/// never compared against the version floor.
+fn version_failure_line(stream: &[u8], status: &std::process::ExitStatus) -> String {
+    let line = String::from_utf8_lossy(stream)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if line.is_empty() {
+        format!("exited with {status}")
+    } else {
+        line
+    }
+}
+
 impl ProviderAdapter for ClaudeCodeAdapter {
     fn id(&self) -> ProviderId {
         aui_protocol::Provider::Claude
@@ -810,20 +829,38 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         }
         // The version floor is enforced here, before any session exists:
         // `claude --version` prints `2.1.276 (Claude Code)` and the shared
-        // parser tolerates that trailer.
+        // parser tolerates that trailer. The child's `PATH` is the
+        // login-shell `PATH` with the program's own directory first, so a
+        // Dock launch still runs a home install and its `env`-shebang
+        // neighbours. No other env var is changed.
         let output = std::process::Command::new(&self.program)
             .arg("--version")
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)))
             .output()
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not ask claude its version: {error}"),
             })?;
+        if !output.status.success() {
+            return Err(ProviderError::Unavailable {
+                reason: format!(
+                    "claude --version failed: {}",
+                    version_failure_line(&output.stderr, &output.status)
+                ),
+            });
+        }
         let raw = String::from_utf8_lossy(&output.stdout);
-        let raw = raw.trim();
-        let version = if raw.is_empty() {
-            String::from_utf8_lossy(&output.stderr).trim().to_owned()
-        } else {
-            raw.to_owned()
-        };
+        let version = raw.trim().to_owned();
+        // Only stdout of a successful exit is ever compared against the
+        // floor: stderr of a failed spawn is a spawn failure, never a
+        // version.
+        if provider::parse_version(&version).is_none() {
+            return Err(ProviderError::Unavailable {
+                reason: format!(
+                    "could not read claude version from: {}",
+                    version_failure_line(&output.stdout, &output.status)
+                ),
+            });
+        }
         if !claude_version_supported(&version) {
             return Err(ProviderError::Rejected {
                 reason: format!(
@@ -1258,6 +1295,71 @@ mod tests {
             matches!(ack, Ack::Account { signed_in: false, label: None }),
             "no reading seen, no login claimed: {ack:?}"
         );
+    }
+
+    /// Seed an executable fake binary in a fresh temp dir.
+    fn seed_executable(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-claude-shebang-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("fake writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = std::fs::metadata(&path).expect("fake metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("fake executable");
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn a_failed_version_is_never_below_the_floor() {
+        // The Dock failure shape: a non-zero exit with the spawn error on
+        // stderr and empty stdout. The old code compared that stderr
+        // against the floor and refused with "… is below the floor …".
+        let (dir, claude) = seed_executable(
+            "fail",
+            "claude",
+            "#!/bin/sh\necho 'env: node: No such file or directory' >&2\nexit 127\n",
+        );
+        let mut adapter = ClaudeCodeAdapter::new(&claude.to_string_lossy());
+        let error = adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect_err("127 fails");
+        match error {
+            ProviderError::Unavailable { reason } => {
+                assert!(reason.contains("--version failed"), "honest failure: {reason}");
+                assert!(reason.contains("env: node: No such file or directory"), "stderr kept: {reason}");
+                assert!(!reason.contains("below the floor"), "never a floor refusal: {reason}");
+            }
+            other => panic!("a spawn failure is unavailable, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unparseable_version_is_never_below_the_floor() {
+        // Exit 0 but no version on stdout: nothing to compare against the
+        // floor, so the probe says what it could not read.
+        let (dir, claude) =
+            seed_executable("garbage", "claude", "#!/bin/sh\necho 'not a version'\nexit 0\n");
+        let mut adapter = ClaudeCodeAdapter::new(&claude.to_string_lossy());
+        let error = adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect_err("garbage fails");
+        match error {
+            ProviderError::Unavailable { reason } => {
+                assert!(reason.contains("could not read claude version"), "honest failure: {reason}");
+                assert!(!reason.contains("below the floor"), "never a floor refusal: {reason}");
+            }
+            other => panic!("an unreadable version is unavailable, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
