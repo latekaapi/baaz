@@ -205,16 +205,22 @@ fn env_override(id: ProviderId) -> Option<&'static str> {
 }
 
 /// Where the `claude` / `codex` binary comes from, in order: the env
-/// override (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else a `PATH` lookup, else the
-/// fixed fallbacks. The fallbacks matter because the app also launches from
-/// the Dock with a minimal `PATH` that names almost nothing.
+/// override (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else the login-shell `PATH`
+/// (which already carries the fixed fallbacks). The login `PATH` matters
+/// because the app also launches from the Dock with a minimal `PATH` that
+/// names almost nothing.
 ///
 /// `None` for muse (no binary) and when nothing on the search path exists.
 pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).collect())
-        .unwrap_or_default();
+    // The login `PATH` first (it already ends in the install dirs), then
+    // the fixed fallbacks again so a bare `PATH` search and this one agree.
+    let mut path_dirs: Vec<PathBuf> = std::env::split_paths(provider::env_path::login_path()).collect();
+    for dir in fallback_dirs(&home) {
+        if !path_dirs.contains(&dir) {
+            path_dirs.push(dir);
+        }
+    }
     let env = env_override(id).and_then(std::env::var_os).map(PathBuf::from);
     resolve_program_with(id, env.as_deref(), &path_dirs, &fallback_dirs(&home))
 }

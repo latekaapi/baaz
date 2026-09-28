@@ -570,6 +570,25 @@ impl CodexAdapter {
     }
 }
 
+/// The human line behind a failed `--version`: the stream's first
+/// non-empty line, trimmed to 200 characters — never the whole stream, and
+/// never compared against the version floor.
+fn version_failure_line(stream: &[u8], status: &std::process::ExitStatus) -> String {
+    let line = String::from_utf8_lossy(stream)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if line.is_empty() {
+        format!("exited with {status}")
+    } else {
+        line
+    }
+}
+
 impl ProviderAdapter for CodexAdapter {
     fn id(&self) -> ProviderId {
         ProviderId::Codex
@@ -581,20 +600,40 @@ impl ProviderAdapter for CodexAdapter {
         }
         // The version floor is enforced here, before any session exists:
         // `codex --version` prints `codex-cli 0.144.6` and the prefix is
-        // stripped before comparing (see `codex_version_supported`).
+        // stripped before comparing (see `codex_version_supported`). The
+        // child's `PATH` is the login-shell `PATH` with the program's own
+        // directory first, so a Dock launch still runs a home install and
+        // its `env`-shebang neighbours. No other env var is changed.
         let output = std::process::Command::new(&self.program)
             .arg("--version")
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)))
             .output()
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not ask codex its version: {error}"),
             })?;
+        if !output.status.success() {
+            return Err(ProviderError::Unavailable {
+                reason: format!(
+                    "codex --version failed: {}",
+                    version_failure_line(&output.stderr, &output.status)
+                ),
+            });
+        }
         let raw = String::from_utf8_lossy(&output.stdout);
-        let raw = raw.trim();
-        let version = if raw.is_empty() {
-            String::from_utf8_lossy(&output.stderr).trim().to_owned()
-        } else {
-            raw.to_owned()
-        };
+        let version = raw.trim().to_owned();
+        // Only stdout of a successful exit is ever compared against the
+        // floor: stderr of a failed spawn (notably `env: node: No such
+        // file or directory`) is a spawn failure, never a version.
+        let stripped =
+            version.strip_prefix("codex-cli").map(str::trim_start).unwrap_or(&version);
+        if provider::parse_version(stripped).is_none() {
+            return Err(ProviderError::Unavailable {
+                reason: format!(
+                    "could not read codex version from: {}",
+                    version_failure_line(&output.stdout, &output.status)
+                ),
+            });
+        }
         if !codex_version_supported(&version) {
             return Err(ProviderError::Rejected {
                 reason: format!(
@@ -956,6 +995,105 @@ with open(log, "w") as handle:
     /// so the connect test holds this while its child is alive — two
     /// fakes at once would cross their logs.
     static FAKE_SERVER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Seed an executable fake binary in a fresh temp dir.
+    fn seed_executable(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-codex-shebang-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        (dir.clone(), seed_executable_in(&dir, name, body))
+    }
+
+    /// Seed an executable fake binary in `dir`.
+    fn seed_executable_in(
+        dir: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("fake writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = std::fs::metadata(&path).expect("fake metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("fake executable");
+        }
+        path
+    }
+
+    #[test]
+    fn version_probe_succeeds_through_an_env_shebang() {
+        // A `codex` whose shebang is `#!/usr/bin/env fakenode`, with the
+        // `fakenode` next to it printing a floor-clearing version: the
+        // Dock case, where the process `PATH` names almost nothing.
+        let (dir, _) = seed_executable("ok", "fakenode", "#!/bin/sh\necho 'codex-cli 0.150.0'\n");
+        let codex = seed_executable_in(&dir, "codex", "#!/usr/bin/env fakenode\n# fake codex\n");
+        // With a Dock-like `PATH` on the spawn itself the shebang cannot
+        // resolve: this proves the fixture needs the child's repaired
+        // `PATH`, set on the spawn's own env, never the test process's.
+        let bare = std::process::Command::new(&codex)
+            .arg("--version")
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("bare spawn runs");
+        assert!(!bare.status.success(), "without PATH repair the shebang fails");
+        // The adapter repairs the child's `PATH` itself, so its probe
+        // succeeds with the process environment untouched.
+        let mut adapter = CodexAdapter::new(&codex.to_string_lossy());
+        let handshake =
+            adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("repaired PATH probes");
+        assert!(handshake.agent_version.contains("0.150.0"), "version: {handshake:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_version_is_never_below_the_floor() {
+        // The Dock failure verbatim: exit 127, `env: node` on stderr, empty
+        // stdout. The old code compared that stderr against the floor and
+        // refused with "… is below the floor …".
+        let (dir, codex) = seed_executable(
+            "fail",
+            "codex",
+            "#!/bin/sh\necho 'env: node: No such file or directory' >&2\nexit 127\n",
+        );
+        let mut adapter = CodexAdapter::new(&codex.to_string_lossy());
+        let error = adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect_err("127 fails");
+        match error {
+            ProviderError::Unavailable { reason } => {
+                assert!(reason.contains("--version failed"), "honest failure: {reason}");
+                assert!(reason.contains("env: node: No such file or directory"), "stderr kept: {reason}");
+                assert!(!reason.contains("below the floor"), "never a floor refusal: {reason}");
+            }
+            other => panic!("a spawn failure is unavailable, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unparseable_version_is_never_below_the_floor() {
+        // Exit 0 but no version on stdout: nothing to compare against the
+        // floor, so the probe says what it could not read.
+        let (dir, codex) =
+            seed_executable("garbage", "codex", "#!/bin/sh\necho 'not a version'\nexit 0\n");
+        let mut adapter = CodexAdapter::new(&codex.to_string_lossy());
+        let error = adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect_err("garbage fails");
+        match error {
+            ProviderError::Unavailable { reason } => {
+                assert!(reason.contains("could not read codex version"), "honest failure: {reason}");
+                assert!(!reason.contains("below the floor"), "never a floor refusal: {reason}");
+            }
+            other => panic!("an unreadable version is unavailable, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn open_session_reads_rate_limits_on_connect() {
