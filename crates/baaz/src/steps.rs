@@ -359,6 +359,7 @@ impl Harness {
         // two-captures-must-agree rule failed four entries out of five.
         if slug.eq_ignore_ascii_case("off") || slug.eq_ignore_ascii_case("closed") {
             self.layout.right_open = false;
+            self.save_right_for_active(cx);
             cx.notify();
             return;
         }
@@ -366,6 +367,7 @@ impl Harness {
             Some(kind) => {
                 self.layout.right_kind = Some(kind);
                 self.layout.right_open = true;
+                self.save_right_for_active(cx);
                 cx.notify();
             }
             None => {
