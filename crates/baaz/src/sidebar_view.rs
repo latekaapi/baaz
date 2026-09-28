@@ -1576,6 +1576,8 @@ impl Harness {
             .occlude()
             .absolute()
             .inset_0()
+            .role(gpui::Role::Button)
+            .aria_label("Dismiss menu")
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
         Some(
             popover_layer(
