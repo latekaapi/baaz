@@ -18,6 +18,22 @@ SETTLE_TRIES = 6
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BAAZ = os.path.join(REPO, "target", "debug", "baaz")
 
+# The scripted statuses behind `connect-first-run` and
+# `launch-cached-shell`: one Connected (Muse, with email and plan), one
+# Signed out (Claude Code, installed), one Not installed (Codex). Shaped
+# exactly as `<state>/provider-status.json`, the cache the status service
+# reads at boot.
+CONNECT_MIXED = json.dumps([
+    {"provider": "muse", "installed": {"Yes": {"version": "1.4.0", "path": "/usr/local/bin/muse"}},
+     "auth": {"SignedIn": {"email": "ada@example.com", "plan": "Pro", "method": "account"}},
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+    {"provider": "claude-code", "installed": {"Yes": {"version": "2.1.276", "path": "/opt/homebrew/bin/claude"}},
+     "auth": "SignedOut",
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+    {"provider": "codex", "installed": "No", "auth": "Unknown",
+     "enabled": True, "advisory": "None", "checked_at": 1790000000, "usage": None},
+])
+
 # baaz's own switch for this, and its doc comment says exactly what it is for:
 # "Whether captures must be byte-identical run to run." It freezes the clock and
 # holds the platform reduced-motion flag, so every tween, spring and shimmer
@@ -129,6 +145,18 @@ ENTRIES = {
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
+    # Y5: the first-run Connect your providers screen, offline with scripted
+    # statuses (`BAAZ_PROVIDER_STATUS_SCRIPT` — the only statuses a
+    # deterministic run reports). `connect-first-run` is mixed rows
+    # (Connected / Signed out / Not installed); `connect-checking` scripts
+    # nothing, so every row reads Checking. `launch-cached-shell` is the
+    # returning launch: cached statuses, `--login signed-in`, straight into
+    # the shell with no sign-in screen.
+    "connect-first-run":    {"shot": ["--no-connect", "--login", "connect"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": CONNECT_MIXED}},
+    "connect-checking":     {"shot": ["--no-connect", "--login", "connect"]},
+    "launch-cached-shell":  {"shot": ["--no-connect", "--login", "signed-in"],
+                             "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": CONNECT_MIXED}},
 }
 
 
@@ -155,6 +183,9 @@ def main():
 
     if a.probe_shot:
         cmd = boot(a.entry, "shot") + extra
+        # Per-entry scripted environment (provider statuses for the connect
+        # entries): merged over the deterministic base, entry only.
+        env = {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
         # Capture twice and require the two to agree. With BAAZ_DETERMINISTIC
         # set they always should, so this is cheap; when they do not, the screen
         # is genuinely still animating and reporting that beats baselining an
@@ -166,7 +197,7 @@ def main():
             p = subprocess.run(cmd + ["--screenshot", shot,
                                       "--screenshot-delay", str(a.delay_ms)],
                                cwd=REPO, capture_output=True, text=True,
-                               timeout=180, env=PROBE_ENV)
+                               timeout=180, env=env)
             if p.returncode != 0 or not os.path.exists(shot):
                 sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
                 return 1

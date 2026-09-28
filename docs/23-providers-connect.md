@@ -1,6 +1,12 @@
 # 23 — Connecting and managing providers
 
-Status: design, 2026-09-28. Replaces the Muse-only sign-in gate. Research: T3 Code
+Status: design, 2026-09-28; Y5 (2026-09-28) implements §3's launch and §4's
+first bullet — the Connect your providers screen, the stored-facts launch
+decision, the quiet sign-out banner, and the row actions below. The rest
+(Settings cards, footer, usage card) stays design.
+Muse names no Install command: no installer is documented in this repo or in
+`muse --help`, so its missing row offers Docs (this repo) instead.
+Research: T3 Code
 (`pingdotgg/t3code`, `apps/server/src/provider/Layers/*Provider.ts`, `components/onboarding/*`,
 `settings/ProviderInstanceCard.tsx`) and Synara (`Emanuele-web04/synara`, MIT, T3-derived:
 `ProviderHealth.ts`, `OnboardingProvidersStep`, `providerSetupStatus.ts`). Backend surfaces below were
@@ -61,6 +67,9 @@ Re-check / Connected ✓) and a secondary "Docs". **Continue** enables once one 
 "Skip for now" always works. Install opens the dock terminal with the vendor's install command typed and
 not run (Claude: `curl -fsSL https://claude.ai/install.sh | bash`; Codex: `npm i -g @openai/codex`;
 Muse: its documented installer), and says so.
+(Y5: no Muse installer is documented anywhere this repo or `muse --help`
+can point at, so the Muse row offers Docs instead of Install; the Claude
+and Codex commands above are exact.)
 
 **Settings → Providers**: one card per provider — status dot + headline, "Signed in as <email> · <plan>",
 version (with a Too-old advisory), Enabled switch, Re-check, Sign in / Sign out (sign out confirms).
