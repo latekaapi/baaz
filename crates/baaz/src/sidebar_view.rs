@@ -1,8 +1,8 @@
 //! The sidebar column: what it draws, and the two menus that hang off it.
 //!
 //! Everything here is composition over state [`Harness`] already holds — the
-//! joined session rows, the filter toggles, the open rename, the signed-in
-//! identity and the probed tier. It is the shell's left half plus the
+//! joined session rows, the filter toggles, the open rename, and the
+//! signed-in identity. It is the shell's left half plus the
 //! session-list policy that decides which rows are shown and what the column
 //! says when it shows none; it never touches login, the wire, or the session
 //! lifecycle, and the only thing it writes is a filter toggle.
@@ -26,7 +26,8 @@ use aui::nav::{
     MenuRow, RailItem, RowAction, SidebarRow,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
-use aui_icons::{IconName, Provider};
+use aui::screens::{usage_card, UsageWindow as UsageCardWindow};
+use aui_icons::IconName;
 use aui_motion::pulse_phase;
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
 use gpui::{
@@ -190,10 +191,12 @@ impl Render for SidebarPane {
 /// their `Rc` pointers (this comparison calls both getters every frame, so
 /// an `invalidate_list` rebuild — or the minute rollover regrouping — shows
 /// up as a new pointer here), the selection, the rename, the one-shot
-/// reveal, the footer's identity and tier, and the current project. Compared
+/// reveal, the footer's identity, and the current project. Compared
 /// in `on_frame`, before anything draws; a few small clones per frame, no
 /// rebuild. Nested entities inside the column (the rename editor, hover and
 /// scroll state) notify through the view tree on their own and need no key.
+/// The tier is deliberately not an input: the footer shows the person,
+/// never the plan or the meter, so a usage tick must not dirty the column.
 #[derive(PartialEq, Eq)]
 pub(crate) struct SidebarKey {
     visible: usize,
@@ -202,8 +205,6 @@ pub(crate) struct SidebarKey {
     renaming: Option<String>,
     reveal: Option<String>,
     auth: (u8, String, String, String, bool),
-    tier_args: bool,
-    tier: Option<(String, bool, Option<u32>)>,
     current_project: Option<String>,
 }
 
@@ -223,14 +224,11 @@ impl SidebarKey {
             Auth::SignedIn(identity) => (
                 2,
                 identity.initial(),
-                identity.footer_name(),
+                identity.display_name(),
                 identity.email.clone(),
                 identity.is_api_key(),
             ),
         };
-        let tier = baaz.tier.as_ref().map(|tier| {
-            (tier.footer_label(), tier.is_warning(), tier.weekly_fraction().map(f32::to_bits))
-        });
         Self {
             visible: Rc::as_ptr(&visible) as usize,
             grouping: Rc::as_ptr(&grouping) as usize,
@@ -238,8 +236,6 @@ impl SidebarKey {
             renaming: baaz.renaming.clone(),
             reveal: baaz.reveal.clone(),
             auth,
-            tier_args: baaz.args.tier.is_some(),
-            tier,
             current_project: baaz.current_project.clone(),
         }
     }
@@ -1335,10 +1331,12 @@ impl Harness {
         )
     }
 
-    /// "Signed in as", in the library's shape: avatar, name, the email it is
-    /// really reporting, the plan row, and the provider usage meter with the
-    /// chevron. The whole footer opens the account menu — Sign out lives
-    /// there now, and the list-management toggles live in the Sessions menu.
+    /// "Signed in as", in the library's shape: the avatar, the clean name,
+    /// and the email it is really reporting. No account id, no plan row,
+    /// no meter — the footer is just the person, and usage lives in the
+    /// account menu's cards. The whole footer opens the menu (the chevron
+    /// stands alone so it stays discoverable), where Sign out lives; the
+    /// list-management toggles live in the Sessions menu.
     fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let Auth::SignedIn(identity) = &self.auth else {
             return div().into_any_element();
@@ -1346,41 +1344,19 @@ impl Harness {
         let account = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
             this.open_menu(MenuKind::Account, cx);
         });
-        let mut footer = sidebar_footer("account", identity.initial(), identity.footer_name())
-            .on_click(move |e, w, cx| account(e, w, cx));
-        if !identity.email.is_empty() {
+        let name = identity.display_name();
+        let mut footer =
+            sidebar_footer("account", identity.initial(), name.clone())
+                .on_click(move |e, w, cx| account(e, w, cx));
+        if !identity.email.is_empty() && identity.email != name {
             footer = footer.detail(identity.email.clone());
         }
-        // The third row: what this login is entitled to. Warning-tinted for
-        // anything that is not a plan in force, because that is the case where
-        // the next turn costs money nobody expected. The key lanes say so
-        // without a probe: a stored key or `META_API_KEY` is pay-as-you-go by
-        // construction.
-        let meter = self.tier.as_ref().and_then(|tier| tier.weekly_fraction());
-        // `--tier` fakes the probe it names: the footer reads the faked tier
-        // like any other probe answer, even on the key lanes.
-        if self.args.tier.is_some() {
-            if let Some(tier) = &self.tier {
-                footer = footer.plan(tier.footer_label(), tier.is_warning());
-            }
-        } else if identity.is_api_key() {
-            footer = footer.plan("Pay-as-you-go · API key", true);
-        } else if let Some(tier) = &self.tier {
-            footer = footer.plan(tier.footer_label(), tier.is_warning());
-        }
-        // The meter is the weekly fraction the probe already reports; with no
-        // reading there is no meter. Either way the chevron stands, so the
-        // account menu stays discoverable — the row's own click opens it too.
-        if let Some(fraction) = meter {
-            footer = footer.meter(Provider::Muse, fraction);
-        } else {
-            footer = footer.trailing(
-                icon_button("account-chevron", IconName::ChevronDown)
-                    .ghost()
-                    .size(ButtonSize::Xs)
-                    .icon_size(px(12.0)),
-            );
-        }
+        footer = footer.trailing(
+            icon_button("account-chevron", IconName::ChevronDown)
+                .ghost()
+                .size(ButtonSize::Xs)
+                .icon_size(px(12.0)),
+        );
         // The wrapper reports the footer row's own rect (its only child),
         // which is what the account menu seats at — above the footer's top
         // edge, right edges aligned, at any sidebar width.
@@ -1615,40 +1591,35 @@ impl Harness {
         )
     }
 
-    /// The footer's account menu: Settings at the top, then Sign in to Muse
-    /// while signed out, else Sign out. The environment lane names itself:
-    /// `META_API_KEY` survives a sign-out, so the row says where the
-    /// credential really comes from (D28). Sign in opens the Muse login
-    /// sheet — the login screen is never the app's first screen, but it
-    /// stays reachable here.
+    /// The footer's account menu: a Usage section with one card per
+    /// Connected provider, then Settings…, Providers…, and Sign out of Muse
+    /// (or Sign in to Muse while signed out — the login screen is never the
+    /// app's first screen, but it stays reachable here). The environment
+    /// lane names itself: `META_API_KEY` survives a sign-out, so the row
+    /// says where the credential really comes from (D28).
     pub(crate) fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
         }
-        let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let label: SharedString = if signed_in {
-            match &self.auth {
-                Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
-                    "Sign out (set by META_API_KEY)".into()
-                }
-                _ => "Sign out".into(),
+        let muse_row: &str = match &self.auth {
+            Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
+                "Sign out of Muse (set by META_API_KEY)"
             }
-        } else {
-            "Sign in to Muse".into()
+            Auth::SignedIn(_) => "Sign out of Muse",
+            _ => "Sign in to Muse",
         };
         let rows = vec![
             MenuRow::Toggle { label: "Settings…".into(), checked: false },
-            MenuRow::Toggle { label, checked: false },
+            MenuRow::Toggle { label: "Providers…".into(), checked: false },
+            MenuRow::Toggle { label: muse_row.into(), checked: false },
         ];
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
-            if *index == 0 {
-                this.overlays.update(cx, |overlays, _| overlays.menu = None);
-                this.open_settings(0, cx);
-            } else if *index == 1 {
-                this.overlays.update(cx, |overlays, _| overlays.menu = None);
-                if matches!(this.auth, Auth::SignedIn(_)) {
-                    this.logout(cx);
-                } else {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            match *index {
+                0 => this.open_settings(0, cx),
+                1 => this.open_providers(cx),
+                _ if matches!(this.auth, Auth::SignedIn(_)) => this.logout(cx),
+                _ => {
                     this.login.reset_to_choose();
                     this.muse_sheet = true;
                     cx.notify();
@@ -1678,16 +1649,53 @@ impl Harness {
             .absolute()
             .inset_0()
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        let now = crate::account_usage::now_secs();
+        let cards = crate::account_usage::usage_cards(&crate::provider_status::live_statuses());
+        let p = cx.aui().colors;
+        let mut popover = v_flex().gap(px(8.0)).child(
+            div()
+                .ui(scale::FS_11)
+                .medium()
+                .text_color(p.ink_3)
+                .child("Usage"),
+        );
+        for card in &cards {
+            let mut element = usage_card(
+                SharedString::from(format!("account-usage-{}", card.provider.as_str())),
+                card.provider.icon(),
+                card.windows
+                    .iter()
+                    .map(|window| {
+                        UsageCardWindow::new(
+                            window.label.clone(),
+                            window.used_fraction as f32,
+                            crate::account_usage::resets_in_text(window.resets_at, now),
+                        )
+                    })
+                    .collect(),
+            );
+            if let Some(plan) = &card.plan {
+                element = element.plan(plan.clone());
+            }
+            // No reading, no footnote: a card with nothing reported omits
+            // "as of" rather than dating a guess.
+            if let Some(as_of) = card.as_of {
+                element = element.as_of(crate::account_usage::age_text(as_of, now));
+            }
+            popover = popover.child(element);
+        }
+        popover = popover.child(
+            view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
+                activate(&i, w, cx)
+            }),
+        );
         Some(
-            div().absolute().inset_0().child(catcher).child(anchored_menu(
-                trigger,
-                MenuSide::Above,
-                MenuAlign::End,
-                view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
-                    activate(&i, w, cx)
-                }),
-            ))
-            .into_any_element(),
+            div()
+                .absolute()
+                .inset_0()
+                .child(catcher)
+                .child(anchored_menu(trigger, MenuSide::Above, MenuAlign::End, popover))
+                .into_any_element(),
         )
     }
 }

@@ -10,7 +10,7 @@ run costs nothing and reaches no model.
     uiprobe.py --entry login-choose --probe-shot out.png
     uiprobe.py --entry login-choose --probe-idle 2000
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile
+import argparse, json, os, shutil, subprocess, sys, tempfile, time
 
 # How many captures to take looking for two that agree.
 SETTLE_TRIES = 6
@@ -52,6 +52,39 @@ PROBE_ENV = {**os.environ, "BAAZ_DETERMINISTIC": "1"}
 #         frames drawn at rest. Free, ~4s.
 # An entry that declares only one kind cannot answer the other verb, and says
 # so rather than pretending: relay records that as unverified, never as passed.
+
+def _usage_script():
+    now = int(time.time())
+    def status(provider, email, plan, usage):
+        return {
+            "provider": provider,
+            "installed": {"Yes": {"version": "9.9.9", "path": "/bin/" + provider}},
+            "auth": {"SignedIn": {"email": email, "plan": plan, "method": "account"}},
+            "enabled": True,
+            "advisory": "None",
+            "checked_at": now,
+            "usage": usage,
+        }
+    def usage(provider, plan, windows):
+        return {
+            "provider": provider,
+            "plan": plan,
+            "windows": [
+                {"label": label, "used_fraction": used, "resets_at": resets}
+                for (label, used, resets) in windows
+            ],
+            "as_of": now,
+        }
+    return [
+        status("muse", "latekaapi@gmail.com", "High Usage", usage(
+            "muse", "High Usage", [("Weekly", 0.01, now + 2 * 86400)])),
+        status("claude-code", None, "Pro", usage(
+            "claude-code", "Pro", [("Session · 5h", 0.42, now + 41 * 60),
+                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)])),
+        status("codex", None, "prolite", usage(
+            "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
+    ]
+
 ENTRIES = {
     "login-choose":         {"shot": ["--no-connect", "--login", "choose"]},
     "login-apikey":         {"shot": ["--no-connect", "--login", "apikey"]},
@@ -180,6 +213,15 @@ ENTRIES = {
     "connect-checking":     {"shot": ["--no-connect", "--login", "connect"]},
     "launch-cached-shell":  {"shot": ["--no-connect", "--login", "signed-in"],
                              "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": CONNECT_MIXED}},
+    # The account menu, open: one usage card per Connected provider (the
+    # weekly card at 83% exercises the warning ink), scripted through
+    # BAAZ_PROVIDER_STATUS_SCRIPT — offline, deterministic, free. The
+    # timestamps are fixed at import so every settle capture agrees. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "account-usage":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "account"],
+                               "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script())}},
 }
 
 
@@ -204,7 +246,16 @@ def main():
 
     extra = a.extra.split() if a.extra else []
 
+    # An entry's own environment rides on top of the probe's: scripted
+    # statuses and other per-screen fixtures that must not leak across
+    # entries. `boot` validates the entry first, so the lookup below
+    # cannot KeyError.
+    def merged_env(verb):
+        boot(a.entry, verb)
+        return {**PROBE_ENV, **ENTRIES[a.entry].get("env", {})}
+
     if a.probe_shot:
+        env = merged_env("shot")
         cmd = boot(a.entry, "shot") + extra
         # Per-entry scripted environment (provider statuses for the connect
         # entries): merged over the deterministic base, entry only.
@@ -234,6 +285,7 @@ def main():
         return 1
 
     if a.probe_idle:
+        env = merged_env("idle")
         cmd = boot(a.entry, "idle") + extra
         # `--bench` already measures frames drawn at rest and writes
         # `idle_frames_2s`. Translate it onto the contract's shape.

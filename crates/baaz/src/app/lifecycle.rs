@@ -2017,6 +2017,39 @@ impl Harness {
     /// A failure surfaces the same error dialog a failed `session/start`
     /// gets, titled with the provider's name — and opens nothing, never a
     /// silent muse fallback.
+    /// Refresh the account menu's usage cards from what the app already
+    /// knows: a peek at every open provider lane plus Muse's tier — no
+    /// probe, no spend, no blocking (a busy lane simply keeps its last
+    /// reading). Throttled to one refresh per minute and skipped entirely
+    /// in deterministic mode, where the scripted statuses are the cards.
+    pub(crate) fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
+        if crate::provider_status::deterministic() {
+            return;
+        }
+        if !crate::provider_status::note_usage_refresh() {
+            return;
+        }
+        let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
+        let mut views: Vec<Entity<SessionView>> =
+            self.session_cache.iter().map(|(_, view)| view.clone()).collect();
+        if let Some(view) = &self.active {
+            views.push(view.clone());
+        }
+        for view in &views {
+            let seen = view.read(cx);
+            if let Some(report) = seen.lane_usage() {
+                lanes.push((seen.provider_kind(), report));
+            }
+        }
+        let muse = self.tier.as_ref().map(|tier| {
+            (
+                Some(tier.footer_label()),
+                tier.weekly_fraction().map(|fraction| fraction as f64),
+            )
+        });
+        crate::provider_status::record_refreshed_usage(&lanes, muse);
+    }
+
     pub(crate) fn open_on_provider(
         &mut self,
         provider_id: ProviderId,
