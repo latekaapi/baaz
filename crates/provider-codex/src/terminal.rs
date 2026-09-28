@@ -103,11 +103,77 @@ pub fn disable_overrides<'a>(servers: impl IntoIterator<Item = &'a str>) -> Vec<
 /// but still start in every session: seen live 2026-09-27 on codex-cli
 /// 0.144.6 (`mcpServerStatus/list` beside the bridge: `codex_app`,
 /// `codex_apps` with 97 tools, `cua_repl`, plus file-configured
-/// `computer-use` and `node_repl`). Overriding an absent name creates a
-/// disabled no-op stub, so covering a name this machine does not have
-/// costs one inert row — while missing a name this machine DOES have
-/// leaks its tools into the session.
-pub const BUNDLED_SERVERS: &[&str] = &["codex_app", "codex_apps", "computer-use", "cua_repl"];
+/// `computer-use` and `node_repl`). The Z5 probe (2026-09-28,
+/// docs/19-codex.md) re-listed bare `app-server` at 5 servers and 104
+/// tools — `node_repl` (`js`, `js_add_node_module_dir`, `js_reset`,
+/// `turn_ended`) is file-configured on this box but rides the floor
+/// anyway, so a box where it is bundled-but-unconfigured stays covered.
+/// Overriding an absent name creates a disabled no-op stub, so covering
+/// a name this machine does not have costs one inert row — while missing
+/// a name this machine DOES have leaks its tools into the session.
+pub const BUNDLED_SERVERS: &[&str] =
+    &["codex_app", "codex_apps", "computer-use", "cua_repl", "node_repl"];
+
+/// Silence one owner-enabled plugin for this child only: a single-key
+/// `-c 'plugins."<name>".enabled=false'`. Single-key is safe here (unlike
+/// [`disable_override`]'s servers): the Z5 probe (2026-09-28) booted with
+/// eleven such overrides and listed the same silenced rows — the key is
+/// accepted, though it removes nothing `mcpServerStatus/list` can see
+/// beyond what the server disables already silence (defense in depth for
+/// what plugins contribute outside that listing, e.g. skills). The name
+/// rides a quoted segment, so a `"` (or anything outside the plugin-id
+/// alphabet) is refused rather than smuggled into the override key.
+pub fn plugin_disable_override(plugin: &str) -> Option<Vec<String>> {
+    if plugin.is_empty()
+        || plugin.contains(|char: char| {
+            !(char.is_ascii_alphanumeric()
+                || char == '_'
+                || char == '-'
+                || char == '@'
+                || char == '.')
+        })
+    {
+        return None;
+    }
+    Some(vec!["-c".to_owned(), format!("plugins.\"{plugin}\".enabled=false")])
+}
+
+/// The plugin disables for every name in `plugins`, in order, skipping
+/// what [`plugin_disable_override`] refuses. Empty in, empty out.
+pub fn plugin_disable_overrides<'a>(plugins: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    plugins.into_iter().filter_map(plugin_disable_override).flatten().collect()
+}
+
+/// Owner-enabled `[plugins."<name>@<marketplace>"]` tables named by
+/// `config.toml` text, read-only — the same heading scan as
+/// [`file_server_names`]. Sub-tables (`[plugins."x".env]`) are not
+/// plugins; a `"` inside the name never reaches an override key.
+pub fn plugin_names(config_toml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in config_toml.lines() {
+        let line = line.trim();
+        let Some(body) = line.strip_prefix("[plugins.") else { continue };
+        let Some(name) = body.strip_suffix(']') else { continue };
+        let name = name.trim().trim_matches('"').trim_matches('\'').to_owned();
+        // A sub-table (`[plugins."browser@openai-bundled".env]`) keeps an
+        // inner quote after the outer trim; a plugin header never does.
+        // Exact duplicates ride once.
+        if name.is_empty() || name.contains('"') || names.contains(&name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names
+}
+
+/// Every owner-enabled plugin to silence for one child, read-only from
+/// the owner's config file. Best-effort: an unreadable file silences
+/// nothing here (the server disables above are unaffected).
+pub fn inherited_plugins() -> Vec<String> {
+    let Some(path) = codex_config_path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    plugin_names(&text)
+}
 
 /// File-configured `[mcp_servers.<name>]` tables named by `config.toml`
 /// text, read-only: line headers, nothing more — this crate gains no TOML
@@ -246,9 +312,46 @@ mod tests {
     #[test]
     fn the_bundled_set_names_what_the_probe_saw() {
         // `codex_apps` (97 tools), `cua_repl`, `codex_app`: bundled, not
-        // file-configured, still starting in every session.
-        for name in ["codex_app", "codex_apps", "cua_repl"] {
+        // file-configured, still starting in every session. `node_repl`
+        // joins the floor (Z5 probe 2026-09-28: file-configured here,
+        // floor-covered everywhere).
+        for name in ["codex_app", "codex_apps", "cua_repl", "computer-use", "node_repl"] {
             assert!(BUNDLED_SERVERS.contains(&name), "{name} stays covered");
         }
+    }
+
+    #[test]
+    fn plugin_disables_quote_the_marketplace_name() {
+        assert_eq!(
+            plugin_disable_override("browser@openai-bundled"),
+            Some(vec![
+                "-c".to_owned(),
+                "plugins.\"browser@openai-bundled\".enabled=false".to_owned()
+            ])
+        );
+        assert_eq!(plugin_disable_override(""), None);
+        assert_eq!(plugin_disable_override("a\"b"), None, "no smuggled quotes");
+        assert_eq!(plugin_disable_override("a b"), None, "no whitespace");
+        assert_eq!(
+            plugin_disable_overrides(["chrome@openai-bundled", "a\"b"]),
+            vec![
+                "-c".to_owned(),
+                "plugins.\"chrome@openai-bundled\".enabled=false".to_owned()
+            ]
+        );
+        assert!(plugin_disable_overrides(Vec::<&str>::new()).is_empty());
+    }
+
+    #[test]
+    fn the_plugin_scan_names_tables_not_subtables() {
+        let text = "[plugins.\"browser@openai-bundled\"]\nenabled = true\n\
+            [plugins.\"browser@openai-bundled\".env]\nA = \"1\"\n\
+            [plugins.\"pdf@openai-primary-runtime\"]\nenabled = true\n\
+            [mcp_servers.node_repl]\ncommand = \"x\"\n";
+        assert_eq!(
+            plugin_names(text),
+            vec!["browser@openai-bundled".to_owned(), "pdf@openai-primary-runtime".to_owned()]
+        );
+        assert!(plugin_names("no tables here").is_empty());
     }
 }

@@ -36,9 +36,14 @@ fn the_spawn_argv_carries_the_bridge_for_the_session() {
     assert_eq!(extra[2], "-c");
     assert!(extra[3].contains("\"--session\",\"cmd-open\""), "the open id: {}", extra[3]);
     // Inherited servers ride along as full-table disables (the bundled
-    // set at least — the file-configured rest depends on the machine).
+    // set at least — the file-configured rest depends on the machine),
+    // plus one plugin disable per owner-enabled plugin.
     let disables = extra.iter().filter(|arg| arg.contains("enabled=false")).count();
     assert!(disables > 0, "inherited servers are silenced: {extra:?}");
+    assert!(
+        extra.iter().any(|arg| arg.contains("mcp_servers.codex_apps={")),
+        "the probe's 97-tool server stays covered: {extra:?}"
+    );
     assert!(
         !extra.iter().any(|arg| arg.contains("mcp_servers.baaz={")),
         "the bridge itself is never disabled: {extra:?}"
@@ -52,10 +57,37 @@ fn the_spawn_argv_carries_the_bridge_for_the_session() {
 }
 
 #[test]
-fn without_a_relay_the_child_spawns_bare() {
+fn without_a_relay_the_child_still_spawns_silenced() {
+    // Z5: the disables ride EVERY session, relay or not — the live probe
+    // (docs/19-codex.md) listed a bare `app-server` at 5 servers and 104
+    // owner tools. No bridge without a relay, but the silences stay.
     let adapter = CodexAdapter::new("codex-must-never-spawn");
+    let extra = adapter.spawn_args_for("cmd-open");
     assert!(
-        adapter.spawn_args_for("cmd-open").is_empty(),
-        "no relay means bare `app-server`, exactly as before"
+        !extra.iter().any(|arg| arg.contains("mcp_servers.baaz.")),
+        "no relay means no bridge: {extra:?}"
     );
+    let disables = extra.iter().filter(|arg| arg.contains("enabled=false")).count();
+    assert!(disables > 0, "inherited servers are silenced without a relay: {extra:?}");
+}
+
+#[test]
+fn with_the_switch_on_no_disables_but_the_bridge() {
+    // The Settings → Providers opt-in restores the owner's servers: no
+    // silence rows at all, while the bridge still rides when set.
+    let adapter = CodexAdapter::new("codex-must-never-spawn");
+    adapter.set_terminal_relay(relay());
+    adapter.set_use_own_mcp(true);
+    let extra = adapter.spawn_args_for("cmd-open");
+    assert_eq!(extra.len(), 4, "bridge only: {extra:?}");
+    assert!(extra[1].starts_with("mcp_servers.baaz.command="));
+    assert!(extra[3].contains("\"--session\",\"cmd-open\""));
+    assert!(
+        !extra.iter().any(|arg| arg.contains("enabled=false")),
+        "opted in means nothing silenced: {extra:?}"
+    );
+    // And without a relay the opt-in is exactly bare `app-server`.
+    let bare = CodexAdapter::new("codex-must-never-spawn");
+    bare.set_use_own_mcp(true);
+    assert!(bare.spawn_args_for("cmd-open").is_empty(), "opted in, no relay: bare");
 }

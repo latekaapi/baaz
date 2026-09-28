@@ -61,8 +61,16 @@ pub struct CodexAdapter {
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
     /// commands run: the bridge binary and the socket to point it at.
-    /// `None` means no relay: the child spawns bare `app-server`.
+    /// `None` means no relay: the child spawns without the bridge (but
+    /// still with the inherit-nothing disables below).
     terminal: Mutex<Option<TerminalRelay>>,
+    /// Whether the session may inherit the owner's own MCP servers and
+    /// plugins: the Settings → Providers "Use my own MCP servers" switch
+    /// (`Layout.use_own_mcp.codex`), set by the host before the session
+    /// commands run. Off means inherit-nothing (the default); on means
+    /// the disables are skipped while the bridge still rides when a relay
+    /// is set. Applies to sessions started after the change.
+    use_own_mcp: Mutex<bool>,
 }
 
 /// Where the terminal relay lives: the bridge to spawn and the socket to
@@ -95,6 +103,7 @@ impl CodexAdapter {
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
+            use_own_mcp: Mutex::new(false),
         }
     }
 
@@ -107,22 +116,42 @@ impl CodexAdapter {
         *self.terminal.lock().expect("terminal mutex") = Some(relay);
     }
 
-    /// The `app-server` argv fragment for `session_id` — or empty when no
-    /// relay is set. With a relay: the bridge as a per-session MCP server,
-    /// then a full-table disable for every inherited server (bundled plus
-    /// file-configured), so the session sees Baaz's tools and nothing
-    /// else. A session without a relay spawns bare `app-server`, exactly
-    /// as before. No spawn — see [`crate::terminal::server_overrides`] —
-    /// so tests drive this without spending the owner's money.
+    /// Let the session inherit the owner's own MCP servers and plugins:
+    /// the Settings → Providers "Use my own MCP servers" switch. When on,
+    /// [`Self::spawn_args_for`] skips every disable (server and plugin)
+    /// while the bridge still rides when a relay is set. Off by default.
+    pub fn set_use_own_mcp(&self, use_own: bool) {
+        *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
+    }
+
+    /// The `app-server` argv fragment for `session_id`: the bridge as a
+    /// per-session MCP server when a relay is set, then — unless the
+    /// owner's own servers were opted into — a full-table disable for
+    /// every inherited server (bundled floor plus file-configured) and a
+    /// plugin disable per owner-enabled plugin, so the session sees
+    /// Baaz's tools and nothing else. The disables ride EVERY session,
+    /// relay or not: the Z5 probe (docs/19-codex.md) listed a bare
+    /// `app-server` at 5 servers and 104 owner tools — a session without
+    /// a relay spawns no bridge but still spawns silenced. No spawn — see
+    /// [`crate::terminal::server_overrides`] — so tests drive this
+    /// without spending the owner's money.
     pub fn spawn_args_for(&self, session_id: &str) -> Vec<String> {
-        let Some(relay) = self.terminal.lock().expect("terminal mutex").clone() else {
-            return Vec::new();
+        let relay = self.terminal.lock().expect("terminal mutex").clone();
+        let use_own = *self.use_own_mcp.lock().expect("use-own-mcp mutex");
+        let mut args = match relay {
+            Some(relay) => {
+                crate::terminal::server_overrides(&relay.bridge, &relay.socket, session_id)
+            }
+            None => Vec::new(),
         };
-        let mut args =
-            crate::terminal::server_overrides(&relay.bridge, &relay.socket, session_id);
-        args.extend(crate::terminal::disable_overrides(
-            crate::terminal::inherited_servers().iter().map(String::as_str),
-        ));
+        if !use_own {
+            args.extend(crate::terminal::disable_overrides(
+                crate::terminal::inherited_servers().iter().map(String::as_str),
+            ));
+            args.extend(crate::terminal::plugin_disable_overrides(
+                crate::terminal::inherited_plugins().iter().map(String::as_str),
+            ));
+        }
         args
     }
 

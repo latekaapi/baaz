@@ -490,3 +490,21 @@ Approvals follow the session: the bridge's tools arrive as ordinary
 `can_use_tool` requests on the `stdio` permission channel, answered from
 Baaz's approvals surface like every other tool (D48). No second Baaz-side
 gate.
+
+---
+
+# Addendum 2026-09-28 — strict on every session, opt-in under each card (Z5)
+
+`--strict-mcp-config` now rides every launch even when no bridge config
+does: `claude --help` lists it as a standalone boolean flag ("Only use
+MCP servers from --mcp-config, ignoring all other MCP configurations"),
+so a relay-less session carries bare `--strict-mcp-config` — no empty
+`--mcp-config` beside it — and sees no servers at all. Probed live afterwards
+without a turn (only the `mcp_status` control request, claude 2.1.276):
+bare `--strict-mcp-config` → `"mcpServers":[]`; the same launch without
+it → the owner's claude.ai connectors (Claude Docs, HeyGen, Google
+Drive, …). Settings → Providers gains a "Use my
+own MCP servers" switch under each of the Claude Code and Codex cards
+(`Layout.use_own_mcp`, both default off); on, the launch keeps its
+bridge config but drops strict, so the session sees the owner's
+connectors beside Baaz's. Applies to sessions started after the flip.
