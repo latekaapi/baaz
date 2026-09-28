@@ -69,6 +69,7 @@ mod search;
 mod session;
 mod sessions;
 mod settings;
+mod settings_providers;
 mod shot;
 mod sidebar;
 mod sidebar_view;

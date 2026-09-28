@@ -67,6 +67,14 @@ version (with a Too-old advisory), Enabled switch, Re-check, Sign in / Sign out 
 Disabling hides the provider from the composer's provider menu and stops its probes; its sessions stay
 listed and readable. Sign-out of a CLI is a real `logout` of that CLI and the confirm says so.
 
+*Built (Y6): `crates/baaz/src/settings_providers.rs`. The library dialog only takes `SettingsRow`s, so
+the Settings rail's Providers row opens a dedicated Providers page (same modal layer, one
+`aui::screens::providers::provider_card` per provider) rather than hosting the cards inside the
+dialog. Sign-in is the spec fallbacks (Y5 is not on this branch): the Muse sheet, the Claude
+terminal prefill (`claude auth login` typed, not run), the Codex `account/login/start` browser flow —
+so there is no "Set up providers" row. Probe entry `settings-providers` in `scripts/uiprobe.py`
+(offline, scripted Connected / Signed out / Not installed; no baseline — capture and look).*
+
 **Account footer** (sidebar bottom): the person's avatar initial and email only — no account id, no inline
 meter. Its menu opens a **Usage** card listing every Connected provider: Codex from `account/rateLimits/read`
 (primary/secondary windows labelled from `windowDurationMins`, used %, reset time; live via

@@ -1789,6 +1789,29 @@ mod tests {
     }
 
     /// P6: `setprovider:<id>` is the provider picker's menu row as a
+    /// A disabled provider leaves the composer menu: the filtered rows
+    /// name only the enabled providers (plus the session's own lane,
+    /// which always stays so it can describe itself). Pure rows, no
+    /// window.
+    #[test]
+    fn disabled_providers_leave_the_composer_menu() {
+        let rows = SessionView::provider_rows_for(
+            ProviderId::Muse,
+            false,
+            &[ProviderId::Muse, ProviderId::Codex],
+        );
+        assert!(
+            rows.iter().all(|row| !row.id.contains("claude-code")),
+            "claude-code left the menu: {:?}",
+            rows.iter().map(|row| &row.id).collect::<Vec<_>>()
+        );
+        assert!(rows.iter().any(|row| row.id == "codex"));
+        // The session's own lane stays even switched off mid-run.
+        let rows =
+            SessionView::provider_rows_for(ProviderId::ClaudeCode, false, &[ProviderId::Muse]);
+        assert!(rows.iter().any(|row| row.id == "claude-code"));
+    }
+
     /// verb — the same `pick_provider` the click and Enter paths call.
     /// A fresh session emits the swap; a session with turns keeps its
     /// lane (the verb still routes through the menu, so a new session
