@@ -202,9 +202,11 @@ impl Harness {
     fn browser_for(&mut self, key: &str, focus_fresh: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
         if key == HOME_KEY {
             if let Some(home) = self.browser.home.clone() {
+                self.terminal_service.register_browser(key, home.clone());
                 return home;
             }
         } else if let Some(state) = self.browser.states.get(key).cloned() {
+            self.terminal_service.register_browser(key, state.clone());
             return state;
         }
         let stored = if key == HOME_KEY {
@@ -247,6 +249,9 @@ impl Harness {
         } else {
             self.browser.states.insert(key.to_owned(), state.clone());
         }
+        // The agent's `browser_*` tools act on this same state through the
+        // socket service, keyed by session id.
+        self.terminal_service.register_browser(key, state.clone());
         state
     }
 

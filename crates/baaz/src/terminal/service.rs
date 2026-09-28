@@ -1,4 +1,5 @@
-//! The terminal service: the agent's seven tools over a unix socket (D46).
+//! The terminal service: the agent's seven terminal tools plus its six
+//! browser tools over a unix socket (D46, Z7b).
 //!
 //! The app serves the `docs/14-terminal.md` §4 contract on
 //! `<support_dir>/run/terminal-<pid>.sock` (dir `0700`, socket `0600`).
@@ -13,9 +14,13 @@
 //! on a reply channel. No socket thread ever touches gpui: each request is
 //! queued, and [`TerminalService::drain`] — called on the UI thread, every
 //! 15 ms by the harness's pump task — executes the queue against
-//! [`TerminalHost`] and answers. A `terminal_run` with `wait: exit` stays a
-//! [`PendingRun`] across drains: each drain pumps the tab once and checks
-//! the block, so a long run never stalls a frame and the UI never blocks.
+//! [`TerminalHost`] (and the browser registry, for `browser_*`) and
+//! answers. A `terminal_run` with `wait: exit` stays a [`PendingRun`]
+//! across drains: each drain pumps the tab once and checks the block, so a
+//! long run never stalls a frame and the UI never blocks. A `browser_*`
+//! evaluation likewise stays a [`PendingBrowser`] across drains: each drain
+//! sends at most one script and collects what the page answered, so a slow
+//! page never stalls a frame either.
 //!
 //! Only session ids the app registered ([`register_session`][TerminalService::register_session],
 //! D53) are served; anything else is refused. The socket file is removed
@@ -31,11 +36,13 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aui_terminal::{BlockAuthor, TextCursor};
+use aui_webview::{WebviewState, agent_js};
+use base64::Engine as _;
 use gpui::{App, Entity};
 use serde_json::{Value, json};
 
@@ -51,6 +58,26 @@ pub const TOOL_NAMES: [&str; 7] = [
     "terminal_send",
     "terminal_close",
 ];
+
+/// The six browser tools, in contract order (`docs/15-browser-tools.md`).
+pub const BROWSER_TOOL_NAMES: [&str; 6] = [
+    "browser_open",
+    "browser_read",
+    "browser_links",
+    "browser_click",
+    "browser_type",
+    "browser_screenshot",
+];
+
+/// How long a `browser_*` evaluation waits for the page's answer before
+/// the tool reports [`BROWSER_NO_ANSWER`].
+pub const BROWSER_TIMEOUT: Duration = Duration::from_secs(15);
+/// What a `browser_*` tool reports when the page never answered.
+pub const BROWSER_NO_ANSWER: &str = "the page did not answer";
+/// `browser_read`'s default `max_chars`.
+pub const BROWSER_READ_DEFAULT_MAX: usize = 8_000;
+/// `browser_links`'s default `max`.
+pub const BROWSER_LINKS_DEFAULT_MAX: usize = 100;
 
 /// `terminal_run` output is head+tail capped at this many bytes.
 pub const RUN_OUTPUT_CAP: usize = 4_096;
@@ -130,6 +157,27 @@ struct Shared {
     /// run's block closes or the tab goes away.
     marks: Mutex<Vec<MarkWatch>>,
     activity: Mutex<Option<ActivityHook>>,
+    /// One live webview per session id, registered by the harness when the
+    /// pane creates it. A `browser_*` tool acts only on its calling
+    /// session's entry here — never another session's — which is what
+    /// keeps sessions' pages apart.
+    browsers: Mutex<HashMap<String, Entity<WebviewState>>>,
+    /// `browser_*` evaluations still waiting for their page's answer.
+    pending_browser: Mutex<Vec<PendingBrowser>>,
+    /// Evaluation answers that arrived for a request still queued: the
+    /// page answers every outstanding script at once, so a drain that
+    /// collects for one pending evaluation stashes the others' here.
+    eval_stash: Mutex<HashMap<(String, u64), Result<String, String>>>,
+    /// The next evaluation request id. Unique per service, so concurrent
+    /// evaluations from one session never share an answer.
+    next_request: AtomicU64,
+    /// How long a `browser_*` evaluation waits for the page. Production is
+    /// [`BROWSER_TIMEOUT`]; tests shorten it.
+    browser_timeout: Mutex<Duration>,
+    /// What the harness does when the agent opens a URL: open the Browser
+    /// pane, which the harness defers like [`ActivityHook`] (same
+    /// re-entrancy rule — `drain` runs inside a Harness update).
+    browser_open: Mutex<Option<BrowserOpenHook>>,
 }
 
 /// What the harness does when the agent runs something: open the dock (not
@@ -140,6 +188,12 @@ struct Shared {
 /// entity off the stack. A hook that updates the draining entity re-enters
 /// it and aborts the app.
 type ActivityHook = Box<dyn Fn(&mut App) + Send + Sync>;
+
+/// What the harness does when the agent opens a URL: open the right pane
+/// on the Browser kind for that session. Same re-entrancy rule as
+/// [`ActivityHook`]: runs inside `drain`, so the harness defers its own
+/// update with `cx.defer`.
+type BrowserOpenHook = Box<dyn Fn(&mut App, String) + Send + Sync>;
 
 struct Job {
     id: Value,
@@ -160,6 +214,44 @@ struct PendingRun {
     started: Instant,
     deadline: Instant,
     reply: mpsc::Sender<String>,
+}
+
+/// A `browser_*` call still waiting on its page: the script is sent once,
+/// and each drain collects what arrived until the matching answer lands or
+/// the deadline passes. The page keeps loading either way — the deadline
+/// only stops waiting, and reports [`BROWSER_NO_ANSWER`].
+struct PendingBrowser {
+    id: Value,
+    session: String,
+    deadline: Instant,
+    reply: mpsc::Sender<String>,
+    wait: BrowserWait,
+}
+
+/// What a [`PendingBrowser`] is waiting for.
+enum BrowserWait {
+    /// `browser_open`: navigate once the session's webview exists, then
+    /// answer once it shows the URL. The webview may not exist yet — the
+    /// agent can open a URL before the person ever opened the pane — so
+    /// the navigation waits for the harness's registration, not just the
+    /// load.
+    Open { url: String, navigated: bool },
+    /// `browser_read/links/click/type`: the script goes out once (`sent`),
+    /// then the drain matches the answer by request id.
+    Eval { request_id: u64, sent: bool, js: String, render: BrowserRender },
+    /// `browser_screenshot`: ask once (`captured`), then read the bytes.
+    Shot { captured: bool },
+}
+
+/// How a [`BrowserWait::Eval`] answer is shaped into the tool's result.
+#[derive(Clone, Copy)]
+enum BrowserRender {
+    /// `browser_read`: the page's `{title, url, text}` object, as answered.
+    Read,
+    /// `browser_links`: the answered array, capped at `max` entries.
+    Links { max: usize },
+    /// `browser_click` / `browser_type`: the answered element text.
+    Text,
 }
 
 /// A run the service already answered (`wait: none`, or a `wait: exit` that
@@ -205,6 +297,12 @@ impl TerminalService {
             pending: Mutex::new(Vec::new()),
             marks: Mutex::new(Vec::new()),
             activity: Mutex::new(None),
+            browsers: Mutex::new(HashMap::new()),
+            pending_browser: Mutex::new(Vec::new()),
+            eval_stash: Mutex::new(HashMap::new()),
+            next_request: AtomicU64::new(1),
+            browser_timeout: Mutex::new(BROWSER_TIMEOUT),
+            browser_open: Mutex::new(None),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
         // A leftover file from a crashed run binds fine once removed; a
@@ -259,8 +357,33 @@ impl TerminalService {
         *self.shared.activity.lock().expect("activity hook") = Some(Box::new(hook));
     }
 
+    /// Trust `state` as `session`'s webview for `browser_*` tools. Called
+    /// on the UI thread when the pane creates (or reuses) the session's
+    /// webview; re-registering moves the session to the new state.
+    pub fn register_browser(&self, session: &str, state: Entity<WebviewState>) {
+        self.shared.browsers.lock().expect("browser registry").insert(session.to_owned(), state);
+    }
+
+    /// What the harness runs on the UI thread when the agent opens a URL
+    /// (open the Browser pane for that session). Test hooks observe it
+    /// instead. Same re-entrancy rule as
+    /// [`set_activity_hook`][TerminalService::set_activity_hook]: the hook
+    /// fires inside [`drain`][TerminalService::drain], so it must defer
+    /// entity work with `cx.defer`.
+    pub fn set_browser_open_hook(&self, hook: impl Fn(&mut App, String) + Send + Sync + 'static) {
+        *self.shared.browser_open.lock().expect("browser open hook") = Some(Box::new(hook));
+    }
+
+    /// How long a `browser_*` evaluation waits for the page. Tests shorten
+    /// it so the timeout path does not take [`BROWSER_TIMEOUT`].
+    #[cfg(test)]
+    pub(crate) fn set_browser_timeout(&self, timeout: Duration) {
+        *self.shared.browser_timeout.lock().expect("browser timeout") = timeout;
+    }
+
     /// Run every queued request and poll every pending run. Call on the UI
-    /// thread only — everything here touches [`TerminalHost`].
+    /// thread only — everything here touches [`TerminalHost`] or a
+    /// [`WebviewState`].
     pub fn drain(&self, cx: &mut App) {
         let jobs: Vec<Job> = self.shared.queue.lock().expect("job queue").drain(..).collect();
         for job in jobs {
@@ -268,6 +391,7 @@ impl TerminalService {
         }
         self.poll_runs(cx);
         self.poll_marks(cx);
+        self.poll_browser(cx);
     }
 
     /// How many runs are still waiting on their blocks. Tests read this;
@@ -292,6 +416,13 @@ impl TerminalService {
             self.run(&root, Some(job.session.clone()), &job.params, &job.id, job.reply, cx);
             return;
         }
+        // `browser_*` likewise sends its own replies: refusals answer at
+        // once, while navigations and evaluations queue for
+        // `poll_browser` — their reply channels ride the pending item.
+        if BROWSER_TOOL_NAMES.contains(&job.tool.as_str()) {
+            self.browser_tool(&job.session, &job.tool, &job.params, &job.id, job.reply, cx);
+            return;
+        }
         let outcome: Result<Value, String> = match job.tool.as_str() {
             "terminal_list" => self.list(&root, cx),
             "terminal_open" => self.open(&root, Some(job.session.clone()), &job.params, cx),
@@ -299,7 +430,11 @@ impl TerminalService {
             "terminal_screen" => self.screen(&root, &job.params, cx),
             "terminal_send" => self.send(&root, &job.params, cx),
             "terminal_close" => self.close(&root, &job.params, cx),
-            other => Err(format!("unknown tool: {other} ({})", TOOL_NAMES.join(", "))),
+            other => {
+                let mut names = TOOL_NAMES.to_vec();
+                names.extend(BROWSER_TOOL_NAMES);
+                Err(format!("unknown tool: {other} ({})", names.join(", ")))
+            }
         };
         match outcome {
             Ok(result) => send(&job.reply, &job.id, true, result),
@@ -892,6 +1027,295 @@ impl TerminalService {
     }
 }
 
+/// The six browser tools (Z7b). Each runs on the UI thread, inside `drain`,
+/// and acts only on the calling session's own webview: `session` is the
+/// registered id from [`TerminalService::register_session`], and the
+/// webview is the harness's [`register_browser`][TerminalService::register_browser]
+/// entry for that same id — never another session's.
+impl TerminalService {
+    /// Dispatch one `browser_*` job. Refusals (a bad URL, a missing
+    /// argument, no webview yet) answer at once; navigations, evaluations
+    /// and screenshots queue a [`PendingBrowser`] for [`poll_browser`].
+    /// Every arm sends exactly one reply.
+    fn browser_tool(
+        &self,
+        session: &str,
+        tool: &str,
+        params: &Value,
+        job_id: &Value,
+        reply: mpsc::Sender<String>,
+        cx: &mut App,
+    ) {
+        let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
+        let pend = |reply: mpsc::Sender<String>, wait: BrowserWait| {
+            self.shared.pending_browser.lock().expect("pending browser").push(PendingBrowser {
+                id: job_id.clone(),
+                session: session.to_owned(),
+                deadline: Instant::now() + timeout,
+                reply,
+                wait,
+            });
+        };
+        match tool {
+            "browser_open" => {
+                let url = params.get("url").and_then(Value::as_str).unwrap_or("").to_owned();
+                if url.trim().is_empty() {
+                    send(&reply, job_id, false, json!({"error": "browser_open needs url"}));
+                    return;
+                }
+                if !browser_url_allowed(&url) {
+                    send(
+                        &reply,
+                        job_id,
+                        false,
+                        json!({"error": format!(
+                            "refused URL: {url} (browser_open takes http, https, file, or about:blank)"
+                        )}),
+                    );
+                    return;
+                }
+                // The person watches the agent browse: the pane opens on
+                // Browser, unfocused. Deferred like the dock hook — `drain`
+                // runs inside a Harness update.
+                if let Some(hook) = self.shared.browser_open.lock().expect("browser open hook").as_ref() {
+                    hook(cx, session.to_owned());
+                }
+                pend(reply, BrowserWait::Open { url, navigated: false });
+            }
+            "browser_read" | "browser_links" | "browser_click" | "browser_type" => {
+                let Some((js, render)) = self.browser_script(tool, params) else {
+                    let want = match tool {
+                        "browser_click" => "browser_click needs selector",
+                        "browser_type" => "browser_type needs selector and text",
+                        _ => "unreachable",
+                    };
+                    send(&reply, job_id, false, json!({"error": want}));
+                    return;
+                };
+                if self.shared.browsers.lock().expect("browser registry").get(session).is_none() {
+                    send(
+                        &reply,
+                        job_id,
+                        false,
+                        json!({"error": "no browser for this session yet; browser_open opens it"}),
+                    );
+                    return;
+                }
+                let request_id = self.shared.next_request.fetch_add(1, Ordering::Relaxed);
+                pend(reply, BrowserWait::Eval { request_id, sent: false, js, render });
+            }
+            "browser_screenshot" => {
+                if self.shared.browsers.lock().expect("browser registry").get(session).is_none() {
+                    send(
+                        &reply,
+                        job_id,
+                        false,
+                        json!({"error": "no browser for this session yet; browser_open opens it"}),
+                    );
+                    return;
+                }
+                pend(reply, BrowserWait::Shot { captured: false });
+            }
+            // `execute` only routes names in `BROWSER_TOOL_NAMES`.
+            _ => send(&reply, job_id, false, json!({"error": format!("unknown tool: {tool}")})),
+        }
+    }
+
+    /// The evaluation script and answer shape for a read/click/type tool,
+    /// or `None` when a required argument is missing.
+    fn browser_script(&self, tool: &str, params: &Value) -> Option<(String, BrowserRender)> {
+        match tool {
+            "browser_read" => {
+                let max_chars = params
+                    .get("max_chars")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(BROWSER_READ_DEFAULT_MAX as u64)
+                    as usize;
+                Some((agent_js::page_text(max_chars), BrowserRender::Read))
+            }
+            "browser_links" => {
+                let max = params
+                    .get("max")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(BROWSER_LINKS_DEFAULT_MAX as u64)
+                    as usize;
+                Some((agent_js::list_links(max), BrowserRender::Links { max }))
+            }
+            "browser_click" => {
+                let selector = params.get("selector").and_then(Value::as_str)?;
+                if selector.is_empty() {
+                    return None;
+                }
+                Some((agent_js::click(selector), BrowserRender::Text))
+            }
+            "browser_type" => {
+                let selector = params.get("selector").and_then(Value::as_str)?;
+                let text = params.get("text").and_then(Value::as_str)?;
+                if selector.is_empty() {
+                    return None;
+                }
+                Some((agent_js::type_text(selector, text), BrowserRender::Text))
+            }
+            _ => None,
+        }
+    }
+
+    /// Poll every `browser_*` call still waiting on its page: navigate once
+    /// the session's webview exists, send each script once, and answer when
+    /// the matching answer lands or the deadline passes. Never blocks: one
+    /// pass over the queue per frame, like [`poll_runs`][TerminalService::poll_runs].
+    fn poll_browser(&self, cx: &mut App) {
+        let mut pending = self.shared.pending_browser.lock().expect("pending browser");
+        let mut done: Vec<usize> = Vec::new();
+        for (index, item) in pending.iter_mut().enumerate() {
+            match &mut item.wait {
+                BrowserWait::Open { url, navigated } => {
+                    let view =
+                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                    let Some(view) = view else {
+                        // No webview yet: the pane has not created one for
+                        // this session. Wait for the registration (or the
+                        // deadline) rather than failing the open.
+                        if Instant::now() >= item.deadline {
+                            send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                            done.push(index);
+                        }
+                        continue;
+                    };
+                    if !*navigated {
+                        let url = url.clone();
+                        view.update(cx, |state, _| state.navigate(&url));
+                        *navigated = true;
+                    }
+                    let current = view.read(cx).url().to_string();
+                    let title = view.read(cx).title().to_string();
+                    if current == *url {
+                        send(&item.reply, &item.id, true, json!({"url": current, "title": title}));
+                        done.push(index);
+                    } else if Instant::now() >= item.deadline {
+                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        done.push(index);
+                    }
+                }
+                BrowserWait::Eval { request_id, sent, js, render } => {
+                    let request_id = *request_id;
+                    let render = *render;
+                    // An answer that arrived with another evaluation's batch.
+                    if let Some(answer) =
+                        self.shared.eval_stash.lock().expect("eval stash").remove(&(item.session.clone(), request_id))
+                    {
+                        answer_browser_eval(&item.reply, &item.id, render, answer);
+                        done.push(index);
+                        continue;
+                    }
+                    let view =
+                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                    let Some(view) = view else {
+                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        done.push(index);
+                        continue;
+                    };
+                    if !*sent {
+                        let js = js.clone();
+                        view.update(cx, |state, _| state.eval_with_result(request_id, &js));
+                        *sent = true;
+                    }
+                    let answers = view.update(cx, |state, _| state.take_eval_results());
+                    let mut ours = None;
+                    for (id, answer) in answers {
+                        if id == request_id && ours.is_none() {
+                            ours = Some(answer);
+                        } else {
+                            self.shared
+                                .eval_stash
+                                .lock()
+                                .expect("eval stash")
+                                .insert((item.session.clone(), id), answer);
+                        }
+                    }
+                    if let Some(answer) = ours {
+                        answer_browser_eval(&item.reply, &item.id, render, answer);
+                        done.push(index);
+                    } else if Instant::now() >= item.deadline {
+                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        done.push(index);
+                    }
+                }
+                BrowserWait::Shot { captured } => {
+                    let view =
+                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                    let Some(view) = view else {
+                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        done.push(index);
+                        continue;
+                    };
+                    if !*captured {
+                        view.update(cx, |state, _| state.capture());
+                        *captured = true;
+                    }
+                    if let Some(bytes) = view.read(cx).screenshot().map(<[u8]>::to_vec) {
+                        let png = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        send(&item.reply, &item.id, true, json!({"image_base64": png}));
+                        done.push(index);
+                    } else if Instant::now() >= item.deadline {
+                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        done.push(index);
+                    }
+                }
+            }
+        }
+        for index in done.into_iter().rev() {
+            pending.remove(index);
+        }
+    }
+}
+
+/// Whether `browser_open` takes `url`: `http`, `https`, `file`, or
+/// `about:blank` — anything else (`javascript:`, `data:`, custom schemes)
+/// is refused before any webview ever sees it.
+fn browser_url_allowed(url: &str) -> bool {
+    if url == "about:blank" {
+        return true;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://")
+}
+
+/// Answer one evaluation from its page's response: a thrown page error
+/// (an unknown selector, for instance) is a tool error, and each answer
+/// is shaped by its tool.
+fn answer_browser_eval(
+    reply: &mpsc::Sender<String>,
+    id: &Value,
+    render: BrowserRender,
+    answer: Result<String, String>,
+) {
+    let text = match answer {
+        Ok(text) => text,
+        Err(page) => {
+            send(reply, id, false, json!({"error": page}));
+            return;
+        }
+    };
+    let outcome: Result<Value, String> = match render {
+        BrowserRender::Read => {
+            serde_json::from_str(&text).map_err(|_| "the page answered unreadably".to_owned())
+        }
+        BrowserRender::Links { max } => match serde_json::from_str::<Vec<Value>>(&text) {
+            Ok(links) => Ok(json!({"links": links.into_iter().take(max).collect::<Vec<_>>() })),
+            Err(_) => Err("the page answered unreadably".to_owned()),
+        },
+        BrowserRender::Text => {
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+            Ok(json!({"text": value}))
+        }
+    };
+    match outcome {
+        Ok(result) => send(reply, id, true, result),
+        Err(error) => send(reply, id, false, json!({"error": error})),
+    }
+}
+
 /// Mark blocks `before..len` agent-owned: the assembler leaves every new
 /// block human, and only the agent's runs stamp what they started.
 fn stamp_agent(entity: &Entity<aui_terminal::TerminalSession>, cx: &mut App, before: usize, len: usize) {
@@ -1016,7 +1440,7 @@ mod tests {
     use std::time::Duration;
 
     use aui_terminal::{ScriptChunk, TermEvent, TerminalBackend, TerminalSession};
-    use base64::Engine as _;
+    use aui_webview::FakeWebBackend;
     use gpui::AppContext as _;
 
     static NEXT_PID: AtomicU32 = AtomicU32::new(1_000_000);
@@ -2026,5 +2450,184 @@ mod tests {
                 "the run opens the dock for the person to watch"
             );
         });
+    }
+
+    /// One browser request over a real socket, draining until the reply
+    /// arrives. Evaluations ride the webview's own poll timer (50 ms)
+    /// before the service can collect them, and the test executor is
+    /// deterministic — wall-clock never fires its timers — so each pass
+    /// advances the virtual clock past one poll, then parks: the app's
+    /// 15 ms pump, at test speed. A breath of real time per pass lets
+    /// `Instant` deadlines expire for the timeout path.
+    fn bcall(
+        cx: &mut gpui::TestAppContext,
+        fx: &Fixture,
+        session: &str,
+        tool: &str,
+        params: Value,
+    ) -> Value {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let request = serde_json::to_string(&json!({
+            "id": id,
+            "session": session,
+            "tool": tool,
+            "params": params,
+        }))
+        .expect("request serializes");
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(10))).expect("read timeout");
+        stream.write_all(request.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        let mut reader = BufReader::new(stream);
+        for _ in 0..300 {
+            cx.update(|cx| fx.service.drain(cx));
+            cx.dispatcher.advance_clock(Duration::from_millis(60));
+            cx.run_until_parked();
+            if let Some(reply) = try_recv(&mut reader, id) {
+                return reply;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("{tool}: no reply after draining");
+    }
+
+    /// A fixture with the scripted page registered as `session`'s webview.
+    fn browser_fixture(
+        cx: &mut gpui::TestAppContext,
+        session: &str,
+    ) -> (Fixture, Entity<WebviewState>) {
+        let fx = fixture(cx, session);
+        let state = cx.new(|cx| WebviewState::new(Box::new(FakeWebBackend::new()), cx));
+        fx.service.register_browser(session, state.clone());
+        (fx, state)
+    }
+
+    /// Only page URLs reach a webview: `javascript:`, `data:` and unknown
+    /// schemes are refused before any navigation.
+    #[test]
+    fn only_page_urls_reach_the_webview() {
+        assert!(browser_url_allowed("https://example.com/x?q=1"));
+        assert!(browser_url_allowed("http://localhost:3000/pricing"));
+        assert!(browser_url_allowed("HTTP://UPPERCASE-SCHEME.EXAMPLE/"));
+        assert!(browser_url_allowed("file:///tmp/page.html"));
+        assert!(browser_url_allowed("about:blank"));
+        for bad in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "data:text/html,<h1>hi</h1>",
+            "about:config",
+            "chrome://settings",
+            "ftp://files.example/x",
+            "https",
+            "",
+        ] {
+            assert!(!browser_url_allowed(bad), "refused: {bad}");
+        }
+    }
+
+    /// `browser_open` navigates the calling session's page and answers its
+    /// URL and title, and fires the pane hook for that session.
+    #[gpui::test]
+    fn browser_open_navigates_and_answers_url_and_title(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-open");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            fx.service.set_browser_open_hook(move |_, session: String| {
+                seen.lock().expect("hook log").push(session);
+            });
+        }
+        let out = result(&bcall(cx, &fx, "sb-open", "browser_open", json!({"url": "https://example.com"})));
+        assert_eq!(out.get("url"), Some(&json!("https://example.com")), "the open answers: {out}");
+        assert!(
+            out.get("title").and_then(Value::as_str).is_some_and(|title| !title.is_empty()),
+            "the open names the title: {out}"
+        );
+        assert_eq!(
+            cx.update(|cx| state.read(cx).url().to_string()),
+            "https://example.com",
+            "the session's page really moved"
+        );
+        assert_eq!(&*seen.lock().expect("hook log"), &["sb-open".to_owned()], "the pane opens");
+    }
+
+    /// `browser_open` refuses `javascript:` and `data:` URLs without
+    /// touching the page; `about:blank` opens fine.
+    #[gpui::test]
+    fn browser_open_refuses_non_page_schemes(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-scheme");
+        let before = cx.update(|cx| state.read(cx).url().to_string());
+        for url in ["javascript:alert(1)", "data:text/html,<h1>hi</h1>"] {
+            let message = err_text(&bcall(cx, &fx, "sb-scheme", "browser_open", json!({"url": url})));
+            assert!(message.contains("refused URL"), "refused: {message}");
+        }
+        assert_eq!(
+            cx.update(|cx| state.read(cx).url().to_string()),
+            before,
+            "a refused open never navigates"
+        );
+        let out = result(&bcall(cx, &fx, "sb-scheme", "browser_open", json!({"url": "about:blank"})));
+        assert_eq!(out.get("url"), Some(&json!("about:blank")));
+    }
+
+    /// `browser_read`, `browser_links`, `browser_click` and `browser_type`
+    /// round-trip through the service against the scripted page, and an
+    /// unknown selector is a tool error.
+    #[gpui::test]
+    fn browser_read_links_click_type_round_trip(cx: &mut gpui::TestAppContext) {
+        let (fx, _) = browser_fixture(cx, "sb-round");
+        let opened = result(&bcall(cx, &fx, "sb-round", "browser_open", json!({"url": "https://example.com"})));
+        assert_eq!(opened.get("url"), Some(&json!("https://example.com")));
+        let read = result(&bcall(cx, &fx, "sb-round", "browser_read", json!({})));
+        assert_eq!(read.get("url"), Some(&json!("https://example.com")), "the read names the page: {read}");
+        assert!(
+            read.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("Simple pricing")),
+            "the read carries the body: {read}"
+        );
+        let links = result(&bcall(cx, &fx, "sb-round", "browser_links", json!({})));
+        assert_eq!(links.get("links"), Some(&json!([])), "the scripted page has no links: {links}");
+        let clicked = result(&bcall(cx, &fx, "sb-round", "browser_click", json!({"selector": "h1"})));
+        assert_eq!(clicked.get("text"), Some(&json!("Simple pricing")), "the click answers: {clicked}");
+        let typed = result(
+            &bcall(cx, &fx, "sb-round", "browser_type", json!({"selector": "p.lead", "text": "hello"})),
+        );
+        assert_eq!(typed.get("text"), Some(&json!("hello")), "the type answers: {typed}");
+        let missing =
+            err_text(&bcall(cx, &fx, "sb-round", "browser_click", json!({"selector": "main.missing"})));
+        assert!(missing.contains("element not found"), "the page's refusal surfaces: {missing}");
+    }
+
+    /// A call for session B acts on B's page: it cannot read, move, or
+    /// click A's.
+    #[gpui::test]
+    fn browser_sessions_cannot_touch_each_others_pages(cx: &mut gpui::TestAppContext) {
+        let (fx, state_a) = browser_fixture(cx, "sb-a");
+        fx.service.register_session("sb-b", fx.root.clone());
+        let state_b = cx.new(|cx| WebviewState::new(Box::new(FakeWebBackend::new()), cx));
+        fx.service.register_browser("sb-b", state_b.clone());
+        let open_a =
+            result(&bcall(cx, &fx, "sb-a", "browser_open", json!({"url": "https://a.example/"})));
+        assert_eq!(open_a.get("url"), Some(&json!("https://a.example/")));
+        let open_b =
+            result(&bcall(cx, &fx, "sb-b", "browser_open", json!({"url": "https://b.example/"})));
+        assert_eq!(open_b.get("url"), Some(&json!("https://b.example/")));
+        let read_a = result(&bcall(cx, &fx, "sb-a", "browser_read", json!({})));
+        assert_eq!(read_a.get("url"), Some(&json!("https://a.example/")), "A reads A's page: {read_a}");
+        let read_b = result(&bcall(cx, &fx, "sb-b", "browser_read", json!({})));
+        assert_eq!(read_b.get("url"), Some(&json!("https://b.example/")), "B reads B's page: {read_b}");
+        assert_eq!(cx.update(|cx| state_a.read(cx).url().to_string()), "https://a.example/");
+        assert_eq!(cx.update(|cx| state_b.read(cx).url().to_string()), "https://b.example/");
+    }
+
+    /// A page that never answers is an error, not a hung tool: the scripted
+    /// page never produces a screenshot, so the capture waits out the
+    /// (test-shortened) deadline and reports it.
+    #[gpui::test]
+    fn browser_without_an_answer_times_out(cx: &mut gpui::TestAppContext) {
+        let (fx, _) = browser_fixture(cx, "sb-shot");
+        fx.service.set_browser_timeout(Duration::from_millis(150));
+        let message = err_text(&bcall(cx, &fx, "sb-shot", "browser_screenshot", json!({})));
+        assert_eq!(message, BROWSER_NO_ANSWER, "the timeout names itself");
     }
 }

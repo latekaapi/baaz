@@ -1218,6 +1218,19 @@ impl Harness {
             tasks: Vec::new(),
             subscriptions: Vec::new(),
         };
+        // When the agent opens a URL the Browser pane opens on it — never
+        // focused, so the person's keyboard stays where it was while they
+        // watch. Deferred for the same re-entrancy reason as the dock hook
+        // below: the hook runs inside `drain`, inside a Harness update.
+        let browser_harness = cx.entity();
+        this.terminal_service.set_browser_open_hook(move |cx: &mut App, session: String| {
+            let harness = browser_harness.clone();
+            cx.defer(move |cx| {
+                harness.update(cx, |harness, cx| {
+                    harness.show_browser_for_agent(&session, cx);
+                });
+            });
+        });
         // When the agent runs something the dock opens — never focused, so
         // the person's keyboard stays where it was while they watch.
         let harness = cx.entity();
