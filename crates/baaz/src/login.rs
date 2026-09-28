@@ -196,6 +196,17 @@ impl Harness {
             Some(identity) => {
                 crate::baaz_log!("account → {lane}");
                 let api_key = identity.is_api_key();
+                // The status service reads this live connection, never a
+                // second one: remember what it said and re-probe Muse so
+                // the logged line follows sign-in.
+                let email = identity.email.trim().to_owned();
+                crate::provider_status::note_muse_account(Some(
+                    crate::provider_status::MuseAccount {
+                        email: (!email.is_empty()).then_some(email),
+                        plan: None,
+                    },
+                ));
+                crate::provider_status::refresh_muse_status();
                 self.auth = Auth::SignedIn(identity);
                 self.load_sessions(cx);
                 // `--tier` fakes the probe for a screenshot, and nothing else:
@@ -218,6 +229,10 @@ impl Harness {
             }
             None => {
                 crate::baaz_log!("account → loggedOut");
+                // The live connection reports no login: forget what it
+                // said and re-probe Muse so the logged line follows.
+                crate::provider_status::note_muse_account(None);
+                crate::provider_status::refresh_muse_status();
                 let was_in = matches!(self.auth, Auth::SignedIn(_));
                 self.active = None;
                 self.sessions.clear();

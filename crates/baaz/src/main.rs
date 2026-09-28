@@ -61,6 +61,7 @@ mod plan;
 mod project_menu;
 mod projects;
 mod provider_sessions;
+mod provider_status;
 mod providers;
 mod resize;
 mod right;
@@ -677,6 +678,9 @@ fn main() {
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();
+    // The provider status service (Y4): read the cache, log the statuses,
+    // and probe every backend in the background — never gating the window.
+    crate::provider_status::boot();
     let args = parse_args();
     // The billing probe with no window: it drives the `muse` TUI in a pty,
     // prints the plan and leaves. Nothing here needs gpui.

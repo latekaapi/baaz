@@ -1089,6 +1089,24 @@ impl RunningChild {
         )
     }
 
+    /// [`Self::send_request`] with a caller-chosen wait: the status probe's
+    /// short-lived app-server cannot afford the session lane's two minutes.
+    /// Expiry reports `{method} timed out`, exactly like [`Self::deliver`].
+    pub fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, RequestError> {
+        let id = self.next_request_id();
+        self.deliver_with_timeout(
+            id.to_string(),
+            method,
+            json!({"id": id, "method": method, "params": params}),
+            timeout,
+        )
+    }
+
     /// Send a prebuilt request frame (see the `*_request` builders above) and
     /// wait for its `result`. The frame's own `id` is the correlation key, so
     /// handshake frames built offline and ad-hoc [`Self::send_request`] calls
@@ -1103,6 +1121,16 @@ impl RunningChild {
     }
 
     fn deliver(&self, key: String, method: &str, wire: Value) -> Result<Value, RequestError> {
+        self.deliver_with_timeout(key, method, wire, REQUEST_TIMEOUT)
+    }
+
+    fn deliver_with_timeout(
+        &self,
+        key: String,
+        method: &str,
+        wire: Value,
+        timeout: Duration,
+    ) -> Result<Value, RequestError> {
         let (tx, rx): (Sender<Answer>, Receiver<Answer>) = unbounded();
         {
             let mut shared = self.shared.lock().map_err(|_| RequestError {
@@ -1118,7 +1146,7 @@ impl RunningChild {
                 .and_then(|mut shared| shared.waiters.remove(&key));
             return Err(RequestError { reason: format!("the session child is unreachable: {error}") });
         }
-        match rx.recv_timeout(REQUEST_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(message)) => {
                 Err(RequestError { reason: format!("{method} errored: {message}") })
