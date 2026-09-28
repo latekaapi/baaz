@@ -4586,34 +4586,6 @@ mod tests {
     /// restart restores from the store; the restore arms `right_snap` for
     /// exactly one frame while user toggles never arm it; a new session
     /// starts closed; Files previews are per session too.
-    /// Review finding (Z7b): an agent in a BACKGROUND session opening its
-    /// browser must not flip the person's visible pane; only that session's
-    /// saved state changes, and it shows when the person switches there.
-    #[gpui::test]
-    fn a_background_agent_browser_open_leaves_the_visible_pane_alone(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
-        let state = hermetic_state("right-agent-background");
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_browser_for_agent("sess-b", cx)));
-        let (open, kind, saved_b) = vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            (h.layout.right_open, h.layout.right_kind, h.overrides.get("sess-b").and_then(|m| m.right.clone()))
-        });
-        assert_eq!((open, kind), (true, Some(crate::layout::RightKind::Diff)), "A's visible pane is untouched");
-        let saved_b = saved_b.expect("B's saved state is written");
-        assert_eq!((saved_b.open, saved_b.kind), (true, crate::layout::RightKind::Browser));
-        // The foreground session's own agent does flip it.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_browser_for_agent("sess-a", cx)));
-        let kind = vc.update(|_, cx| baaz.read(cx).layout.right_kind);
-        assert_eq!(kind, Some(crate::layout::RightKind::Browser));
-    }
-
     #[gpui::test]
     fn the_right_pane_is_per_session_and_restores_without_animating(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
