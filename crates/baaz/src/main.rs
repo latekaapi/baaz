@@ -609,6 +609,7 @@ fn run_bench(args: Args) {
             .ok();
         cx.on_app_quit(|_| async {
             crate::tier::cleanup_probes();
+            crate::browser::cleanup_screenshots();
         })
         .detach();
         bench::run(handle, seed, opts, command, cx);
@@ -745,6 +746,7 @@ fn main() {
         crate::log::boot_mark("window-shown");
         cx.on_app_quit(|_| async {
             crate::tier::cleanup_probes();
+            crate::browser::cleanup_screenshots();
         })
         .detach();
         match screenshot {

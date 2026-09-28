@@ -59,6 +59,9 @@ pub(crate) struct BrowserVisibility {
     /// A menu stands open: composer/chip pickers, caret popovers, overflow,
     /// view options, project menus.
     pub menu_open: bool,
+    /// The composer's view-local `+` menu stands open. Plain view state,
+    /// never the shared overlay stack, so it gets its own input.
+    pub plus_open: bool,
     /// The account menu stands open.
     pub account_menu_open: bool,
     /// A modal dialog stands open.
@@ -80,6 +83,7 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.settings_open
         && !inputs.palette_open
         && !inputs.menu_open
+        && !inputs.plus_open
         && !inputs.account_menu_open
         && !inputs.dialog_open
         && !inputs.drop_cover
@@ -115,14 +119,24 @@ pub(crate) fn initial_url(stored: Option<&str>) -> &str {
     stored.unwrap_or(BLANK)
 }
 
-/// Writes PNG `bytes` into the app's temp attachments dir
-/// (`$BAAZ_STATE_DIR/attachments/`, else the system temp dir) and answers
-/// with the path. The composer chip carries the bytes; this file is the
-/// durable copy. Failures are silent: the draft attach is primary.
-fn write_screenshot_temp(bytes: &[u8]) -> Option<PathBuf> {
+/// How many page screenshots one run keeps: enough to re-read the last
+/// few captures, bounded so a long session never fills the disk.
+pub(crate) const MAX_SCREENSHOTS: usize = 20;
+
+/// This run's page screenshots live here: `$BAAZ_STATE_DIR/attachments/browser/`
+/// (else the system temp dir), away from the composer's own attachments.
+fn screenshot_dir() -> Option<PathBuf> {
     let base =
         std::env::var_os("BAAZ_STATE_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("attachments");
+    Some(base.join("attachments").join("browser"))
+}
+
+/// Writes PNG `bytes` into [this run's screenshot dir](screenshot_dir) and
+/// answers with the path, pruning back to [`MAX_SCREENSHOTS`]. The composer
+/// chip carries the bytes; this file is the durable copy. Failures are
+/// silent: the draft attach is primary.
+fn write_screenshot_temp(bytes: &[u8]) -> Option<PathBuf> {
+    let dir = screenshot_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -130,7 +144,44 @@ fn write_screenshot_temp(bytes: &[u8]) -> Option<PathBuf> {
         .unwrap_or(0);
     let path = dir.join(format!("browser-{}-{nanos}.png", std::process::id()));
     std::fs::write(&path, bytes).ok()?;
+    prune_screenshot_dir(&dir, MAX_SCREENSHOTS);
     Some(path)
+}
+
+/// Drop every `browser-*.png` in `dir` but the newest `keep`, oldest first
+/// by mtime (file name breaks ties). Pure over the directory, so tests can
+/// drive it; failures are silent, like the write it follows.
+pub(crate) fn prune_screenshot_dir(dir: &std::path::Path, keep: usize) {
+    let mut shots: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.starts_with("browser-") || !name.ends_with(".png") {
+                return None;
+            }
+            let modified =
+                entry.metadata().ok()?.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((modified, entry.path()))
+        })
+        .collect();
+    shots.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    if shots.len() > keep {
+        for (_, path) in shots.drain(..shots.len() - keep) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Delete this run's page screenshots (quit): captures are per-run working
+/// files, and the prune above only bounds the live run. Silent when there
+/// is nothing to delete.
+pub(crate) fn cleanup_screenshots() {
+    if let Some(dir) = screenshot_dir() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 impl Harness {
@@ -144,9 +195,10 @@ impl Harness {
     }
 
     /// The webview for `key`, creating it on first use. A new webview opens
-    /// on its session's last URL (else `about:blank`); a fresh blank one
-    /// takes the keyboard into the URL field, so ⌘L is already where the
-    /// person looks.
+    /// on its session's last URL (else `about:blank`); only an explicit
+    /// person open (`focus_fresh`) takes the keyboard into a fresh blank
+    /// URL field, so ⌘L is already where the person looks. Activation,
+    /// restore and `browse:` steps pass `false`: the composer keeps focus.
     fn browser_for(&mut self, key: &str, focus_fresh: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
         if key == HOME_KEY {
             if let Some(home) = self.browser.home.clone() {
@@ -199,13 +251,20 @@ impl Harness {
     }
 
     /// The webview the pane shows this frame, creating it on first use.
-    pub(crate) fn ensure_browser(
+    /// The caller gates on pane-open-on-Browser, so activation, boot and
+    /// every other kind never create a webview as a side effect; the
+    /// `browse:` step and agent tools create through [`Self::browser_for`]
+    /// directly instead. Focus rides only on the person's own open: render
+    /// consumes one armed `show_right`/`toggle_right` onto a blank page,
+    /// and a restore leaves the composer's keyboard alone.
+    pub(crate) fn ensure_browser_person(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WebviewState> {
+        let focus = std::mem::take(&mut self.browser_url_focus_armed);
         let key = self.browser_key(cx);
-        self.browser_for(&key, true, window, cx)
+        self.browser_for(&key, focus, window, cx)
     }
 
     /// `browse:<url>`: navigate the active (or home) browser, idempotently —
@@ -373,6 +432,13 @@ impl Harness {
             || project_menu;
         let account_menu_open = menu_kind == Some(MenuKind::Account) || account;
         let dialog_open = overlays.dialog.is_some();
+        // The composer's `+` menu is plain view state, never the overlay
+        // stack — read it off the active view. Audit: caret popovers and
+        // chip pickers ride `overlays.menu` above; the row-detail card hangs
+        // beside the sidebar, tooltips seat on the header, and the
+        // queue/steer strips render inline in the composer — none of them
+        // covers the right pane, so the `+` menu is the only extra input.
+        let plus_open = self.active.as_ref().is_some_and(|view| view.read(cx).plus_open());
         let kind = crate::layout::right_kind(&self.layout);
         let base = BrowserVisibility {
             pane_open: self.layout.right_open,
@@ -381,6 +447,7 @@ impl Harness {
             settings_open,
             palette_open,
             menu_open,
+            plus_open,
             account_menu_open,
             dialog_open,
             drop_cover: self.browser.drop_cover,
@@ -440,6 +507,7 @@ mod tests {
             settings_open: false,
             palette_open: false,
             menu_open: false,
+            plus_open: false,
             account_menu_open: false,
             dialog_open: false,
             drop_cover: false,
@@ -458,7 +526,7 @@ mod tests {
 
     #[test]
     fn every_covering_input_hides_the_native_view() {
-        let cases: [(&str, VisibilityFlip); 11] = [
+        let cases: [(&str, VisibilityFlip); 12] = [
             ("closed pane", |mut inputs| {
                 inputs.pane_open = false;
                 inputs
@@ -481,6 +549,10 @@ mod tests {
             }),
             ("menu", |mut inputs| {
                 inputs.menu_open = true;
+                inputs
+            }),
+            ("plus menu", |mut inputs| {
+                inputs.plus_open = true;
                 inputs
             }),
             ("account menu", |mut inputs| {
@@ -557,6 +629,56 @@ mod tests {
         let back: crate::sessions::RightState = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, state);
         assert_eq!(back.browser_url.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn screenshot_pruning_keeps_the_newest_twenty() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-shot-prune-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe screenshot dir");
+        let base = SystemTime::now() - Duration::from_secs(120);
+        for index in 0..25 {
+            let path = dir.join(format!("browser-test-{index:02}.png"));
+            std::fs::write(&path, [index as u8]).expect("probe screenshot");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("probe screenshot")
+                .set_modified(base + Duration::from_secs(index))
+                .expect("probe mtime");
+        }
+        // A neighbour the prune must not touch.
+        std::fs::write(dir.join("draft-image.png"), [0x89]).expect("probe neighbour");
+        super::prune_screenshot_dir(&dir, super::MAX_SCREENSHOTS);
+        let mut kept: Vec<String> = std::fs::read_dir(&dir)
+            .expect("probe screenshot dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept.len(), 21, "twenty screenshots plus the untouched neighbour");
+        assert!(kept.contains(&"draft-image.png".to_owned()));
+        for index in 0..5 {
+            assert!(
+                !kept.contains(&format!("browser-test-{index:02}.png")),
+                "the oldest five go"
+            );
+        }
+        for index in 5..25 {
+            assert!(
+                kept.contains(&format!("browser-test-{index:02}.png")),
+                "the newest twenty stay"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
