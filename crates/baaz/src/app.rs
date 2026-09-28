@@ -485,6 +485,16 @@ pub struct Harness {
     list_epoch: u64,
     /// One sorted visible list and one grouping per change, not per frame.
     list_cache: RefCell<ListCache>,
+    /// The handoff chains over full storage, built once per `list_epoch`
+    /// and shared by the head, member and view lookups — never rebuilt per
+    /// frame or per row (Y2a3). `list_epoch` is the validity key: every
+    /// storage change invalidates the list, which retires the index with
+    /// it. Interior mutability because the readers (`visible_sessions`,
+    /// `chain_head`, the header) only hold `&self`.
+    chain_index: RefCell<Option<(u64, sidebar::ChainIndex)>>,
+    /// How many chain indexes this run built: the once-per-change proof
+    /// the Y2a3 tests read.
+    chain_index_builds: std::cell::Cell<u64>,
     pub(crate) index: HashMap<String, IndexEntry>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// The session the UI is pointed at: the sidebar click's target, set the
@@ -968,6 +978,8 @@ impl Harness {
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
+            chain_index: RefCell::new(None),
+            chain_index_builds: std::cell::Cell::new(0),
             index: HashMap::new(),
             active: None,
             pending_id: None,
@@ -1257,26 +1269,36 @@ impl Harness {
             .or_else(|| self.projects.most_recent_available())
     }
 
+    /// The header and window title for a chain head: the collapsed view
+    /// row's label — the same one the sidebar's one row wears — so header
+    /// and row can never disagree (Y2a3). Falls back to the stored row's
+    /// title ladder when the head is filtered out of the view.
+    pub(crate) fn collapsed_head_label(&self, head: &str, cx: &gpui::App) -> Option<String> {
+        if let Some(entry) = self.visible_sessions(cx).iter().find(|e| e.id == head) {
+            let pending = entry.title_pending || self.titles_pending.contains(&entry.id);
+            return Some(crate::sidebar::display_label(&entry.label, pending).to_owned());
+        }
+        self.sessions.iter().find(|e| e.id == head).map(|e| {
+            let pending = e.title_pending || self.titles_pending.contains(&e.id);
+            let text = if !e.named {
+                sidebar::handoff_title_of(head, &self.provider_sessions, &self.overrides)
+                    .map(|t| sidebar::one_line(&t))
+                    .unwrap_or_else(|| e.label.clone())
+            } else {
+                e.label.clone()
+            };
+            crate::sidebar::display_label(&text, pending).to_owned()
+        })
+    }
+
     /// What the window's own title bar says: the open session against its
     /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
         let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
         // One identity per chain: the raw view id resolves to its head,
-        // whose row (chain-titled at view time) names the window (Y2a).
-        let label = session.and_then(|id| {
-            let head = sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions);
-            self.sessions.iter().find(|e| e.id == head).map(|e| {
-                let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                let text = if !e.named {
-                    sidebar::handoff_title_of(&head, &self.provider_sessions, &self.overrides)
-                        .map(|t| sidebar::one_line(&t))
-                        .unwrap_or_else(|| e.label.clone())
-                } else {
-                    e.label.clone()
-                };
-                crate::sidebar::display_label(&text, pending).to_owned()
-            })
-        });
+        // and the collapsed view row — the same label the sidebar's one
+        // row wears — names the window (Y2a, Y2a3).
+        let label = session.and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
         match self.current_project() {
             Some(project) => match label {
                 Some(label) => format!("{label} \u{2014} {}", project.name),
@@ -2350,25 +2372,14 @@ impl Harness {
         let target =
             self.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
         // One identity per chain: header, window and selection all resolve
-        // the raw id to its head (Y2a).
-        let target = target.map(|id| sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions));
+        // the raw id to its head, and the collapsed view row names it —
+        // the same label the sidebar's one row wears (Y2a, Y2a3).
+        let target = target.map(|id| self.chain_head(&id));
         // The Skills page names itself after the crumb: "Skills · [project]".
         let label = if self.skills.open {
             Some("Skills".to_owned())
         } else {
-            target.and_then(|id| {
-                self.sessions.iter().find(|e| e.id == id).map(|e| {
-                    let pending = e.title_pending || self.titles_pending.contains(&e.id);
-                    let text = if !e.named {
-                        sidebar::handoff_title_of(&id, &self.provider_sessions, &self.overrides)
-                            .map(|t| sidebar::one_line(&t))
-                            .unwrap_or_else(|| e.label.clone())
-                    } else {
-                        e.label.clone()
-                    };
-                    crate::sidebar::display_label(&text, pending).to_owned()
-                })
-            })
+            target.as_deref().and_then(|id| self.collapsed_head_label(id, cx))
         };
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));

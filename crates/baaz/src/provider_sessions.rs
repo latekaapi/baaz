@@ -219,11 +219,14 @@ pub fn note_first_prompt(store: &mut ProviderSessionStore, session_id: &str, pro
     if prompt.is_empty() {
         return;
     }
-    // A handoff pack is never a session's own words (Y2a).
-    if crate::sidebar::is_pack_text(prompt) {
-        return;
-    }
+    // A handoff pack is never a session's own words — but only a handoff
+    // destination ever has a pack turn, so the text match applies solely
+    // there. Any other session keeps its own words, pack-shaped or not
+    // (Y2a3).
     if let Some(record) = store.get_mut(session_id) {
+        if record.handoff_from.is_some() && crate::sidebar::is_pack_text(prompt) {
+            return;
+        }
         if record.first_prompt.is_none() {
             record.first_prompt = Some(crate::sidebar::one_line(prompt));
         }
@@ -426,12 +429,15 @@ mod tests {
         );
     }
 
-    /// Y2a: a handoff pack is never a session's own words — neither the
-    /// full pack nor its bubble summary becomes the first prompt.
+    /// Y2a: a handoff pack is never a destination's own words — neither
+    /// the full pack nor its bubble summary becomes the first prompt.
+    /// Y2a3: the skip is gated on the destination — any other session
+    /// keeps pack-shaped words like any other first prompt.
     #[test]
     fn the_handoff_pack_is_never_a_first_prompt() {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
+        store.get_mut("s-1").expect("sample").handoff_from = Some("s-0".into());
         note_first_prompt(&mut store, "s-1", "Continuing a session handed off from Muse: goal words");
         assert!(store["s-1"].first_prompt.is_none(), "the pack turn records nothing");
         note_first_prompt(
@@ -440,6 +446,24 @@ mod tests {
             "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)",
         );
         assert!(store["s-1"].first_prompt.is_none(), "the bubble records nothing either");
+    }
+
+    /// Y2a3: a session that is no handoff destination has no pack turn —
+    /// its own words land even when they start with "Handed off from ".
+    #[test]
+    fn a_non_destinations_pack_shaped_words_are_its_first_prompt() {
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        note_first_prompt(
+            &mut store,
+            "s-1",
+            "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)",
+        );
+        assert_eq!(
+            store["s-1"].first_prompt.as_deref(),
+            Some("Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)"),
+            "a non-destination keeps its own words, pack-shaped or not"
+        );
     }
 
     #[test]
