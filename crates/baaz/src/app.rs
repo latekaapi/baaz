@@ -2633,6 +2633,8 @@ impl Harness {
                         .flex_none()
                         .items_center()
                         .gap(px(5.0))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Project {name}. Open project menu"))
                         .track_interaction(&state)
                         .on_click(open)
                         .child(div().text_color(p.ink).ui(scale::FS_13).semibold().child(name))
@@ -2648,6 +2650,8 @@ impl Harness {
                 .id("hd-project")
                 .flex_none()
                 .items_center()
+                .role(gpui::Role::Button)
+                .aria_label("Open projects")
                 .track_interaction(&state)
                 .on_click(open)
                 .child(div().text_color(p.ink_3).ui(scale::FS_13).semibold().child(crate::sidebar::UNFILED_LABEL))
@@ -2700,8 +2704,10 @@ impl Harness {
         let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.toggle_terminal(window, cx);
         });
-        let mut term_button =
-            icon_button("hd-centre-terminal", IconName::Terminal).ghost().size(ButtonSize::Sm);
+        let mut term_button = icon_button("hd-centre-terminal", IconName::Terminal)
+            .ghost()
+            .size(ButtonSize::Sm)
+            .accessibility_label("Toggle terminal");
         if self.layout.terminal_open {
             term_button = term_button.on_click(term_toggle);
         } else {
@@ -2720,7 +2726,10 @@ impl Harness {
             this.toggle_right(cx);
         });
         let mut right_button =
-            icon_button("hd-centre-toggle-right", IconName::PanelRight).ghost().size(ButtonSize::Sm);
+            icon_button("hd-centre-toggle-right", IconName::PanelRight)
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Toggle right pane");
         if self.layout.right_open {
             right_button = right_button.on_click(right_toggle);
         } else {
@@ -2757,6 +2766,7 @@ impl Harness {
                             .ghost()
                             .muted()
                             .size(ButtonSize::Sm)
+                            .accessibility_label("Open session menu")
                             .on_click(overflow),
                     ),
             )
@@ -2915,10 +2925,15 @@ impl Harness {
         } else {
             match self.active.clone() {
             Some(view) => {
-                let transcript = view
-                    .clone()
-                    .cached(StyleRefinement::default().flex_grow(1.))
-                    .into_any_element();
+                // No `.cached(...)` while assistive tech is on: gpui-pre's reuse replays
+                // hitboxes and mouse listeners but not a11y node bounds, and an AXPress is
+                // a synthetic click at those bounds — so every press in a clean cached pane
+                // did nothing. gpui refreshes the window when a screen reader (de)activates.
+                let transcript = if window.is_a11y_active() {
+                    view.clone().into_any_element()
+                } else {
+                    view.clone().cached(StyleRefinement::default().flex_grow(1.)).into_any_element()
+                };
                 let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
                 let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
                 v_flex()
@@ -3582,7 +3597,12 @@ impl Render for Harness {
             // fills its cell), so the cached layout resolves to the same
             // bounds the shell offers and any resize re-renders through the
             // bounds key.
-            let sidebar = self.sidebar_pane.clone().cached(StyleRefinement::default().size_full());
+            // No `.cached(...)` while assistive tech is on — see `render_centre`.
+            let sidebar: AnyElement = if window.is_a11y_active() {
+                self.sidebar_pane.clone().into_any_element()
+            } else {
+                self.sidebar_pane.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+            };
             let centre = self.render_centre(window, cx);
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
