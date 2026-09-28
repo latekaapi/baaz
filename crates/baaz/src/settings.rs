@@ -345,13 +345,13 @@ pub(crate) fn shortcuts_section(
         } else if !binding.editable {
             binding.reserved_reason.clone().map(SharedString::from)
         } else {
-            binding.context.clone().map(SharedString::from)
+            binding.context.as_deref().and_then(context_label).map(SharedString::from)
         };
         rows.push(SettingsRow::Shortcut {
             id: SharedString::from(id.clone()),
             label: SharedString::from(binding.label.clone()),
             detail,
-            keystroke: Some(SharedString::from(binding.keystroke.clone())),
+            keystroke: Some(SharedString::from(keystroke_glyphs(&binding.keystroke))),
             recording: recording == Some(id.as_str()),
             editable: binding.editable,
         });
@@ -361,6 +361,69 @@ pub(crate) fn shortcuts_section(
         label: SharedString::from("Shortcuts"),
         rows,
     }
+}
+
+/// Where a binding fires, in words — or nothing for the global context,
+/// which is the default and needs no caption. Internal gpui context names
+/// ("AuiRoot", "BaazComposer && menu") are never shown to the person.
+fn context_label(context: &str) -> Option<&'static str> {
+    let context = context.trim();
+    match context {
+        "AuiRoot" | "" => None,
+        c if c.starts_with("BaazComposer") && c.contains("histup") => Some("In the composer, on the first line"),
+        c if c.starts_with("BaazComposer") && c.contains("histdown") => Some("In the composer, on the last line"),
+        c if c.starts_with("BaazComposer") && c.contains("&& menu") => Some("In the composer, while a menu is open"),
+        c if c.starts_with("BaazComposer") => Some("In the composer"),
+        c if c.starts_with("BaazTerminal") => Some("In the terminal"),
+        c if c.starts_with("BaazRename") => Some("While renaming"),
+        c if c.starts_with("AuiMenu") => Some("In the palette"),
+        _ => None,
+    }
+}
+
+/// A keystroke as macOS writes it on a keycap: `cmd-shift-o` → `⌘⇧O`,
+/// chords separated by a space. What is stored and matched stays gpui's
+/// spelling; this is display only.
+fn keystroke_glyphs(keystroke: &str) -> String {
+    keystroke
+        .split_whitespace()
+        .map(|stroke| {
+            let mut out = String::new();
+            let parts: Vec<&str> = stroke.split('-').collect();
+            let (mods, key) = match parts.split_last() {
+                // `cmd--` (minus) splits into ["cmd", "", ""]
+                Some((last, rest)) if last.is_empty() && !rest.is_empty() => (&rest[..rest.len() - 1], "-"),
+                Some((last, rest)) => (rest, *last),
+                None => (&parts[..0], ""),
+            };
+            for m in ["ctrl", "alt", "shift", "cmd"] {
+                if mods.contains(&m) {
+                    out.push_str(match m {
+                        "ctrl" => "\u{2303}",
+                        "alt" => "\u{2325}",
+                        "shift" => "\u{21e7}",
+                        _ => "\u{2318}",
+                    });
+                }
+            }
+            let key = match key {
+                "enter" => "\u{21a9}".to_owned(),
+                "escape" => "esc".to_owned(),
+                "backspace" => "\u{232b}".to_owned(),
+                "tab" => "\u{21e5}".to_owned(),
+                "up" => "\u{2191}".to_owned(),
+                "down" => "\u{2193}".to_owned(),
+                "left" => "\u{2190}".to_owned(),
+                "right" => "\u{2192}".to_owned(),
+                "space" => "space".to_owned(),
+                k if k.chars().count() == 1 => k.to_uppercase(),
+                k => k.to_owned(),
+            };
+            out.push_str(&key);
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -507,8 +570,8 @@ mod tests {
             assert_eq!(label, &binding.label, "the row carries the binding's label");
             assert_eq!(
                 keystroke.as_deref(),
-                Some(binding.keystroke.as_str()),
-                "the row shows the live keystroke"
+                Some(keystroke_glyphs(&binding.keystroke).as_str()),
+                "the row shows the live keystroke as keycaps"
             );
         }
         let mut categories: Vec<&str> = Vec::new();
@@ -550,7 +613,9 @@ mod tests {
                 } else if binding.action == "OpenSettings" {
                     assert_eq!(detail, &None, "a global row has no detail");
                 } else if binding.action == "NewSession" {
-                    assert_eq!(detail.as_deref(), Some("AuiRoot"), "an off-global row names its context");
+                    assert_eq!(detail, &None, "the root context is global and says nothing");
+                } else if let Some(context) = binding.context.as_deref() {
+                    assert_eq!(detail.as_deref(), context_label(context), "contexts read as words");
                 }
             }
         }
@@ -593,4 +658,25 @@ mod tests {
             std::time::Instant::now(),
         ));
     }
+
+    #[test]
+    fn keystrokes_read_as_keycaps() {
+        // macOS order: control, option, shift, command.
+        assert_eq!(keystroke_glyphs("cmd-shift-o"), "\u{21e7}\u{2318}O");
+        assert_eq!(keystroke_glyphs("ctrl-c"), "\u{2303}C");
+        assert_eq!(keystroke_glyphs("cmd-,"), "\u{2318},");
+        assert_eq!(keystroke_glyphs("cmd--"), "\u{2318}-");
+        assert_eq!(keystroke_glyphs("enter"), "\u{21a9}");
+        assert_eq!(keystroke_glyphs("cmd-k cmd-s"), "\u{2318}K \u{2318}S");
+    }
+
+    #[test]
+    fn contexts_read_as_words_and_the_global_one_is_silent() {
+        assert_eq!(context_label("AuiRoot"), None);
+        assert_eq!(context_label("AuiMenu > Input"), Some("In the palette"));
+        assert_eq!(context_label("BaazComposer && menu"), Some("In the composer, while a menu is open"));
+        assert_eq!(context_label("BaazRename"), Some("While renaming"));
+        assert_eq!(context_label("SomethingNew"), None);
+    }
+
 }
