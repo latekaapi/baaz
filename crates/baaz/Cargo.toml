@@ -26,6 +26,7 @@ aui-motion.workspace = true
 aui-tokens.workspace = true
 aui-icons.workspace = true
 aui-terminal.workspace = true
+aui-webview.workspace = true
 muse-client.workspace = true
 muse-adapter.workspace = true
 # C1b: the connection and command path speak the provider seam; the session
