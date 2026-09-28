@@ -3139,7 +3139,11 @@ impl Harness {
                         div()
                             .text_role(aui_tokens::TextRole::Title)
                             .text_color(p.ink)
-                            .child(format!("Couldn't reopen {label}")),
+                            .child(if failure.session_id.is_some() {
+                                format!("Couldn't reopen {label}")
+                            } else {
+                                format!("Couldn't start {label}")
+                            }),
                     )
                     .child(
                         div()
