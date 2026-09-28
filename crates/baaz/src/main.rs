@@ -275,6 +275,12 @@ pub struct Args {
     /// `--no-project`: boot with no current project and adopt nothing, so a
     /// capture can show the "Add a project" hero. Scripting only, and free.
     pub no_project: bool,
+    /// Test-only override for the terminal socket's support dir. `None` in
+    /// production (the socket serves `<support_dir>/run/terminal-<pid>.sock`
+    /// or its short fallback); tests set a unique short dir per Harness, and
+    /// the Harness serves it under a unique fake pid, so no two Harnesses in
+    /// one test process share a socket. Not a CLI flag.
+    pub terminal_socket_dir: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -314,6 +320,7 @@ fn parse_args() -> Args {
         bench_shell: false,
         sidebar_fixture: None,
         no_project: false,
+        terminal_socket_dir: None,
     };
     // Resolve it once, here: `session/list` filters on exact path equality and
     // the metadata record carries the path the server resolved, so `/tmp/x`
