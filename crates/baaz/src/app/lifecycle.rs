@@ -1262,7 +1262,8 @@ impl Harness {
         // something else: the switch is cancelled (its open lands stale
         // and is discarded) and this opens as a normal new session on the
         // restored provider, the old draft staying with the old view.
-        self.cancel_pending_switch(cx);
+        let replaced = self.replacing.clone();
+        let switch_cancelled = self.cancel_pending_switch(cx);
         // One session per `new`: a switch already in flight owns the next
         // session — a second `new` (boot racing the head's `new`, a double
         // ⌘N, a scripted repeat) starts nothing, unless a provider switch
@@ -1270,6 +1271,16 @@ impl Harness {
         if self.session_switch_pending && self.switch_claim.take().is_none() {
             crate::baaz_log!("new: a session is already opening; keeping it");
             return;
+        }
+        if switch_cancelled {
+            // This `new` opens fresh: drop the replaced view's draft-name
+            // so the reuse below cannot mistake this explicit new session
+            // for a repeated ⌘N on the still-unsent draft (the restored
+            // provider is the old view's own, so it would serve). The text
+            // itself stays in the old view, which parks below.
+            if let Some(old) = replaced {
+                self.drafts.retain(|_, id| *id != old);
+            }
         }
         self.new_session_open(project, window, cx, None);
     }
@@ -5485,12 +5496,15 @@ mod tests {
         lane_restore(state);
     }
 
-    /// Y2b2 scaffolding: a recording factory whose opens can be held
-    /// pending. Each `OpenSession` mints a fresh id (so several lanes
-    /// coexist), blocks while a gate is installed (so a switch can be held
-    /// in flight while the test performs the cancelling action), and every
-    /// shutdown is recorded per id (so a discarded open proves its child
-    /// was hung up and parked nowhere).
+    /// Y2b2 scaffolding: a recording factory. Each `OpenSession` mints a
+    /// fresh id (so several lanes coexist), records it synchronously, and
+    /// returns at once; every shutdown is recorded per id (so a discarded
+    /// open proves its child was hung up and parked nowhere). The open is
+    /// held pending by STAGING the scheduler (`y2b2_drain_until_opens`),
+    /// never by blocking inside `dispatch`: the test scheduler polls
+    /// background work on the test thread, so parking that thread in the
+    /// adapter strands the test itself — the suite stalls holding the
+    /// env lock.
     #[derive(Clone)]
     struct Y2b2Shared {
         inner: std::sync::Arc<std::sync::Mutex<Y2b2State>>,
@@ -5500,7 +5514,6 @@ mod tests {
         opens: usize,
         created: Vec<String>,
         shutdowns: Vec<String>,
-        gate: Option<(crossbeam_channel::Sender<()>, crossbeam_channel::Receiver<()>)>,
     }
 
     struct Y2b2Adapter {
@@ -5556,18 +5569,14 @@ mod tests {
             }
             match command {
                 provider::Command::OpenSession { .. } => {
-                    let (id, gate) = {
+                    let id = {
                         let mut shared = self.shared.inner.lock().expect("y2b2");
                         shared.opens += 1;
                         let id = format!("y2b2-{}", shared.opens);
                         shared.created.push(id.clone());
-                        (id, shared.gate.clone())
+                        id
                     };
                     *self.id.lock().expect("y2b2") = Some(id.clone());
-                    if let Some((started, release)) = gate {
-                        let _ = started.send(());
-                        let _ = release.recv();
-                    }
                     Ok(provider::Ack::Session { session_id: id, title: None })
                 }
                 provider::Command::ListModels { .. } => {
@@ -5586,8 +5595,15 @@ mod tests {
             self.rx.clone()
         }
         fn shutdown(&mut self) {
+            // Recorded once per child: hanging up is idempotent by
+            // contract ([`SessionView::shutdown_lane`], and a dropped view
+            // hangs up again), so a re-hangup on drop must not read as a
+            // second child shut down.
             if let Some(id) = self.id.lock().expect("y2b2").clone() {
-                self.shared.inner.lock().expect("y2b2").shutdowns.push(id);
+                let mut shared = self.shared.inner.lock().expect("y2b2");
+                if !shared.shutdowns.contains(&id) {
+                    shared.shutdowns.push(id);
+                }
             }
         }
     }
@@ -5599,7 +5615,6 @@ mod tests {
                 opens: 0,
                 created: Vec::new(),
                 shutdowns: Vec::new(),
-                gate: None,
             })),
         };
         let factory_shared = shared.clone();
@@ -5654,29 +5669,34 @@ mod tests {
         });
     }
 
-    /// Hold the next opens at the child: the test then acts while the
-    /// switch is pending. Returns the started signal and the release
-    /// handle (one release per blocked open; extras buffer harmlessly).
-    fn y2b2_hold(
+    /// Stage the scheduler until `total` opens have STARTED (their
+    /// `OpenSession` dispatches ran). A switch's open starts on a
+    /// background task but lands on a later foreground one, so stopping
+    /// here holds the switch pending with no thread parked: the landing
+    /// is queued but cannot run until the test drains again, and the test
+    /// performs the cancelling action synchronously first — no scheduler
+    /// turn runs between this return and that action, so the open always
+    /// lands stale. Each `tick` runs one task and returns, which is what
+    /// keeps this from deadlocking: `run_until_parked` polls background
+    /// work on the test thread, so a blocking wait for the open inside
+    /// the test would strand the release the test itself must send.
+    fn y2b2_drain_until_opens(
+        vc: &mut gpui::VisualTestContext,
         shared: &Y2b2Shared,
-    ) -> (crossbeam_channel::Receiver<()>, crossbeam_channel::Sender<()>) {
-        let (started_tx, started_rx) = crossbeam_channel::unbounded::<()>();
-        let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
-        shared.inner.lock().expect("y2b2").gate = Some((started_tx, release_rx));
-        (started_rx, release_tx)
-    }
-
-    fn y2b2_unhold(shared: &Y2b2Shared) {
-        shared.inner.lock().expect("y2b2").gate = None;
-    }
-
-    fn y2b2_wait_started(started: &crossbeam_channel::Receiver<()>, what: &str) {
-        started.recv_timeout(std::time::Duration::from_secs(10)).expect(what);
+        total: usize,
+    ) {
+        for _ in 0..30_000 {
+            if shared.inner.lock().expect("y2b2").created.len() >= total {
+                return;
+            }
+            vc.cx.background_executor.tick();
+        }
+        panic!("the switch open never started after 30_000 scheduler ticks");
     }
 
     /// Y2b2 case 1: clicking another session while a switch is pending
     /// cancels the switch. The click resumes normally, the old view parks
-    /// with its draft, and the switch's open — released afterwards — is
+    /// with its draft, and the switch's open — still in flight — is
     /// discarded: its child is shut down, and it parks, persists, and rows
     /// nowhere. Before the fix the click's activation consumed the switch
     /// marker (closing the old view into the clicked session) and the late
@@ -5695,19 +5715,25 @@ mod tests {
             });
         });
         let first = y2b2_open(vc, &baaz, ProviderId::Codex);
+        // A repeated ⌘N would reopen the first lane's still-unsent draft
+        // instead of spawning another child (see `finish_provider_open`):
+        // drop its draft-name so the second open is a genuine second lane.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.drafts.retain(|_, id| *id != first);
+            });
+        });
         let second = y2b2_open(vc, &baaz, ProviderId::Codex);
+        assert_ne!(first, second, "the setup holds two distinct lanes");
         // Back on the first lane with an unsent draft waiting.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx));
         });
         vc.run_until_parked();
         y2b2_set_draft(vc, &baaz, "hello unsent");
-        // The switch starts but its open never leaves the child.
-        let (started, release) = y2b2_hold(&shared);
+        // The switch starts; its open is in flight but has not landed.
         y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the switch open reached the child");
-        y2b2_unhold(&shared);
+        y2b2_drain_until_opens(vc, &shared, 3);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.replacing.as_deref(), Some(first.as_str()), "the switch is pending");
@@ -5716,7 +5742,6 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| harness.resume_quiet(second.clone(), window, cx));
         });
-        let _ = release.send(());
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -5785,16 +5810,12 @@ mod tests {
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
         y2b2_set_draft(vc, &baaz, "hello unsent");
-        let (started, release) = y2b2_hold(&shared);
         y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the switch open reached the child");
-        y2b2_unhold(&shared);
+        y2b2_drain_until_opens(vc, &shared, 2);
         // The person's ⌘N: a normal new session, not the switch's.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| harness.new_session(window, cx));
         });
-        let _ = release.send(());
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -5847,9 +5868,9 @@ mod tests {
 
     /// Y2b2 case 3: two quick switches supersede cleanly — the second
     /// switch opens (the first task never steals its claim), the first
-    /// open is discarded when released, and the chip and the landed
-    /// session match the last pick. Before the fix the first task consumed
-    /// the shared claim, so the second switch never opened at all.
+    /// open is discarded, and the chip and the landed session match the
+    /// last pick. Before the fix the first task consumed the shared claim,
+    /// so the second switch never opened at all.
     #[gpui::test]
     fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -5865,17 +5886,11 @@ mod tests {
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
         y2b2_set_draft(vc, &baaz, "hello unsent");
-        let (started, release) = y2b2_hold(&shared);
         y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the first switch open reached the child");
+        y2b2_drain_until_opens(vc, &shared, 2);
         // The second pick while the first is still pending.
         y2b2_switch(vc, &baaz, ProviderId::Codex);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the second switch opened too");
-        y2b2_unhold(&shared);
-        let _ = release.send(());
-        let _ = release.send(());
+        y2b2_drain_until_opens(vc, &shared, 3);
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -5927,15 +5942,11 @@ mod tests {
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
-        let (started, release) = y2b2_hold(&shared);
         y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the switch open reached the child");
-        y2b2_unhold(&shared);
+        y2b2_drain_until_opens(vc, &shared, 2);
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.close_view(&old, cx));
         });
-        let _ = release.send(());
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
@@ -5973,15 +5984,11 @@ mod tests {
             });
         });
         let old = y2b2_open(vc, &baaz, ProviderId::Codex);
-        let (started, release) = y2b2_hold(&shared);
         y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
-        vc.run_until_parked();
-        y2b2_wait_started(&started, "the switch open reached the child");
-        y2b2_unhold(&shared);
+        y2b2_drain_until_opens(vc, &shared, 2);
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.shutdown_provider_views(cx));
         });
-        let _ = release.send(());
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
