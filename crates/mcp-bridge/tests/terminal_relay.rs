@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use mcp_bridge::{
     ToolOutcome, ToolRegistry, browser as browser_relay, serve_loop,
-    terminal::{INSTRUCTIONS, TOOL_NAMES, TerminalTarget, UNAVAILABLE, register_terminal_tools},
+    terminal::{INSTRUCTIONS, TOOL_NAMES, TerminalTarget, register_terminal_tools},
 };
 use mcp_bridge::browser::{BROWSER_TOOL_NAMES, register_browser_tools};
 use serde_json::{Value, json};
@@ -306,9 +306,11 @@ fn a_gone_socket_answers_unavailable_not_a_crash() {
     for (i, name) in all.iter().enumerate() {
         assert_eq!(
             content_text(result_of(&replies[i])),
-            UNAVAILABLE,
-            "{name} answers unavailable, not a crash"
+            mcp_bridge::terminal::unavailable_for(name),
+            "{name} answers unavailable (naming its own surface), not a crash"
         );
+        let expected = if name.starts_with("browser_") { "browser" } else { "terminal" };
+        assert!(mcp_bridge::terminal::unavailable_for(name).contains(expected), "{name}");
     }
     // `ping` is the bridge's own diagnostic, not a forwarded tool: it
     // answers even with Baaz gone.
