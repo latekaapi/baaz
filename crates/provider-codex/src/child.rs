@@ -302,10 +302,49 @@ pub struct ModelInfo {
     pub label: String,
     /// The server's one-line description, when it sends one.
     pub description: Option<String>,
+    /// A hidden row: the menu lists it only when it is the active one
+    /// (probed live 2026-09-28: `includeHidden: true` returns `gpt-reserve`
+    /// with `"hidden": true` first).
+    pub hidden: bool,
+    /// The row flagged `isDefault`: what an absent model request resolves
+    /// to when the caller names none.
+    pub is_default: bool,
+    /// The levels this model accepts, in provider order: the row's own
+    /// `supportedReasoningEfforts`, so the effort menu follows the
+    /// selected model with no second fetch.
+    pub efforts: Vec<SupportedEffort>,
 }
 
-/// The model catalog out of a `model/list` response: ids, human labels
-/// and descriptions, in provider order. See [`ModelInfo`] for the key.
+/// The `model/list` call: always with `includeHidden: true` (a hidden row
+/// that is the session's model must still be nameable), plus `cursor` when
+/// following a page. The response carries `data[]` and `nextCursor`; a null
+/// cursor ends the walk (probed live 2026-09-28: six rows, `nextCursor`
+/// null; a bogus cursor is refused with `invalid cursor`, proving the
+/// server reads `cursor`).
+pub fn model_list_request(id: u64, cursor: Option<&str>) -> Value {
+    let mut params = serde_json::Map::with_capacity(2);
+    params.insert("includeHidden".to_owned(), Value::Bool(true));
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+        params.insert("cursor".to_owned(), Value::String(cursor.to_owned()));
+    }
+    json!({"id": id, "method": "model/list", "params": Value::Object(params)})
+}
+
+/// The next page's cursor out of a `model/list` response: `None` on the
+/// last page (`nextCursor` null or absent), never an empty string.
+pub fn next_cursor(result: &Value) -> Option<String> {
+    result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_owned)
+}
+
+/// The model catalog out of one `model/list` response page: ids, human
+/// labels, descriptions, hidden and default flags, and each row's own
+/// reasoning levels, in provider order. See [`ModelInfo`] for the key.
+/// Callers walking pages concatenate one call per page (see
+/// [`next_cursor`]).
 pub fn model_catalog(result: &Value) -> Vec<ModelInfo> {
     result
         .get("data")
@@ -326,6 +365,15 @@ pub fn model_catalog(result: &Value) -> Vec<ModelInfo> {
                             .get("description")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
+                        hidden: row
+                            .get("hidden")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        is_default: row
+                            .get("isDefault")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        efforts: supported_efforts(result, id),
                     })
                 })
                 .collect()
@@ -1383,6 +1431,18 @@ mod tests {
                 "input": [{"type": "text", "text": text}]
             }))
         );
+
+        // `model/list` deliberately moved past the fixture: the recorded
+        // call carries bare `{}`, while the adapter now sends
+        // `includeHidden: true` (the live probe returns `gpt-reserve` only
+        // with it) and follows `nextCursor` via `cursor`.
+        let listed = client_frame(&frames, "model/list");
+        assert_eq!(listed.get("params"), Some(&json!({})), "the fixture sent bare params");
+        assert_eq!(
+            model_list_request(10, None).get("params"),
+            Some(&json!({"includeHidden": true})),
+            "the adapter no longer sends bare params"
+        );
     }
 
     #[test]
@@ -1878,6 +1938,110 @@ mod tests {
             "the elicitation is still raised: {seen:?}"
         );
         assert_eq!(shared.questions.len(), 1, "the refused elicitation is recorded");
+    }
+
+    #[test]
+    fn model_list_always_carries_include_hidden_and_follows_the_cursor() {
+        // The request the adapter sends, first page and later ones: a call
+        // without `includeHidden` misses hidden rows (probed live
+        // 2026-09-28: `gpt-reserve` answers only with it), and a call
+        // without `cursor` re-reads page one forever. A builder that emits
+        // bare `{}` must fail this test, not slide through.
+        let first = model_list_request(2, None);
+        assert_eq!(first.get("method"), Some(&json!("model/list")));
+        assert_eq!(
+            first.get("params"),
+            Some(&json!({"includeHidden": true})),
+            "page one still carries the flag: {first}"
+        );
+        let second = model_list_request(3, Some("cursor-abc"));
+        assert_eq!(
+            second.get("params"),
+            Some(&json!({"includeHidden": true, "cursor": "cursor-abc"})),
+            "page two carries the cursor: {second}"
+        );
+        let empty_cursor = model_list_request(4, Some(""));
+        assert_eq!(
+            empty_cursor.get("params"),
+            Some(&json!({"includeHidden": true})),
+            "an empty cursor is no cursor: {empty_cursor}"
+        );
+    }
+
+    #[test]
+    fn next_cursor_ends_the_walk_on_null_and_continues_on_a_cursor() {
+        // Two synthetic pages: the first names its successor, the second
+        // ends with null. The loop the adapter runs stops exactly there —
+        // a parser that reads a `cursor` key instead of `nextCursor` walks
+        // nothing, and one that treats null as a page walks forever.
+        let page_one = json!({"data": [{"id": "a"}], "nextCursor": "cursor-abc"});
+        let page_two = json!({"data": [{"id": "b"}], "nextCursor": serde_json::Value::Null});
+        assert_eq!(next_cursor(&page_one), Some("cursor-abc".to_owned()));
+        assert_eq!(next_cursor(&page_two), None, "null ends the walk");
+        assert_eq!(next_cursor(&json!({"data": []})), None, "absent ends the walk too");
+        assert_eq!(
+            next_cursor(&json!({"data": [], "nextCursor": ""})),
+            None,
+            "empty is not a page"
+        );
+        let first_rows = model_catalog(&page_one);
+        let second_rows = model_catalog(&page_two);
+        let ids: Vec<&str> = first_rows
+            .iter()
+            .chain(second_rows.iter())
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "pages concatenate in order");
+    }
+
+    #[test]
+    fn model_rows_carry_hidden_default_and_their_own_efforts() {
+        // The fixture's `model/list` answer: `gpt-5.6-sol` is the default
+        // with six levels, `gpt-5.5` stops at `xhigh`, and no row hides
+        // (the live `includeHidden` probe adds `gpt-reserve` with
+        // `"hidden": true`, asserted on a synthetic row below). A catalog
+        // that drops these flags cannot drive the menu's hidden filter or
+        // the per-model effort list.
+        let frames = envelopes("basic.jsonl");
+        let response = frames
+            .iter()
+            .find(|(dir, frame)| {
+                *dir == Direction::ServerToClient && frame.get("id") == Some(&json!(10))
+            })
+            .map(|(_, frame)| frame.get("result").cloned().expect("result"))
+            .expect("model/list response");
+        assert_eq!(next_cursor(&response), None, "the fixture is one page");
+        let rows = model_catalog(&response);
+        let sol = rows.iter().find(|row| row.id == "gpt-5.6-sol").expect("sol");
+        assert!(sol.is_default, "sol is the default row");
+        assert!(!sol.hidden, "sol is visible");
+        let sol_levels: Vec<&str> =
+            sol.efforts.iter().map(|level| level.id.as_str()).collect();
+        assert_eq!(sol_levels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        let legacy = rows.iter().find(|row| row.id == "gpt-5.5").expect("legacy");
+        assert!(!legacy.is_default, "only one default");
+        let legacy_levels: Vec<&str> =
+            legacy.efforts.iter().map(|level| level.id.as_str()).collect();
+        assert_eq!(legacy_levels, ["low", "medium", "high", "xhigh"]);
+        // The hidden shape, as the live probe returns it: hidden rows
+        // parse and stay marked, so the menu can filter them.
+        let hidden_page = json!({
+            "data": [{
+                "id": "gpt-reserve",
+                "displayName": "GPT-Reserve",
+                "description": "Fast and affordable agentic coding model.",
+                "hidden": true,
+                "isDefault": false,
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "Fast responses with lighter reasoning"}
+                ],
+            }],
+            "nextCursor": serde_json::Value::Null,
+        });
+        let hidden_rows = model_catalog(&hidden_page);
+        assert_eq!(hidden_rows.len(), 1);
+        assert!(hidden_rows[0].hidden, "the hidden flag survives the parse");
+        assert_eq!(hidden_rows[0].efforts.len(), 1);
     }
 
     #[test]
