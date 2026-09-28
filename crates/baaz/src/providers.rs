@@ -36,7 +36,11 @@ use provider::{Capability, CapabilityState, Provider, ProviderError};
 
 /// Which backend a session belongs to. Fixed at session creation; a live
 /// session never changes lanes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// Serialized kebab-case (`muse`, `claude-code`, `codex`) for the
+/// provider-status cache, matching [`ProviderId::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProviderId {
     /// The existing backend, served by the legacy pump.
     Muse,
