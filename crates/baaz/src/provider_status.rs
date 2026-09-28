@@ -391,7 +391,7 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
             }
             // The override Muse sessions honour too (`MUSE_BIN`), so the
             // Providers page never disagrees with a session that works —
-            // named here rather than called through `muse_client`, which the
+            // named here rather than called through the muse wire crate, which the
             // seam ratchet keeps out of this file.
             if let Some(program) = std::env::var_os("MUSE_BIN") {
                 let candidate = PathBuf::from(&program);
