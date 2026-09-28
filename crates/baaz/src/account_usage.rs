@@ -13,17 +13,16 @@ use aui::screens::{UsageRowData, UsageRowState, UsageWindow};
 use aui_icons::Provider as AuiProvider;
 
 use crate::providers::ProviderId;
-use crate::provider_status::{Headline, ProviderStatus};
+use crate::provider_status::{Auth, Headline, ProviderStatus};
+use crate::tier::Tier;
 
 /// The app's live muse connection and tier for the Muse row: present
 /// exactly when the app is signed in to Muse. The row then reports the
-/// tier's weekly fraction even when no `muse` binary was found.
+/// tier card's own windows even when no `muse` binary was found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuseFeed {
-    /// The tier's plan label (`High Usage`, …), when known.
-    pub plan: Option<String>,
-    /// The tier's weekly fraction, when the probe reported one.
-    pub weekly_fraction: Option<f64>,
+    /// The tier probe's latest answer, when it has answered yet.
+    pub tier: Option<Tier>,
 }
 
 /// One usage row per enabled provider, in registry order. Disabled
@@ -62,40 +61,89 @@ pub fn usage_rows(
     rows
 }
 
-/// The Muse row while the app is signed in: the tier's weekly fraction
-/// first (the binary lookup never gates it), then whatever snapshot the
-/// refreshes recorded, then the no-reading reason.
+/// The Muse row while the app is signed in: a live usage read with an
+/// unexpired window wins over the tier probe (the binary lookup never
+/// gates either); otherwise the tier card's own windows draw — plan with
+/// the leading "Muse Code " dropped, "Current" and "Weekly" windows with
+/// the card's own reset clauses — then the snapshot's own words.
 fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData {
     let snapshot = status.usage.as_ref();
-    if let Some(snapshot) = snapshot {
-        if !snapshot.windows.is_empty() {
-            return connected_row(status, now);
-        }
+    if snapshot.is_some_and(|snapshot| {
+        snapshot.windows.iter().any(|window| window.resets_at.is_none_or(|at| at > now))
+    }) {
+        return connected_row(status, now);
     }
-    if let Some(used) = feed.weekly_fraction {
-        let as_of = snapshot.map(|snapshot| age_footnote(snapshot.as_of, now));
-        let mut row = UsageRowData::new(
+    match feed.tier.as_ref() {
+        Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) => {
+            let plan = plan.strip_prefix("Muse Code ").unwrap_or(plan).to_owned();
+            if *usage_unavailable {
+                return UsageRowData::new(
+                    AuiProvider::Muse,
+                    UsageRowState::Unavailable("Usage currently unavailable".into()),
+                )
+                .plan(plan);
+            }
+            let mut windows = Vec::new();
+            if let Some(pct) = current_pct {
+                windows.push(UsageWindow::new("Current", tier_fraction(*pct), tier_reset_text(resets.first(), now)));
+            }
+            if let Some(pct) = weekly_pct {
+                windows.push(UsageWindow::new("Weekly", tier_fraction(*pct), tier_reset_text(resets.get(1), now)));
+            }
+            if !windows.is_empty() {
+                let as_of = snapshot.map(|snapshot| age_footnote(snapshot.as_of, now));
+                return UsageRowData::new(AuiProvider::Muse, UsageRowState::Windows(windows, as_of)).plan(plan);
+            }
+            // A known plan with no numbers yet: the snapshot's own words,
+            // still wearing the plan.
+            let mut row = snapshot_row(status, snapshot, now);
+            if row.plan.is_none() {
+                row.plan = Some(plan.into());
+            }
+            row
+        }
+        Some(Tier::PayAsYouGo) => UsageRowData::new(
             AuiProvider::Muse,
-            UsageRowState::Windows(
-                vec![UsageWindow::new("Weekly", used as f32, resets_in_text(None, now))],
-                as_of,
-            ),
-        );
-        let plan = feed.plan.clone().or_else(|| snapshot.and_then(|snapshot| snapshot.plan.clone()));
-        if let Some(plan) = plan {
-            row = row.plan(plan);
-        }
-        return row;
+            UsageRowState::Unavailable("Pay-as-you-go — turns bill API usage".into()),
+        ),
+        // A failed probe leaves the snapshot's own words standing.
+        Some(Tier::Unavailable(_)) => snapshot_row(status, snapshot, now),
+        // Signed in but the probe has not answered yet.
+        None => UsageRowData::new(AuiProvider::Muse, UsageRowState::Unavailable("Checking…".into())),
     }
-    let mut row = UsageRowData::new(
+}
+
+/// The Muse row without a usable tier answer: the snapshot's own words —
+/// its reset note when its windows all expired, else the no-reading
+/// reason. A snapshot never gates this; `None` reads the same reason.
+fn snapshot_row(
+    status: &ProviderStatus,
+    snapshot: Option<&crate::provider_status::UsageSnapshot>,
+    now: i64,
+) -> UsageRowData {
+    if snapshot.is_some_and(|snapshot| !snapshot.windows.is_empty()) {
+        return connected_row(status, now);
+    }
+    UsageRowData::new(
         AuiProvider::Muse,
-        UsageRowState::Unavailable("No reading yet — appears after your first Muse turn".into()),
-    );
-    let plan = feed.plan.clone().or_else(|| snapshot.and_then(|snapshot| snapshot.plan.clone()));
-    if let Some(plan) = plan {
-        row = row.plan(plan);
+        UsageRowState::Unavailable(no_reading_reason(status.provider).into()),
+    )
+}
+
+/// One tier-card percentage as a window fraction in `0..=1`.
+fn tier_fraction(pct: u32) -> f32 {
+    (pct as f32 / 100.0).clamp(0.0, 1.0)
+}
+
+/// One tier-card reset clause as a window's reset text: the card's own
+/// words after its leading "Resets " ("Resets at 2:57 AM" → "at 2:57 AM"),
+/// so the row reads the card's clock instead of a countdown. A missing
+/// clause reads unknown, never a fabricated countdown.
+fn tier_reset_text(clause: Option<&String>, now: i64) -> String {
+    match clause {
+        Some(clause) => clause.strip_prefix("Resets ").unwrap_or(clause).to_owned(),
+        None => resets_in_text(None, now),
     }
-    row
 }
 
 /// A connected provider's row: live windows as bars, an all-expired
@@ -113,7 +161,14 @@ fn connected_row(status: &ProviderStatus, now: i64) -> UsageRowData {
                 return UsageRowData::new(provider, UsageRowState::Unavailable(text.into()));
             }
         }
-        return UsageRowData::new(provider, UsageRowState::Unavailable(no_reading_reason(status.provider).into()));
+        let mut row = UsageRowData::new(
+            provider,
+            UsageRowState::Unavailable(no_reading_reason(status.provider).into()),
+        );
+        if let Some(plan) = auth_plan(status) {
+            row = row.plan(plan);
+        }
+        return row;
     }
     let live: Vec<_> = windows.iter().filter(|window| window.resets_at.is_none_or(|at| at > now)).collect();
     if live.is_empty() {
@@ -135,10 +190,22 @@ fn connected_row(status: &ProviderStatus, now: i64) -> UsageRowData {
         })
         .collect();
     let mut row = UsageRowData::new(provider, UsageRowState::Windows(bars, as_of));
-    if let Some(plan) = snapshot.and_then(|snapshot| snapshot.plan.clone()) {
+    if let Some(plan) = snapshot.and_then(|snapshot| snapshot.plan.clone()).or_else(|| auth_plan(status)) {
         row = row.plan(plan);
     }
     row
+}
+
+/// The status's own account plan when no usage snapshot carries one: the
+/// auth probe's label with a provider prefix dropped ("Claude Max" →
+/// "Max"). `None` for anonymous or plan-less logins.
+fn auth_plan(status: &ProviderStatus) -> Option<String> {
+    match &status.auth {
+        Auth::SignedIn { plan: Some(plan), .. } => {
+            Some(plan.strip_prefix("Claude ").unwrap_or(plan).to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// A not-connected provider's row: the headline plus whatever the probe
@@ -175,9 +242,11 @@ fn no_reading_reason(id: ProviderId) -> &'static str {
     }
 }
 
-/// A reading's `as of …` footnote.
+/// A reading's age footnote: just the age (`just now`, `2m ago`) — the
+/// library renders the `as of` prefix itself, so passing it here would
+/// read "as of as of just now".
 fn age_footnote(as_of: i64, now: i64) -> gpui::SharedString {
-    format!("as of {}", age_text(as_of, now)).into()
+    age_text(as_of, now).into()
 }
 
 /// Unix seconds now. Best-effort: zero when the clock is unavailable.
@@ -289,7 +358,8 @@ mod tests {
         match &rows[2].state {
             UsageRowState::Windows(windows, as_of) => {
                 assert_eq!(windows.len(), 1);
-                assert_eq!(as_of.as_deref(), Some("as of just now"));
+                // The age only: the library renders the "as of" prefix.
+                assert_eq!(as_of.as_deref(), Some("just now"));
             }
             other => panic!("expected windows, got {other:?}"),
         }
@@ -332,26 +402,126 @@ mod tests {
         assert_eq!(unavailable_text(&unverified_rows[0]), "Installed · sign-in not verified");
     }
 
+    fn subscription(plan: &str, current_pct: Option<u32>, weekly_pct: Option<u32>) -> Tier {
+        Tier::Subscription {
+            plan: plan.into(),
+            current_pct,
+            weekly_pct,
+            resets: vec!["Resets at 2:57 AM".into(), "Resets Oct 5 at 5:30 AM".into()],
+            usage_unavailable: false,
+        }
+    }
+
+    fn muse_rows(tier: Option<Tier>, now: i64) -> Vec<UsageRowData> {
+        let muse = status(ProviderId::Muse);
+        usage_rows(&[muse], Some(MuseFeed { tier }), now)
+    }
+
     #[test]
     fn muse_row_reads_tier_without_a_binary() {
         // No `muse` binary: Not installed. The app is signed in, so the
-        // tier's weekly fraction still rows a Weekly bar.
+        // tier card's own windows still row Current and Weekly bars.
         let mut muse = status(ProviderId::Muse);
         muse.installed = Installed::No;
         muse.auth = Auth::Unknown;
-        let feed = MuseFeed { plan: Some("High Usage".into()), weekly_fraction: Some(0.02) };
-        let rows = usage_rows(&[muse], Some(feed), 1700000000);
+        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, AuiProvider::Muse);
-        assert_eq!(rows[0].plan.as_deref(), Some("High Usage"));
+        assert_eq!(rows[0].plan.as_deref(), Some("Power Usage"));
+        match &rows[0].state {
+            UsageRowState::Windows(windows, as_of) => {
+                assert_eq!(windows.len(), 2);
+                assert_eq!(windows[0].label.to_string(), "Current");
+                assert!((windows[0].used_fraction - 0.0).abs() < f32::EPSILON);
+                assert_eq!(windows[0].resets_at_text.to_string(), "at 2:57 AM");
+                assert_eq!(windows[1].label.to_string(), "Weekly");
+                assert!((windows[1].used_fraction - 0.03).abs() < f32::EPSILON);
+                assert_eq!(windows[1].resets_at_text.to_string(), "Oct 5 at 5:30 AM");
+                // The age only: the library renders the "as of" prefix, so
+                // this string must never start with it.
+                if let Some(as_of) = as_of {
+                    assert!(!as_of.starts_with("as of"), "doubled prefix: {as_of}");
+                }
+            }
+            other => panic!("expected the tier's Current and Weekly bars, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn muse_row_covers_every_tier_variant() {
+        // A plan with no numbers yet keeps the plan beside the no-reading
+        // reason; `usage_unavailable` names itself; pay-as-you-go names
+        // the billing; no probe answer yet reads Checking.
+        let bare = &muse_rows(Some(subscription("Muse Code Power Usage", None, None)), 1700000000)[0];
+        assert_eq!(bare.plan.as_deref(), Some("Power Usage"));
+        assert!(unavailable_text(bare).contains("first Muse turn"), "got {}", unavailable_text(bare));
+
+        let mut dark = subscription("Muse Code Power Usage", None, None);
+        let Tier::Subscription { usage_unavailable, .. } = &mut dark else { unreachable!() };
+        *usage_unavailable = true;
+        let dark = &muse_rows(Some(dark), 1700000000)[0];
+        assert_eq!(dark.plan.as_deref(), Some("Power Usage"));
+        assert_eq!(unavailable_text(dark), "Usage currently unavailable");
+
+        let payg = &muse_rows(Some(Tier::PayAsYouGo), 1700000000)[0];
+        assert_eq!(unavailable_text(payg), "Pay-as-you-go — turns bill API usage");
+
+        let checking = &muse_rows(None, 1700000000)[0];
+        assert_eq!(unavailable_text(checking), "Checking…");
+    }
+
+    #[test]
+    fn muse_row_prefers_a_live_reading_over_the_tier() {
+        // A live snapshot with an unexpired window wins even when the tier
+        // probe already answered.
+        let mut muse = status(ProviderId::Muse);
+        muse.usage = Some(UsageSnapshot {
+            provider: "muse".into(),
+            plan: None,
+            windows: vec![SnapshotWindow {
+                label: "Session".into(),
+                used_fraction: 0.5,
+                resets_at: Some(1700003600),
+            }],
+            as_of: 1700000000,
+        });
+        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
+        assert_eq!(rows.len(), 1);
         match &rows[0].state {
             UsageRowState::Windows(windows, _) => {
                 assert_eq!(windows.len(), 1);
-                assert_eq!(windows[0].label.to_string(), "Weekly");
-                assert!((windows[0].used_fraction - 0.02).abs() < f32::EPSILON);
+                assert_eq!(windows[0].label.to_string(), "Session");
             }
-            other => panic!("expected the tier's Weekly bar, got {other:?}"),
+            other => panic!("expected the live reading's bar, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plans_fall_back_to_the_status_account_facts() {
+        // No snapshot plan: Claude Code reads its auth fact with the
+        // provider prefix dropped; Codex the same when its snapshot is
+        // plan-less (its "prolite" snapshot keeps showing as before).
+        let mut claude = status(ProviderId::ClaudeCode);
+        claude.auth = Auth::SignedIn { email: None, plan: Some("Claude Max".into()), method: None };
+        let rows = usage_rows(&[claude], None, 1700000000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].plan.as_deref(), Some("Max"));
+        assert!(unavailable_text(&rows[0]).contains("Claude Code turn"));
+
+        let mut codex = status(ProviderId::Codex);
+        codex.auth = Auth::SignedIn { email: None, plan: Some("prolite".into()), method: None };
+        codex.usage = Some(UsageSnapshot {
+            provider: "codex".into(),
+            plan: None,
+            windows: vec![SnapshotWindow {
+                label: "Weekly".into(),
+                used_fraction: 0.1,
+                resets_at: Some(1700003600),
+            }],
+            as_of: 1700000000,
+        });
+        let rows = usage_rows(&[codex], None, 1700000000);
+        assert_eq!(rows[0].plan.as_deref(), Some("prolite"));
     }
 
     #[test]
