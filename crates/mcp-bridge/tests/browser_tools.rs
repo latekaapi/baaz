@@ -229,7 +229,7 @@ fn the_screenshot_answer_renders_as_an_mcp_image_block() {
 
 #[test]
 fn a_gone_socket_answers_unavailable_for_browser_tools() {
-    use mcp_bridge::terminal::UNAVAILABLE;
+    use mcp_bridge::terminal::BROWSER_UNAVAILABLE;
     let missing = socket_path();
     assert!(UnixStream::connect(&missing).is_err(), "nothing serves this path");
     let registry = registry_for(&missing, "s1");
@@ -252,6 +252,6 @@ fn a_gone_socket_answers_unavailable_for_browser_tools() {
             .pointer("/content/0/text")
             .and_then(Value::as_str)
             .expect("one text block");
-        assert_eq!(text, UNAVAILABLE, "{name} answers unavailable, not a crash");
+        assert_eq!(text, BROWSER_UNAVAILABLE, "{name} answers the browser is unavailable, not a crash");
     }
 }

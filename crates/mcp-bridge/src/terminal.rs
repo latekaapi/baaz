@@ -20,6 +20,16 @@ use crate::{ToolOutcome, ToolRegistry};
 /// What every tool reports when the socket is gone.
 pub const UNAVAILABLE: &str = "Baaz isn't running; the terminal is unavailable";
 
+/// What a `browser_*` tool reports when the socket is gone: the same answer,
+/// naming the browser — seen live, a browser tool told the model "the
+/// terminal is unavailable" and it apologised for the wrong thing.
+pub const BROWSER_UNAVAILABLE: &str = "Baaz isn't running; the browser is unavailable";
+
+/// The unavailable answer for `tool`.
+pub fn unavailable_for(tool: &str) -> &'static str {
+    if tool.starts_with("browser_") { BROWSER_UNAVAILABLE } else { UNAVAILABLE }
+}
+
 /// The `instructions` string: steering per D50, shared with the tool
 /// descriptions below.
 pub const INSTRUCTIONS: &str = "Baaz's terminal tools drive the person's visible terminal: \
@@ -148,7 +158,7 @@ pub fn forward_call(
 ) -> Result<ToolOutcome, String> {
     let stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
-        Err(_) => return Ok(ToolOutcome::text(UNAVAILABLE)),
+        Err(_) => return Ok(ToolOutcome::text(unavailable_for(tool))),
     };
     let request = serde_json::to_string(&json!({
         "id": 1,
@@ -160,18 +170,18 @@ pub fn forward_call(
     if stream.set_write_timeout(Some(Duration::from_secs(30))).is_err()
         || stream.set_read_timeout(Some(Duration::from_millis(660_000))).is_err()
     {
-        return Ok(ToolOutcome::text(UNAVAILABLE));
+        return Ok(ToolOutcome::text(unavailable_for(tool)));
     }
     let mut stream = stream;
     if stream.write_all(request.as_bytes()).is_err()
         || stream.write_all(b"\n").is_err()
         || stream.flush().is_err()
     {
-        return Ok(ToolOutcome::text(UNAVAILABLE));
+        return Ok(ToolOutcome::text(unavailable_for(tool)));
     }
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() || line.trim().is_empty() {
-        return Ok(ToolOutcome::text(UNAVAILABLE));
+        return Ok(ToolOutcome::text(unavailable_for(tool)));
     }
     let reply: Value = serde_json::from_str(&line).map_err(|e| format!("bad terminal reply: {e}"))?;
     if reply.get("ok") == Some(&Value::Bool(true)) {
