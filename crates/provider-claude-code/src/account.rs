@@ -130,7 +130,13 @@ impl AccountSnapshot {
         let info = self.latest.as_ref()?;
         let mut windows = Vec::new();
         let named_minutes = window_minutes(&info.rate_limit_type);
+        // The named window only covers its unified twin when it actually
+        // carded: a live `allowed` event names `five_hour` but carries no
+        // top-level utilization, and skipping the unified five-hour window
+        // then would drop the 5h reading altogether.
+        let mut covered = None;
         if let Some(used) = info.utilization {
+            covered = named_minutes;
             windows.push(provider::UsageWindow {
                 label: named_minutes
                     .map(provider::window_label)
@@ -141,7 +147,7 @@ impl AccountSnapshot {
             });
         }
         for (window, minutes) in [(&info.five_hour, 300u64), (&info.seven_day, 10080u64)] {
-            if Some(minutes) == named_minutes {
+            if Some(minutes) == covered {
                 continue;
             }
             let Some(window) = window else { continue };
@@ -236,6 +242,24 @@ mod tests {
         assert_eq!(report.windows[1].label, "Session · 5h");
         assert!((report.windows[1].used_fraction - 0.9).abs() < f64::EPSILON);
         assert_eq!(report.windows[1].resets_at, Some(1790187000));
+    }
+
+    #[test]
+    fn a_named_window_without_a_top_level_number_still_cards_both_windows() {
+        // The shape the live CLI sends on an `allowed` reading (captured
+        // 2026-09-29): the named window is `five_hour`, there is no
+        // top-level `utilization`, and both numbers ride `unifiedWindows`.
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790647800,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.12,"resetsAt":1790647800},"seven_day":{"utilization":0.41,"resetsAt":1790989200}}}}"#;
+        let Frame::RateLimit(info) = decode_line(line).expect("decodes") else {
+            panic!("expected a rate-limit frame");
+        };
+        let mut snapshot = AccountSnapshot::default();
+        snapshot.observe(info);
+        let report = snapshot.usage_report().expect("a reading was seen");
+        let minutes: Vec<_> = report.windows.iter().map(|window| window.window_minutes).collect();
+        assert_eq!(minutes, [Some(300), Some(10080)], "both the 5h and the weekly window card");
+        assert!((report.windows[0].used_fraction - 0.12).abs() < 1e-9);
+        assert!((report.windows[1].used_fraction - 0.41).abs() < 1e-9);
     }
 
     #[test]
