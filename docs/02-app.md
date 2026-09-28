@@ -293,7 +293,13 @@ default off). The Settings dialog owns the switches:
 the two auto switches below — `auto_title` ("Name sessions
 automatically") and `auto_summary` ("Summarise sessions in the sidebar"),
 both default ON — and later sections add arms in
-`Harness::settings_sections` (`crate::settings`). `--steps
+`Harness::settings_sections` (`crate::settings`). Its Shortcuts section
+(`--steps settings:shortcuts`) lists every live keymap binding under a
+heading per category — the label as the row, the context as detail
+off-global, reserved rows read-only with their reason — and edits write
+through `keymap::set_binding`/`clear_binding`, reloading the live bindings
+at once; a refused keystroke hangs its reason on the row and keeps the old
+binding. `--steps
 group-chevron|group-bar|group-branch|auto-title|auto-summary` flips them
 without opening the dialog.
 Activating a session from outside the sidebar reveals it: the least scroll
