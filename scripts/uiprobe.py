@@ -120,6 +120,15 @@ ENTRIES = {
                                       "--steps", "skills:import-preview"]},
     "skills-new":           {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:new"]},
+    # The Skills page with the terminal dock open (Y3a): the dock steals
+    # centre height, which once pushed the dock itself below the fold (a
+    # full-height page root) and centred the scroll box up into the header
+    # (a cross-centred body row). `project:.` adopts the checkout the probe
+    # runs from so the dock has a root; `terminal-dock:` opens the
+    # deterministic FakePty tab. Offline. No baseline yet — generate on
+    # main after merge, never to silence a finding.
+    "skills-dock":          {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "project:.;skills:page;terminal-dock:terminal"]},
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
