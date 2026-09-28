@@ -123,7 +123,7 @@ provider session underneath. What changes is what the user sees:
 - **Chain.** Sessions linked by `handoff_to` / `handoff_from` form a chain;
   the **head** is the one with no `handoff_to`. The chain is the unit the
   user sees. The sidebar shows **only the head**, under the chain's original
-  title, and its turn count is the chain's total. Selecting any member id
+  title, and its turn count is the chain's visible total (§8.4). Selecting any member id
   (search result, back/forward, `--session`, a link) opens the head.
 - **Transcript.** The head's view renders, in order: every earlier member's
   turns (read-only), then a `Block::Marker { kind: MarkerKind::HandOff { from,
@@ -202,7 +202,8 @@ provider session underneath. What changes is what the user sees:
   both stores): a session with a `handoff_to` link whose destination is
   known in either store or the rows is not listed. The head row keeps its
   own `updated`, provider badge and flags, reads the tail member's title
-  unless the head was user-renamed, and counts the chain's summed turns.
+  unless the head was user-renamed, and counts the chain's summed visible
+  turns (§8.4).
   Mixed chains work — the links are read from whichever store holds them.
   A dangling `handoff_to` keeps the source listed; a head with no row yet
   waits for the next build; a link cycle lists, never hangs.
@@ -230,3 +231,40 @@ provider session underneath. What changes is what the user sees:
   plus `gpui::test`s through the real `Harness`). It does NOT prove what
   the sidebar draws, the selection highlight, any animation, or the live
   swap in the window — those remain unverified here.
+
+### 8.4 As built (X3d, chain-aware search, conditional collapse, honest counts)
+
+- **Search reads a chain as one hit.** `search_session_rows`
+  (`crates/baaz/src/app/find.rs`) groups the indexed sessions by chain
+  head and emits one `SessionRow` per chain: the head id, the chain's
+  display title (the collapsed sidebar row's label when the list has
+  one, else the head's own index label), and the head's own
+  label/title/first prompt — with every other member's label, title,
+  first prompt and transcript text appended to the body. A query
+  matching only an early member's turns returns the head. Provider-lane
+  members carry no index entry, so they contribute their ack title and
+  first prompt. Opening still redirects to the head; that path is
+  untouched.
+- **Collapse runs only on links.** `sidebar::needs_collapse` is true
+  when the touched id carries a handoff link in either direction or is
+  the endpoint of another session's link. `rejoin_provider_row` (the
+  per-turn settle path) and the override-write `rejoin` collapse only
+  then; `merge_provider_rows` collapses only when a merged or removed
+  record is link-adjacent. Unlinked settles keep the O(1) row refresh.
+  Full list builds (`session/list` replies, fixtures) still collapse
+  unconditionally — they already pay the full scan.
+- **Counts match the transcript.** The transcript hides the pack
+  exchange (the pack's user turn plus its one-sentence acknowledgement)
+  while the stores count the acknowledgement as a settled turn, so every
+  member with a `handoff_from` link reads one turn high. Both row
+  constructors (`SessionEntry::join` for muse rows,
+  `SessionEntry::provider_row` for lane rows) subtract it via
+  `sidebar::visible_turns`, saturating at zero. The collapsed head row
+  is the plain sum of the already-honest member rows, and a lone
+  destination row reads the same rule wherever it is shown. E.g.
+  claude-code (1 turn) → codex (2 incl. pack) → muse (2 incl. pack)
+  shows 3 turns.
+- **What the gate proves, and does not.** `cargo test -p baaz` proves
+  the index rows, the decision function and the counts. It does NOT
+  prove what the palette or the sidebar draw — those remain unverified
+  here.
