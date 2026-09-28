@@ -4075,9 +4075,9 @@ mod tests {
     fn live_action_for(cx: &mut gpui::App, keystroke: &str, context: &str) -> Option<String> {
         let map = cx.key_bindings();
         let borrowed = map.borrow();
-        borrowed
+        let action = borrowed
             .bindings()
-            .filter(|binding| {
+            .rfind(|binding| {
                 let id = binding
                     .keystrokes()
                     .iter()
@@ -4097,8 +4097,8 @@ mod tests {
                 let binding_context = binding.predicate().map(|predicate| predicate.to_string());
                 id == keystroke && binding_context.as_deref() == Some(context)
             })
-            .last()
-            .map(|binding| binding.action().name().rsplit("::").next().unwrap_or("").to_string())
+            .map(|binding| binding.action().name().rsplit("::").next().unwrap_or("").to_string());
+        action
     }
 
     /// Point `BAAZ_STATE_DIR` at a fresh temp dir for a Shortcuts handler
