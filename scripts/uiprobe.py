@@ -52,6 +52,12 @@ ENTRIES = {
                                       "--steps", "right-width:400;right:git"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
+    # The Files pane previewing a small file: the same preview a tree
+    # click opens (header plus the file's own bytes), reached through the
+    # click's own `files-select:` verb. No baseline yet — generate on main
+    # after merge, never to silence a finding.
+    "right-file-preview":   {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:files;files-select:uiprobe.json"]},
     "right-closed":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files;right:off"]},
     # The ⌘K palette, open. It had no coverage at all, which is why a list
