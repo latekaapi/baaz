@@ -186,6 +186,10 @@ pub struct Folds {
     /// The destination marker's back-link to the source session. `None`
     /// renders the marker without its link.
     pub handoff_back: Option<HandoffBack>,
+    /// The session's workspace root, for shortening file-card paths
+    /// through [`display_path`]. Display only: the blocks keep their full
+    /// targets, so clicks, reveals and run-in-terminal are unchanged.
+    pub workspace_root: String,
 }
 
 /// What a handoff card needs to talk back: "Open the new session" opens
@@ -403,15 +407,56 @@ pub fn display_diff(diff: &Diff, cap: usize) -> Diff {
     }
 }
 
+/// Z6b: a file-card path for display. Inside the session's workspace
+/// root it reads relative to the root (`crates/baaz/src/app.rs`); outside
+/// it stays absolute but abbreviates `$HOME` to `~`. A sibling directory
+/// sharing a string prefix (`/a/harness-int` vs root `/a/harness`) is
+/// outside: the check is component-wise, through [`std::path::Path`].
+/// Anything else — relative targets, patterns, blank — passes through
+/// untouched. Display only: clicks and reveals keep the full path.
+pub fn display_path(path: &str, workspace_root: &str, home: &str) -> String {
+    let candidate = std::path::Path::new(path);
+    if candidate.is_absolute() {
+        let root = std::path::Path::new(workspace_root);
+        if let Ok(relative) = candidate.strip_prefix(root) {
+            if !relative.as_os_str().is_empty() {
+                return relative.to_string_lossy().into_owned();
+            }
+            // The root itself: there is no relative remainder to show.
+            return path.to_owned();
+        }
+        if !home.is_empty() {
+            // `Path::strip_prefix` consumes the separator, so the
+            // remainder is already relative (`other/file.rs`).
+            if let Ok(rest) = candidate.strip_prefix(home) {
+                if rest.as_os_str().is_empty() {
+                    return "~".to_owned();
+                }
+                return format!("~/{}", rest.to_string_lossy());
+            }
+        }
+    }
+    path.to_owned()
+}
+
+/// The process `$HOME`, or empty when unset — the [`display_path`]
+/// abbreviation then simply never fires.
+fn home_dir() -> String {
+    std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 /// X2: the header target a shell card shows: the command's first line
 /// only, capped at [`COMMAND_TARGET_CHARS`] characters with `…`. A shell
 /// heredoc otherwise makes the whole script the card's title. The block
-/// keeps the full command — run-in-terminal still runs it whole — and
-/// non-shell cards show their target untouched. Covers every lane: Codex,
-/// Claude Code and muse shell cards all render through `tool_call_card`.
-pub fn display_target(call: &ToolCall) -> String {
+/// keeps the full command — run-in-terminal still runs it whole. Z6b: a
+/// non-shell card's target is a file path, shown through [`display_path`]
+/// against the session workspace — the block keeps the full target, so
+/// reveals and the terminal tab lookup still see the whole path. Covers
+/// every lane: Codex, Claude Code and muse shell cards all render through
+/// `tool_call_card`.
+pub fn display_target(call: &ToolCall, workspace_root: &str, home: &str) -> String {
     if !matches!(call.kind, ToolKind::Shell) {
-        return call.target.clone();
+        return display_path(&call.target, workspace_root, home);
     }
     let first = call.target.lines().next().unwrap_or("").trim_end().to_owned();
     if first.chars().count() > COMMAND_TARGET_CHARS {
@@ -1212,8 +1257,34 @@ fn activity_card(
 /// the group, and the open group renders every call as the full card the lone
 /// `Block::ToolCall` would have shown — same toggles, same full-output
 /// fetches, keyed stably per call.
+/// Z6b: a grouped block's display copy: every call's header target — and
+/// an Edit body diff's path — shortened through [`display_path`]. The
+/// fold's own block is untouched: group intents carry the call index, so
+/// reveals resolve the full target from the stored call.
+fn display_group_block(block: &Block, workspace_root: &str, home: &str) -> Block {
+    let Block::ToolGroup { calls, summary, state } = block else {
+        return block.clone();
+    };
+    let calls = calls
+        .iter()
+        .map(|call| {
+            let mut call = call.clone();
+            if !matches!(call.kind, ToolKind::Shell) {
+                call.target = display_path(&call.target, workspace_root, home);
+            }
+            if let ToolBody::Edit { diff } = &mut call.body {
+                diff.path = display_path(&diff.path, workspace_root, home);
+            }
+            call
+        })
+        .collect();
+    Block::ToolGroup { calls, summary: summary.clone(), state: *state }
+}
+
 fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> AnyElement {
-    let Some(data) = ToolGroupData::from_block(block) else {
+    let home = home_dir();
+    let shown = display_group_block(block, &folds.workspace_root, &home);
+    let Some(data) = ToolGroupData::from_block(&shown) else {
         return generic_item_card(id, "tool", "done", String::new()).into_any_element();
     };
     let mut group = tool_group(id, &data, folds.open(key, false));
@@ -1451,7 +1522,8 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     // existing diff row the library already draws), so no new role/label
     // is owed; the card toggle keeps its own.
     if let ToolBody::Edit { diff } = &body {
-        let cut = display_diff(diff, DIFF_DISPLAY_CAP);
+        let mut cut = display_diff(diff, DIFF_DISPLAY_CAP);
+        cut.path = display_path(&cut.path, &folds.workspace_root, &home_dir());
         body = ToolBody::Edit { diff: cut };
     }
     // A fetched full output replaces the truncated visible text on the
@@ -1506,8 +1578,16 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
     // X2: big Write/Edit cards start closed (the toggle still persists
     // through `folds`), and a shell header names only the command's first
     // line — the block keeps the full target, so run-in-terminal and the
-    // tab lookup below still see the whole command.
-    let mut card = tool_card(id, call.verb.clone(), display_target(call), call.status, body)
+    // tab lookup below still see the whole command. Z6b: a file header
+    // names the workspace-relative path; the open/reveal below still see
+    // the whole target.
+    let mut card = tool_card(
+        id,
+        call.verb.clone(),
+        display_target(call, &folds.workspace_root, &home_dir()),
+        call.status,
+        body,
+    )
         .duration_ms(call.duration_ms)
         .open(folds.open(key, default_open(call)));
     if !actions.is_empty() {
@@ -1992,7 +2072,7 @@ mod tests {
     fn a_heredoc_header_is_its_first_line_only() {
         let command = "cat > /tmp/x.html <<'EOF'\n<html>\n<body>\nEOF";
         assert_eq!(
-            display_target(&shell_call("Ran", command)),
+            display_target(&shell_call("Ran", command), "/ws", "/home/u"),
             "cat > /tmp/x.html <<'EOF'"
         );
     }
@@ -2001,18 +2081,60 @@ mod tests {
     #[test]
     fn long_commands_cap_with_an_ellipsis() {
         let command = "x".repeat(200);
-        let shown = display_target(&shell_call("Ran", &command));
+        let shown = display_target(&shell_call("Ran", &command), "/ws", "/home/u");
         assert_eq!(shown.chars().count(), COMMAND_TARGET_CHARS + 1);
         assert!(shown.ends_with('…'));
     }
 
-    /// X2: a short single-line command shows whole, and non-shell targets
-    /// are never touched.
+    /// X2: a short single-line command shows whole, and relative
+    /// non-shell targets are never touched.
     #[test]
     fn short_commands_and_non_shell_targets_show_whole() {
-        assert_eq!(display_target(&shell_call("Ran", "npm test")), "npm test");
+        assert_eq!(display_target(&shell_call("Ran", "npm test"), "/ws", "/home/u"), "npm test");
         let write = write_call(5);
-        assert_eq!(display_target(&write), "index.html");
+        assert_eq!(display_target(&write, "/ws", "/home/u"), "index.html");
+    }
+
+    /// Z6b: an absolute path inside the workspace reads relative to it.
+    #[test]
+    fn inside_the_workspace_reads_relative() {
+        assert_eq!(
+            display_path("/ws/crates/baaz/src/app.rs", "/ws", "/home/u"),
+            "crates/baaz/src/app.rs"
+        );
+    }
+
+    /// Z6b: an absolute path outside the workspace stays absolute, with
+    /// `$HOME` abbreviated to `~`.
+    #[test]
+    fn outside_the_workspace_stays_absolute_with_home_abbreviated() {
+        assert_eq!(display_path("/home/u/other/file.rs", "/ws", "/home/u"), "~/other/file.rs");
+        assert_eq!(display_path("/etc/passwd", "/ws", "/home/u"), "/etc/passwd");
+        assert_eq!(display_path("/home/u", "/ws", "/home/u"), "~");
+    }
+
+    /// Z6b: the workspace root itself has no relative remainder, and a
+    /// sibling directory sharing a string prefix is outside.
+    #[test]
+    fn the_root_itself_and_a_shared_prefix_sibling_stay_absolute() {
+        assert_eq!(display_path("/a/harness", "/a/harness", "/home/u"), "/a/harness");
+        assert_eq!(
+            display_path("/a/harness-int/x.rs", "/a/harness", "/home/u"),
+            "/a/harness-int/x.rs"
+        );
+    }
+
+    /// Z6b: file cards show the shortened path while the block keeps the
+    /// full target for reveals.
+    #[test]
+    fn file_card_headers_shorten_but_keep_the_full_target() {
+        let mut read = shell_call("Read", "/ws/src/main.rs");
+        read.kind = ToolKind::Read;
+        assert_eq!(display_target(&read, "/ws", "/home/u"), "src/main.rs");
+        assert_eq!(read.target, "/ws/src/main.rs");
+        let mut read = shell_call("Read", "/home/u/notes/todo.md");
+        read.kind = ToolKind::Read;
+        assert_eq!(display_target(&read, "/ws", "/home/u"), "~/notes/todo.md");
     }
 
     /// D49: a shell tool card carries the card's command text — Muse's
@@ -2212,6 +2334,7 @@ mod tests {
             open_skill: None,
             handoff: None,
             handoff_back: None,
+            workspace_root: "/ws".to_owned(),
         }
     }
 
