@@ -599,6 +599,19 @@ impl Service {
         // A re-probe never re-enables: the switch is the person's, not
         // the probe's.
         status.enabled = enabled;
+        self.install_probed(status);
+    }
+
+    /// Install a fresh probe result. A probe that read no usage keeps the
+    /// reading already held (restored from the cache at boot, or recorded
+    /// from a live turn): a Claude Code status probe never reads usage, so
+    /// replacing wholesale wiped the saved reading at every launch and
+    /// wrote the wipe back to disk.
+    fn install_probed(&mut self, mut status: ProviderStatus) {
+        let id = status.provider;
+        if status.usage.is_none() {
+            status.usage = self.statuses.get(&id).and_then(|old| old.usage.clone());
+        }
         self.statuses.insert(id, status);
         self.last_probe.insert(id, Instant::now());
         self.save_cache();
@@ -633,10 +646,7 @@ impl Service {
         }
         for handle in handles {
             let status = handle.join().expect("a probe thread panicked");
-            let id = status.provider;
-            self.statuses.insert(id, status);
-            self.last_probe.insert(id, Instant::now());
-            self.save_cache();
+            self.install_probed(status);
         }
     }
 
@@ -1077,7 +1087,7 @@ fn seed_live(statuses: &HashMap<ProviderId, ProviderStatus>) {
 /// Every provider's status as the live service last knew it, in registry
 /// order: what boot seeded and the probes and lane refreshes have updated
 /// since. The Settings → Providers page renders all of them; the account
-/// menu renders one usage card per Connected entry.
+/// menu renders one usage row per enabled provider.
 pub fn live_statuses() -> Vec<ProviderStatus> {
     let live = live_service();
     ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
@@ -1099,7 +1109,9 @@ pub fn note_usage_refresh() -> bool {
 }
 
 /// Store lane and Muse readings the account menu just refreshed: one
-/// snapshot per provider, in the single store the cards render from.
+/// snapshot per provider, in the single store the rows render from. The
+/// store is written to the cache, so a Claude Code reading survives
+/// restarts: boot reloads it and the row shows its age.
 pub fn record_refreshed_usage(
     lanes: &[(ProviderId, provider::UsageReport)],
     muse: Option<(Option<String>, Option<f64>)>,
@@ -1111,6 +1123,7 @@ pub fn record_refreshed_usage(
     if let Some((plan, used_fraction)) = muse {
         live.service.record_muse_usage(plan, used_fraction, None);
     }
+    live.service.save_cache();
 }
 
 /// Remember the existing muse connection's account state: the Muse auth
@@ -1452,6 +1465,36 @@ mod tests {
     }
 
     #[test]
+    fn a_reprobe_keeps_the_saved_usage_reading() {
+        // Review finding: boot restores the cache, then probes; the Claude
+        // Code probe reads no usage and used to replace the status whole,
+        // wiping the saved reading on every launch.
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::ClaudeCode, ok_version("2.1.276"));
+        let mut service = scripted_service(
+            versions,
+            RunOutcome::Output {
+                code: Some(0),
+                stdout: r#"{"loggedIn":true,"authMethod":"oauth","email":"a@x.com","subscriptionType":"max"}"#.into(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+            Err("unreachable".into()),
+        );
+        let saved = UsageSnapshot {
+            provider: "claude-code".into(),
+            plan: Some("Max".into()),
+            windows: Vec::new(),
+            as_of: 1_700_000_000,
+        };
+        service.statuses.entry(ProviderId::ClaudeCode).or_insert_with(|| ProviderStatus::checking(ProviderId::ClaudeCode)).usage =
+            Some(saved.clone());
+        service.probe_one(ProviderId::ClaudeCode);
+        assert_eq!(service.status(ProviderId::ClaudeCode).usage, Some(saved));
+    }
+
+    #[test]
     fn claude_max_and_pro_labels_come_from_subscription_type() {
         let _env = sandbox();
         let mut versions = HashMap::new();
@@ -1662,6 +1705,45 @@ mod tests {
         assert_eq!(muse.plan.as_deref(), Some("High Usage"));
         assert_eq!(muse.windows.len(), 1);
         assert_eq!(muse.windows[0].label, "Weekly");
+    }
+
+    #[test]
+    fn refreshed_claude_reading_persists_and_restores_from_cache() {
+        // A `rate_limit_event` recording reaches the cache file with its
+        // `as_of`: the next launch overlays it and the row shows its age.
+        let env = sandbox();
+        let before = now_secs();
+        record_refreshed_usage(
+            &[(
+                ProviderId::ClaudeCode,
+                provider::UsageReport {
+                    plan: None,
+                    windows: vec![provider::UsageWindow {
+                        label: "Weekly".into(),
+                        used_fraction: 0.42,
+                        resets_at: None,
+                        window_minutes: Some(10080),
+                    }],
+                },
+            )],
+            None,
+        );
+        let after = now_secs();
+        assert!(env.state_dir().join("provider-status.json").is_file());
+        let cached: Vec<ProviderStatus> = read_cache();
+        let claude =
+            cached.iter().find(|status| status.provider == ProviderId::ClaudeCode).expect("cached");
+        let usage = claude.usage.as_ref().expect("the reading was persisted");
+        assert!((before..=after).contains(&usage.as_of), "the reading carries its landing time");
+        assert_eq!(usage.windows.len(), 1);
+        assert!((usage.windows[0].used_fraction - 0.42).abs() < 1e-9);
+        // What boot does: a fresh service overlays the cache before any
+        // probe, so the row renders from the persisted reading.
+        let mut reread = Service::with_probes(Probes::never());
+        reread.load_cache();
+        let restored = reread.status(ProviderId::ClaudeCode).usage.expect("restored");
+        assert_eq!(restored.as_of, usage.as_of);
+        assert_eq!(restored.windows.len(), 1);
     }
 
     #[test]
