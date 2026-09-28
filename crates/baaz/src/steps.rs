@@ -342,8 +342,12 @@ impl Harness {
             self.toggle_right(cx);
             return;
         }
-        // `off` closes it; a kind OPENS it, idempotently, and NEITHER
-        // persists.
+        // `off` closes it; a kind OPENS it, idempotently, and neither
+        // writes `layout.json`. With a session active the pane state IS
+        // saved to that session (per-session pane, Z2) — which is still
+        // idempotent, since the verb sets a state rather than toggling one.
+        // A capture entry that opens a session first therefore persists
+        // into its own throwaway `BAAZ_STATE_DIR`, never across entries.
         //
         // A capture aid must not write `layout.json`. These verbs did, and
         // the entries quietly contaminated each other: running `right-git`
