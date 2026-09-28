@@ -499,9 +499,11 @@ gate.
 does: `claude --help` lists it as a standalone boolean flag ("Only use
 MCP servers from --mcp-config, ignoring all other MCP configurations"),
 so a relay-less session carries bare `--strict-mcp-config` — no empty
-`--mcp-config` beside it — and sees no servers at all. (Whether the CLI
-accepts bare strict was read off `--help`, never probed with a turn:
-no turn was sent for this task.) Settings → Providers gains a "Use my
+`--mcp-config` beside it — and sees no servers at all. Probed live afterwards
+without a turn (only the `mcp_status` control request, claude 2.1.276):
+bare `--strict-mcp-config` → `"mcpServers":[]`; the same launch without
+it → the owner's claude.ai connectors (Claude Docs, HeyGen, Google
+Drive, …). Settings → Providers gains a "Use my
 own MCP servers" switch under each of the Claude Code and Codex cards
 (`Layout.use_own_mcp`, both default off); on, the launch keeps its
 bridge config but drops strict, so the session sees the owner's

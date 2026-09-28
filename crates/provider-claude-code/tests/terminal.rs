@@ -83,7 +83,7 @@ fn open_resume_and_fork_all_carry_the_bridge() {
 }
 
 #[test]
-fn without_a_relay_the_argv_is_what_it_always_was() {
+fn without_a_relay_there_is_no_config_but_still_strict() {
     let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
     for argv in [
         adapter.launch_for_open("req-1", None, None).expect("open").argv,
@@ -94,9 +94,12 @@ fn without_a_relay_the_argv_is_what_it_always_was() {
             !argv.iter().any(|arg| arg == "--mcp-config"),
             "no relay means no config flag: {argv:?}"
         );
+        // Z5: strict rides every launch, bridge or not — bare strict loads
+        // zero servers (probed live 2026-09-28 via `mcp_status`: `[]` with
+        // it, the owner's claude.ai connectors without it).
         assert!(
-            !argv.iter().any(|arg| arg == "--strict-mcp-config"),
-            "no relay means no strict flag either: {argv:?}"
+            argv.iter().any(|arg| arg == "--strict-mcp-config"),
+            "strict must ride even without a relay: {argv:?}"
         );
     }
 }
