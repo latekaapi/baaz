@@ -2103,9 +2103,9 @@ impl Harness {
     /// make it the visible session. What `new_session_in` calls when the
     /// switcher's pick is not muse.
     ///
-    /// A failure surfaces the same error dialog a failed `session/start`
-    /// gets, titled with the provider's name — and opens nothing, never a
-    /// silent muse fallback.
+    /// A failure lands the inline open-failure state (see
+    /// [`Self::fail_provider_open`]) — and opens nothing, never a silent
+    /// muse fallback. A failed provider SWITCH still dialogs (Y2b).
     /// Refresh the account menu's usage cards from what the app already
     /// knows: a peek at every open provider lane plus Muse's tier — no
     /// probe, no spend, no blocking (a busy lane simply keeps its last
@@ -2185,6 +2185,10 @@ impl Harness {
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
         );
+        // What Retry re-runs when this fresh open fails: cloned up front,
+        // because `work` below moves the originals into the background.
+        let retry_new =
+            ProviderOpenRetry::OpenNew { project: project.clone(), workspace: workspace.clone() };
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2236,20 +2240,7 @@ impl Harness {
                 // No switch is coming: release the session verbs waiting on
                 // it, like the failed `session/start` arm does.
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
-                this.session_switch_pending = false;
-                this.abort_replacing(cx);
-                this.fail_pending_handoff(error.to_string(), cx);
-                this.set_dialog(
-                    cx,
-                    Dialog {
-                        title: format!("Couldn't start {}", provider_id.label()),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Dismiss",
-                        action: DialogAction::Dismiss,
-                        archive_target: None,
-                    },
-                );
+                this.fail_provider_open(provider_id, error.to_string(), retry_new, None, window, cx);
             }
         });
     }
@@ -2314,20 +2305,11 @@ impl Harness {
                     return;
                 }
                 crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
-                self.session_switch_pending = false;
-                self.abort_replacing(cx);
-                self.fail_pending_handoff(reason.clone(), cx);
-                self.set_dialog(
-                    cx,
-                    Dialog {
-                        title: format!("Couldn't start {}", provider_id.label()),
-                        detail: reason,
-                        kind: DialogKind::Error,
-                        primary: "Dismiss",
-                        action: DialogAction::Dismiss,
-                        archive_target: None,
-                    },
-                );
+                let retry = ProviderOpenRetry::OpenNew {
+                    project: project.clone(),
+                    workspace: workspace.clone(),
+                };
+                self.fail_provider_open(provider_id, reason, retry, None, window, cx);
             }
         }
     }
@@ -2599,15 +2581,77 @@ impl Harness {
         changed | collapsed
     }
 
+    /// A provider open failed (Z4). With no switch to restore, the window
+    /// lands on the failed open itself: the outgoing view parks exactly
+    /// like a normal switch away (not closed, not lost), the selection
+    /// names the failed session, and the centre shows the inline failure
+    /// instead of a modal dialog over another session's transcript. Retry
+    /// re-runs the open through the normal activation path.
+    ///
+    /// A provider SWITCH that fails keeps its old contract: the old view
+    /// is restored with its chip and the reason dialogs (Y2b).
+    fn fail_provider_open(
+        &mut self,
+        provider: ProviderId,
+        reason: String,
+        retry: ProviderOpenRetry,
+        session_id: Option<String>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replacing.is_some() {
+            self.session_switch_pending = false;
+            self.abort_replacing(cx);
+            self.fail_pending_handoff(reason.clone(), cx);
+            self.set_dialog(
+                cx,
+                Dialog {
+                    title: format!("Couldn't start {}", provider.label()),
+                    detail: reason,
+                    kind: DialogKind::Error,
+                    primary: "Dismiss",
+                    action: DialogAction::Dismiss,
+                    archive_target: None,
+                },
+            );
+            return;
+        }
+        self.fail_pending_handoff(reason.clone(), cx);
+        self.park_active(cx);
+        self.subscriptions.clear();
+        self.session_switch_pending = false;
+        if let Some(id) = session_id.clone() {
+            self.pending_id = Some(id.clone());
+            self.restore_right_for_session(&id, cx);
+        }
+        self.provider_open_error =
+            Some(ProviderOpenError { session_id, provider, error: reason, retry });
+        cx.notify();
+    }
+
+    /// Retry on the inline failure state re-runs the failed open. A
+    /// success lands through the normal activation path (including the
+    /// per-session right-pane restore `activate` performs); a failure
+    /// replaces the standing error.
+    pub(crate) fn retry_provider_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(failure) = self.provider_open_error.clone() else { return };
+        match failure.retry {
+            ProviderOpenRetry::Reopen(record) => self.reopen_provider(*record, window, cx),
+            ProviderOpenRetry::OpenNew { project, workspace } => {
+                self.open_on_provider(failure.provider, project, workspace, window, cx)
+            }
+        }
+    }
+
     /// Reopen a stored provider session after a restart: connect a fresh
     /// child through the factory and `ResumeSession` it there, then land
     /// it like any lane open. The adapter replays the transcript's deltas
     /// (Claude Code its `~/.claude` jsonl, Codex its thread), which the
     /// lane folds into the view — except a record with no settled turns,
     /// which holds no history anywhere: it opens fresh and the stale
-    /// record leaves with it. A refusal dialogs with the reason and
-    /// opens nothing — never a silent muse fallback, never a fresh empty
-    /// session under the old id.
+    /// record leaves with it. A refusal lands inline on the clicked
+    /// session (see [`Self::fail_provider_open`]) — never a silent muse
+    /// fallback, never a fresh empty session under the old id.
     pub(crate) fn reopen_provider(
         &mut self,
         record: crate::provider_sessions::ProviderSessionRecord,
@@ -2709,19 +2753,9 @@ impl Harness {
                         return;
                     }
                     crate::baaz_log!("scripted provider resume failed ({}): {reason}", provider_id.label());
-                    self.session_switch_pending = false;
-                    self.abort_replacing(cx);
-                    self.set_dialog(
-                        cx,
-                        Dialog {
-                            title: format!("Couldn't start {}", provider_id.label()),
-                            detail: reason,
-                            kind: DialogKind::Error,
-                            primary: "Dismiss",
-                            action: DialogAction::Dismiss,
-                            archive_target: None,
-                        },
-                    );
+                    let session_id = record.session_id.clone();
+                    let retry = ProviderOpenRetry::Reopen(Box::new(record.clone()));
+                    self.fail_provider_open(provider_id, reason, retry, Some(session_id), window, cx);
                 }
             }
             return;
@@ -2736,6 +2770,10 @@ impl Harness {
             std::path::PathBuf::from(workspace.clone()),
             record.provider.as_str(),
         );
+        // What Retry re-runs when this reopen fails: cloned up front,
+        // because `work` below borrows the record into the background.
+        let retry_reopen = ProviderOpenRetry::Reopen(Box::new(record.clone()));
+        let retry_id = record.session_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2770,18 +2808,13 @@ impl Harness {
                     return;
                 }
                 crate::baaz_log!("provider resume failed ({}): {error}", provider_id.label());
-                this.session_switch_pending = false;
-                this.abort_replacing(cx);
-                this.set_dialog(
+                this.fail_provider_open(
+                    provider_id,
+                    error.to_string(),
+                    retry_reopen,
+                    Some(retry_id),
+                    window,
                     cx,
-                    Dialog {
-                        title: format!("Couldn't reopen {}", provider_id.label()),
-                        detail: error.to_string(),
-                        kind: DialogKind::Error,
-                        primary: "Dismiss",
-                        action: DialogAction::Dismiss,
-                        archive_target: None,
-                    },
                 );
             }
         });
@@ -2796,6 +2829,15 @@ impl Harness {
     pub(crate) fn delete_provider_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
             self.active = None;
+        }
+        // A deleted session takes its inline open failure with it (Z4), so
+        // Retry cannot resurrect what was just forgotten.
+        if self
+            .provider_open_error
+            .as_ref()
+            .is_some_and(|failure| failure.session_id.as_deref() == Some(session_id))
+        {
+            self.provider_open_error = None;
         }
         self.session_cache.retain(|(id, _)| id != session_id);
         self.sessions.retain(|entry| entry.id != session_id);
@@ -3177,6 +3219,9 @@ impl Harness {
         // Whatever switch the scripts were waiting for has landed: session
         // verbs run against this view from here on.
         self.session_switch_pending = false;
+        // A landed session stands any inline open failure down (Z4): the
+        // real view replaces the failure state through this same path.
+        self.provider_open_error = None;
         // Opening a session leaves the Skills page (D54, V1): "New session"
         // from the sidebar or ⌘N activates through here on every path
         // (draft reuse, local draft, provider lane), so the page never
@@ -5087,9 +5132,232 @@ mod tests {
             let harness = baaz.read(cx);
             assert!(harness.active.is_none(), "a failed connect opens no view");
             assert!(!harness.session_switch_pending, "the verbs waiting on the switch are released");
-            let dialog = harness.overlays.read(cx).dialog.as_ref().expect("the failure is dialogued");
-            assert_eq!(dialog.title, "Couldn't start Claude Code");
-            assert!(dialog.detail.contains("no child here"), "the reason survives: {}", dialog.detail);
+            assert!(
+                harness.overlays.read(cx).dialog.is_none(),
+                "no failure dialog: a fresh open fails inline instead"
+            );
+            let failure = harness.provider_open_error.clone().expect("the inline failure stands");
+            assert!(failure.session_id.is_none(), "a fresh open never earned an id");
+            assert_eq!(failure.provider, ProviderId::ClaudeCode);
+            assert!(failure.error.contains("no child here"), "the reason survives: {}", failure.error);
+        });
+        lane_restore(state);
+    }
+
+    /// Seed a stored Codex session with history, as a restart would leave
+    /// it: the record plus its sidebar row.
+    fn z4_seed_stored_codex(harness: &mut Harness, cx: &mut Context<Harness>) {
+        use std::collections::HashMap;
+        harness.provider_sessions.insert(
+            "s-codex-old".into(),
+            crate::provider_sessions::ProviderSessionRecord {
+                provider: "codex".into(),
+                session_id: "s-codex-old".into(),
+                workspace: None,
+                project: None,
+                created_ms: 1_700_000_000_000,
+                updated_ms: 1_700_000_000_000,
+                turns: 2,
+                title: Some("Inquiry About Current Model".into()),
+                first_prompt: Some("which model is this".into()),
+                handoff_to: None,
+                handoff_from: None,
+                handoff_from_provider: None,
+                handoff_title: None,
+                display_texts: HashMap::new(),
+            },
+        );
+        harness.merge_provider_rows();
+        // The failed session's own right pane stands open: the failure
+        // lands on it, like every activation lands on its session's.
+        harness.set_override(
+            "s-codex-old",
+            |meta| {
+                meta.right = Some(crate::sessions::RightState {
+                    open: true,
+                    ..Default::default()
+                })
+            },
+            cx,
+        );
+    }
+
+    /// Z4: clicking a stored provider session whose child cannot start
+    /// lands on the clicked session — selected, headered, failed inline —
+    /// never on the previous session's transcript behind a dialog. Before
+    /// the fix the click left the old view active (header and composer
+    /// naming the clicked session over its transcript) and dialogued the
+    /// reason.
+    #[gpui::test]
+    fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("z4-reopen");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = y2b2_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+                // A tier that banners every session view it touches — the
+                // failure state must show none of it.
+                harness.tier = Some(crate::tier::Tier::Unavailable("no plan word".into()));
+            });
+        });
+        let first = y2b2_open(vc, &baaz, ProviderId::Codex);
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // Codex cannot start now.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = failing_factory("no child here");
+            });
+        });
+        // The click on the stored session.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert_eq!(
+                    harness.pending_id.as_deref(),
+                    Some("s-codex-old"),
+                    "the click's target stays selected"
+                );
+                assert!(
+                    harness.active.is_none(),
+                    "no session view is shown — and no view's Muse tier banner with it"
+                );
+                assert!(
+                    harness.tier_banner().is_some(),
+                    "the tier would banner any view shown, so its absence is the failure state's"
+                );
+                let parked: Vec<String> =
+                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                assert_eq!(
+                    parked,
+                    vec![first.clone()],
+                    "the previous session parks exactly like a switch away"
+                );
+                assert!(
+                    harness.overlays.read(cx).dialog.is_none(),
+                    "no modal dialog for a failed reopen"
+                );
+                let failure = harness.provider_open_error.clone().expect("the inline failure stands");
+                assert_eq!(failure.session_id.as_deref(), Some("s-codex-old"));
+                assert_eq!(failure.provider, ProviderId::Codex);
+                assert!(
+                    failure.error.contains("no child here"),
+                    "the failure carries the error text: {}",
+                    failure.error
+                );
+                assert!(!harness.session_switch_pending, "the verbs waiting on the switch are released");
+                // The header names the clicked session, like the selected
+                // row does.
+                let head = harness.chain_head("s-codex-old");
+                let header = harness.collapsed_head_label(&head, cx).expect("the clicked session has a label");
+                let row = harness
+                    .visible_sessions(cx)
+                    .iter()
+                    .find(|entry| entry.id == head)
+                    .expect("the clicked row is listed")
+                    .label
+                    .clone();
+                assert_eq!(header, row, "header title == selected row title");
+                assert!(harness.layout.right_open, "the failure lands on the failed session's pane");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Z4: Retry on the inline failure re-runs the reopen — a factory that
+    /// answers now replaces the failure with the real session view through
+    /// the normal activation path.
+    #[gpui::test]
+    fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("z4-retry");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = y2b2_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        let first = y2b2_open(vc, &baaz, ProviderId::Codex);
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = failing_factory("no child here");
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(
+                baaz.read(cx).provider_open_error.is_some(),
+                "the setup ends on the inline failure"
+            );
+        });
+        // Codex answers again: Retry re-runs the reopen.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let (factory, _) = recording_resumable_factory();
+                harness.provider_factory = factory;
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.retry_provider_open(window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the retried lane is open");
+                assert!(view.read(cx).is_provider_lane(), "the retry reopens a lane, not a muse view");
+                assert_eq!(view.read(cx).session_id, "s-codex-old", "the clicked session itself");
+                assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+                assert!(
+                    harness.provider_open_error.is_none(),
+                    "the real view replaces the failure state"
+                );
+                assert!(harness.overlays.read(cx).dialog.is_none(), "still no dialog");
+                assert_eq!(harness.pending_id.as_deref(), Some("s-codex-old"));
+                assert!(!harness.session_switch_pending, "the switch landed");
+                let parked: Vec<String> =
+                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                assert_eq!(
+                    parked,
+                    vec![first.clone()],
+                    "the previous session is still parked, never closed or lost"
+                );
+                let texts: Vec<String> = view
+                    .read(cx)
+                    .session()
+                    .map(|session| {
+                        session
+                            .turns
+                            .iter()
+                            .flat_map(|turn| turn.blocks())
+                            .filter_map(|block| match block {
+                                aui_protocol::Block::Text { text, .. } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    texts.iter().any(|text| text.contains("The header is restored")),
+                    "the view shows the replayed transcript, drew {texts:?}"
+                );
+            });
         });
         lane_restore(state);
     }
