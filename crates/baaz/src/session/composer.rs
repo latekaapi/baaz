@@ -851,6 +851,32 @@ impl SessionView {
         self.images.iter().any(|image| image.pending)
     }
 
+    /// Z7a: attach already-held screenshot bytes (a browser page capture) as
+    /// an image chip. The existing image path owns the decode off the frame;
+    /// this is its entry point for bytes that never touched the filesystem.
+    pub(crate) fn attach_screenshot(&mut self, name: String, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.attach_bytes(&name, bytes, cx);
+    }
+
+    /// Z7a: append a text block (browser annotations) to the draft without
+    /// clobbering what is already typed. An empty draft takes the block as
+    /// is; otherwise a blank line separates the two.
+    pub(crate) fn append_draft_block(
+        &mut self,
+        block: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.draft_text(cx);
+        let next = if current.trim().is_empty() {
+            block
+        } else {
+            format!("{}\n\n{block}", current.trim_end())
+        };
+        self.set_draft(next, window, cx);
+        self.on_draft_changed(cx);
+    }
+
     /// Open the system picker for a file. Image extensions attach as images;
     /// everything else is extracted to text, so the prompt accepts any file.
     pub fn prompt_for_image(&mut self, cx: &mut Context<Self>) {

@@ -642,6 +642,10 @@ pub struct Harness {
     /// the shell's `resizing` bypass. User toggles never set it, so they
     /// keep animating exactly as today.
     pub(crate) right_snap: bool,
+    /// The browser pane's engines (Z7a): one live `WebviewState` per session
+    /// plus the no-session/home one, created lazily, hidden on switch, never
+    /// destroyed. The boot flag picks WKWebView vs the scripted page.
+    pub(crate) browser: crate::browser::BrowserRegistry,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1056,6 +1060,11 @@ impl Harness {
                 .map(|id| id.as_str().to_owned())
                 .unwrap_or_else(|| args.provider.clone())
         };
+        // Z7a, read once at boot: captures (`--screenshot`) and tests run the
+        // scripted browser page — a native view never appears in a gpui
+        // screenshot, and captures must be deterministic — while the app runs
+        // WKWebView. Never sniffed in render.
+        let browser_fake = args.screenshot.is_some();
         let mut this = Self {
             new_provider,
             args,
@@ -1097,6 +1106,7 @@ impl Harness {
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
             right_cache: crate::right::RightCache::default(),
+            browser: crate::browser::BrowserRegistry::new(browser_fake),
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -2021,12 +2031,20 @@ impl Harness {
             }
             None => (None, None, Vec::new()),
         };
+        // Z7a: the session's last browser URL rides along untouched — the
+        // navigation sync owns it, and a pane toggle must never clear it.
+        let browser_url = self
+            .overrides
+            .get(&session_id)
+            .and_then(|meta| meta.right.clone())
+            .and_then(|right| right.browser_url);
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
             kind: layout::right_kind(&self.layout),
             files_preview,
             files_selected,
             files_expanded,
+            browser_url,
         };
         self.set_override(&session_id, |meta| meta.right = Some(state), cx);
     }
@@ -2932,10 +2950,14 @@ impl Harness {
                     // down again.
                     .on_drag_move(cx.listener(
                         |this: &mut Self, _: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
+                            // Z7a: an external drag covers the browser pane —
+                            // the native view hides while it lasts.
+                            this.browser.drop_cover = true;
                             this.with_session(cx, |view, cx| view.note_drag_over(cx));
                         },
                     ))
                     .on_drop(cx.listener(|this: &mut Self, paths: &ExternalPaths, _, cx| {
+                        this.browser.drop_cover = false;
                         this.with_session(cx, |view, cx| view.drop_external(paths, cx));
                     }))
                     .into_any_element()
@@ -3595,7 +3617,11 @@ impl Render for Harness {
             // key/invalidation to avoid going stale — while the subtree
             // rebuild itself is cheap once the reads are gone.
             let right_project = self.right_project();
-            let right = right::render(kind, &self.right_cache, right_project, cx);
+            // Z7a: the Browser kind draws the active session's live webview
+            // (created lazily here, where the window is at hand), every other
+            // kind draws from the read cache as before.
+            let browser = self.ensure_browser(window, cx);
+            let right = right::render(kind, &self.right_cache, right_project, Some(&browser), cx);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -3734,6 +3760,18 @@ impl Render for Harness {
         let view_options = self.render_view_menu(cx);
         let account = self.render_account_menu(cx);
         let project_menu = self.render_project_menu(cx);
+        // Z7a, the native-overlay rule: persist real navigations, resolve
+        // pending screenshot attaches, and hide every native webview this
+        // frame covers (the page is composited above gpui, so gpui cannot
+        // draw over it — the host takes the view out instead).
+        self.sync_browser(
+            overflow.is_some(),
+            view_options.is_some(),
+            account.is_some(),
+            project_menu.is_some(),
+            window,
+            cx,
+        );
         // The palette takes the keyboard the frame it opens, so the arrows and
         // the return reach it rather than the composer under it. The search
         // palette is the exception: its query field owns the keyboard, and the
@@ -4411,6 +4449,7 @@ mod tests {
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
+                browser_url: None,
             })
         );
         let baaz2 = vc.update(|window, cx| {
@@ -4470,7 +4509,7 @@ mod tests {
             for _ in 0..2 {
                 vc.update(|_, cx| {
                     baaz.update(cx, |harness, cx| {
-                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), cx);
+                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), None, cx);
                     });
                 });
             }

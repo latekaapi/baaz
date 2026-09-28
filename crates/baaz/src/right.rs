@@ -24,15 +24,15 @@ use std::time::{Duration, Instant};
 use aui::data::button;
 use aui::transcript::code_block;
 use aui::workbench::{
-    browser_nav, diff_review, doc_pane, file_card, file_tree, git_changes, pr_form, ArtifactKind,
-    BrowserAction, DiffReviewAction, DiffScope, DiffView, DocBlock, DocPage, FileNode, FileTreeAction,
-    GitAction, PrAction, PrDescription, ReviewFile,
+    diff_review, doc_pane, file_card, file_tree, git_changes, pr_form, ArtifactKind, DiffReviewAction,
+    DiffScope, DiffView, DocBlock, DocPage, FileNode, FileTreeAction, GitAction, PrAction,
+    PrDescription, ReviewFile,
 };
 use aui_icons::FileType;
 use aui_protocol::{ChangeKind, Diff, DiffKind, DiffLine, FileChange, Hunk};
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, ElementId, ScrollHandle, SharedString, WeakEntity,
-    Window,
+    div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, ScrollHandle, SharedString,
+    WeakEntity, Window,
 };
 use gpui_kit::base::{h_flex, v_flex};
 
@@ -292,12 +292,21 @@ pub(crate) fn render(
     kind: RightKind,
     cache: &RightCache,
     project: Option<(PathBuf, String)>,
+    browser: Option<&Entity<aui_webview::WebviewState>>,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
     let notify = toast_sink(cx.weak_entity());
     let harness = cx.weak_entity();
     match kind {
-        RightKind::Browser => browser_pane(&notify),
+        RightKind::Browser => match browser {
+            Some(state) => browser_pane(state, cx),
+            None => loading_state(
+                "right-browser-loading",
+                "Browser",
+                "Opening the page",
+                "The webview is being attached.",
+            ),
+        },
         RightKind::Diff => match project {
             Some((root, _)) => match cache.git_for(&root) {
                 None => loading_state(
@@ -570,18 +579,6 @@ fn files_action_name(action: &FileTreeAction) -> String {
     }
 }
 
-fn browser_action_name(action: &BrowserAction) -> String {
-    match action {
-        BrowserAction::Back => "Back".to_string(),
-        BrowserAction::Forward => "Forward".to_string(),
-        BrowserAction::Reload => "Reload".to_string(),
-        BrowserAction::FocusUrl => "FocusUrl".to_string(),
-        BrowserAction::ToggleAnnotate => "ToggleAnnotate".to_string(),
-        BrowserAction::Screenshot => "Screenshot".to_string(),
-        BrowserAction::Console => "Console".to_string(),
-    }
-}
-
 fn git_action_name(action: &GitAction) -> String {
     match action {
         GitAction::Toggle(path) => format!("Toggle {path}"),
@@ -643,12 +640,6 @@ fn files_handler(
         FileTreeAction::Search => {
             inert("Files", &files_action_name(action), &notify, cx);
         }
-    }
-}
-
-fn browser_handler(notify: ToastSink) -> impl Fn(BrowserAction, &mut Window, &mut App) + 'static {
-    move |action, _window, cx| {
-        inert("Browser", &browser_action_name(&action), &notify, cx);
     }
 }
 
@@ -1510,31 +1501,29 @@ fn file_preview_pane(
         .into_any_element()
 }
 
-/// Chrome only: the nav row over a surface that says plainly that no web
-/// engine is attached yet.
-fn browser_pane(notify: &ToastSink) -> AnyElement {
-    let nav = browser_nav("right-browser-nav", "about:blank")
-        .secure(true)
-        .can_go_back(false)
-        .can_go_forward(false)
-        .on_action(browser_handler(notify.clone()));
+/// The browser pane (Z7a): the library's `webview_pane` for the active
+/// session's [`WebviewState`](aui_webview::WebviewState) — nav row, page and
+/// annotations panel — over role Group labelled "Browser". The nav controls
+/// come labelled from the library. Intents forward to the harness:
+/// screenshots and annotations land in the active session's composer draft,
+/// Console toasts.
+fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harness>) -> AnyElement {
+    let harness = cx.weak_entity();
+    let pane = aui_webview::webview_pane("right-browser", state).on_intent(
+        move |intent, window, cx| {
+            if let Some(harness) = harness.upgrade() {
+                harness.update(cx, |harness, cx| {
+                    harness.handle_browser_intent(intent, window, cx);
+                });
+            }
+        },
+    );
     v_flex()
         .id("right-browser-pane")
         .role(gpui::Role::Group)
         .aria_label("Browser")
         .size_full()
-        .child(nav)
-        .child(
-            div()
-                .id("right-browser-placeholder")
-                .role(gpui::Role::Label)
-                .aria_label("Browser placeholder")
-                .p(px(16.0))
-                .child(
-                    "There is no web engine attached yet, so this pane cannot show a page. \
-                     The address bar above is chrome only and does nothing for now.",
-                ),
-        )
+        .child(pane)
         .into_any_element()
 }
 
@@ -2109,34 +2098,23 @@ mod tests {
         restore_harness_dir(state);
     }
 
+    /// Z7a: the Browser pane's nav actions belong to the webview now, not to
+    /// [`inert`] — Back/Forward/Reload/Screenshot/Console/annotate reach the
+    /// session's [`WebviewState`](aui_webview::WebviewState) through the
+    /// library's `webview_pane`. What this pins is the data contract the pane
+    /// renders: navigating the state moves the URL the nav row shows, and the
+    /// scripted backend (what tests and captures run on) is never native.
     #[gpui::test]
-    fn browser_actions_all_reach_inert(cx: &mut TestAppContext) {
-        let _serial = inert_guard();
+    fn browser_pane_state_drives_the_nav_row(cx: &mut TestAppContext) {
         let vc = cx.add_empty_window();
-        clear_inert_log();
-        let toasts = Rc::new(std::cell::RefCell::new(Vec::new()));
-        vc.update(|window, cx| {
-            let handle = browser_handler(test_sink(toasts.clone()));
-            for action in [
-                BrowserAction::Back,
-                BrowserAction::Forward,
-                BrowserAction::Reload,
-                BrowserAction::FocusUrl,
-                BrowserAction::ToggleAnnotate,
-                BrowserAction::Screenshot,
-                BrowserAction::Console,
-            ] {
-                handle(action, window, cx);
-            }
+        vc.update(|_, cx| {
+            let state = cx.new(|cx| {
+                aui_webview::WebviewState::new(Box::new(aui_webview::FakeWebBackend::new()), cx)
+            });
+            assert!(!state.read(cx).is_native(), "the scripted page is gpui, never a native overlay");
+            state.update(cx, |state, _| state.navigate("https://example.com"));
+            assert_eq!(state.read(cx).url().as_ref(), "https://example.com");
         });
-        let log = inert_log();
-        assert_eq!(log.len(), 7);
-        for line in &log {
-            assert!(line.contains("Browser"), "unexpected: {line}");
-        }
-        assert!(log.iter().any(|line| line.contains("Back")));
-        assert!(log.iter().any(|line| line.contains("Screenshot")));
-        assert_eq!(toasts.borrow().len(), 7);
     }
 
     #[gpui::test]

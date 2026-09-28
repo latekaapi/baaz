@@ -48,6 +48,11 @@ pub struct RightState {
     /// The directory ids standing open in the Files tree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files_expanded: Vec<String>,
+    /// The Browser pane's last URL for this session (Z7a): written on real
+    /// navigations, read when the session's webview is first created. `None`
+    /// is "never navigated": a fresh webview opens on `about:blank`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_url: Option<String>,
 }
 
 /// Baaz's own facts about one session.
@@ -291,6 +296,7 @@ mod tests {
                 files_preview: Some("Cargo.toml".into()),
                 files_selected: Some("Cargo.toml".into()),
                 files_expanded: vec!["src".into()],
+                browser_url: Some("https://example.com".into()),
             }),
             ..SessionMeta::default()
         };
@@ -302,6 +308,7 @@ mod tests {
         assert!(text.contains("\"filesPreview\":\"Cargo.toml\""));
         assert!(text.contains("\"filesSelected\":\"Cargo.toml\""));
         assert!(text.contains("\"filesExpanded\":[\"src\"]"));
+        assert!(text.contains("\"browserUrl\":\"https://example.com\""));
         let back: SessionMeta = serde_json::from_str(&text).unwrap();
         assert_eq!(back, meta);
         // Old files without the pane still read, showing the pane closed.

@@ -41,6 +41,7 @@ mod attachments;
 mod auth;
 mod bench;
 mod billing;
+mod browser;
 mod byline;
 mod clock;
 mod connect;
