@@ -861,6 +861,12 @@ pub struct SessionView {
     /// This session was retired by a handoff: the destination provider and
     /// session id. The composer refuses sends and names the new session.
     handed_off_to: Option<(ProviderId, String)>,
+    /// A provider switch is replacing this view (Y2b): sends are refused
+    /// while the replacement opens, keeping the old view drawable.
+    input_locked: bool,
+    /// The switch's pick, for the composer chip while this view is still
+    /// drawn: the lane itself never changes, only the displayed mark.
+    switching_to: Option<ProviderId>,
     /// This session started as a handoff's destination: where it came from.
     /// Drawn as the quiet marker at the top of the transcript.
     handoff_origin: Option<crate::handoff::HandoffOrigin>,
@@ -1070,6 +1076,8 @@ impl SessionView {
             ticker: None,
             handoff_card: None,
             handed_off_to: None,
+            input_locked: false,
+            switching_to: None,
             handoff_origin: None,
             handoff_prefix: Rc::new(Vec::new()),
             handoff_divider: None,
@@ -1769,6 +1777,28 @@ impl SessionView {
     /// Move the keyboard to the composer.
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    /// Lock the composer while a provider switch replaces this view (Y2b).
+    pub(crate) fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.input_locked = locked;
+        cx.notify();
+    }
+
+    /// Whether sends are refused while the replacement opens.
+    pub(crate) fn is_input_locked(&self) -> bool {
+        self.input_locked
+    }
+
+    /// Show the switch's pick on the chip while this view is still drawn.
+    pub(crate) fn set_switching_to(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
+        self.switching_to = provider;
+        cx.notify();
+    }
+
+    /// The provider mark the composer chip draws (Y2b display override).
+    pub(crate) fn display_provider(&self) -> ProviderId {
+        self.switching_to.unwrap_or_else(|| self.provider_kind())
     }
 }
 

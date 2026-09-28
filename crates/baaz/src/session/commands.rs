@@ -16,6 +16,12 @@ impl SessionView {
     /// transcript shows, and it stays the person's words even when plan mode
     /// prefixes the model-visible input.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_input_locked() {
+            self.banner = Some("Switching provider — sends resume when the new session opens.".to_owned());
+            self.banner_action = None;
+            cx.notify();
+            return;
+        }
         let text = self.composer.read(cx).value().to_string();
         if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
             return;
