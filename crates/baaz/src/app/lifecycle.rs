@@ -2058,6 +2058,10 @@ impl Harness {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
+            // `model: None` on purpose: the chip's display seed (env,
+            // `claude` settings, the last reported model) never reaches
+            // the child — no `--model` flag without a pick — so the CLI
+            // resolves its own default exactly as before.
             let ack = provider.send(provider::Command::OpenSession {
                 request_id,
                 workspace: Some(workspace_bg),
@@ -3090,7 +3094,15 @@ impl Harness {
             // the lane's `turn/completed`.
             SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
                 let (session_id, turn_id, meta) = (session_id.clone(), turn_id.clone(), meta.clone());
-                let provider = view.read(cx).provider_kind().as_str().to_owned();
+                let provider_kind = view.read(cx).provider_kind();
+                let provider = provider_kind.as_str().to_owned();
+                // A Claude Code report seeds the next fresh session's
+                // chip: display-only (the argv never sees it — see
+                // `claude_code_seed_model`), persisted beside the other
+                // stores with their hermeticity rule.
+                if provider_kind == ProviderId::ClaudeCode && !meta.model.is_empty() {
+                    crate::providers::write_claude_code_last_reported_model(&meta.model);
+                }
                 let cursor =
                     view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
                 let row = crate::provider_sessions::ledger_row(

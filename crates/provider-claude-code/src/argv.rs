@@ -230,6 +230,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_chip_seed_never_reaches_the_argv() {
+        // X4: the chip's display seed (env, `claude` settings, the last
+        // reported model) is view-only. A session the person never picked
+        // a model for opens with no `--model` flag on every launch shape,
+        // letting the CLI resolve its own default exactly as before; only
+        // an explicit pick adds the flag.
+        for argv in [
+            argv_for_open("req-1", Some("/work"), None, None, None).argv,
+            argv_for_resume("sess-9", None, None, None).argv,
+            argv_for_fork("branch-2", "sess-9", None, None, None).argv,
+        ] {
+            assert!(
+                !argv.iter().any(|arg| arg == "--model"),
+                "no model flag without a pick: {argv:?}"
+            );
+        }
+        let picked = argv_for_open("req-1", Some("/work"), Some("opus"), None, None);
+        let position = picked.argv.iter().position(|arg| arg == "--model").expect("--model");
+        assert_eq!(picked.argv.get(position + 1).map(String::as_str), Some("opus"));
+        assert_eq!(picked.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
     fn open_chooses_the_session_id() {
         let launch = argv_for_open("req-1", Some("/work"), Some("haiku"), None, None);
         assert!(launch.argv.contains(&"--session-id".to_owned()));

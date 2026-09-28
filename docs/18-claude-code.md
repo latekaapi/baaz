@@ -312,6 +312,18 @@ which is honest ignorance and is still attempted.
 Three `Unverified` and one `Unavailable` is the honest reading today. Raising
 any of them requires a new fixture, not an argument.
 
+**X4 note — the chip's pre-first-turn seed (Baaz view behaviour, not CLI
+evidence).** A new session's chip names, in order: the session's own
+stored pick, `ANTHROPIC_MODEL`, `model` in `~/.claude/settings.json`
+overridden by `<workspace>/.claude/settings.json` then
+`<workspace>/.claude/settings.local.json` (the CLI's precedence), the
+last model an init/result frame reported on this machine (persisted by
+Baaz in its state dir, honouring `BAAZ_STATE_DIR` and the
+`BAAZ_DETERMINISTIC=1` hermeticity rule), then `sonnet`. The seed is
+display-only: without a pick the child still spawns with no `--model`
+flag, so the CLI resolves its own default exactly as before, and the
+first init frame updates the chip as it always did.
+
 ## 7. Version handling — a floor, reusing S2.2
 
 `crates/provider-muse/src/caps.rs` already has the mechanism:
