@@ -1597,9 +1597,9 @@ impl Harness {
     /// out — the login screen is never the app's first screen, but it
     /// stays reachable here). The environment lane names itself:
     /// `META_API_KEY` survives a sign-out, so the row says where the
-    /// credential really comes from (D28). The panel seats above the
-    /// footer with its left edge on the footer's left edge, at the
-    /// sidebar's own width, so it never flips over the transcript.
+    /// credential really comes from (D28). The panel seats 6 px above the
+    /// footer and 8 px inside the window's left edge ([`account_menu_seat`]),
+    /// at the sidebar's own width, so it never flips over the transcript.
     pub(crate) fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
@@ -1645,14 +1645,7 @@ impl Harness {
             }
         });
         let now = crate::account_usage::now_secs();
-        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed {
-            plan: muse_plan_label(self.tier.as_ref()),
-            weekly_fraction: self
-                .tier
-                .as_ref()
-                .and_then(|tier| tier.weekly_fraction())
-                .map(|fraction| fraction as f64),
-        });
+        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed { tier: self.tier.clone() });
         let rows =
             crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), muse_feed, now);
         let (header_name, header_detail) = account_menu_header(&self.auth, self.tier.as_ref());
@@ -1670,9 +1663,31 @@ impl Harness {
                 .absolute()
                 .inset_0()
                 .child(catcher)
-                .child(anchored_menu(trigger, MenuSide::Above, MenuAlign::Start, menu))
+                .child(anchored_menu(account_menu_seat(trigger), MenuSide::Above, MenuAlign::Start, menu))
                 .into_any_element(),
         )
+    }
+}
+
+/// The account menu's left inset from the window edge, in pixels: the
+/// panel never touches the edge it used to sit flush against.
+const ACCOUNT_MENU_EDGE_INSET: f32 = 8.0;
+/// The account menu's bottom clearance above the footer row, in pixels.
+const ACCOUNT_MENU_ABOVE_FOOTER: f32 = 6.0;
+
+/// The account menu's seat from the footer row's bounds: 8 px inside the
+/// window's left edge and 6 px above the footer row. The anchored menu
+/// hangs its own gap below whatever seat it is given, so the seat is
+/// raised back by exactly that gap — the panel's bottom edge lands 6 px
+/// above the footer, and its width still never exceeds the sidebar minus
+/// 16 px ([`account_menu_width`]).
+pub(crate) fn account_menu_seat(trigger: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: gpui::point(
+            trigger.origin.x + px(ACCOUNT_MENU_EDGE_INSET),
+            trigger.origin.y - px(ACCOUNT_MENU_ABOVE_FOOTER) + px(scale::SP_2),
+        ),
+        size: trigger.size,
     }
 }
 
@@ -2604,6 +2619,21 @@ mod tests {
         assert_eq!(account_menu_width(252.0), 236.0);
         assert_eq!(account_menu_width(200.0), 220.0);
         assert_eq!(account_menu_width(800.0), 260.0);
+    }
+
+    /// The panel sits 8 px inside the window's left edge and 6 px above
+    /// the footer row: the seat the anchored menu hangs its own gap below
+    /// is offset right by 8 and raised so the gap lands the panel's bottom
+    /// edge exactly 6 above the footer.
+    #[test]
+    fn account_menu_seats_off_the_edge_and_the_footer() {
+        let trigger = caption(0.0, 500.0, 252.0, 40.0);
+        let seat = account_menu_seat(trigger);
+        assert_eq!(seat.origin.x, px(8.0));
+        // The anchored menu subtracts its own gap below the seat, so the
+        // panel's bottom edge lands here.
+        assert_eq!(seat.origin.y - px(scale::SP_2), px(494.0));
+        assert_eq!(seat.size, trigger.size);
     }
 
     /// The activation mapping the panel replaced: Settings… is 0,
