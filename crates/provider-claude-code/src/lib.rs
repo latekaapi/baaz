@@ -610,6 +610,8 @@ impl ClaudeCodeAdapter {
             running.shutdown();
         }
         *self.child.lock().expect("child mutex") = None;
+        // Requests the old child never answered die with it (Y1b review).
+        self.hub.forget_pending();
         let launch = self.with_mcp_config(launch.clone())?;
         let running = RunningChild::spawn(&self.program, &launch, &self.hub).map_err(|error| {
             ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
@@ -1828,6 +1830,42 @@ mod tests {
         let cards = control_cards(&drain_events(&adapter));
         assert_eq!(cards.len(), 1, "one timeout banner: {cards:?}");
         assert!(cards[0].1.contains("no answer arrived within 10s"), "{:?}", cards[0].1);
+    }
+
+    /// A relaunch forgets the killed child's unanswered requests: their
+    /// timeout must never refuse against the new child's state.
+    #[test]
+    fn relaunch_forgets_requests_the_old_child_never_answered() {
+        use std::time::Duration;
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        assert_eq!(adapter.hub.pending.lock().expect("pending mutex").len(), 1, "set_model is tracked");
+        let launch = SessionLaunch {
+            argv: Vec::new(),
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: Some("opus".into()),
+            effort: None,
+        };
+        // The spawn fails (no such program); the old child's requests are
+        // forgotten before it is attempted.
+        let _ = adapter.relaunch(&launch);
+        assert!(adapter.hub.pending.lock().expect("pending mutex").is_empty(), "nothing stale survives");
+        for request in adapter.hub.pending.lock().expect("pending mutex").values_mut() {
+            request.sent_at -= CONTROL_CONFIRM_TIMEOUT + Duration::from_secs(1);
+        }
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        assert_eq!(adapter.model.lock().expect("model mutex").as_deref(), Some("opus"), "the new pick stands");
+        assert!(control_cards(&drain_events(&adapter)).is_empty(), "no stale banner");
     }
 
     /// An `apply_flag_settings` the child rejects falls back to the

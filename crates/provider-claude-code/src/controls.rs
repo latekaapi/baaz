@@ -143,6 +143,14 @@ impl ControlHub {
         self.pending.lock().expect("pending mutex").remove(request_id);
     }
 
+    /// Forget every tracked request: the child they were sent to is gone
+    /// (a relaunch killed it), so no answer can arrive, and a timeout firing
+    /// later would refuse against the NEW child's state — rolling back a
+    /// pick it legitimately holds and bannering a stale failure.
+    pub(crate) fn forget_pending(&self) {
+        self.pending.lock().expect("pending mutex").clear();
+    }
+
     /// Take a due effort relaunch, when a refusal recorded one. The take
     /// is the claim: at most one `SubmitInput` performs it.
     pub(crate) fn take_effort_relaunch(&self) -> Option<SessionLaunch> {
