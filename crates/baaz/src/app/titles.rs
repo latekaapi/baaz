@@ -44,10 +44,15 @@ impl Harness {
     /// minted, or the persisted `side_session` flag a restart reloaded —
     /// never the id shape: a side id is a bare uuid, exactly like a real
     /// session's, because muse 1.3.0 rejects any `session/start` id that is
-    /// not its own shape.
+    /// not its own shape. Beside it, the wire-alone mark the row joined
+    /// with: a side started by any other state dir — a scratch run, a relay
+    /// lane, a second install, a restored backup — carries no local record
+    /// here, so its prompt prefix or side workspace speaks instead. The
+    /// local override path keeps working exactly as before.
     pub(crate) fn is_side_session(&self, session_id: &str) -> bool {
         self.side_sessions.contains(session_id)
             || self.overrides.get(session_id).is_some_and(|meta| meta.side_session)
+            || self.sessions.iter().any(|entry| entry.id == session_id && entry.side_marker)
     }
 
     /// Remember a freshly minted side id before its `session/start` runs:
@@ -126,7 +131,10 @@ impl Harness {
         if !self.titles_pending.contains(&real_id) {
             return;
         }
-        let workspace = self.session_workspace(&real_id);
+        // The side workspace, never the real session's: the prompt already
+        // carries the user's message, so the side session needs no repo —
+        // and outside every adoption it can never match a project.
+        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
         let side_id = titles::side_session_id();
         // Recorded before the start runs, so a crash between the start and
         // the hide still hides by record after a restart.
@@ -469,7 +477,9 @@ impl Harness {
         if self.byline_jobs.values().any(|job| job.real_id == real_id) {
             return;
         }
-        let workspace = self.session_workspace(&real_id);
+        // Same side workspace as a title side session: the rewrite prompt
+        // already quotes both lines, so no repo is needed either.
+        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
         let side_id = titles::side_session_id();
         // Recorded before the start runs, like a title side session.
         self.remember_side_session(&side_id, cx);

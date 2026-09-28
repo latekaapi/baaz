@@ -10,14 +10,17 @@
 //!
 //! * [`should_title`] decides, on the first `turn/started`, whether this
 //!   session earns a generation. Exactly one per session, ever.
-//! * the app starts a side session (`session/start` in the same workspace,
-//!   `modelId` pinned, a bare-UUIDv7 client id recorded before the start),
-//!   sends ONE short prompt ([`title_prompt`]) for a 3–6 word title, and
+//! * the app starts a side session (`session/start` in the side workspace
+//!   under Baaz's own state dir — never a project — `modelId` pinned, a
+//!   bare-UUIDv7 client id recorded before the start), sends ONE short
+//!   prompt ([`title_prompt`]) for a 3–6 word title, and harvests
 //!   `turn/completed` with a free `session/read` ([`harvest_title_text`]).
 //! * the result lands in `sessions.json` as `generated_title`, ranked under
 //!   a user-given name in the label order; the server record is never
 //!   renamed. The side session is marked `hidden` the moment it starts, so
-//!   it never reaches the sidebar, the palette or the counts.
+//!   it never reaches the sidebar, the palette or the counts — and it stays
+//!   recognisable from the wire alone ([`looks_like_side_session`]), so a
+//!   side started by any other state dir hides with no local record.
 //! * failure is silent and cheap: a timeout ([`TITLE_TIMEOUT_SECS`]), a wire
 //!   error, or a missing model falls back to today's first-prompt label.
 //!   One log line, never a dialog, at most one retry per session.
@@ -91,6 +94,64 @@ pub fn should_land_late(meta: Option<&SessionMeta>) -> bool {
 /// tokens of instruction plus a short quote.
 pub const TITLE_PROMPT_CHARS: usize = 500;
 
+/// The first line of [`title_prompt`], kept as its own constant so the
+/// hide rule can recognise a side session from the wire alone: a listed
+/// session whose first user prompt starts with this prefix IS one of
+/// Baaz's throwaway title generations, whatever state dir started it and
+/// whether any local `side_session` record survives.
+pub const TITLE_PROMPT_PREFIX: &str =
+    "Suggest a short title, 3 to 6 words, for a chat session that started with this user message:";
+
+/// The directory side sessions start in: one folder under Baaz's own
+/// state dir, never a project. The prompt already carries the user's
+/// message, so the side session needs no repo — and starting it outside
+/// every adoption means it can never match one.
+pub const SIDE_WORKSPACE_DIR_NAME: &str = "side-sessions";
+
+/// The workspace a side session starts in: [`SIDE_WORKSPACE_DIR_NAME`]
+/// under this run's state dir, created on the way in (like the tier
+/// probe's own workspace). What the new start path puts on the wire as
+/// `workspace_root`, so the mark below can read it back.
+pub fn side_workspace_dir() -> std::path::PathBuf {
+    let dir = crate::store::support_dir().join(SIDE_WORKSPACE_DIR_NAME);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Whether `root` is a Baaz side-session workspace: this state dir's or
+/// the default install's (a scratch `BAAZ_STATE_DIR` run still has to
+/// recognise the real app's sides, and vice versa). Compared through the
+/// same canonicalisation project resolution uses, so symlinked tmp dirs
+/// match.
+pub fn is_side_workspace_root(root: &str) -> bool {
+    let root = crate::projects::canonical_str(root);
+    [crate::store::support_dir(), crate::store::default_support_dir()]
+        .iter()
+        .map(|dir| crate::projects::canonical_str(&dir.join(SIDE_WORKSPACE_DIR_NAME).to_string_lossy()))
+        .any(|side| side == root)
+}
+
+/// Whether `text` is one of Baaz's own side-session prompts — a title or
+/// a byline rewrite. Exact-prefix match, so truncation-safe: the wire's
+/// `first_user_prompt` is a preview and may cut the tail, never the head.
+pub fn is_side_prompt(text: &str) -> bool {
+    text.starts_with(TITLE_PROMPT_PREFIX) || text.starts_with(crate::byline::REWRITE_PROMPT_PREFIX)
+}
+
+/// Whether a listed session is one of Baaz's throwaway side sessions —
+/// from what muse itself returns, with no local record. Either the
+/// prompt prefix (every side session ever started, including ones from
+/// another state dir, a relay lane, a second install, or a restored
+/// backup) or the side workspace (new starts, even when the prompt is
+/// underivable). Ordinary sessions carry neither.
+pub fn looks_like_side_session(
+    first_user_prompt: Option<&str>,
+    workspace_root: Option<&str>,
+) -> bool {
+    first_user_prompt.is_some_and(is_side_prompt)
+        || workspace_root.is_some_and(is_side_workspace_root)
+}
+
 /// A fresh client id for one title side session: a bare UUIDv7 command id —
 /// exactly the shape the server mints itself when `sessionId` is omitted
 /// (and the shape `session/start` accepts: 36 characters, where the old
@@ -144,7 +205,7 @@ pub fn pick_title_model(models: &[muse_client::schema::ModelCatalogEntry]) -> Op
 pub fn title_prompt(first_message: &str) -> String {
     let quoted: String = first_message.chars().take(TITLE_PROMPT_CHARS).collect();
     format!(
-        "Suggest a short title, 3 to 6 words, for a chat session that started with this user message:\n\n{quoted}\n\nReply with only the title: no quotes, no trailing punctuation, no explanation."
+        "{TITLE_PROMPT_PREFIX}\n\n{quoted}\n\nReply with only the title: no quotes, no trailing punctuation, no explanation."
     )
 }
 
@@ -312,6 +373,32 @@ mod tests {
         assert_eq!(pick_title_model(&listed), Some(TITLE_MODEL_ID.to_owned()));
         assert_eq!(pick_title_model(&[model_row("muse-spark-1.2")]), None);
         assert_eq!(pick_title_model(&[]), None);
+    }
+
+    #[test]
+    fn side_prompts_are_recognisable_from_the_wire_alone() {
+        assert!(is_side_prompt(&title_prompt("Explain the layout")));
+        assert!(is_side_prompt(&crate::byline::rewrite_prompt("fix it", "patched it")));
+        assert!(title_prompt("x").starts_with(TITLE_PROMPT_PREFIX));
+        assert!(!is_side_prompt("Explain the layout"));
+        assert!(!is_side_prompt(""));
+        assert!(!is_side_prompt("Suggest a great title for this thread"));
+    }
+
+    #[test]
+    fn a_listed_side_session_is_recognisable_with_no_local_record() {
+        let prompt = title_prompt("Explain the layout");
+        assert!(looks_like_side_session(Some(&prompt), None));
+        let rewrite = crate::byline::rewrite_prompt("fix it", "patched it");
+        assert!(looks_like_side_session(Some(&rewrite), None));
+        // The new start path marks the row even when the prompt is underivable.
+        let root = side_workspace_dir().to_string_lossy().into_owned();
+        assert!(looks_like_side_session(None, Some(&root)));
+        // Ordinary sessions are unaffected.
+        assert!(!looks_like_side_session(Some("Explain the layout"), None));
+        assert!(!looks_like_side_session(None, None));
+        assert!(!looks_like_side_session(None, Some("/Users/someone/harness")));
+        assert!(!looks_like_side_session(Some("Explain the layout"), Some("/Users/someone/harness")));
     }
 
     #[test]

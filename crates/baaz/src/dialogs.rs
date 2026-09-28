@@ -1544,6 +1544,7 @@ mod tests {
                         provider: None,
                         named: true,
                         needs_title: false,
+                        side_marker: false,
                         title_pending: false,
                         last_ask: Some("the ask".into()),
                         local: false,
