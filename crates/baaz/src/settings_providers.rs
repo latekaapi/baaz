@@ -10,22 +10,25 @@
 //! [`provider_card`](aui::screens::provider_card) per provider) instead
 //! of the stock dialog. The rail row is the Settings row that opens it.
 //!
-//! Y5's connect screen is not on this branch, so there is no "Set up
-//! providers" row (spec: omit it then).
+//! The page ends in a "Set up providers…" row into the first-run
+//! connect screen ([`Harness::open_connect_screen`]), which also serves
+//! a returning person — the rows refresh from the status cache.
 //!
 //! Sign-in/out never touch the owner's real accounts from automation:
 //! the actions exist in the UI, but verification runs them against the
 //! scripted [`AuthCommander`] below, and every binary run sets
 //! `BAAZ_STATE_DIR=$(mktemp -d)`.
 
+use aui::data::{button, icon_button, ButtonSize};
 use aui::overlay::{popover_layer, SettingsRow, SettingsSection};
 use aui::screens::{
     provider_card, ProviderAction, ProviderActionDef, ProviderCardData, ProviderHeadline,
     ProviderIntent,
 };
+use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use gpui::{prelude::*, px, AnyElement, Context, SharedString, Window};
-use gpui_kit::base::v_flex;
+use gpui::{black, prelude::*, px, AnyElement, Context, SharedString, Window};
+use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::overlays::{Dialog, DialogAction};
@@ -582,27 +585,15 @@ impl Harness {
         cx.notify();
     }
 
-    /// The Providers page: the modal layer's card over the window, one
-    /// [`provider_card`] per provider from the live statuses. Rendered
-    /// when the Settings rail stands on Providers (see
-    /// [`Harness::render_settings`]).
+    /// The Providers page: a real modal over the window — dim scrim,
+    /// bordered card, header close button — with one [`provider_card`]
+    /// per provider from the live statuses and a "Set up providers…"
+    /// row into the connect screen. Rendered when the Settings rail
+    /// stands on Providers (see [`Harness::render_settings`]).
     pub(crate) fn render_providers_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let statuses = crate::provider_status::live_statuses();
-        let mut column = v_flex()
-            .gap(px(scale::SP_3))
-            .child(
-                gpui::div()
-                    .text_color(p.ink)
-                    .ui(scale::FS_13)
-                    .semibold()
-                    .child("Providers"),
-            )
-            .child(
-                gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
-                    "Signed-in state, versions and switches. Signing a CLI out signs it out on this Mac.",
-                ),
-            );
+        let mut cards = v_flex().gap(px(scale::SP_3));
         for status in &statuses {
             let data = card_data(status);
             let intent = cx.listener(
@@ -610,30 +601,95 @@ impl Harness {
                     this.handle_provider_intent(intent.clone(), window, cx);
                 },
             );
-            column = column.child(
+            cards = cards.child(
                 provider_card(format!("providers-card-{}", status.provider.as_str()), &data)
                     .on_intent(move |event, window, cx| intent(&event, window, cx)),
             );
         }
-        // Y5's connect screen is not on this branch, so there is no
-        // "Set up providers" row (spec: omit it then).
+        // The modal chrome the app's other dialogs use (`dialogs.rs`):
+        // a 1 px line border, radius and elevation shadow on the card,
+        // with a header row (title left, close button right) and a max
+        // height whose body scrolls when the window is short.
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
+        let setup = cx.listener(|this: &mut Self, _: &(), _, cx| this.open_connect_screen(cx));
+        let header = h_flex().w_full().items_center().gap(px(scale::SP_3)).child(
+            gpui::div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_color(p.ink)
+                .ui(scale::FS_13)
+                .semibold()
+                .child("Providers"),
+        ).child(
+            icon_button("providers-close", IconName::X)
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Close providers")
+                .on_click(move |_, window, cx| close(&(), window, cx)),
+        );
         let card = v_flex()
+            .id("providers-card")
+            .occlude()
             .w(px(640.0))
+            .max_h(px(600.0))
             .p(px(scale::SP_5))
+            .gap(px(scale::SP_3))
             .bg(p.overlay)
             .rounded(px(scale::R_SM))
-            .child(column);
+            .border_1()
+            .border_color(p.line_strong)
+            .shadow(p.shadow(3))
+            .child(header)
+            .child(
+                gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
+                    "Signed-in state, versions and switches. Signing a CLI out signs it out on this Mac.",
+                ),
+            )
+            .child(
+                v_flex()
+                    .id("providers-cards")
+                    .gap(px(scale::SP_3))
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .child(cards),
+            )
+            .child(
+                button("providers-setup", "Set up providers…")
+                    .ghost()
+                    .accessibility_label("Set up providers")
+                    .on_click(move |_, window, cx| setup(&(), window, cx)),
+            );
+        // The scrim is a sibling behind the centred card — the app's
+        // overflow-menu pattern — so card presses never bubble into a
+        // dismiss. Only the dimmed ground (release, like the palette's)
+        // and Esc close the page.
         popover_layer(
             gpui::div()
                 .absolute()
                 .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
                 .key_context(aui::keys::MENU_CONTEXT)
                 .track_focus(&self.focus_dialog)
                 .on_action(cx.listener(|this, _: &aui::keys::Cancel, _, cx| this.close_settings(cx)))
-                .child(card.into_any_element()),
+                .child(
+                    gpui::div()
+                        .id("providers-scrim")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .bg(black().opacity(0.25))
+                        .on_click(move |_, window, cx| dismiss(&(), window, cx)),
+                )
+                .child(
+                    gpui::div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(card.into_any_element()),
+                ),
         )
         .into_any_element()
     }

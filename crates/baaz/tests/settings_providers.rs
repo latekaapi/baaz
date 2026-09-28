@@ -92,8 +92,7 @@ fn signout_confirms_then_runs_the_right_command() {
     pin(&dialogs, "confirm_provider_signout", "confirm runs sign-out");
 }
 
-/// Sign-in reuses the spec fallbacks (Y5 is not on this branch, so no
-/// "Set up providers" row): the Muse sheet, the Claude terminal
+/// Sign-in reuses the spec fallbacks: the Muse sheet, the Claude terminal
 /// prefill, the Codex browser flow.
 #[test]
 fn signin_starts_each_providers_own_flow() {
@@ -101,4 +100,37 @@ fn signin_starts_each_providers_own_flow() {
     pin(&module, "MuseSheet", "muse sign-in sheet");
     pin(&module, "claude auth login", "claude terminal prefill");
     pin(&module, "CodexBrowser", "codex browser flow");
+}
+
+/// The Providers page is a real modal: a scrim behind the card that
+/// closes on click (Esc still closes), the dialog chrome (1 px line
+/// border, radius, elevation shadow) with a header close button, and a
+/// "Set up providers…" row into the connect screen.
+#[test]
+fn providers_page_is_a_modal_with_close_and_setup_row() {
+    let module = read_repo("crates/baaz/src/settings_providers.rs");
+    pin(&module, "providers-scrim", "scrim behind the card");
+    pin(&module, "border_color(p.line_strong)", "1 px line border");
+    pin(&module, "shadow(p.shadow(3))", "elevation shadow");
+    pin(&module, "overflow_y_scroll", "scrolling body");
+    pin(&module, "Close providers", "close button label");
+    pin(&module, "Set up providers", "set-up row");
+    pin(&module, "open_connect_screen", "set-up row opens connect");
+    let connect = read_repo("crates/baaz/src/connect.rs");
+    pin(&connect, "fn open_connect_screen", "connect open entry point");
+    pin(&connect, "show_connect = true", "connect screen opens");
+}
+
+/// File cards show workspace-relative paths: the display helper with
+/// its inside/outside/home/root/shared-prefix cases, wired through the
+/// transcript's card targets with the full path kept for reveals.
+#[test]
+fn file_cards_show_workspace_relative_paths() {
+    let transcript = read_repo("crates/baaz/src/transcript.rs");
+    pin(&transcript, "fn display_path", "display helper");
+    pin(&transcript, "workspace_root", "workspace context");
+    pin(&transcript, "display_target(call, &folds.workspace_root", "lone cards shorten");
+    pin(&transcript, "display_group_block", "grouped cards shorten");
+    let render = read_repo("crates/baaz/src/session/render.rs");
+    pin(&render, "workspace_root: self.workspace.clone()", "view passes its root");
 }
