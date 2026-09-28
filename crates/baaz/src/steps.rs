@@ -88,6 +88,7 @@
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
 //! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
+//! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
 //! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `baaz: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
@@ -281,6 +282,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
@@ -372,6 +374,29 @@ impl Harness {
                 crate::baaz_log!("unknown right pane kind `{rest}`; known kinds are {}", known.join(", "));
             }
         }
+    }
+
+    /// `files-select:<path>`: preview the project-relative file `path` in
+    /// the Files pane through the same preview path a tree click takes
+    /// (selection and loading state at once, bytes on a background task),
+    /// opening the pane on Files first. A directory toggles instead. An
+    /// empty payload, or no current project, records a step failure
+    /// instead of capturing a window where nothing happened. Free: no
+    /// turn, no wire.
+    pub(crate) fn step_files_select(&mut self, rest: &str, cx: &mut Context<Self>) {
+        let id = rest.trim();
+        if id.is_empty() {
+            record_step_failure("files-select:");
+            return;
+        }
+        let Some((root, _)) = self.right_project() else {
+            record_step_failure(&format!("files-select:{rest}"));
+            return;
+        };
+        self.layout.right_kind = Some(crate::layout::RightKind::Files);
+        self.layout.right_open = true;
+        self.refresh_right_now(cx);
+        self.begin_file_preview_for(&root, id, cx);
     }
 
     /// `right-width:<px>`: settle the right pane's divider at a width,
