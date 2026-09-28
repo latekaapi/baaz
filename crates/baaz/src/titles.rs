@@ -131,11 +131,14 @@ pub fn is_side_workspace_root(root: &str) -> bool {
         .any(|side| side == root)
 }
 
-/// Whether `text` is one of Baaz's own side-session prompts — a title or
-/// a byline rewrite. Exact-prefix match, so truncation-safe: the wire's
-/// `first_user_prompt` is a preview and may cut the tail, never the head.
+/// Whether `text` is one of Baaz's own side-session prompts — a title, a
+/// handoff summary, or a byline rewrite. Exact-prefix match, so
+/// truncation-safe: the wire's `first_user_prompt` is a preview and may
+/// cut the tail, never the head.
 pub fn is_side_prompt(text: &str) -> bool {
-    text.starts_with(TITLE_PROMPT_PREFIX) || text.starts_with(crate::byline::REWRITE_PROMPT_PREFIX)
+    text.starts_with(TITLE_PROMPT_PREFIX)
+        || text.starts_with(crate::handoff::SUMMARY_PROMPT_PREFIX)
+        || text.starts_with(crate::byline::REWRITE_PROMPT_PREFIX)
 }
 
 /// Whether a listed session is one of Baaz's throwaway side sessions —
@@ -228,6 +231,37 @@ pub fn clean_title(reply: &str) -> Option<String> {
         return None;
     }
     Some(crate::sidebar::one_line(flat))
+}
+
+/// A handoff-summary reply as pack text: trimmed but otherwise verbatim
+/// — multi-line, unlike a title — and bounded, so a rambling answer
+/// cannot blow the pack's token budget. `None` is "nothing usable": the
+/// caller keeps the extractive summary.
+pub const SUMMARY_REPLY_CHARS: usize = 2000;
+
+/// A model reply as a handoff pack's summary (see
+/// [`SUMMARY_REPLY_CHARS`]). `None` is "nothing usable".
+pub fn clean_summary(reply: &str) -> Option<String> {
+    let trimmed = reply.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(SUMMARY_REPLY_CHARS).collect())
+}
+
+/// A handoff summary side session's answer, off a free `session/read`:
+/// the newest `agentMessage` text, inline items then the snapshot — the
+/// same two shapes [`harvest_title_text`] reads, but cleaned with
+/// [`clean_summary`] (multi-line) rather than [`clean_title`].
+pub fn harvest_summary_text(read: &muse_client::schema::SessionReadResult) -> Option<String> {
+    let inline = read.history.items.iter().flatten();
+    let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
+    inline
+        .chain(snapshot)
+        .filter(|item| item.kind == muse_client::schema::ItemKind::AgentMessage)
+        .filter_map(|item| item.text.as_deref())
+        .rfind(|text| !text.trim().is_empty())
+        .and_then(clean_summary)
 }
 
 /// The side session's answer, off a free `session/read`: the newest
@@ -402,6 +436,30 @@ mod tests {
         assert!(!is_side_prompt("Explain the layout"));
         assert!(!is_side_prompt(""));
         assert!(!is_side_prompt("Suggest a great title for this thread"));
+    }
+
+    #[test]
+    fn handoff_summary_prompts_hide_from_the_wire_alone() {
+        let prompt = crate::handoff::summary_prompt("Goal: Fix it\n");
+        assert!(prompt.starts_with(crate::handoff::SUMMARY_PROMPT_PREFIX));
+        assert!(is_side_prompt(&prompt));
+        assert!(looks_like_side_session(Some(&prompt), None));
+    }
+
+    #[test]
+    fn the_summary_harvest_keeps_multi_line_replies_verbatim() {
+        let reply = "Did X.\nDecided Y.\nNow at Z.\nLeft: W.";
+        let read = read_with(["queued reply", reply]);
+        assert_eq!(harvest_summary_text(&read), Some(reply.to_owned()));
+    }
+
+    #[test]
+    fn the_summary_harvest_skips_blanks_and_bounds_ramblers() {
+        assert_eq!(harvest_summary_text(&read_with(["   "])), None);
+        assert_eq!(harvest_summary_text(&read_with([])), None);
+        let long = clean_summary(&"word ".repeat(10_000)).expect("a long reply still summarises");
+        assert!(long.chars().count() <= SUMMARY_REPLY_CHARS);
+        assert_eq!(clean_summary("  \n  "), None);
     }
 
     #[test]
