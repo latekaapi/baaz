@@ -29,6 +29,7 @@ use aui_icons::IconName;
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{black, prelude::*, px, AnyElement, Context, SharedString, Window};
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::switch::Switch;
 
 use crate::app::Harness;
 use crate::overlays::{Dialog, DialogAction};
@@ -392,6 +393,41 @@ pub(crate) fn parse_enabled_row(id: &str) -> Option<ProviderId> {
     (parsed.as_str() == wire).then_some(parsed)
 }
 
+/// The providers whose sessions Baaz scopes down to its own tools — the
+/// only cards that gain a "Use my own MCP servers" switch (Z5). Muse
+/// rides the legacy pump and never spawns through the scoped argv.
+pub(crate) fn own_mcp_providers() -> [ProviderId; 2] {
+    [ProviderId::ClaudeCode, ProviderId::Codex]
+}
+
+/// The switch label, identical on both cards.
+pub(crate) fn use_own_mcp_label() -> &'static str {
+    "Use my own MCP servers"
+}
+
+/// The switch detail per provider: what off/on means, plus the
+/// sessions-started-after-the-change sentence the task requires the row
+/// to carry. Pure, so tests drive it without a window.
+pub(crate) fn use_own_mcp_detail(id: ProviderId) -> &'static str {
+    match id {
+        ProviderId::Codex => "Off: sessions see only Baaz's tools. On: your ~/.codex/config.toml \
+            servers and plugins load too. Applies to sessions started after this change.",
+        ProviderId::ClaudeCode => "Off: sessions see only Baaz's tools. On: your Claude Code MCP \
+            servers and connectors load too. Applies to sessions started after this change.",
+        ProviderId::Muse => "Muse sessions always ride the legacy pump.",
+    }
+}
+
+/// The switch state for `id` in `layout`. Muse has no switch (see
+/// [`own_mcp_providers`]) and reads false.
+pub(crate) fn use_own_mcp_state(layout: &crate::layout::Layout, id: ProviderId) -> bool {
+    match id {
+        ProviderId::Codex => layout.use_own_mcp.codex,
+        ProviderId::ClaudeCode => layout.use_own_mcp.claude_code,
+        ProviderId::Muse => false,
+    }
+}
+
 impl Harness {
     /// Flip a provider Enabled switch from either the section rows or a
     /// card. Persists through the status cache; a disabled provider
@@ -410,6 +446,63 @@ impl Harness {
             crate::providers::write_last_provider(fallback);
         }
         cx.notify();
+    }
+
+    /// Flip a "Use my own MCP servers" switch and persist it. Sessions
+    /// started after the flip build their argv with (on) or without (off)
+    /// Baaz's scoping; live sessions keep the argv they spawned with.
+    pub(crate) fn flip_use_own_mcp(&mut self, id: ProviderId, on: bool, cx: &mut Context<Self>) {
+        match id {
+            ProviderId::Codex => self.layout.use_own_mcp.codex = on,
+            ProviderId::ClaudeCode => self.layout.use_own_mcp.claude_code = on,
+            ProviderId::Muse => return,
+        }
+        crate::layout::write(&self.layout);
+        cx.notify();
+    }
+
+    /// The "Use my own MCP servers" row under the Claude Code / Codex
+    /// card: label + detail left, the switch right, flipping through
+    /// [`Self::flip_use_own_mcp`].
+    fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let on = use_own_mcp_state(&self.layout, id);
+        let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
+            this.flip_use_own_mcp(id, *next, cx);
+        });
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(scale::SP_3))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        gpui::div()
+                            .text_color(p.ink)
+                            .ui(scale::FS_13)
+                            .child(use_own_mcp_label()),
+                    )
+                    .child(
+                        gpui::div()
+                            .text_color(p.ink_3)
+                            .ui(scale::FS_12)
+                            .child(use_own_mcp_detail(id)),
+                    ),
+            )
+            .child(
+                Switch::new(format!("providers-use-own-mcp-{}", id.as_str()))
+                    .checked(on)
+                    .color(p.accent)
+                    .accessibility_label(SharedString::from(format!(
+                        "{} · {}",
+                        use_own_mcp_label(),
+                        id.label()
+                    )))
+                    .on_click(move |next, window, cx| flip(next, window, cx)),
+            )
+            .into_any_element()
     }
 
     /// One provider intent from a card: switch, re-check, sign in/out,
@@ -605,6 +698,13 @@ impl Harness {
                 provider_card(format!("providers-card-{}", status.provider.as_str()), &data)
                     .on_intent(move |event, window, cx| intent(&event, window, cx)),
             );
+            // Z5: the inherit-owner-servers switch rides directly under
+            // the Claude Code and Codex cards (Role=Switch with its label,
+            // like every Settings switch). Muse has none: its sessions
+            // never spawn through the scoped argv.
+            if own_mcp_providers().contains(&status.provider) {
+                cards = cards.child(self.use_own_mcp_row(status.provider, cx));
+            }
         }
         // The modal chrome the app's other dialogs use (`dialogs.rs`):
         // a 1 px line border, radius and elevation shadow on the card,
@@ -948,5 +1048,39 @@ mod tests {
             disabled_banner(ProviderId::ClaudeCode),
             "Claude Code is disabled in Settings — Enable"
         );
+    }
+
+    #[test]
+    fn the_own_mcp_switch_belongs_to_both_scoped_providers_only() {
+        // Z5: Claude Code and Codex cards gain the row; Muse never does.
+        assert_eq!(own_mcp_providers(), [ProviderId::ClaudeCode, ProviderId::Codex]);
+        assert_eq!(use_own_mcp_label(), "Use my own MCP servers");
+        // The detail names the off/on contract per provider plus the
+        // sessions-started-after-the-change sentence.
+        for (id, owned) in [
+            (ProviderId::Codex, "~/.codex/config.toml servers and plugins load too"),
+            (ProviderId::ClaudeCode, "your Claude Code MCP servers and connectors load too"),
+        ] {
+            let detail = use_own_mcp_detail(id);
+            assert!(
+                detail.contains("Off: sessions see only Baaz's tools."),
+                "{id:?}: off names the default"
+            );
+            assert!(detail.contains(owned), "{id:?}: on names the owner's servers");
+            assert!(
+                detail.contains("Applies to sessions started after this change."),
+                "{id:?}: the row says when it applies"
+            );
+        }
+        // State reads the layout; Muse reads false with no switch.
+        let mut layout = crate::layout::Layout::default();
+        assert!(!use_own_mcp_state(&layout, ProviderId::Codex));
+        assert!(!use_own_mcp_state(&layout, ProviderId::ClaudeCode));
+        assert!(!use_own_mcp_state(&layout, ProviderId::Muse));
+        layout.use_own_mcp.codex = true;
+        layout.use_own_mcp.claude_code = true;
+        assert!(use_own_mcp_state(&layout, ProviderId::Codex));
+        assert!(use_own_mcp_state(&layout, ProviderId::ClaudeCode));
+        assert!(!use_own_mcp_state(&layout, ProviderId::Muse));
     }
 }

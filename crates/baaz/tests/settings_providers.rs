@@ -121,6 +121,30 @@ fn providers_page_is_a_modal_with_close_and_setup_row() {
     pin(&connect, "show_connect = true", "connect screen opens");
 }
 
+/// Z5: each Claude Code / Codex card carries a "Use my own MCP
+/// servers" switch row (Role=Switch + label) that persists through the
+/// layout and reaches the session argv; the row says it applies to
+/// sessions started after the change.
+#[test]
+fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
+    let module = read_repo("crates/baaz/src/settings_providers.rs");
+    pin(&module, "Use my own MCP servers", "switch label");
+    pin(&module, "use_own_mcp_row", "row under each card");
+    pin(&module, "flip_use_own_mcp", "switch flip");
+    pin(&module, "Applies to sessions started after this change", "row says when it applies");
+    pin(&module, "~/.codex/config.toml servers and plugins load too", "codex detail");
+    pin(&module, "Claude Code MCP servers and connectors load too", "claude detail");
+    let layout = read_repo("crates/baaz/src/layout.rs");
+    pin(&layout, "use_own_mcp", "layout switch state");
+    pin(&layout, "struct UseOwnMcp", "per-provider switch");
+    let providers = read_repo("crates/baaz/src/providers.rs");
+    pin(&providers, "set_use_own_mcp", "argv wiring reads the switch");
+    let codex = read_repo("crates/provider-codex/src/lib.rs");
+    pin(&codex, "set_use_own_mcp", "codex opt-in");
+    let claude = read_repo("crates/provider-claude-code/src/lib.rs");
+    pin(&claude, "set_use_own_mcp", "claude opt-in");
+}
+
 /// File cards show workspace-relative paths: the display helper with
 /// its inside/outside/home/root/shared-prefix cases, wired through the
 /// transcript's card targets with the full path kept for reveals.

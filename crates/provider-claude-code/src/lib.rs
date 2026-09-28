@@ -115,8 +115,17 @@ pub struct ClaudeCodeAdapter {
     /// Where the terminal relay lives, set by the host before the session
     /// commands run: the bridge binary, the socket to point it at, and the
     /// directory (`<support_dir>/mcp`) its per-session config files land
-    /// in. `None` means no relay: sessions spawn exactly today's argv.
+    /// in. `None` means no relay: sessions spawn with no `--mcp-config`
+    /// file (but still with `--strict-mcp-config` below).
     terminal: Mutex<Option<TerminalRelay>>,
+    /// Whether the session may inherit the owner's own MCP servers and
+    /// connectors: the Settings → Providers "Use my own MCP servers"
+    /// switch (`Layout.use_own_mcp.claude_code`), set by the host before
+    /// the session commands run. Off means `--strict-mcp-config` on every
+    /// launch (the default); on means the flag is stripped while the
+    /// bridge config still rides when a relay is set. Applies to sessions
+    /// started after the change.
+    use_own_mcp: Mutex<bool>,
 }
 
 /// The host→child control lines the adapter addresses, each answering
@@ -209,15 +218,37 @@ impl ClaudeCodeAdapter {
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
+            use_own_mcp: Mutex::new(false),
         }
     }
 
     /// Point the terminal relay at the bridge, socket and config directory
     /// before the session commands run. Every open, resume, fork and
     /// effort-swap relaunch then writes its per-session MCP config and
-    /// spawns with `--mcp-config <path> --strict-mcp-config`.
+    /// spawns with `--mcp-config <path> --strict-mcp-config` (strict
+    /// unless [`Self::set_use_own_mcp`] opted the session into the
+    /// owner's own servers).
     pub fn set_terminal_relay(&self, relay: TerminalRelay) {
         *self.terminal.lock().expect("terminal mutex") = Some(relay);
+    }
+
+    /// Let the session inherit the owner's own MCP servers and
+    /// connectors: the Settings → Providers "Use my own MCP servers"
+    /// switch. When on, launches strip `--strict-mcp-config` (the bridge
+    /// config still rides when a relay is set). Off by default.
+    pub fn set_use_own_mcp(&self, use_own: bool) {
+        *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
+    }
+
+    /// Apply the opt-in to a built launch: strip `--strict-mcp-config`
+    /// when the switch is on, else leave the launch as built (strict on
+    /// every launch — see [`argv`]).
+    fn apply_use_own_mcp(&self, launch: SessionLaunch) -> SessionLaunch {
+        if *self.use_own_mcp.lock().expect("use-own-mcp mutex") {
+            argv::without_strict_mcp(launch)
+        } else {
+            launch
+        }
     }
 
     /// The `--mcp-config` path for `session_id`, writing its file first —
@@ -235,8 +266,10 @@ impl ClaudeCodeAdapter {
     }
 
     /// The open launch for `request_id`: the caller-chosen session id plus
-    /// the terminal relay's config file, when one is set. Pure apart from
-    /// that one file write — no spawn — so tests drive this without a CLI.
+    /// the terminal relay's config file, when one is set — and
+    /// `--strict-mcp-config` on every launch, relay or not (Z5), unless
+    /// the opt-in stripped it. Pure apart from that one file write — no
+    /// spawn — so tests drive this without a CLI.
     pub fn launch_for_open(
         &self,
         request_id: &str,
@@ -244,39 +277,55 @@ impl ClaudeCodeAdapter {
         model: Option<&str>,
     ) -> Result<SessionLaunch, ProviderError> {
         let mcp = self.mcp_config_for(request_id)?;
-        Ok(argv::argv_for_open(request_id, workspace, model, mcp.as_deref(), None))
+        Ok(self.apply_use_own_mcp(argv::argv_for_open(
+            request_id,
+            workspace,
+            model,
+            mcp.as_deref(),
+            None,
+        )))
     }
 
     /// The resume launch for a stored `session_id`, with the relay's
-    /// config file when one is set. No spawn — see [`Self::launch_for_open`].
+    /// config file when one is set and strict unless opted in. No spawn —
+    /// see [`Self::launch_for_open`].
     pub fn launch_for_resume(&self, session_id: &str) -> Result<SessionLaunch, ProviderError> {
         let mcp = self.mcp_config_for(session_id)?;
-        Ok(argv::argv_for_resume(session_id, None, mcp.as_deref(), None))
+        Ok(self.apply_use_own_mcp(argv::argv_for_resume(session_id, None, mcp.as_deref(), None)))
     }
 
     /// The fork launch branching `session_id` into `request_id`, with the
-    /// relay's config file (for the NEW session) when one is set. No spawn.
+    /// relay's config file (for the NEW session) when one is set and
+    /// strict unless opted in. No spawn.
     pub fn launch_for_fork(
         &self,
         request_id: &str,
         session_id: &str,
     ) -> Result<SessionLaunch, ProviderError> {
         let mcp = self.mcp_config_for(request_id)?;
-        Ok(argv::argv_for_fork(request_id, session_id, None, mcp.as_deref(), None))
+        Ok(self
+            .apply_use_own_mcp(argv::argv_for_fork(request_id, session_id, None, mcp.as_deref(), None)))
     }
 
     /// Carry the relay onto an effort-swap `launch`: the swap relaunches
     /// with `--resume`, and the resumed child must see the same bridge the
     /// old one did. A launch that already carries `--mcp-config` (every
-    /// [`Self::launch_for_open`] one does) passes through untouched, so
-    /// the file is written once per session, not once per swap.
+    /// relayed [`Self::launch_for_open`] one does) keeps its file — the
+    /// file is written once per session, not once per swap — but still
+    /// gains (or, opted in, loses) `--strict-mcp-config`, so a swap never
+    /// silently widens or narrows what the session may see.
     fn with_mcp_config(&self, mut launch: SessionLaunch) -> Result<SessionLaunch, ProviderError> {
-        if launch.argv.iter().any(|arg| arg == "--mcp-config") {
-            return Ok(launch);
+        let use_own = *self.use_own_mcp.lock().expect("use-own-mcp mutex");
+        if !launch.argv.iter().any(|arg| arg == "--mcp-config") {
+            if let Some(path) = self.mcp_config_for(&launch.session_id.clone())? {
+                launch.argv.push("--mcp-config".into());
+                launch.argv.push(path);
+            }
         }
-        if let Some(path) = self.mcp_config_for(&launch.session_id.clone())? {
-            launch.argv.push("--mcp-config".into());
-            launch.argv.push(path);
+        let has_strict = launch.argv.iter().any(|arg| arg == "--strict-mcp-config");
+        if use_own && has_strict {
+            launch = argv::without_strict_mcp(launch);
+        } else if !use_own && !has_strict {
             launch.argv.push("--strict-mcp-config".into());
         }
         Ok(launch)
@@ -597,7 +646,12 @@ impl ClaudeCodeAdapter {
             return None;
         }
         let model = self.model.lock().expect("model mutex").clone();
-        Some(argv::argv_for_resume(session_id, model.as_deref(), None, wanted.as_deref()))
+        Some(self.apply_use_own_mcp(argv::argv_for_resume(
+            session_id,
+            model.as_deref(),
+            None,
+            wanted.as_deref(),
+        )))
     }
 
     /// Swap the running child for `launch`: hang up the old one first, then

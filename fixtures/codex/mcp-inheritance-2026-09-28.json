@@ -1,0 +1,365 @@
+{
+ "date": "2026-09-28",
+ "codex": "codex-cli 0.144.6 (/opt/homebrew/bin/codex)",
+ "note": "Live mcpServerStatus/list over stdio JSON-RPC (initialize, initialized, list). No thread, no turn, no model. Per-tool inputSchema definitions trimmed to tool names; counts verbatim.",
+ "owner_config_inventory": {
+  "mcp_servers_tables": [
+   "node_repl",
+   "computer-use"
+  ],
+  "plugins_enabled": [
+   "codex-app-tools@openai-bundled",
+   "visualize@openai-bundled",
+   "documents@openai-primary-runtime",
+   "pdf@openai-primary-runtime",
+   "spreadsheets@openai-primary-runtime",
+   "presentations@openai-primary-runtime",
+   "template-creator@openai-primary-runtime",
+   "browser@openai-bundled",
+   "unified-computer-use@openai-bundled",
+   "chrome@openai-bundled",
+   "computer-use@openai-bundled"
+  ]
+ },
+ "A_bare": {
+  "argv": [
+   "/opt/homebrew/bin/codex",
+   "app-server"
+  ],
+  "servers": [
+   {
+    "name": "codex_app",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "codex_apps",
+    "toolNames": [
+     "codex_document_control.execute_document_command",
+     "codex_document_control.get_document_tool_schemas",
+     "codex_document_control.list_document_sessions",
+     "google_drive.batch_update_document",
+     "google_drive.batch_update_presentation",
+     "google_drive.batch_update_spreadsheet",
+     "google_drive.bulk_update_file_comments",
+     "google_drive.copy_file",
+     "google_drive.create_file",
+     "google_drive.create_folder",
+     "google_drive.create_presentation_from_template",
+     "google_drive.delete_file",
+     "google_drive.duplicate_sheet_in_new_spreadsheet",
+     "google_drive.export_file",
+     "google_drive.fetch",
+     "google_drive.fetch_file_revision",
+     "google_drive.find_document_text_range",
+     "google_drive.get_document",
+     "google_drive.get_document_comments",
+     "google_drive.get_document_paragraph_range",
+     "google_drive.get_document_tables",
+     "google_drive.get_document_text",
+     "google_drive.get_file_comments",
+     "google_drive.get_file_metadata",
+     "google_drive.get_presentation",
+     "google_drive.get_presentation_comments",
+     "google_drive.get_presentation_outline",
+     "google_drive.get_presentation_tables",
+     "google_drive.get_presentation_text",
+     "google_drive.get_profile",
+     "google_drive.get_slide",
+     "google_drive.get_slide_thumbnail",
+     "google_drive.get_spreadsheet_cells",
+     "google_drive.get_spreadsheet_comments",
+     "google_drive.get_spreadsheet_metadata",
+     "google_drive.get_spreadsheet_range",
+     "google_drive.import_document",
+     "google_drive.import_presentation",
+     "google_drive.import_spreadsheet",
+     "google_drive.list_drives",
+     "google_drive.list_file_revisions",
+     "google_drive.list_folder",
+     "google_drive.recent_documents",
+     "google_drive.search",
+     "google_drive.search_spreadsheet_rows",
+     "google_drive.share_file",
+     "google_drive.update_file",
+     "google_drive.upload_file",
+     "hotline.get_local_hotline",
+     "plugin_management.get_app_permissions",
+     "plugin_management.get_plugin_dependencies",
+     "plugin_management.search_plugins",
+     "plugin_management.suggest_plugins",
+     "plugin_management.uninstall_app",
+     "plugin_management.update_app_permissions",
+     "safety_settings.get_family_info",
+     "safety_settings.get_parental_controls",
+     "safety_settings.get_trusted_contact",
+     "safety_settings.prepare_parental_control_update",
+     "safety_settings.update_parental_control",
+     "sites.add_custom_domain",
+     "sites.change_site_slug",
+     "sites.check_slug_availability",
+     "sites.create_site",
+     "sites.create_source_repository_write_credential",
+     "sites.delete_site",
+     "sites.deploy_private_site_version",
+     "sites.deploy_site_version",
+     "sites.generate_siwc_bypass_token",
+     "sites.get_database_overview",
+     "sites.get_database_table_rows",
+     "sites.get_deployment_status",
+     "sites.get_environment",
+     "sites.get_environment_variables",
+     "sites.get_project",
+     "sites.get_site",
+     "sites.get_site_analytics_overview",
+     "sites.get_site_version",
+     "sites.get_site_worker_logs",
+     "sites.list_custom_domains",
+     "sites.list_projects",
+     "sites.list_site_analytics_events",
+     "sites.list_site_versions",
+     "sites.list_sites",
+     "sites.list_sites_creator_control_panel_projects",
+     "sites.query_site_analytics_event",
+     "sites.read_database_overview",
+     "sites.read_database_table_rows",
+     "sites.refresh_custom_domain_status",
+     "sites.remove_custom_domain",
+     "sites.save_site_version",
+     "sites.save_version_and_deploy_private",
+     "sites.update_access",
+     "sites.update_environment",
+     "sites.update_environment_variables",
+     "sites.update_site_access",
+     "sites.update_site_metadata"
+    ],
+    "toolCount": 97,
+    "authStatus": "bearerToken",
+    "serverInfo": {
+     "name": "plugin-runtime",
+     "title": null,
+     "version": "0.1.0",
+     "description": null,
+     "icons": null,
+     "websiteUrl": null
+    },
+    "resourceCount": 33
+   },
+   {
+    "name": "computer-use",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "cua_repl",
+    "toolNames": [
+     "js",
+     "js_reset",
+     "turn_ended"
+    ],
+    "toolCount": 3,
+    "authStatus": "unsupported",
+    "serverInfo": {
+     "name": "rmcp",
+     "title": null,
+     "version": "1.5.0",
+     "description": null,
+     "icons": null,
+     "websiteUrl": null
+    },
+    "resourceCount": 0
+   },
+   {
+    "name": "node_repl",
+    "toolNames": [
+     "js",
+     "js_add_node_module_dir",
+     "js_reset",
+     "turn_ended"
+    ],
+    "toolCount": 4,
+    "authStatus": "unsupported",
+    "serverInfo": {
+     "name": "rmcp",
+     "title": null,
+     "version": "1.5.0",
+     "description": null,
+     "icons": null,
+     "websiteUrl": null
+    },
+    "resourceCount": 0
+   }
+  ],
+  "nextCursor": null
+ },
+ "B_relay_bridge_plus_disables": {
+  "argv": [
+   "/opt/homebrew/bin/codex",
+   "app-server",
+   "-c",
+   "mcp_servers.baaz.command=\"/tmp/baaz-probe/mcp-bridge\"",
+   "-c",
+   "mcp_servers.baaz.args=[\"--terminal\",\"--socket\",\"/tmp/baaz-probe/terminal-1.sock\",\"--session\",\"z5-probe\"]",
+   "-c",
+   "mcp_servers.codex_app={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.codex_apps={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.computer-use={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.cua_repl={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.node_repl={enabled=false,command=\"/bin/true\"}"
+  ],
+  "servers": [
+   {
+    "name": "baaz",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "codex_app",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "codex_apps",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "computer-use",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "cua_repl",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "node_repl",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   }
+  ],
+  "nextCursor": null
+ },
+ "C_relay_disables_plus_plugin_disables": {
+  "argv": [
+   "/opt/homebrew/bin/codex",
+   "app-server",
+   "-c",
+   "mcp_servers.baaz.command=\"/tmp/baaz-probe/mcp-bridge\"",
+   "-c",
+   "mcp_servers.baaz.args=[\"--terminal\",\"--socket\",\"/tmp/baaz-probe/terminal-1.sock\",\"--session\",\"z5-probe\"]",
+   "-c",
+   "mcp_servers.codex_app={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.codex_apps={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.computer-use={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.cua_repl={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "mcp_servers.node_repl={enabled=false,command=\"/bin/true\"}",
+   "-c",
+   "plugins.\"browser@openai-bundled\".enabled=false",
+   "-c",
+   "plugins.\"chrome@openai-bundled\".enabled=false",
+   "-c",
+   "plugins.\"computer-use@openai-bundled\".enabled=false",
+   "-c",
+   "plugins.\"unified-computer-use@openai-bundled\".enabled=false",
+   "-c",
+   "plugins.\"documents@openai-primary-runtime\".enabled=false",
+   "-c",
+   "plugins.\"pdf@openai-primary-runtime\".enabled=false",
+   "-c",
+   "plugins.\"spreadsheets@openai-primary-runtime\".enabled=false",
+   "-c",
+   "plugins.\"presentations@openai-primary-runtime\".enabled=false",
+   "-c",
+   "plugins.\"template-creator@openai-primary-runtime\".enabled=false",
+   "-c",
+   "plugins.\"visualize@openai-bundled\".enabled=false",
+   "-c",
+   "plugins.\"codex-app-tools@openai-bundled\".enabled=false"
+  ],
+  "servers": [
+   {
+    "name": "baaz",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "codex_app",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "codex_apps",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "computer-use",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "cua_repl",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   },
+   {
+    "name": "node_repl",
+    "toolNames": [],
+    "toolCount": 0,
+    "authStatus": "unsupported",
+    "serverInfo": null,
+    "resourceCount": 0
+   }
+  ],
+  "nextCursor": null
+ }
+}

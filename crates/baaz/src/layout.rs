@@ -86,6 +86,24 @@ impl RightKind {
     }
 }
 
+/// Whether provider sessions may inherit the owner's own MCP servers
+/// and connectors (Z5). Off means inherit-nothing: Codex sessions carry
+/// the full-table disables (plus plugin disables) and Claude Code
+/// sessions carry `--strict-mcp-config`. On restores exactly the argv
+/// without Baaz's scoping (the bridge still rides when a relay is set).
+/// Applies to sessions started after the change. Both off by default, so
+/// every `layout.json` written before this feature reads as today's
+/// behaviour with no migration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseOwnMcp {
+    /// Codex: inherit `~/.codex/config.toml` servers and plugins too.
+    #[serde(default)]
+    pub codex: bool,
+    /// Claude Code: inherit the owner's MCP servers and connectors too.
+    #[serde(rename = "claudeCode", default)]
+    pub claude_code: bool,
+}
+
 /// What `layout.json` holds. `None` is "never resized": the default width.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layout {
@@ -164,6 +182,10 @@ pub struct Layout {
     /// restores it. `None` is "never opened": [`RightKind::Files`].
     #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
     pub right_kind: Option<RightKind>,
+    /// The two inherit-owner-servers opt-ins, owned by the Settings →
+    /// Providers page (see [`UseOwnMcp`]).
+    #[serde(rename = "useOwnMcp", default)]
+    pub use_own_mcp: UseOwnMcp,
 }
 
 /// The default for the auto-title and auto-summary switches: ON. A missing
@@ -194,6 +216,7 @@ impl Default for Layout {
             right_open: false,
             right_width: None,
             right_kind: None,
+            use_own_mcp: UseOwnMcp::default(),
         }
     }
 }
@@ -331,6 +354,7 @@ mod tests {
             right_open: true,
             right_width: Some(420.0),
             right_kind: Some(RightKind::Diff),
+            use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"groupBy\":\"project\""));
@@ -345,6 +369,7 @@ mod tests {
         assert!(text.contains("\"rightOpen\":true"));
         assert!(text.contains("\"rightWidth\":420.0"));
         assert!(text.contains("\"rightKind\":\"diff\""));
+        assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
@@ -358,6 +383,8 @@ mod tests {
         assert!(back.right_open);
         assert_eq!(back.right_width, Some(420.0));
         assert_eq!(back.right_kind, Some(RightKind::Diff));
+        assert!(back.use_own_mcp.codex);
+        assert!(!back.use_own_mcp.claude_code);
         // An old file with only a width still reads, taking the new defaults.
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
         assert_eq!(old.group_by, None);
@@ -387,6 +414,26 @@ mod tests {
         assert_eq!(old.right_kind, None);
         assert_eq!(right_kind(&Layout::default()), RightKind::Files);
         assert_eq!(right_kind(&old), RightKind::Files);
+    }
+
+    #[test]
+    fn the_inherit_owner_servers_switch_defaults_off_and_round_trips() {
+        // Z5: both switches default off (old files included — serde
+        // default, no migration), and an opted-in file reads back.
+        let default = Layout::default();
+        assert!(!default.use_own_mcp.codex);
+        assert!(!default.use_own_mcp.claude_code);
+        let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").unwrap();
+        assert!(!old.use_own_mcp.codex);
+        assert!(!old.use_own_mcp.claude_code);
+        let stored = Layout {
+            use_own_mcp: UseOwnMcp { codex: true, claude_code: true },
+            ..Layout::default()
+        };
+        let text = serde_json::to_string(&stored).unwrap();
+        let back: Layout = serde_json::from_str(&text).unwrap();
+        assert!(back.use_own_mcp.codex);
+        assert!(back.use_own_mcp.claude_code);
     }
 
     #[test]
