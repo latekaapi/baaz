@@ -17,6 +17,10 @@ use uuid::Uuid;
 
 use crate::error::{MuseError, Result};
 use crate::frame::{notification_line, parse_line, request_line, Frame};
+use crate::program::{
+    child_path_needs_repair, child_path_value, muse_fallback_dirs, resolve_muse_program,
+    resolve_spawn_program, MUSE_BINARY,
+};
 use crate::schema::{
     AccountLoginCancelResult, AccountLoginStartParams, AccountLoginStartResult, AccountState,
     ApprovalDecideParams, ApprovalDecideResult,
@@ -220,7 +224,10 @@ pub struct MuseConfig {
 impl Default for MuseConfig {
     fn default() -> Self {
         Self {
-            program: PathBuf::from("muse"),
+            // The resolved install when one is found, else the bare name —
+            // unchanged behaviour for machines where `muse` is on `PATH`,
+            // and a working spawn from a Dock launch where it is not.
+            program: resolve_muse_program().unwrap_or_else(|| PathBuf::from(MUSE_BINARY)),
             trust_workspace: true,
             no_session_log: false,
             extra_args: Vec::new(),
@@ -402,8 +409,26 @@ pub struct MuseClient {
 
 impl MuseClient {
     /// Spawn `muse serve` and start the reader and writer threads.
+    ///
+    /// A bare program name is looked up on `PATH` and then the home-install
+    /// fallbacks (see [`resolve_muse_program`](crate::resolve_muse_program)),
+    /// so a Dock launch with launchd's minimal `PATH` still finds a
+    /// `~/.local/bin/muse`. When nothing is found the error says where it
+    /// looked. The child's `PATH` is the current `PATH` plus the program's
+    /// directory plus the existing fallback dirs, so the `muse` wrapper and
+    /// the tools muse runs work from that same minimal launch.
     pub fn spawn(config: &MuseConfig) -> Result<Self> {
-        let mut command = Command::new(&config.program);
+        let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect())
+            .unwrap_or_default();
+        let fallbacks = muse_fallback_dirs();
+        let program = resolve_spawn_program(&config.program, &path_dirs, &fallbacks)?;
+        let mut command = Command::new(&program);
+        if child_path_needs_repair(&program, &path_dirs, &fallbacks) {
+            let existing: Vec<PathBuf> =
+                fallbacks.iter().filter(|dir| dir.is_dir()).cloned().collect();
+            command.env("PATH", child_path_value(&path_dirs, &program, &existing));
+        }
         command.arg("serve");
         if config.trust_workspace {
             command.arg("--trust-workspace");
