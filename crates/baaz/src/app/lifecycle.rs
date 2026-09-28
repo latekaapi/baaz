@@ -1069,10 +1069,13 @@ impl Harness {
             self.sessions[ix] = row;
             self.invalidate_list();
         }
-        // A settled turn on a chain head re-sums the chain: the one-row
-        // refresh above rebuilt head-only facts, the collapse restores the
-        // original title and the total count.
-        self.collapse_handoff_chains();
+        // A settled turn on a linked session re-sums its chain: the
+        // one-row refresh above rebuilt head-only facts, the collapse
+        // restores the original title and the total count. An unlinked
+        // settle stops at the O(1) refresh above (X3d).
+        if sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides) {
+            self.collapse_handoff_chains();
+        }
     }
 
     /// Re-label the rows after the index arrives (it usually beats the wire,
@@ -1176,8 +1179,16 @@ impl Harness {
             entry.named = name.is_some();
         }
         // A handoff chain is one row: rejoined member rows collapse back to
-        // the head here, so an override write never resurfaces one.
-        self.collapse_handoff_chains();
+        // the head here, so an override write never resurfaces one — but
+        // only when a link is in play, so link-free rejoins keep the O(1)
+        // row refresh (X3d).
+        let touched_link = self
+            .sessions
+            .iter()
+            .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
+        if touched_link {
+            self.collapse_handoff_chains();
+        }
     }
 
     /// `session/start` in the current project, on the switcher's provider.
@@ -2289,15 +2300,24 @@ impl Harness {
     /// then collapses to its head row, in the source row's place. Returns
     /// whether the list changed.
     pub(crate) fn merge_provider_rows(&mut self) -> bool {
+        // A deleted record that anchored a chain still needs the collapse:
+        // its row leaves, the chain re-sums without it.
+        let removed_linked = self.sessions.iter().any(|entry| {
+            entry.provider.is_some()
+                && !self.provider_sessions.contains_key(&entry.id)
+                && sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides)
+        });
         self.sessions.retain(|entry| entry.provider.is_none() || self.provider_sessions.contains_key(&entry.id));
         if self.provider_sessions.is_empty() {
             return false;
         }
         let mut changed = false;
+        let mut touched_link = removed_linked;
         let mut records: Vec<crate::provider_sessions::ProviderSessionRecord> =
             self.provider_sessions.values().cloned().collect();
         records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         for record in &records {
+            touched_link |= sidebar::needs_collapse(&record.session_id, &self.provider_sessions, &self.overrides);
             let mut row = sidebar::SessionEntry::provider_row(
                 record,
                 self.overrides.get(&record.session_id),
@@ -2330,8 +2350,11 @@ impl Harness {
             self.invalidate_list();
         }
         // A handoff chain is one row: the activation swap lands in this
-        // same build, the destination taking the source row's place.
-        changed | self.collapse_handoff_chains()
+        // same build, the destination taking the source row's place — but
+        // only when a merged or removed record is link-adjacent, so
+        // link-free merges stop at the row refresh (X3d).
+        let collapsed = if touched_link { self.collapse_handoff_chains() } else { false };
+        changed | collapsed
     }
 
     /// Reopen a stored provider session after a restart: connect a fresh
@@ -5232,9 +5255,14 @@ mod tests {
             },
         );
         // Activation order: the members first, the head appended, then the
-        // collapse puts the head row in the source row's place.
+        // collapse puts the head row in the source row's place. The head
+        // shows visible turns: the wire's 5 minus the hidden pack exchange.
         harness.merge_provider_rows();
-        harness.sessions.push(chain_muse_entry("chain-c", "Later words", 5));
+        harness.sessions.push(chain_muse_entry(
+            "chain-c",
+            "Later words",
+            sidebar::visible_turns(5, true),
+        ));
         harness.collapse_handoff_chains();
     }
 
@@ -5256,7 +5284,7 @@ mod tests {
             let row = &harness.sessions[0];
             assert_eq!(row.id, "chain-c", "the head is what is listed");
             assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
-            assert_eq!(row.turns, 10, "2 + 3 + 5 across the chain");
+            assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
         });
         // Opening the tail member lands on the head, selected.
         vc.update(|window, cx| {
@@ -5319,7 +5347,11 @@ mod tests {
                     },
                 );
                 harness.sessions.push(chain_muse_entry("old-muse", "First words", 2));
-                harness.sessions.push(chain_muse_entry("new-muse", "Later words", 1));
+                harness.sessions.push(chain_muse_entry(
+                    "new-muse",
+                    "Later words",
+                    sidebar::visible_turns(1, true),
+                ));
                 harness.collapse_handoff_chains();
                 assert_eq!(harness.sessions.len(), 1, "the pair is one row");
                 assert_eq!(harness.chain_head("old-muse"), "new-muse");
@@ -5337,6 +5369,154 @@ mod tests {
                 "old-muse",
                 "the explicit source path bypasses the redirect"
             );
+        });
+        lane_restore(state);
+    }
+
+    /// X3d: a two-member chain indexes as one search row under the head,
+    /// with the first member's words finding it.
+    #[gpui::test]
+    fn x3d_a_chain_indexes_once_under_the_head(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("x3d-search");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.overrides.insert(
+                    "search-old".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_to: Some("search-new".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.overrides.insert(
+                    "search-new".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_from: Some("search-old".into()),
+                        handoff_from_provider: Some("muse".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.index.insert(
+                    "search-old".into(),
+                    IndexEntry {
+                        title: "Greyport ferries".into(),
+                        first_user_prompt: Some("chart the ferry routes".into()),
+                        search_text: "cormorant crossing lighthouse supply run".into(),
+                        ..Default::default()
+                    },
+                );
+                harness.index.insert(
+                    "search-new".into(),
+                    IndexEntry {
+                        title: "Later words".into(),
+                        first_user_prompt: Some("what else".into()),
+                        search_text: "harbour ledger quiet winter".into(),
+                        ..Default::default()
+                    },
+                );
+                let rows = harness.search_session_rows();
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "a two-member chain is one search row, drew {:?}",
+                    rows.iter().map(|row| row.session_id.clone()).collect::<Vec<_>>()
+                );
+                assert_eq!(rows[0].session_id, "search-new", "the head is what is indexed");
+                let mut connection =
+                    crate::search::open_at(std::path::Path::new(":memory:")).expect("in-memory search db");
+                crate::search::rebuild_sessions(&mut connection, &rows).expect("rebuild");
+                let hits = crate::search::query_sessions(&connection, "cormorant", crate::search::LIMIT);
+                assert_eq!(hits.len(), 1, "the first member's words find the chain");
+                assert_eq!(hits[0].session_id, "search-new", "a match in an early member returns the head");
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// X3d: the chain row matches the transcript — each destination hides
+    /// its pack exchange, so claude-code (1) → codex (2 incl. pack) → muse
+    /// (2 incl. pack) reads 3 turns.
+    #[gpui::test]
+    fn x3d_chain_counts_match_the_transcript(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("x3d-counts");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                use std::collections::HashMap;
+                let record =
+                    |id: &str, provider: &str, turns: u64, to: Option<&str>, from: Option<(&str, &str)>| {
+                        crate::provider_sessions::ProviderSessionRecord {
+                            provider: provider.to_owned(),
+                            session_id: id.to_owned(),
+                            workspace: None,
+                            project: None,
+                            created_ms: 1_700_000_000_000,
+                            updated_ms: 1_700_000_000_000,
+                            turns,
+                            title: None,
+                            first_prompt: None,
+                            handoff_to: to.map(str::to_owned),
+                            handoff_from: from.map(|(source, _)| source.to_owned()),
+                            handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
+                            display_texts: HashMap::new(),
+                        }
+                    };
+                harness.provider_sessions.insert(
+                    "count-a".into(),
+                    record("count-a", "claude-code", 1, Some("count-b"), None),
+                );
+                harness.provider_sessions.insert(
+                    "count-b".into(),
+                    record("count-b", "codex", 2, Some("count-c"), Some(("count-a", "claude-code"))),
+                );
+                harness.overrides.insert(
+                    "count-c".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_from: Some("count-b".into()),
+                        handoff_from_provider: Some("codex".into()),
+                        ..Default::default()
+                    },
+                );
+                harness.merge_provider_rows();
+                // The muse head through the real join, wire count 2 incl. pack.
+                let wire = muse_client::schema::Session {
+                    active_turn_id: None,
+                    approval_mode: None,
+                    attention: None,
+                    branch: None,
+                    created_at: "2026-09-13T10:00:00Z".into(),
+                    first_user_prompt: None,
+                    forked_from: None,
+                    last_activity_at: None,
+                    model_id: None,
+                    name: None,
+                    path: String::new(),
+                    provider_id: None,
+                    session_id: "count-c".into(),
+                    status: muse_client::schema::SessionStatus::Idle,
+                    title: None,
+                    turn_count: 2,
+                    updated_at: "2026-09-13T10:00:00Z".into(),
+                    workspace_root: None,
+                };
+                let head = crate::sidebar::SessionEntry::join(
+                    &wire,
+                    harness.index.get("count-c"),
+                    harness.overrides.get("count-c"),
+                    &crate::projects::Projects::default(),
+                );
+                harness.sessions.push(head);
+                harness.collapse_handoff_chains();
+                assert_eq!(harness.sessions.len(), 1, "three members, one row");
+                assert_eq!(
+                    harness.sessions[0].turns, 3,
+                    "1 + (2 - 1) + (2 - 1): each destination hides its pack exchange"
+                );
+            });
         });
         lane_restore(state);
     }

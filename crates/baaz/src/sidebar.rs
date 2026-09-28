@@ -256,7 +256,12 @@ impl SessionEntry {
             label: one_line(text),
             updated: parse_time(&session.updated_at),
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
-            turns: session.turn_count,
+            // A destination's wire count includes its hidden pack
+            // exchange; the row matches the transcript (§8.4).
+            turns: visible_turns(
+                session.turn_count,
+                meta.and_then(|m| m.handoff_from.as_deref()).map(str::trim).is_some_and(|s| !s.is_empty()),
+            ),
             hidden: meta.is_some_and(|m| m.hidden) || side_marker,
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
@@ -446,7 +451,13 @@ impl SessionEntry {
             label: one_line(text),
             updated,
             running: false,
-            turns: record.turns,
+            // A destination's record counts its hidden pack
+            // acknowledgement; the row matches the transcript (§8.4). A
+            // lone destination row reads this too, wherever it is shown.
+            turns: visible_turns(
+                record.turns,
+                record.handoff_from.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()),
+            ),
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
@@ -1058,7 +1069,9 @@ pub fn chain_members(
 ///
 /// The head row keeps its own `updated`, provider badge and flags; its label
 /// is the chain's original title (the tail member's row) unless the head was
-/// user-renamed, and its turn count is the chain's total.
+/// user-renamed, and its turn count is the chain's visible total — each
+/// member row already hides its pack exchange ([`visible_turns`]), so the
+/// plain sum matches the transcript.
 /// Walk `handoff_from` back from the head to the tail member: the chain's
 /// first session, whose title the collapsed row keeps. Stops at an unknown
 /// source or a cycle; `None` when the head itself names no source.
@@ -1079,6 +1092,51 @@ fn chain_tail(
         found = true;
     }
     found.then_some(tail)
+}
+
+/// The turn count the sidebar shows for a row: the transcript hides the
+/// handoff pack exchange (the pack's user turn plus its one-sentence
+/// acknowledgement), while the stores count the acknowledgement as a
+/// settled turn. A member born from a handoff therefore reads one turn
+/// high until this subtracts it (`docs/22-handoff.md` §8.4).
+pub fn visible_turns(turns: u64, has_handoff_from: bool) -> u64 {
+    if has_handoff_from { turns.saturating_sub(1) } else { turns }
+}
+
+/// Whether `id` carries a handoff link in either direction, whichever store
+/// holds it. Blank links read as none, like [`handoff_to_of`] treats them.
+fn has_handoff_link(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> bool {
+    handoff_to_of(id, provider_sessions, overrides).is_some()
+        || handoff_from_of(id, provider_sessions, overrides).is_some()
+}
+
+/// Whether settling `id` can change the chain collapse: the touched session
+/// carries a handoff link, or is the endpoint of another session's link.
+/// What keeps an unlinked settle on the O(1) row refresh instead of the
+/// full clone + scan (`docs/22-handoff.md` §8.4).
+///
+pub fn needs_collapse(
+    id: &str,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> bool {
+    if has_handoff_link(id, provider_sessions, overrides) {
+        return true;
+    }
+    // The touched id may carry no link itself and still anchor a chain:
+    // another session names it as its handoff source or destination.
+    fn names(id: &str, link: Option<&str>) -> bool {
+        link.map(str::trim).is_some_and(|target| target == id)
+    }
+    provider_sessions.values().any(|record| {
+        names(id, record.handoff_to.as_deref()) || names(id, record.handoff_from.as_deref())
+    }) || overrides
+        .values()
+        .any(|meta| names(id, meta.handoff_to.as_deref()) || names(id, meta.handoff_from.as_deref()))
 }
 
 pub fn collapse_handoff_chains(
@@ -3060,13 +3118,15 @@ mod tests {
         row_b.updated = Local::now() - chrono::Duration::days(1);
         let mut row_c = entry("chain-c");
         row_c.label = "Later words".into();
-        row_c.turns = 5;
+        // The wire's 5 minus the hidden pack exchange: the fixture mirrors
+        // what `join` builds for a destination (see `visible_turns`).
+        row_c.turns = visible_turns(5, true);
         row_c.updated = Local::now();
         vec![row_a, row_b, row_c]
     }
 
     /// A 2-hop mixed chain lists one row: the head's id, the original
-    /// title, the summed turns, the head's provider badge and time.
+    /// title, the summed visible turns, the head's provider badge and time.
     #[test]
     fn a_two_hop_mixed_chain_lists_one_row_with_the_original_title_and_summed_turns() {
         let (provider, overrides) = chain_stores();
@@ -3077,7 +3137,7 @@ mod tests {
         let row = &collapsed[0];
         assert_eq!(row.id, "chain-c", "the head is what is listed");
         assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
-        assert_eq!(row.turns, 10, "2 + 3 + 5 across the chain");
+        assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
         assert!(row.provider.is_none(), "the muse head wears no provider mark");
     }
 
@@ -3134,7 +3194,7 @@ mod tests {
         ];
         let mut head = entry("chain-c");
         head.archived = true;
-        head.turns = 5;
+        head.turns = visible_turns(5, true);
         rows.push(head);
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 1);
@@ -3150,7 +3210,7 @@ mod tests {
         rows[2].named = true;
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed[0].label, "Mine");
-        assert_eq!(collapsed[0].turns, 10, "the rename changes the title, not the count");
+        assert_eq!(collapsed[0].turns, 8, "the rename changes the title, not the count");
     }
 
     /// An unlinked session passes through untouched.
@@ -3205,6 +3265,28 @@ mod tests {
         let member_rows = vec![rows[0].clone(), rows[1].clone()];
         let collapsed = collapse_handoff_chains(member_rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 2, "no head row, no collapse");
+    }
+
+    /// X3d: a settle on an unlinked session needs no collapse — the O(1)
+    /// row refresh stands on its own — while any chain member's settle
+    /// re-sums the chain.
+    #[test]
+    fn x3d_an_unlinked_settle_needs_no_collapse() {
+        let (provider, overrides) = chain_stores();
+        assert!(!needs_collapse("unlinked", &provider, &overrides));
+        assert!(!needs_collapse("no-such-session", &provider, &overrides));
+        assert!(needs_collapse("chain-a", &provider, &overrides));
+        assert!(needs_collapse("chain-b", &provider, &overrides));
+        assert!(needs_collapse("chain-c", &provider, &overrides));
+    }
+
+    /// X3d: the hidden pack exchange is exactly one counted turn per
+    /// destination member.
+    #[test]
+    fn x3d_visible_turns_hide_the_pack_exchange() {
+        assert_eq!(visible_turns(5, false), 5);
+        assert_eq!(visible_turns(2, true), 1);
+        assert_eq!(visible_turns(0, true), 0, "saturates, never wraps");
     }
 
     /// Corrupt links must not hang the list build: a two-cycle lists both

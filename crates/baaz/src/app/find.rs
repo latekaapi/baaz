@@ -90,41 +90,42 @@ impl Harness {
         });
     }
 
-    /// Rebuild the session half of `search.db` off the UI thread.
-    ///
-    /// Runs at boot and after each index refresh; the files half is never
-    /// touched here, so recorded files survive a rebuild. When the rebuild
-    /// lands while the palette is open, the open query runs again against
-    /// the fresh index.
-    pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
-        let at = std::time::Instant::now();
+    /// The session half's rows, one per handoff chain: the label and
+    /// project terms the palette shows, every member's transcript text as
+    /// the matchable body. Pure over the harness state so tests can pin
+    /// the rows without a window; [`Self::rebuild_search_index`] writes
+    /// them to `search.db` (`docs/22-handoff.md` §8.4).
+    pub(crate) fn search_session_rows(&self) -> Vec<crate::search::SessionRow> {
+        use std::collections::HashMap;
         // One cache over the whole build: each distinct index root is
         // canonicalized once, not once per row.
         let mut canon = crate::projects::CanonicalCache::default();
-        let rows: Vec<crate::search::SessionRow> = self
-            .index
-            .iter()
+        let mut per_session: HashMap<String, crate::search::SessionRow> = HashMap::new();
+        for (session_id, entry) in self.index.iter() {
             // Title side sessions never reach the search palette: their
             // only transcript is the title prompt itself.
-            .filter(|(session_id, _)| !self.is_side_session(session_id))
-            .map(|(session_id, entry)| {
-                let meta = self.overrides.get(session_id);
-                let name =
-                    meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-                let derived = meta
-                    .and_then(|m| m.derived_title.as_deref())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty());
-                let label =
-                    name.or_else(|| entry.label()).or(derived).unwrap_or(crate::sidebar::UNNAMED);
-                let workspace = entry.workspace_root.as_deref().map(|root| canon.get(root));
-                // The adopted name too, when this root has one: a renamed
-                // project is findable by the name on screen as well as by
-                // the folder it still lives in.
-                let adopted = workspace
-                    .as_deref()
-                    .and_then(|root| self.projects.find_by_root(std::path::Path::new(root)))
-                    .map(|p| p.name.clone());
+            if self.is_side_session(session_id) {
+                continue;
+            }
+            let meta = self.overrides.get(session_id);
+            let name =
+                meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+            let derived = meta
+                .and_then(|m| m.derived_title.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let label =
+                name.or_else(|| entry.label()).or(derived).unwrap_or(crate::sidebar::UNNAMED);
+            let workspace = entry.workspace_root.as_deref().map(|root| canon.get(root));
+            // The adopted name too, when this root has one: a renamed
+            // project is findable by the name on screen as well as by
+            // the folder it still lives in.
+            let adopted = workspace
+                .as_deref()
+                .and_then(|root| self.projects.find_by_root(std::path::Path::new(root)))
+                .map(|p| p.name.clone());
+            per_session.insert(
+                session_id.clone(),
                 crate::search::SessionRow {
                     session_id: session_id.clone(),
                     label: label.to_owned(),
@@ -133,9 +134,105 @@ impl Harness {
                     body: entry.search_text.clone(),
                     project: crate::search::project_terms(workspace.as_deref(), adopted.as_deref()),
                     workspace,
+                },
+            );
+        }
+        // One row per chain: indexed members share the head's row, so a
+        // three-member chain is one palette hit under the head id. The
+        // head keeps its own label, title and first prompt; every other
+        // member's words join the body, so a match in an early member's
+        // turns finds the head. Opening already redirects to the head, so
+        // nothing changes there.
+        let mut by_head: HashMap<String, Vec<String>> = HashMap::new();
+        for id in per_session.keys() {
+            let head = crate::sidebar::chain_head(id, &self.provider_sessions, &self.overrides, &self.sessions);
+            by_head.entry(head).or_default().push(id.clone());
+        }
+        let mut heads: Vec<String> = by_head.keys().cloned().collect();
+        heads.sort();
+        let mut out = Vec::with_capacity(heads.len());
+        for head in heads {
+            let mut members = by_head.remove(&head).unwrap_or_default();
+            members.sort();
+            if self.is_side_session(&head) {
+                // A chained side session stays unfindable, but its members
+                // keep their own rows rather than vanishing with it.
+                for member in members {
+                    if let Some(row) = per_session.remove(&member) {
+                        out.push(row);
+                    }
                 }
-            })
-            .collect();
+                continue;
+            }
+            // Every non-head member's words: label, title, first prompt
+            // and transcript text alike.
+            let mut extra: Vec<String> = Vec::new();
+            for member in &members {
+                if member == &head {
+                    continue;
+                }
+                if let Some(row) = per_session.get(member) {
+                    for text in [&row.label, &row.title, &row.first_prompt, &row.body] {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            extra.push(text.to_owned());
+                        }
+                    }
+                }
+            }
+            // Provider-lane members carry no index entry: their ack title
+            // and first prompt still name the chain.
+            for member in
+                crate::sidebar::chain_members(&head, &self.provider_sessions, &self.overrides, &self.sessions)
+            {
+                if member == head || per_session.contains_key(&member) || self.is_side_session(&member) {
+                    continue;
+                }
+                if let Some(record) = self.provider_sessions.get(&member) {
+                    for text in [&record.title, &record.first_prompt].into_iter().flatten() {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            extra.push(text.to_owned());
+                        }
+                    }
+                }
+            }
+            let mut base = match per_session.remove(&head) {
+                Some(row) => row,
+                // A provider-lane head carries no index entry: scaffold
+                // its row from the first indexed member, renamed to the
+                // head (its words already joined `extra` above).
+                None => {
+                    let first = members[0].clone();
+                    let mut row =
+                        per_session.remove(&first).expect("chain groups derive from indexed ids");
+                    row.session_id.clone_from(&head);
+                    row
+                }
+            };
+            // The chain's display title: the collapsed sidebar row when
+            // the list has one, else the head's own index label (boot
+            // orders vary).
+            if let Some(entry) = self.sessions.iter().find(|entry| entry.id == head) {
+                base.label.clone_from(&entry.label);
+            }
+            if !extra.is_empty() {
+                base.body = format!("{}\n{}", base.body, extra.join("\n"));
+            }
+            out.push(base);
+        }
+        out
+    }
+
+    /// Rebuild the session half of `search.db` off the UI thread.
+    ///
+    /// Runs at boot and after each index refresh; the files half is never
+    /// touched here, so recorded files survive a rebuild. When the rebuild
+    /// lands while the palette is open, the open query runs again against
+    /// the fresh index.
+    pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        let rows = self.search_session_rows();
         crate::log::boot_mark(&format!(
             "search-rows-built rows={} in={}ms (per-row canonical_str N={})",
             rows.len(),
