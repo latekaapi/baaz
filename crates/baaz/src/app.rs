@@ -1931,6 +1931,9 @@ impl Harness {
     /// flips the open state, persists it, notifies, and re-reads the pane's
     /// data off the render path when it ends up open.
     pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        // A user toggle always animates, even when a restore armed the
+        // snap and no frame has consumed it yet.
+        self.right_snap = false;
         self.layout.right_open = !self.layout.right_open;
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         layout::write(&self.layout);
@@ -1947,6 +1950,8 @@ impl Harness {
     /// Either way the pane's data is re-read off the render path when it ends
     /// up open.
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        // A user pick always animates (see `toggle_right`).
+        self.right_snap = false;
         if self.layout.right_open && self.layout.right_kind == Some(kind) {
             self.layout.right_open = false;
         } else {
@@ -4262,6 +4267,15 @@ mod tests {
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        // A restore arms the snap; a user toggle BEFORE any frame consumes it
+        // must still animate (review finding): the toggle disarms it.
+        open_session!("sess-b");
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), true));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a toggle before the frame still animates");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        open_session!("sess-a");
+        draw!();
         // Restart: the store carries A home as Diff.
         let disk = crate::sessions::read();
         assert_eq!(
