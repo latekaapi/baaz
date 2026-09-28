@@ -781,6 +781,16 @@ pub struct Harness {
     /// task, so they claim the next start up front — any other `new` while
     /// a switch is in flight is a duplicate and starts nothing.
     pub(crate) switch_claim: Option<String>,
+    /// The view a provider switch is replacing (Y2b): the old session id,
+    /// kept active and drawn — composer locked, chip already on the pick —
+    /// until the replacement activates in the same update. `None` outside
+    /// a switch.
+    pub(crate) replacing: Option<String>,
+    /// The old view's provider, to restore the chip when the open fails.
+    pub(crate) replacing_provider: Option<String>,
+    /// The drafts-map project that named the replaced view, to restore it
+    /// when the open fails.
+    pub(crate) replacing_draft_project: Option<String>,
     /// One handoff run per source session: the machine in
     /// [`crate::handoff`]. The source view mirrors the run's card; this
     /// map is the authority the ack and cancel paths advance.
@@ -1037,6 +1047,9 @@ impl Harness {
             session_switch_pending: false,
             provider_open_epoch: 0,
             switch_claim: None,
+            replacing: None,
+            replacing_provider: None,
+            replacing_draft_project: None,
             handoffs: HashMap::new(),
             handoff_epoch: 0,
             pending_handoff: None,
