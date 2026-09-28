@@ -20,6 +20,7 @@ pub mod caps;
 pub mod child;
 pub mod fold;
 pub mod frame;
+pub mod probe;
 pub mod terminal;
 
 use std::sync::{Arc, Mutex};
