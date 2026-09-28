@@ -532,36 +532,52 @@ impl SessionView {
 
     /// Ask the lane's child for its model catalog after open, so the model
     /// menu lists what the child returns and the chip reads the effective
-    /// model's human name. Claude Code has no catalog surface — Baaz owns
-    /// its supplied alias list (the `Emulated` cell) — so that folds
-    /// synchronously instead of asking. A refusal or an empty answer
-    /// records the typed reason for the picker's stand-in row and stays
-    /// quiet otherwise: a background fetch never banners.
+    /// model's human name. A refusal or an empty answer records the typed
+    /// reason for the picker's stand-in row and stays quiet otherwise: a
+    /// background fetch never banners. A Claude Code lane whose child has
+    /// no catalog yet (no `initialize` answer landed) folds Baaz's supplied
+    /// alias list instead — the offline fallback, never served as the
+    /// child's own.
     pub(super) fn request_provider_models(&mut self, cx: &mut Context<Self>) {
-        if self.provider_kind() == ProviderId::ClaudeCode {
-            let current = self.model_id();
-            let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
-            let provider = self.provider_id.clone();
-            self.apply_model_catalog(rows, &provider, cx);
-            return;
-        }
         let command = provider::Command::ListModels { session: Some(self.session_id.clone()) };
         self.provider_send(command, cx, |this, result, cx| match result {
             Ok(provider::Ack::ModelCatalog { models, provider }) => {
-                this.apply_model_catalog(models, &provider, cx);
+                if models.is_empty() && this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.apply_model_catalog(models, &provider, cx);
+                }
             }
             Ok(_) => {
-                this.models = Vec::new();
-                this.models_error = Some("the model catalog answered without a catalog".to_owned());
-                cx.notify();
+                if this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.models = Vec::new();
+                    this.models_error =
+                        Some("the model catalog answered without a catalog".to_owned());
+                    cx.notify();
+                }
             }
             Err(error) => {
                 crate::baaz_log!("provider lane: ListModels refused: {error}");
-                this.models = Vec::new();
-                this.models_error = Some(error.to_string());
-                cx.notify();
+                if this.provider_kind() == ProviderId::ClaudeCode {
+                    this.apply_supplied_claude_catalog(cx);
+                } else {
+                    this.models = Vec::new();
+                    this.models_error = Some(error.to_string());
+                    cx.notify();
+                }
             }
         });
+    }
+
+    /// Fold Baaz's supplied Claude Code alias list: the offline fallback
+    /// when the lane's child has no catalog to serve.
+    fn apply_supplied_claude_catalog(&mut self, cx: &mut Context<Self>) {
+        let current = self.model_id();
+        let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
+        let provider = self.provider_id.clone();
+        self.apply_model_catalog(rows, &provider, cx);
     }
 
     /// Pull the lane's pending set on (re)open, so an approval or a
@@ -1957,8 +1973,18 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::with_catalog(vec![
-            provider::ModelSummary { id: "gx-1".into(), label: "GX One".into(), active: true },
-            provider::ModelSummary { id: "gx-2".into(), label: "GX Two".into(), active: false },
+            provider::ModelSummary {
+                id: "gx-1".into(),
+                label: "GX One".into(),
+                active: true,
+                ..Default::default()
+            },
+            provider::ModelSummary {
+                id: "gx-2".into(),
+                label: "GX Two".into(),
+                active: false,
+                ..Default::default()
+            },
         ]);
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {

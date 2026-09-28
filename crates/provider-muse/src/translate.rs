@@ -378,6 +378,7 @@ pub fn dispatch(
                         id: model.model_id,
                         label: model.display_label,
                         active: model.is_active,
+                        ..Default::default()
                     })
                     .collect(),
                 provider: result.provider_id,

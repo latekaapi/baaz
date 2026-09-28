@@ -692,6 +692,11 @@ pub struct ClaudeFold {
     /// Answered through `DecideApproval` with `"deny"` (a refusal) or
     /// `"allow"`; never auto-answered, never unanswerable.
     pending_unknown: Vec<UnknownControlRequest>,
+    /// The model catalog from the last `initialize` answer, in answer
+    /// order: what `ListModels` serves. Replaced wholesale on every
+    /// `initialize` answer — the child restates the whole list — and empty
+    /// until the first one lands.
+    catalog: Vec<crate::frame::CatalogModel>,
 }
 
 impl ClaudeFold {
@@ -716,10 +721,23 @@ impl ClaudeFold {
         self.model.as_deref()
     }
 
+    /// The model catalog from the last `initialize` answer, in answer
+    /// order. Empty until the first answer lands — `ListModels` refuses
+    /// honestly rather than serving Baaz's fallback as the child's own.
+    pub fn catalog_models(&self) -> &[crate::frame::CatalogModel] {
+        &self.catalog
+    }
+
     /// Remember the effective model from a `SelectModel` admission: the next
     /// turn's footer reads it, the way `init`'s model lands in the first.
     pub fn set_model(&mut self, model: &str) {
         self.model = Some(model.to_owned());
+    }
+
+    /// Forget the recorded model: a `SelectModel` admission the child never
+    /// took is un-recorded, so the chip stops claiming it.
+    pub fn clear_model(&mut self) {
+        self.model = None;
     }
 
     /// `can_use_tool` requests waiting on a human decision, oldest first.
@@ -976,8 +994,14 @@ impl ClaudeFold {
             }
             // A child→host `control_response` (e.g. the answer to our
             // `initialize` handshake). Host-initiated, so nothing about it
-            // needs answering.
-            Frame::ControlResponse { .. } => Vec::new(),
+            // needs answering — but an `initialize` answer restates the
+            // model catalog, which `ListModels` serves from here.
+            Frame::ControlResponse { models, .. } => {
+                if !models.is_empty() {
+                    self.catalog = models.clone();
+                }
+                Vec::new()
+            }
             // The other lane, by choice (see module docs): parsed, ignored.
             Frame::Stream { .. } | Frame::Ignored { .. } => Vec::new(),
         }

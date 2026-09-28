@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex};
 use aui_protocol::Delta;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
-    Ack, CapabilitySet, Command, ConnectInfo, Handshake, PendingApproval, ProviderAdapter,
-    ProviderError, ProviderEvent, ProviderId, SessionSummary,
+    Ack, CapabilitySet, Command, ConnectInfo, Handshake, ModelSummary, PendingApproval,
+    ProviderAdapter, ProviderError, ProviderEvent, ProviderId, SessionSummary,
 };
 
 pub use caps::{capabilities, claude_version_supported, CLAUDE_VERSION_FLOOR};
@@ -75,10 +75,21 @@ pub struct ClaudeCodeAdapter {
     child: Mutex<Option<RunningChild>>,
     session_id: Mutex<Option<String>>,
     model: Mutex<Option<String>>,
-    /// The `--effort` level the running child was launched with, when one
-    /// was. Effort is a launch flag — a `SubmitInput` carrying a different
-    /// level relaunches the child with `--resume` plus the new flag.
+    /// The effort level in effect on the running child, when one was set:
+    /// raised with `apply_flag_settings{effortLevel}` (verified live
+    /// 2026-09-28 — the next turn's session jsonl carries the level), or
+    /// the `--effort` launch flag when the child spawned with one. `None`
+    /// is Default: no override in effect. Clearing back to Default has no
+    /// verified control-channel reset, so it keeps the `--resume`
+    /// relaunch path (see [`Self::resume_launch_for_effort`]).
     effort: Mutex<Option<String>>,
+    /// Host→child control `request_id` sequence (`baaz-ctl-…`), shared by
+    /// `initialize`, `set_model` and `apply_flag_settings` alike.
+    control_seq: Mutex<u64>,
+    /// Every host→child control line addressed, in order — written to the
+    /// child when one runs, recorded regardless so tests can read the
+    /// bytes a spawn would carry.
+    sent_control: Mutex<Vec<String>>,
     workspace: Mutex<Option<PathBuf>>,
     home_override: Option<PathBuf>,
     connected: Mutex<bool>,
@@ -88,6 +99,47 @@ pub struct ClaudeCodeAdapter {
     /// directory (`<support_dir>/mcp`) its per-session config files land
     /// in. `None` means no relay: sessions spawn exactly today's argv.
     terminal: Mutex<Option<TerminalRelay>>,
+}
+
+/// The host→child control lines the adapter addresses, each answering
+/// `{"subtype":"success"}` with its `request_id` (every shape probed live
+/// 2026-09-28 against the installed CLI).
+///
+/// `initialize` restates the model catalog (`response.response.models[]`,
+/// recorded in `fixtures/claude-code/permission.jsonl`); the fold keeps it
+/// for `ListModels`.
+pub fn initialize_control_request(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "initialize"},
+    })
+    .to_string()
+}
+
+/// `set_model` switches the live child's model from the next turn, with no
+/// relaunch: spawned on `haiku`, switched to `sonnet`, the next turn's
+/// assistant message reported `claude-sonnet-5`.
+pub fn set_model_control_request(request_id: &str, model: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_model", "model": model},
+    })
+    .to_string()
+}
+
+/// `apply_flag_settings{effortLevel}` raises the live child's effort from
+/// the next turn, with no relaunch: set to `high` on `sonnet`, the next
+/// turn's session jsonl carried `"effort":"high"`. There is no verified
+/// reset — clearing back to Default keeps the `--resume` relaunch path.
+pub fn apply_effort_control_request(request_id: &str, level: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "apply_flag_settings", "settings": {"effortLevel": level}},
+    })
+    .to_string()
 }
 
 /// Where the terminal relay lives: the bridge to spawn and the socket to
@@ -120,6 +172,8 @@ impl ClaudeCodeAdapter {
             session_id: Mutex::new(None),
             model: Mutex::new(None),
             effort: Mutex::new(None),
+            control_seq: Mutex::new(1),
+            sent_control: Mutex::new(Vec::new()),
             workspace: Mutex::new(None),
             home_override: None,
             connected: Mutex::new(false),
@@ -220,6 +274,59 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Mint a host→child control `request_id`. One sequence for every
+    /// subtype — the child joins answers by id, never by kind.
+    fn next_control_id(&self) -> String {
+        let mut seq = self.control_seq.lock().expect("control sequence mutex");
+        let id = format!("baaz-ctl-{}", *seq);
+        *seq += 1;
+        id
+    }
+
+    /// Address one host→child control request: recorded always, written
+    /// when a child runs. With no child there is nothing to deliver to, so
+    /// the line is recorded but not delivered — an admission the child
+    /// never saw, matching `SelectModel`'s offline-capable contract.
+    fn send_control(&self, line: &str) -> Result<(), ProviderError> {
+        self.sent_control.lock().expect("sent control mutex").push(line.to_owned());
+        match self.child.lock().expect("child mutex").as_mut() {
+            Some(running) => running.send_line(line).map_err(|error| ProviderError::Unavailable {
+                reason: format!("the session child is unreachable: {error}"),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The `initialize` line for a freshly spawned child: the answer
+    /// restates the model catalog, which the fold keeps for `ListModels`.
+    /// Best-effort after a spawn — a child whose stdin is already broken
+    /// still opened, and `ListModels` refuses honestly until an answer
+    /// lands.
+    fn send_initialize(&self) {
+        let _ = self.send_control(&initialize_control_request(&self.next_control_id()));
+    }
+
+    /// The `set_model` line for the live child, switching its model from
+    /// the next turn with no relaunch. Best-effort like [`Self::send_control`]:
+    /// a delivery failure un-records the pick at the dispatch site.
+    fn send_set_model(&self, model: &str) -> Result<(), ProviderError> {
+        self.send_control(&set_model_control_request(&self.next_control_id(), model))
+    }
+
+    /// The `apply_flag_settings` line raising the live child's effort from
+    /// the next turn, with no relaunch. Best-effort like
+    /// [`Self::send_control`]: a delivery failure leaves the recorded
+    /// level untouched at the dispatch site.
+    fn send_apply_effort(&self, level: &str) -> Result<(), ProviderError> {
+        self.send_control(&apply_effort_control_request(&self.next_control_id(), level))
+    }
+
+    /// Control lines addressed so far, in order (see [`Self::send_control`]).
+    #[cfg(test)]
+    fn sent_control_lines(&self) -> Vec<String> {
+        self.sent_control.lock().expect("sent control mutex").clone()
+    }
+
     fn spawn_launch(&self, launch: &SessionLaunch) -> Result<Ack, ProviderError> {
         let mut child = self.child.lock().expect("child mutex");
         if child.is_some() {
@@ -238,6 +345,12 @@ impl ClaudeCodeAdapter {
             reason: format!("could not spawn claude: {error}"),
         })?;
         *child = Some(running);
+        // The guard drops here: `send_initialize` locks the child again to
+        // write, and holding both would hang the open forever.
+        drop(child);
+        // The catalog arrives on the child's answer to this: without it
+        // `ListModels` has nothing to serve but the offline fallback.
+        self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
         // The launch's `--model`, when one was requested: the fold learns
         // the rest from the `init` frame, but an alias never appears there
@@ -379,11 +492,13 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    /// The relaunch a `SubmitInput` needs when its effort differs from the
-    /// running child's launch flag: `--resume <session-id>` plus the new
-    /// `--effort`, carrying the recorded `--model` along. `None` means the
-    /// running child already flies this level and the turn goes straight to
-    /// stdin. Pure — no spawn — so tests drive this without a CLI.
+    /// The relaunch a `SubmitInput` needs when its effort clears back to
+    /// Default while a level is in effect: `--resume <session-id>` without
+    /// `--effort`, carrying the recorded `--model` along. Raising a level
+    /// rides `apply_flag_settings` instead (see the `SubmitInput` arm), so
+    /// only the clearing direction builds a launch here. `None` means the
+    /// running child already flies this level and the turn goes straight
+    /// to stdin. Pure — no spawn — so tests drive this without a CLI.
     ///
     /// The fold (and its transcript) outlives the swap: it lives on the
     /// adapter, not the child. And a resumed child does not replay history,
@@ -422,6 +537,8 @@ impl ClaudeCodeAdapter {
             reason: format!("could not respawn claude: {error}"),
         })?;
         *self.child.lock().expect("child mutex") = Some(running);
+        // A relaunched child restates the whole session, catalog included.
+        self.send_initialize();
         *self.session_id.lock().expect("session mutex") = Some(launch.session_id.clone());
         if let Some(model) = &launch.model {
             *self.model.lock().expect("model mutex") = Some(model.clone());
@@ -735,17 +852,31 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             )),
             Command::SelectModel { session_id, model, .. } => {
                 self.check_session(&session_id)?;
-                // Admission, like Codex: the running turn keeps its model
-                // and the recorded one is the session's effective model
-                // from here on — the chip, the next footers, and the next
-                // resume's `--model`. The live child keeps its spawn-time
-                // flag until that reopen; there is no per-turn model
-                // channel over stream-json stdin, and spelling one would
-                // be the lie this seam exists to prevent. Applies to a
+                // Mid-session switch, no relaunch: `set_model` reaches the
+                // live child on the control channel and the next turn runs
+                // on the new model (probed live 2026-09-28: haiku → sonnet
+                // answered success and the assistant message reported
+                // `claude-sonnet-5`). The recorded pick is the session's
+                // effective model from here on — the chip, the next
+                // footers, and the next resume's `--model`. Applies to a
                 // session with turns in it exactly as to a fresh one:
-                // nothing here counts turns.
+                // nothing here counts turns. A delivery failure un-records
+                // the pick, so the chip never claims a model the child
+                // never took.
+                let previous_model = self.model.lock().expect("model mutex").clone();
+                let previous_fold =
+                    self.fold.lock().expect("fold mutex").model().map(str::to_owned);
                 *self.model.lock().expect("model mutex") = Some(model.clone());
                 self.fold.lock().expect("fold mutex").set_model(&model);
+                if let Err(error) = self.send_set_model(&model) {
+                    *self.model.lock().expect("model mutex") = previous_model;
+                    let mut fold = self.fold.lock().expect("fold mutex");
+                    match previous_fold {
+                        Some(previous) => fold.set_model(&previous),
+                        None => fold.clear_model(),
+                    }
+                    return Err(error);
+                }
                 Ok(Ack::Accepted)
             }
             Command::SelectApprovalMode { .. } => Err(ProviderError::unsupported(
@@ -758,14 +889,35 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                  runs inside turns",
             )),
             Command::SubmitInput { request_id, session_id, parts, effort, display_text, .. } => {
-                // Effort is a launch flag: when the pick differs from the
-                // running child's, the next turn relaunches with
-                // `--resume <session-id> --effort <new>` before the text
-                // goes to stdin. Same level — or none anywhere — skips the
-                // swap and the turn goes straight in.
-                if let Some(launch) = self.resume_launch_for_effort(&session_id, effort.as_deref()) {
-                    self.check_session(&session_id)?;
-                    self.relaunch(&launch)?;
+                // Effort rides the control channel: when the pick differs
+                // from the level in effect, `apply_flag_settings` raises it
+                // from the next turn with no relaunch (probed live
+                // 2026-09-28 — the next turn's session jsonl carried
+                // `"effort":"high"`). Same level — or none anywhere — skips
+                // the send and the turn goes straight in. Clearing back to
+                // Default has no verified control-channel reset, so only
+                // that direction keeps the `--resume` relaunch path (the
+                // relaunched child spawns without `--effort`). A rejected
+                // level fails the submit loudly — never silently — and the
+                // recorded level stays where the child actually is.
+                let wanted = effort.filter(|effort| !effort.is_empty());
+                let recorded = self.effort.lock().expect("effort mutex").clone();
+                if wanted != recorded {
+                    match wanted.clone() {
+                        Some(level) => {
+                            self.check_session(&session_id)?;
+                            self.send_apply_effort(&level)?;
+                            *self.effort.lock().expect("effort mutex") = Some(level);
+                        }
+                        None => {
+                            if let Some(launch) =
+                                self.resume_launch_for_effort(&session_id, None)
+                            {
+                                self.check_session(&session_id)?;
+                                self.relaunch(&launch)?;
+                            }
+                        }
+                    }
                 }
                 let (text, images) = Self::split_parts(&parts);
                 self.submit_parts(&session_id, &text, &images, request_id, display_text.as_deref())
@@ -802,10 +954,58 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             Command::ReclaimQueued { .. } => Err(ProviderError::Rejected {
                 reason: "no queued-turn lane was probed over stream-json stdin".into(),
             }),
-            Command::ListModels { .. } => Err(ProviderError::unsupported(
-                "list-models",
-                "no model-catalog surface was probed; Baaz supplies the list",
-            )),
+            Command::ListModels { session } => {
+                // The catalog the child's `initialize` answer restated (see
+                // `send_initialize`): `value` is the id, `displayName` the
+                // label, the description plus the resolved full id the
+                // detail line, each row's own `supportedEffortLevels` the
+                // effort list. Empty until the first answer lands — then
+                // this refuses honestly and the lane falls back to Baaz's
+                // supplied alias list, rather than serving that fallback as
+                // the child's own.
+                let rows =
+                    self.fold.lock().expect("fold mutex").catalog_models().to_vec();
+                if rows.is_empty() {
+                    return Err(ProviderError::Unavailable {
+                        reason: "no initialize answer has landed yet; the catalog is unknown"
+                            .into(),
+                    });
+                }
+                let active = session
+                    .as_deref()
+                    .and_then(|session| {
+                        (Some(session) == self.session_id.lock().expect("session mutex").as_deref())
+                            .then(|| self.model.lock().expect("model mutex").clone())
+                            .flatten()
+                    })
+                    .unwrap_or_default();
+                Ok(Ack::ModelCatalog {
+                    models: rows
+                        .into_iter()
+                        .map(|row| ModelSummary {
+                            active: row.value == active,
+                            label: row.display_name.clone(),
+                            id: row.value.clone(),
+                            efforts: row.efforts.clone(),
+                            hidden: false,
+                            is_default: row.value == "default",
+                            description: match (&row.description, &row.resolved_model) {
+                                (Some(description), Some(resolved))
+                                    if resolved != &row.value =>
+                                {
+                                    Some(format!("{description} ({resolved})"))
+                                }
+                                (Some(description), _) => Some(description.clone()),
+                                (None, Some(resolved)) if resolved != &row.value => {
+                                    Some(resolved.clone())
+                                }
+                                (None, _) => None,
+                            },
+                        })
+                        .collect(),
+                    provider: "anthropic".into(),
+                })
+            }
             // The control channel answers here: a pending `can_use_tool`
             // — or unknown-subtype — request is decided with one of its
             // card's own choices (`"allow"`/`"deny"`), written to the
@@ -1004,9 +1204,152 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_effort_relaunches_with_resume_and_the_new_flag() {
+    fn list_models_serves_the_initialize_catalog_including_fable() {
+        // Offline throughout: the program name does not exist, so a stray
+        // spawn would fail loudly, and the transcript below is
+        // `permission.jsonl` folded through the shared stream path — the
+        // initialize answer lands in the fold exactly as live.
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let path =
+            format!("{}/../../fixtures/claude-code/permission.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(path).expect("fixture reads");
+        {
+            let mut fold = adapter.fold.lock().expect("fold mutex");
+            for line in text.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                crate::fold::step_line(&mut fold, line, &mut |_| {});
+            }
+            assert_eq!(fold.catalog_models().len(), 5, "the initialize answer lands");
+        }
+        // Before any answer lands the catalog is honestly unknown — never
+        // the supplied fallback served as the child's own.
+        let fresh = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        assert!(
+            matches!(
+                fresh.dispatch(Command::ListModels { session: None }),
+                Err(ProviderError::Unavailable { .. })
+            ),
+            "no answer yet, no catalog"
+        );
+        let session =
+            adapter.fold.lock().expect("fold mutex").session_id().expect("init seen").to_owned();
+        adapter.attach_session_for_tests(&session);
+        let ack = adapter
+            .dispatch(Command::ListModels { session: Some(session.clone()) })
+            .expect("the folded catalog serves");
+        match ack {
+            Ack::ModelCatalog { models, provider } => {
+                assert_eq!(provider, "anthropic");
+                let ids: Vec<&str> = models.iter().map(|row| row.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"],
+                    "every row, in answer order: {ids:?}"
+                );
+                let fable = models
+                    .iter()
+                    .find(|row| row.id == "claude-fable-5-1[1m]")
+                    .expect("fable serves");
+                assert_eq!(fable.label, "Fable", "the label is the displayName");
+                assert_eq!(fable.efforts, ["low", "medium", "high", "xhigh", "max"]);
+                assert!(
+                    fable.description.as_deref().is_some_and(|detail| detail
+                        .contains("claude-fable-5-1")),
+                    "the detail line names the resolved id: {:?}",
+                    fable.description
+                );
+                let haiku =
+                    models.iter().find(|row| row.id == "haiku").expect("haiku serves");
+                assert!(haiku.efforts.is_empty(), "haiku names no effort levels");
+                assert!(
+                    models.iter().all(|row| !row.active),
+                    "nothing picked yet, nothing marked"
+                );
+            }
+            other => panic!("expected a catalog, got {other:?}"),
+        }
+        // A pick flags its row: the chip, the menus and the ack agree.
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: session.clone(),
+                model: "sonnet".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        let ack = adapter
+            .dispatch(Command::ListModels { session: Some(session.clone()) })
+            .expect("the catalog serves again");
+        match ack {
+            Ack::ModelCatalog { models, .. } => {
+                let active: Vec<&str> = models
+                    .iter()
+                    .filter(|row| row.active)
+                    .map(|row| row.id.as_str())
+                    .collect();
+                assert_eq!(active, ["sonnet"], "the pick marks its row");
+            }
+            other => panic!("expected a catalog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_model_writes_a_set_model_control_request() {
+        // Offline: no child runs, so nothing is delivered — but the line
+        // addressed to the child is recorded byte-for-byte, which is what a
+        // live child receives on its stdin.
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-7");
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-7".into(),
+                model: "sonnet".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        let lines = adapter.sent_control_lines();
+        assert_eq!(lines.len(), 1, "one control line addressed: {lines:?}");
+        let written: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("the line encodes JSON");
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": written.get("request_id").expect("the line mints an id"),
+                "request": {"subtype": "set_model", "model": "sonnet"},
+            }),
+            "the live child gets set_model, never a relaunch"
+        );
+        // The control shapes themselves pin the probed wire bytes.
+        let effort: serde_json::Value =
+            serde_json::from_str(&apply_effort_control_request("req-e", "high"))
+                .expect("encodes JSON");
+        assert_eq!(
+            effort.get("request"),
+            Some(&serde_json::json!({
+                "subtype": "apply_flag_settings",
+                "settings": {"effortLevel": "high"},
+            })),
+            "effort rides apply_flag_settings, never a relaunch"
+        );
+        let init: serde_json::Value =
+            serde_json::from_str(&initialize_control_request("req-i")).expect("encodes JSON");
+        assert_eq!(
+            init.get("request"),
+            Some(&serde_json::json!({"subtype": "initialize"})),
+            "every spawn opens with initialize"
+        );
+    }
+
+    #[test]
+    fn clearing_the_effort_relaunches_flagless_with_resume() {
         // Offline throughout: `resume_launch_for_effort` is pure — the
-        // decision `SubmitInput` acts on — so no `claude` process spawns.
+        // clearing direction of the `SubmitInput` decision (raising a level
+        // rides `apply_flag_settings`, never a relaunch) — so no `claude`
+        // process spawns.
         let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
         adapter.attach_session_for_tests("sess-9");
         // Same level (none anywhere): no swap, the turn goes straight in.
@@ -1014,35 +1357,29 @@ mod tests {
             adapter.resume_launch_for_effort("sess-9", None).is_none(),
             "no effort anywhere means no relaunch"
         );
-        // A pick the child was not launched with: `--resume <id>` plus the
-        // new `--effort`, carrying the recorded `--model` along.
+        // Clearing back to Default while a level is in effect: `--resume
+        // <id>` without `--effort`, carrying the recorded `--model` along.
         *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
-        let launch = adapter
-            .resume_launch_for_effort("sess-9", Some("high"))
-            .expect("a changed effort relaunches");
-        let argv = &launch.argv;
-        let resume = argv.iter().position(|arg| arg == "--resume").expect("--resume");
-        assert_eq!(argv.get(resume + 1).map(String::as_str), Some("sess-9"));
-        let effort = argv.iter().position(|arg| arg == "--effort").expect("--effort");
-        assert_eq!(argv.get(effort + 1).map(String::as_str), Some("high"));
-        let model = argv.iter().position(|arg| arg == "--model").expect("--model");
-        assert_eq!(argv.get(model + 1).map(String::as_str), Some("sonnet"));
-        assert_eq!(launch.session_id, "sess-9");
-        // Once the child flies that level, the same pick is a no-op: the
-        // turn must not pay a relaunch every send.
         *adapter.effort.lock().expect("effort mutex") = Some("high".into());
-        assert!(
-            adapter.resume_launch_for_effort("sess-9", Some("high")).is_none(),
-            "the launched level needs no swap"
-        );
-        // And clearing back to Default relaunches without the flag.
         let launch = adapter
             .resume_launch_for_effort("sess-9", None)
             .expect("clearing the effort relaunches");
+        let argv = &launch.argv;
+        let resume = argv.iter().position(|arg| arg == "--resume").expect("--resume");
+        assert_eq!(argv.get(resume + 1).map(String::as_str), Some("sess-9"));
         assert!(
-            !launch.argv.iter().any(|arg| arg == "--effort"),
-            "default relaunches flagless: {:?}",
-            launch.argv
+            !argv.iter().any(|arg| arg == "--effort"),
+            "clearing relaunches flagless: {argv:?}"
+        );
+        let model = argv.iter().position(|arg| arg == "--model").expect("--model");
+        assert_eq!(argv.get(model + 1).map(String::as_str), Some("sonnet"));
+        assert_eq!(launch.session_id, "sess-9");
+        // Once the child flies Default, staying there is a no-op: the turn
+        // must not pay a relaunch every send.
+        *adapter.effort.lock().expect("effort mutex") = None;
+        assert!(
+            adapter.resume_launch_for_effort("sess-9", None).is_none(),
+            "default needs no swap"
         );
     }
 

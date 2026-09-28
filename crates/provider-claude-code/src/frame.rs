@@ -100,6 +100,81 @@ pub struct AssistantUsage {
     pub reasoning_tokens: u64,
 }
 
+/// One row of the `initialize` answer's model catalog
+/// (`response.response.models[]`, recorded in
+/// `fixtures/claude-code/permission.jsonl`): what `--model` takes as
+/// `value`, resolved to the full id the stream reports, with the human
+/// label and the effort levels the row supports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogModel {
+    /// What `--model` (and `set_model`) carries: an alias (`sonnet`),
+    /// a bracketed id (`opus[1m]`, `claude-fable-5-1[1m]`) or `default`.
+    pub value: String,
+    /// The full id the stream reports for this row (`init`'s `model` and
+    /// the assistant messages), when the answer names one.
+    pub resolved_model: Option<String>,
+    /// The human label the picker shows (`displayName`).
+    pub display_name: String,
+    /// The answer's one-line description, when it sends one.
+    pub description: Option<String>,
+    /// The effort levels this row supports (`supportedEffortLevels`):
+    /// empty when the answer names none (Haiku carries no effort fields).
+    pub efforts: Vec<String>,
+}
+
+/// The catalog rows out of an `initialize` answer's `response.response`:
+/// one [`CatalogModel`] per `models[]` entry, in answer order. Rows
+/// without a `value` are skipped, never fabricated; a missing or
+/// misshapen `models[]` is an empty catalog, not an error.
+pub fn decode_catalog_models(response: &Value) -> Vec<CatalogModel> {
+    response
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|row| {
+                    let value = row.get("value").and_then(Value::as_str)?;
+                    if value.is_empty() {
+                        return None;
+                    }
+                    Some(CatalogModel {
+                        value: value.to_owned(),
+                        resolved_model: row
+                            .get("resolvedModel")
+                            .and_then(Value::as_str)
+                            .filter(|model| !model.is_empty())
+                            .map(str::to_owned),
+                        display_name: row
+                            .get("displayName")
+                            .and_then(Value::as_str)
+                            .filter(|label| !label.is_empty())
+                            .unwrap_or(value)
+                            .to_owned(),
+                        description: row
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .filter(|description| !description.is_empty())
+                            .map(str::to_owned),
+                        efforts: row
+                            .get("supportedEffortLevels")
+                            .and_then(Value::as_array)
+                            .map(|levels| {
+                                levels
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .filter(|level| !level.is_empty())
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One decoded CLI stdout line.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
@@ -217,12 +292,17 @@ pub enum Frame {
     },
     /// A child→host `control_response` (e.g. the answer to the host's
     /// `initialize` handshake). Carried so the frame counts balance;
-    /// host-initiated, so nothing about it needs answering.
+    /// host-initiated, so nothing about it needs answering. An `initialize`
+    /// answer carries the model catalog (`response.response.models[]`),
+    /// which the fold keeps for `ListModels`.
     ControlResponse {
         /// The `response.request_id` this answers.
         request_id: String,
         /// The `response.subtype` (e.g. `success`).
         subtype: String,
+        /// The catalog rows, when this answer carries them: `initialize`
+        /// only, empty otherwise.
+        models: Vec<CatalogModel>,
     },
     /// Noise or the not-yet-known: hooks, spinner status, token estimates,
     /// turn summaries, and any unknown `type`. Ignored, not fatal.
@@ -731,9 +811,14 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
         "control_response" => {
             let response = value.get("response");
             let get = |key: &str| response.and_then(|response| response.get(key));
+            let models = response
+                .and_then(|response| response.get("response"))
+                .map(decode_catalog_models)
+                .unwrap_or_default();
             Ok(Frame::ControlResponse {
                 request_id: get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 subtype: get("subtype").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                models,
             })
         }
         // Forward compatibility: the CLI will add frames; Baaz ignores them.
@@ -995,6 +1080,55 @@ mod tests {
     #[test]
     fn non_json_is_the_only_error() {
         assert!(decode_line("not json at all").is_err());
+    }
+
+    #[test]
+    fn the_initialize_answer_carries_the_model_catalog() {
+        // `fixtures/claude-code/permission.jsonl` already holds an
+        // `initialize` answer with five `models[]` rows: the `default`
+        // alias, `opus[1m]`, `claude-fable-5-1[1m]` ("Fable"),
+        // `sonnet`, and `haiku` — which carries no effort fields at all.
+        // A decoder that drops the payload serves an empty `ListModels`.
+        let lines = permission_fixture();
+        let frame = lines
+            .iter()
+            .filter(|line| line.get("_dir").is_none())
+            .map(|line| decode_line(&line.to_string()).expect("child line decodes"))
+            .find_map(|frame| match frame {
+                Frame::ControlResponse { models, .. } if !models.is_empty() => Some(models),
+                _ => None,
+            })
+            .expect("one catalog-carrying control_response in the fixture");
+        let values: Vec<&str> = frame.iter().map(|row| row.value.as_str()).collect();
+        assert_eq!(
+            values,
+            ["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"],
+            "every row, in answer order: {values:?}"
+        );
+        let fable = frame.iter().find(|row| row.value == "claude-fable-5-1[1m]").expect("fable");
+        assert_eq!(fable.display_name, "Fable");
+        assert_eq!(fable.resolved_model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(fable.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        let sonnet = frame.iter().find(|row| row.value == "sonnet").expect("sonnet");
+        assert_eq!(sonnet.display_name, "Sonnet");
+        assert_eq!(sonnet.resolved_model.as_deref(), Some("claude-sonnet-5"));
+        assert!(!sonnet.efforts.is_empty(), "sonnet takes an effort");
+        let haiku = frame.iter().find(|row| row.value == "haiku").expect("haiku");
+        assert_eq!(haiku.resolved_model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert!(
+            haiku.efforts.is_empty(),
+            "haiku names no effort levels: the menu must say so, not list the flag's"
+        );
+        // And a response without a payload still decodes: other control
+        // answers carry no catalog.
+        let bare = decode_line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-x"}}"#,
+        )
+        .expect("decodes");
+        assert!(
+            matches!(bare, Frame::ControlResponse { ref models, .. } if models.is_empty()),
+            "no payload, no rows: {bare:?}"
+        );
     }
 
     fn child_lines(name: &str) -> Vec<String> {
