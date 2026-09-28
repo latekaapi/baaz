@@ -164,6 +164,58 @@ fn a_snapshot_round_trips_prefix_divider_and_own_turns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// X3b: a handoff chain is one sidebar row (`docs/22-handoff.md` §8,
+/// sidebar half). The behaviour lives in `sidebar.rs` unit tests (2-hop
+/// mixed fixtures: one row, original title, summed turns, member resolve,
+/// archive expansion, dangling links — all real calls, no window) and in
+/// `app/lifecycle.rs` `gpui::test`s (member-id open lands on the head, the
+/// fallback source link bypasses, archiving the head flags all members —
+/// through the real `Harness`). Pinned here the way the transcript half is
+/// pinned above: the row-collapse entry points, the open-path redirect and
+/// its one bypass, and the chain-wide archive.
+#[test]
+fn sidebar_half_wiring_one_row_per_chain() {
+    let lifecycle = source("app/lifecycle.rs");
+    assert!(
+        lifecycle.contains("collapse_handoff_chains"),
+        "list builds must collapse member rows to the head row"
+    );
+    assert!(
+        lifecycle.contains("chain_head(&session_id)"),
+        "opening any id must resolve to the chain head first"
+    );
+    assert!(
+        lifecycle.contains("resume_source_read_only"),
+        "the fallback divider's source link needs the explicit bypass path"
+    );
+    assert!(
+        lifecycle.contains("HandoffOpenSource"),
+        "the bypass needs its own event, not the card's open-session one"
+    );
+    let sidebar = source("sidebar.rs");
+    assert!(
+        sidebar.contains("pub fn collapse_handoff_chains")
+            && sidebar.contains("pub fn chain_head")
+            && sidebar.contains("pub fn chain_members"),
+        "the chain helpers must exist as pure row functions"
+    );
+    let list = source("app/list.rs");
+    assert!(
+        list.contains("chain_members"),
+        "archiving the head must expand to every member"
+    );
+    let render = source("session/render.rs");
+    assert!(
+        render.contains("HandoffOpenSource"),
+        "the divider back-link must emit the bypass event"
+    );
+    let session = source("session.rs");
+    assert!(
+        session.contains("HandoffOpenSource"),
+        "the bypass event must exist on the session event enum"
+    );
+}
+
 /// The divider text contract both lanes share: providers named both ways,
 /// the model and the carried count only when known, and never a `;` (it
 /// would split `--steps`). Literal strings — the unit tests own the builder.

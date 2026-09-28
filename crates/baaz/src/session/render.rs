@@ -439,7 +439,7 @@ impl SessionView {
                 .map(|origin| {
                     let source = origin.source_session.clone();
                     let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
-                        cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
+                        cx.emit(crate::session::SessionEvent::HandoffOpenSource { source: id.clone() });
                     });
                     crate::transcript::HandoffBack {
                         source,

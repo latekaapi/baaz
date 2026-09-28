@@ -272,20 +272,27 @@ impl Harness {
 
     /// Archive a session out of the list, with a way back for eight seconds.
     ///
+    /// A handoff chain archives as one (`docs/22-handoff.md` §8): the head's
+    /// row is the unit the person sees, and every member takes the flag so
+    /// none resurfaces past it.
+    ///
     /// An archived session is never loaded, so the active one closes when it
     /// is the one archived: the newest remaining visible session opens in its
     /// place, or the empty state when nothing remains.
     pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        // The whole chain, head included: archiving names the head, the
+        // expansion covers the members.
+        let members = self.chain_members(&session_id);
         let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
-        self.session_cache.retain(|(id, _)| *id != session_id);
-        self.set_override(&session_id, |meta| meta.archived = true, cx);
+        self.session_cache.retain(|(id, _)| !members.contains(id));
+        self.set_overrides(&members, |meta| meta.archived = true, cx);
         if was_active {
             self.active = None;
         }
         self.push_undo(
-            UndoBatch::Archived(vec![session_id]),
+            UndoBatch::Archived(members),
             "Session archived".to_owned(),
             "It is still on disk; show it again from the Sessions menu.".to_owned(),
             cx,
@@ -307,9 +314,11 @@ impl Harness {
     }
 
     /// Put a session back in the list (the Archive tray action on an archived
-    /// row, or the toast's Undo through [`Self::undo_newest`]).
+    /// row, or the toast's Undo through [`Self::undo_newest`]). A chain
+    /// unarchives as one, symmetric with [`Self::archive_session`].
     pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.set_override(&session_id, |meta| meta.archived = false, cx);
+        let members = self.chain_members(&session_id);
+        self.set_overrides(&members, |meta| meta.archived = false, cx);
     }
 
     /// A turn completed in this app: leave the free byline excerpt on the
