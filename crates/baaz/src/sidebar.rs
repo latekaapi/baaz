@@ -922,8 +922,10 @@ pub fn first_send_update(
     entry.running = true;
     // A handoff destination is never titled from a send: the pack submit
     // reveals the row, and the destination's first real message keeps the
-    // chain title (`docs/22-handoff.md` §8, Y2a).
-    if !handoff_dest && !is_pack_text(prompt.unwrap_or_default()) && !entry.named {
+    // chain title (`docs/22-handoff.md` §8, Y2a). Any other session is
+    // titled from its own words — even when they start with "Handed off
+    // from ": only a handoff destination ever has a pack turn (Y2a3).
+    if !handoff_dest && !entry.named {
         if let Some(prompt) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
             entry.label = one_line(prompt);
         }
@@ -936,19 +938,26 @@ pub fn first_send_update(
 
 /// Whether `text` is a handoff pack turn or its short display summary: the
 /// full pack starts with the pack header (`PACK_HEAD_PREFIX`), the bubble
-/// with "Handed off from …" (`handoff::display_text`). Either one is the
-/// handoff itself speaking, never words to title or byline from (Y2a).
+/// with "Handed off from …" (`handoff::display_text`). A text match alone,
+/// never a verdict: only a handoff destination ever has a pack turn, so
+/// callers gate this on [`is_handoff_dest`] via [`is_pack_turn`] (Y2a3) —
+/// a normal message starting with that phrase keeps its title and byline.
 pub fn is_pack_text(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with(crate::handoff_snapshot::PACK_HEAD_PREFIX) || t.starts_with("Handed off from ")
 }
 
 /// The byline halves that land: the pack turn and its acknowledgement are
-/// the handoff speaking, so when the newest ask is the pack, neither half
-/// lands (`record_last_summary`, Y2a).
-pub fn byline_landable(summary: Option<String>, ask: Option<String>) -> (Option<String>, Option<String>) {
+/// the handoff speaking, so when the newest ask is the destination's pack,
+/// neither half lands (`record_last_summary`, Y2a). Any other session's
+/// words land untouched, even pack-shaped ones (Y2a3).
+pub fn byline_landable(
+    summary: Option<String>,
+    ask: Option<String>,
+    newest_ask_is_pack: bool,
+) -> (Option<String>, Option<String>) {
     match ask {
-        Some(ref a) if is_pack_text(a) => (None, None),
+        Some(_) if newest_ask_is_pack => (None, None),
         _ => (summary, ask),
     }
 }
@@ -1059,61 +1068,141 @@ fn handoff_from_of(
         .filter(|source| !source.is_empty() && source != id)
 }
 
-/// Whether `id` names a session the list could show: a record in either
-/// store, or a row already built (a muse session the wire lists carries no
-/// store entry until it earns an override).
-fn chain_known(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-    entries: &[SessionEntry],
-) -> bool {
-    provider_sessions.contains_key(id)
-        || overrides.contains_key(id)
-        || entries.iter().any(|entry| entry.id == id)
+/// One build of the handoff chains over full storage: every known id
+/// (both stores plus the rows) resolved to its head, and every head to its
+/// sorted members. Built once per storage change and shared by the head,
+/// member and view lookups — never rebuilt per frame or per row (Y2a3).
+///
+/// A link counts only when its destination is known (a record in either
+/// store, or a built row): a dangling `handoff_to` keeps the source
+/// listed, exactly like an unlinked session. Cycles stop the walk rather
+/// than hanging the list build on a corrupt store.
+#[derive(Clone, Debug, Default)]
+pub struct ChainIndex {
+    /// Every known id to its chain head. An id nothing knows is absent:
+    /// callers read it as its own singleton head.
+    heads: HashMap<String, String>,
+    /// Every head to its sorted members. Heads with no other member are
+    /// absent: callers read them as their own singleton chain.
+    members: HashMap<String, Vec<String>>,
+}
+
+impl ChainIndex {
+    /// Resolve every chain in one pass over the links.
+    pub fn build(
+        provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+        overrides: &crate::sessions::Overrides,
+        entries: &[SessionEntry],
+    ) -> Self {
+        let mut known: HashSet<String> = provider_sessions.keys().cloned().collect();
+        known.extend(overrides.keys().cloned());
+        known.extend(entries.iter().map(|entry| entry.id.clone()));
+        // The live `handoff_to` step for one id: the destination when the
+        // link names another known session, else the walk stops here.
+        let step = |id: &str| -> Option<String> {
+            let next = handoff_to_of(id, provider_sessions, overrides)?;
+            (next != id && known.contains(&next)).then_some(next)
+        };
+        let mut heads: HashMap<String, String> = HashMap::with_capacity(known.len());
+        // One sorted pass, so every shared prefix walk compresses the same
+        // way whatever order the rows arrived in.
+        let mut ids: Vec<&String> = known.iter().collect();
+        ids.sort();
+        for id in ids {
+            if heads.contains_key(id.as_str()) {
+                continue;
+            }
+            // The walk from this id, with its own cycle guard.
+            let mut trail: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut cursor = id.clone();
+            loop {
+                if let Some(settled) = heads.get(cursor.as_str()) {
+                    let head = settled.clone();
+                    for walked in trail {
+                        heads.insert(walked, head.clone());
+                    }
+                    break;
+                }
+                if !seen.insert(cursor.clone()) {
+                    // A cycle: every id on it is its own stop, so the rows
+                    // list rather than collapse or loop.
+                    for walked in &trail {
+                        heads.entry(walked.clone()).or_insert_with(|| walked.clone());
+                    }
+                    heads.entry(cursor.clone()).or_insert_with(|| cursor.clone());
+                    break;
+                }
+                trail.push(cursor.clone());
+                match step(&cursor) {
+                    Some(next) => cursor = next,
+                    None => {
+                        for walked in trail {
+                            heads.insert(walked, cursor.clone());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        let mut members: HashMap<String, Vec<String>> = HashMap::new();
+        for (id, head) in &heads {
+            members.entry(head.clone()).or_default().push(id.clone());
+        }
+        for chain in members.values_mut() {
+            chain.sort();
+        }
+        // Singletons carry no information: drop them so the view's
+        // collapsible check reads the map directly.
+        members.retain(|head, chain| !(chain.len() == 1 && head == &chain[0]));
+        Self { heads, members }
+    }
+
+    /// Whether `id` names a session the list could show: a record in
+    /// either store, or a row already built.
+    pub fn contains(&self, id: &str) -> bool {
+        self.heads.contains_key(id)
+    }
+
+    /// Follow `handoff_to` from `id` to the chain head. An unknown id
+    /// resolves to itself, so callers act on the id they were given.
+    pub fn head(&self, id: &str) -> String {
+        self.heads.get(id).cloned().unwrap_or_else(|| id.to_owned())
+    }
+
+    /// Every member of `id`'s chain, sorted, so archive and rename batches
+    /// over it are deterministic. An unlinked id yields itself alone.
+    pub fn members(&self, id: &str) -> Vec<String> {
+        let head = self.head(id);
+        self.members.get(&head).cloned().unwrap_or_else(|| vec![head])
+    }
 }
 
 /// Follow `handoff_to` from `id` to the chain head: the first id with no live
 /// link onward. A dangling destination (nothing known under it) stops the
 /// walk, so its source stays listed; a cycle stops too, rather than hanging
 /// the list build on a corrupt store.
+#[cfg(test)]
 pub fn chain_head(
     id: &str,
     provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     overrides: &crate::sessions::Overrides,
     entries: &[SessionEntry],
 ) -> String {
-    let mut head = id.to_owned();
-    let mut seen = HashSet::from([head.clone()]);
-    while let Some(next) = handoff_to_of(&head, provider_sessions, overrides) {
-        if !chain_known(&next, provider_sessions, overrides, entries) || !seen.insert(next.clone()) {
-            break;
-        }
-        head = next;
-    }
-    head
+    ChainIndex::build(provider_sessions, overrides, entries).head(id)
 }
 
 /// Every member of `id`'s chain, tail first: all known ids (both stores plus
 /// the rows) that resolve to the same head. Sorted, so archive and rename
 /// batches over it are deterministic. An unlinked id yields itself alone.
+#[cfg(test)]
 pub fn chain_members(
     id: &str,
     provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     overrides: &crate::sessions::Overrides,
     entries: &[SessionEntry],
 ) -> Vec<String> {
-    let head = chain_head(id, provider_sessions, overrides, entries);
-    let mut known: HashSet<String> = provider_sessions.keys().cloned().collect();
-    known.extend(overrides.keys().cloned());
-    known.extend(entries.iter().map(|entry| entry.id.clone()));
-    // An id nothing knows still names its own singleton chain: callers act
-    // on the id they were given, never on nothing.
-    known.insert(id.to_owned());
-    let mut members: Vec<String> =
-        known.into_iter().filter(|cand| chain_head(cand, provider_sessions, overrides, entries) == head).collect();
-    members.sort();
-    members
+    ChainIndex::build(provider_sessions, overrides, entries).members(id)
 }
 
 /// Collapse the rows to one per chain, preserving order: a session whose link
@@ -1135,13 +1224,13 @@ fn chain_tail(
     head: &str,
     provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     overrides: &crate::sessions::Overrides,
-    entries: &[SessionEntry],
+    index: &ChainIndex,
 ) -> Option<String> {
     let mut tail = head.to_owned();
     let mut seen = HashSet::from([tail.clone()]);
     let mut found = false;
     while let Some(source) = handoff_from_of(&tail, provider_sessions, overrides) {
-        if !chain_known(&source, provider_sessions, overrides, entries) || !seen.insert(source.clone()) {
+        if !index.contains(&source) || !seen.insert(source.clone()) {
             break;
         }
         tail = source;
@@ -1195,13 +1284,29 @@ pub fn needs_collapse(
         .any(|meta| names(id, meta.handoff_to.as_deref()) || names(id, meta.handoff_from.as_deref()))
 }
 
+#[cfg(test)]
 pub fn collapse_handoff_chains(
     entries: Vec<SessionEntry>,
     provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     overrides: &crate::sessions::Overrides,
 ) -> Vec<SessionEntry> {
-    let heads: Vec<String> =
-        entries.iter().map(|entry| chain_head(&entry.id, provider_sessions, overrides, &entries)).collect();
+    // One index build for the whole view: every row reads its head from
+    // the same map, never a walk per row (Y2a3).
+    let index = ChainIndex::build(provider_sessions, overrides, &entries);
+    collapse_with_index(entries, &index, provider_sessions, overrides)
+}
+
+/// Collapse the rows against a caller-held [`ChainIndex`]: the same
+/// one-row-per-chain view, without rebuilding the map. The frame's cached
+/// index serves the collapse and the selection heads together, so the view
+/// costs one build per storage change (Y2a3).
+pub fn collapse_with_index(
+    entries: Vec<SessionEntry>,
+    index: &ChainIndex,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    overrides: &crate::sessions::Overrides,
+) -> Vec<SessionEntry> {
+    let heads: Vec<String> = entries.iter().map(|entry| index.head(&entry.id)).collect();
     let mut by_head: HashMap<String, Vec<usize>> = HashMap::new();
     for (ix, head) in heads.iter().enumerate() {
         by_head.entry(head.clone()).or_default().push(ix);
@@ -1234,7 +1339,7 @@ pub fn collapse_handoff_chains(
             if let Some(kept) = handoff_title_of(head, provider_sessions, overrides) {
                 row.label = one_line(&kept);
             } else {
-                let original = chain_tail(head, provider_sessions, overrides, &entries)
+                let original = chain_tail(head, provider_sessions, overrides, index)
                     .filter(|tail| tail != head)
                     .and_then(|tail| entries.iter().find(|entry| entry.id == tail).map(|tail_row| tail_row.label.clone()));
                 if let Some(original) = original {
@@ -1244,6 +1349,8 @@ pub fn collapse_handoff_chains(
         }
         row.turns = by_head[head].iter().map(|ix| entries[*ix].turns).sum();
         let mut newest = row.updated;
+        let mut running = row.running;
+        let mut turn_started = row.turn_started;
         let mut pinned = row.pinned;
         let mut archived = row.archived;
         let mut attention = row.attention.clone();
@@ -1253,6 +1360,12 @@ pub fn collapse_handoff_chains(
             let member = &entries[*ix];
             if member.updated > newest {
                 newest = member.updated;
+            }
+            // A live turn on any member shows on the one row: the head
+            // would otherwise read idle while its chain works (Y2a3).
+            running |= member.running;
+            if turn_started.is_none_or(|started| member.turn_started.is_some_and(|cand| cand > started)) {
+                turn_started = member.turn_started;
             }
             pinned |= member.pinned;
             archived |= member.archived;
@@ -1269,6 +1382,8 @@ pub fn collapse_handoff_chains(
             }
         }
         row.updated = newest;
+        row.running = running;
+        row.turn_started = turn_started;
         row.pinned = pinned;
         row.archived = archived;
         row.attention = attention;
@@ -3337,9 +3452,11 @@ mod tests {
         assert_eq!(row.updated, now);
     }
 
-    /// Y2a: a pack prompt titles nothing, even outside a chain.
+    /// Y2a3: only a handoff destination has a pack turn — a normal
+    /// session whose first words start with "Handed off from " is titled
+    /// from them like any other message.
     #[test]
-    fn a_pack_prompt_never_titles_a_row() {
+    fn a_non_handoff_prompts_pack_shaped_words_still_title_the_row() {
         let now = Local::now();
         let mut row = entry("fresh");
         row.label = UNNAMED.into();
@@ -3349,9 +3466,13 @@ mod tests {
             now,
             false,
         );
-        assert!(changed, "the pack submit still reveals the row");
+        assert!(changed, "the first send still reveals the row");
         assert!(row.running);
-        assert_eq!(row.label, UNNAMED, "the pack is not the session's own words");
+        assert_eq!(
+            row.label,
+            "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)",
+            "a non-destination's own words title it, pack-shaped or not"
+        );
     }
 
     /// Y2a: the persisted chain title outranks the destination's own
@@ -3396,19 +3517,32 @@ mod tests {
     }
 
     /// Y2a: the pack turn and its acknowledgement never become the
-    /// byline — when the newest ask is the pack, neither half lands —
-    /// while real turns pass through untouched.
+    /// byline — when the newest ask is the destination's pack, neither
+    /// half lands — while real turns pass through untouched. Y2a3: the
+    /// skip is gated on the destination — pack-shaped words on any other
+    /// session land like any other byline.
     #[test]
     fn byline_skips_the_pack_turn_and_its_acknowledgement() {
         let (summary, ask) = byline_landable(
             Some("Context received; I will wait.".into()),
             Some("Handed off from Muse: Fix it (1 recent turn, 0 open todos, 0 files touched)".into()),
+            true,
         );
         assert_eq!((summary, ask), (None, None));
         let (summary, ask) =
-            byline_landable(Some("Fixed it".into()), Some("Fix the header".into()));
+            byline_landable(Some("Fixed it".into()), Some("Fix the header".into()), false);
         assert_eq!(summary.as_deref(), Some("Fixed it"));
         assert_eq!(ask.as_deref(), Some("Fix the header"));
+        let (summary, ask) = byline_landable(
+            Some("Context received; I will wait.".into()),
+            Some("Handed off from Muse: Fix it (1 recent turn, 0 open todos, 0 files touched)".into()),
+            false,
+        );
+        assert_eq!(summary.as_deref(), Some("Context received; I will wait."));
+        assert_eq!(
+            ask.as_deref(),
+            Some("Handed off from Muse: Fix it (1 recent turn, 0 open todos, 0 files touched)")
+        );
     }
 
     /// Y2a: collapse is idempotent and order-independent — storage keeps
@@ -3442,18 +3576,20 @@ mod tests {
 
     /// Y2a: the collapsed head carries the chain's state — pinned and
     /// needs-you attention ORed across members, newest time, summed
-    /// honest turns.
+    /// honest turns. Y2a3: a live turn ORs across members too.
     #[test]
     fn the_collapsed_head_carries_the_chains_state() {
         use muse_client::schema::AttentionFlag;
         let (provider, overrides) = chain_stores();
         let mut rows = chain_rows(&provider);
         rows[0].pinned = true;
+        rows[0].running = true;
         rows[0].attention = vec![AttentionFlag::ApprovalPending];
         rows[1].attention = vec![AttentionFlag::InputPending];
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 1);
         let head = &collapsed[0];
+        assert!(head.running, "a live turn on a member shows on the one row (Y2a3)");
         assert!(head.pinned, "pin rides the head even though the source holds it");
         assert!(
             head.attention.contains(&AttentionFlag::ApprovalPending)
