@@ -144,7 +144,8 @@ pub fn upsert_open(
             if title.is_some() {
                 record.title = title.clone();
             }
-            record.updated_ms = now;
+            // A reopen is not activity: opening a row from the sidebar
+            // must not move it to "now" and to the top of its group.
         })
         .or_insert_with(|| ProviderSessionRecord {
             provider: provider.to_owned(),
@@ -186,8 +187,13 @@ pub fn note_settled_turn_counted(
     exchanges: u64,
 ) -> bool {
     let Some(record) = store.get_mut(session_id) else { return false };
-    record.turns = record.turns.max(exchanges);
-    record.updated_ms = crate::usage::now_ms();
+    // Only a turn the record has not counted yet is new activity: the
+    // resume replays every settled turn, and stamping now on each replay
+    // moved a merely-opened row to the top of the sidebar.
+    if exchanges > record.turns {
+        record.turns = exchanges;
+        record.updated_ms = crate::usage::now_ms();
+    }
     true
 }
 
@@ -503,14 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn reopening_keeps_the_row_and_refreshes_recency() {
+    fn reopening_keeps_the_row_and_its_recency() {
         let mut store = ProviderSessionStore::new();
         open_sample(&mut store);
         note_settled_turn_counted(&mut store, "s-1", 1);
         let created = store["s-1"].created_ms;
+        // An old row: a reopen and the resume's replayed settle must leave
+        // it where it sorts, not stamp it "now" and move it to the top.
+        store.get_mut("s-1").unwrap().updated_ms = 1_000;
         upsert_open(&mut store, "claude-code", "s-1", None, None, None);
+        assert!(note_settled_turn_counted(&mut store, "s-1", 1), "the replayed settle");
+        assert_eq!(store["s-1"].updated_ms, 1_000, "opening a session is not activity");
+        assert!(note_settled_turn_counted(&mut store, "s-1", 2), "a new live exchange");
+        assert!(store["s-1"].updated_ms > 1_000, "a new turn is activity");
         assert_eq!(store["s-1"].created_ms, created, "a reopen is not a new session");
-        assert_eq!(store["s-1"].turns, 1, "its history survives");
+        assert_eq!(store["s-1"].turns, 2, "its history survives");
         assert_eq!(store["s-1"].workspace.as_deref(), Some("/w/shop"), "unset stays, not blanked");
     }
 

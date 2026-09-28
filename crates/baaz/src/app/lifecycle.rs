@@ -2082,7 +2082,11 @@ impl Harness {
         // (`--no-connect` / `--replay`) opens the row as a local view with
         // none, which is what lets a capture drive drafts and switching.
         let client = self.client.clone();
-        let (provider, workspace) = (self.new_provider.clone(), self.session_workspace(&session_id));
+        // Every row `open` builds rides the Muse lane (`session/start`, a
+        // fork, a sidebar reopen of a Muse session) — never the new-session
+        // default, which read "Codex" or "Claude Code" on a reopened Muse
+        // session and fed that provider's model metadata into its turns.
+        let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
@@ -5675,6 +5679,32 @@ mod tests {
 
     fn opens_of(opens: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> usize {
         opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[gpui::test]
+    fn a_reopened_muse_session_is_muse_whatever_the_new_session_default(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b2-muse-reopen");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        for default in [ProviderId::Codex, ProviderId::ClaudeCode] {
+            vc.update(|window, cx| {
+                baaz.update(cx, |harness, cx| {
+                    harness.new_provider = default.as_str().to_owned();
+                    harness.open("muse-row".into(), false, true, window, cx);
+                });
+            });
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let view = baaz.read(cx).active.clone().expect("the row opened");
+                assert_eq!(
+                    view.read(cx).provider_kind(),
+                    ProviderId::Muse,
+                    "a Muse row reopened with a {default:?} default still reads Muse"
+                );
+            });
+        }
+        lane_restore(state);
     }
 
     #[gpui::test]
