@@ -84,11 +84,10 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         // A handoff destination keeps the chain title: never start the
-        // paid titler there, whatever the turn count reads (Y2a).
+        // paid titler there, whatever the turn count reads (Y2a). Any
+        // other session has no pack turn, so its first message always
+        // qualifies, pack-shaped or not (Y2a3).
         if crate::sidebar::is_handoff_dest(session_id, &self.provider_sessions, &self.overrides) {
-            return;
-        }
-        if first_message.as_deref().is_some_and(crate::sidebar::is_pack_text) {
             return;
         }
         let entry = self.sessions.iter().find(|e| e.id == session_id);
@@ -437,8 +436,11 @@ impl Harness {
         let ask = view.read(cx).last_user_text();
         let result = view.read(cx).last_summary_text();
         // The pack turn and its acknowledgement are the handoff speaking,
-        // never words to rewrite a byline from (Y2a).
-        if ask.as_deref().is_some_and(crate::sidebar::is_pack_text) {
+        // never words to rewrite a byline from — but only a handoff
+        // destination ever has a pack turn (Y2a, Y2a3).
+        if crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides)
+            && ask.as_deref().is_some_and(crate::sidebar::is_pack_text)
+        {
             return;
         }
         if ask.is_none() && result.is_none() {

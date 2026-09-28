@@ -216,7 +216,7 @@ impl SidebarKey {
             .pending_id
             .clone()
             .or_else(|| baaz.active.as_ref().map(|a| a.read(cx).session_id.clone()))
-            .map(|id| crate::sidebar::chain_head(&id, &baaz.provider_sessions, &baaz.overrides, &baaz.sessions));
+            .map(|id| baaz.chain_head(&id));
         let auth = match &baaz.auth {
             Auth::Probing => (0, String::new(), String::new(), String::new(), false),
             Auth::SignedOut => (1, String::new(), String::new(), String::new(), false),
@@ -494,7 +494,7 @@ impl Harness {
             .pending_id
             .clone()
             .or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()))
-            .map(|id| crate::sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions));
+            .map(|id| self.chain_head(&id));
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             // A sidebar click never arms the reveal: the clicked row is
             // under the cursor, hence painted inside the viewport (owner

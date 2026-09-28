@@ -337,9 +337,13 @@ impl Harness {
             return;
         }
         // The pack turn and its acknowledgement never become the byline:
-        // when the newest ask is the pack, the newest summary is its
-        // acknowledgement, so neither lands (Y2a).
-        let (summary, ask) = crate::sidebar::byline_landable(summary, ask);
+        // when the newest ask is the destination's pack, the newest
+        // summary is its acknowledgement, so neither lands (Y2a). The
+        // skip is gated on the destination: any other session's words
+        // land untouched, even pack-shaped ones (Y2a3).
+        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+        let newest_ask_is_pack = dest && ask.as_deref().is_some_and(crate::sidebar::is_pack_text);
+        let (summary, ask) = crate::sidebar::byline_landable(summary, ask, newest_ask_is_pack);
         if summary.is_none() && ask.is_none() {
             return;
         }
@@ -582,18 +586,20 @@ impl Harness {
         // Y2a: the chain collapses at view time. Storage keeps every
         // member row; the collapsed head (one title, summed turns,
         // derived flags) is what the list filters, sorts and draws, so
-        // the collapse is idempotent and order-independent.
-        let collapsed =
-            sidebar::collapse_handoff_chains(self.sessions.clone(), &self.provider_sessions, &self.overrides);
+        // the collapse is idempotent and order-independent. One index
+        // build serves the collapse and both head lookups below (Y2a3).
+        let index = self.chain_index();
+        let collapsed = sidebar::collapse_with_index(
+            self.sessions.clone(),
+            &index,
+            &self.provider_sessions,
+            &self.overrides,
+        );
         // One identity for selection: the active/pending head is never
         // filtered as empty, so the destination row stays highlighted
         // while the pack runs.
-        let active_head = active
-            .as_deref()
-            .map(|id| sidebar::chain_head(id, &self.provider_sessions, &self.overrides, &self.sessions));
-        let pending_head = pending
-            .as_deref()
-            .map(|id| sidebar::chain_head(id, &self.provider_sessions, &self.overrides, &self.sessions));
+        let active_head = active.as_deref().map(|id| index.head(id));
+        let pending_head = pending.as_deref().map(|id| index.head(id));
         let mut rows: Vec<SessionEntry> = collapsed
             .into_iter()
             .filter(|entry| self.show_hidden || !entry.hidden)
@@ -787,10 +793,9 @@ impl Harness {
             .first_user_title()
             .or_else(|| view.first_shell_title().map(|shell| crate::sidebar::one_line(&shell)));
         let Some(title) = title else { return };
-        // The pack submits as a recorded command: never title from it (Y2a).
-        if crate::sidebar::is_pack_text(&title) {
-            return;
-        }
+        // Destinations return above, so no pack turn can reach here: only
+        // a handoff destination ever has one, and any other session's own
+        // words title it, pack-shaped or not (Y2a3).
         self.set_override(&session_id, |meta| meta.derived_title = Some(title), cx);
     }
 }
