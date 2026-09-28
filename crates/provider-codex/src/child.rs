@@ -857,10 +857,14 @@ impl RunningChild {
     ) -> std::io::Result<Self> {
         // `extra_args` rides after `app-server`: the global `-c`
         // config overrides live there too (`codex app-server -c …`), and
-        // they are process-scoped — this child's config only.
+        // they are process-scoped — this child's config only. The child's
+        // `PATH` is the login-shell `PATH` with the program's own directory
+        // first, so a Dock launch still runs a home install and its
+        // `env`-shebang neighbours. No other env var is changed.
         let mut child = Command::new(program)
             .arg("app-server")
             .args(extra_args)
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
