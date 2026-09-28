@@ -83,11 +83,11 @@ pub struct RateWindow {
     pub resets_at: Option<i64>,
 }
 
-/// Name one `windowDurationMins`: 10080 reads `7d`, 60 reads `1h`.
+/// Name one `windowDurationMins`: 10080 reads `7d`, 60 reads `1h`. A
+/// week (10080) is a multiple of a day (1440), so one day-branch names
+/// every whole-day window — weekly, monthly (`30d`) and otherwise.
 fn duration_label(mins: u64) -> String {
-    if mins % 10080 == 0 {
-        format!("{}d", mins / 1440)
-    } else if mins % 1440 == 0 {
+    if mins % 1440 == 0 {
         format!("{}d", mins / 1440)
     } else if mins % 60 == 0 {
         format!("{}h", mins / 60)
