@@ -243,6 +243,9 @@ impl CodexAdapter {
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.model.lock().expect("model mutex") = Some(resolved.clone());
         self.fold.lock().expect("fold mutex").set_model(&resolved);
+        // The gated MCP tools run in this cwd, and their elicitation
+        // approvals name it — the requests themselves carry none.
+        self.fold.lock().expect("fold mutex").set_workspace(cwd);
         // The lane is up: ask its own server for the rate limits before
         // handing over the child, so the usage card has a reading from
         // the first frame rather than waiting on the first push.
@@ -839,6 +842,10 @@ impl ProviderAdapter for CodexAdapter {
                         reason: format!("no pending approval {approval:?}: it may have resolved"),
                     });
                 }
+                // The press is on the wire: remember it so the completing
+                // item settles the card from what the person chose, not
+                // from the error text the wire reports back.
+                self.fold.lock().expect("fold mutex").record_decision(&approval, &choice);
                 Ok(Ack::Accepted)
             }
             Command::ListPending { session_id } => {
