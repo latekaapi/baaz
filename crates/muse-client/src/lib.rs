@@ -48,6 +48,7 @@
 
 mod client;
 mod error;
+mod program;
 
 pub mod frame;
 pub mod schema;
@@ -55,6 +56,10 @@ pub mod schema;
 pub use client::{
     new_command_id, MuseClient, MuseConfig, MuseEvent, SchemaWarning, CAPTURE_ENV, GAP_ABORTED,
     PROTOCOL_ERROR,
+};
+pub use program::{
+    child_path_value, muse_fallback_dirs, muse_not_found_message, resolve_muse_program,
+    resolve_muse_program_with, MUSE_BIN_ENV, MUSE_BINARY,
 };
 pub use error::{MuseError, Result};
 pub use frame::Frame;
