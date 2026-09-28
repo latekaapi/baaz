@@ -3588,8 +3588,9 @@ impl Harness {
         }
         run.activate();
         // §8, the transcript half: snapshot the source's visible turns —
-        // everything its transcript shows, prefix and card included — for
-        // the destination, then show them there above the one divider.
+        // everything its transcript shows, prefix included but the handoff
+        // card left out — for the destination, then show them there above
+        // the one divider.
         let snap_turns = self
             .find_view(&source, cx)
             .map(|view| view.update(cx, |view, _| view.handoff_snapshot_turns()))
@@ -3604,6 +3605,7 @@ impl Harness {
                 )
             })
             .unwrap_or_default();
+        let turns_carried = run.pack.as_ref().map(|pack| pack.recent.len());
         let to_model = (!run.to_model.is_empty()).then(|| run.to_model.clone());
         crate::handoff_snapshot::write_snapshot(
             &dest,
@@ -3617,6 +3619,7 @@ impl Harness {
                 pack_text: pack_full.clone(),
                 pack_display: pack_display.clone(),
                 turns: snap_turns.clone(),
+                turns_carried,
             },
         );
         let card = run.card();
@@ -3627,7 +3630,7 @@ impl Harness {
             from,
             from_model: run.from_model.clone(),
         };
-        let divider = crate::handoff_snapshot::divider_text(from, to, to_model.as_deref());
+        let divider = crate::handoff_snapshot::divider_text(from, to, to_model.as_deref(), turns_carried);
         self.handoffs.insert(source.clone(), run);
         if let Some(view) = self.find_view(&source, cx) {
             view.update(cx, |view, cx| {
@@ -3754,8 +3757,12 @@ impl Harness {
                 from,
                 from_model: String::new(),
             };
-            let divider =
-                crate::handoff_snapshot::divider_text(from, to, snapshot.to_model.as_deref());
+            let divider = crate::handoff_snapshot::divider_text(
+                from,
+                to,
+                snapshot.to_model.as_deref(),
+                snapshot.turns_carried,
+            );
             view.update(cx, |view, cx| {
                 view.show_handoff_prefix(
                     origin,

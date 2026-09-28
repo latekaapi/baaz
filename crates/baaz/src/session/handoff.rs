@@ -104,7 +104,7 @@ impl SessionView {
             &format!("handoff-divider-{}", self.session_id),
             origin.from,
             to,
-            crate::handoff_snapshot::divider_text(origin.from, to, None),
+            crate::handoff_snapshot::divider_text(origin.from, to, None, None),
         );
         self.handoff_origin = Some(origin);
         self.handoff_divider = Some(Rc::new(divider));
@@ -159,11 +159,16 @@ impl SessionView {
     }
 
     /// The source transcript as this view shows it: prefix, divider, own
-    /// turns with the pack bubble hidden. What activation snapshots, so a
-    /// chain's next hop already carries this hop's divider.
+    /// turns with the pack bubble and its acknowledgement hidden — and never
+    /// the handoff card, which is still Prepared here and would freeze that
+    /// way in the destination's history (the divider stands for the
+    /// handoff). What activation snapshots, so a chain's next hop already
+    /// carries this hop's divider. The live source view keeps its card; only
+    /// these returned turns leave it out.
     pub(crate) fn handoff_snapshot_turns(&mut self) -> Vec<Turn> {
         self.refresh_render_cache();
-        self.cached_turns.iter().map(|turn| (**turn).clone()).collect()
+        let turns: Vec<Turn> = self.cached_turns.iter().map(|turn| (**turn).clone()).collect();
+        crate::handoff_snapshot::without_handoff_cards(turns)
     }
 
     /// A pack-derived bubble text from before snapshots existed: the display

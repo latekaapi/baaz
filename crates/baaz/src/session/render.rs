@@ -205,11 +205,13 @@ impl SessionView {
     pub(super) fn sync_render_cache(&mut self) {
         let live_len = self.fold.session(&self.session_id).map(|s| s.turns.len()).unwrap_or(0);
         // The cache holds more than the fold: the view-side handoff prefix
-        // and its one divider, minus the hidden pack bubble.
+        // and its one divider, minus the hidden pack bubble and the pack's
+        // hidden acknowledgement.
         let expected = live_len
             + self.handoff_prefix.len()
             + usize::from(self.handoff_divider.is_some())
-            - usize::from(self.handoff_pack_hidden.is_some());
+            - usize::from(self.handoff_pack_hidden.is_some())
+            - usize::from(self.handoff_pack_reply_hidden.is_some());
         if expected != self.cached_turns.len() || self.follow {
             self.refresh_render_cache();
         }
@@ -426,18 +428,26 @@ impl SessionView {
                     }),
                 })
             },
-            handoff_back: self.handoff_origin.as_ref().map(|origin| {
-                let source = origin.source_session.clone();
-                let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
-                    cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
-                });
-                crate::transcript::HandoffBack {
-                    source,
-                    open: Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
-                        open(&id, window, cx)
-                    }),
-                }
-            }),
+            // "Open the source session" rides the divider only when no
+            // snapshot exists (the fallback divider, with its empty prefix):
+            // with the carried turns on screen the back-link has nothing to
+            // add, so a snapshot divider stands alone.
+            handoff_back: self
+                .handoff_origin
+                .as_ref()
+                .filter(|_| self.handoff_prefix.is_empty())
+                .map(|origin| {
+                    let source = origin.source_session.clone();
+                    let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
+                        cx.emit(crate::session::SessionEvent::HandoffOpenSession { destination: id.clone() });
+                    });
+                    crate::transcript::HandoffBack {
+                        source,
+                        open: Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                            open(&id, window, cx)
+                        }),
+                    }
+                }),
             // D51 "Open terminal" on a terminal tool card: the tab rides
             // out to the application, which opens the dock on it. Local,
             // like the run above — honoured under `--replay` too.
@@ -788,26 +798,30 @@ impl SessionView {
             }
             // The visible transcript: the view-side handoff prefix, exactly
             // one divider, then the fold's own turns with the pack's user
-            // bubble hidden (the divider stands for it). The prefix and the
-            // divider never enter the fold, so provider deltas never touch
-            // them — and the pack stays in history, only undrawn.
-            let hidden = self.fold.session(&self.session_id).and_then(|s| {
-                crate::handoff_snapshot::first_pack_user_id(
-                    &s.turns,
-                    self.handoff_pack_full.as_deref(),
-                    self.handoff_pack_display.as_deref(),
-                )
-            });
-            self.handoff_pack_hidden = hidden.clone();
+            // bubble and the pack's acknowledgement hidden (the divider
+            // stands for both). The prefix and the divider never enter the
+            // fold, so provider deltas never touch them — and both hidden
+            // turns stay in history, only undrawn.
             let empty: &[Turn] = &[];
             let own: &[Turn] =
                 self.fold.session(&self.session_id).map(|s| s.turns.as_slice()).unwrap_or(empty);
+            let hidden = crate::handoff_snapshot::first_pack_user_id(
+                own,
+                self.handoff_pack_full.as_deref(),
+                self.handoff_pack_display.as_deref(),
+            );
+            self.handoff_pack_hidden = hidden.clone();
+            let hidden_reply =
+                hidden.as_deref().and_then(|id| crate::handoff_snapshot::pack_acknowledgement_id(own, id));
+            self.handoff_pack_reply_hidden = hidden_reply.clone();
             let visible: Vec<&Turn> = self
                 .handoff_prefix
                 .iter()
                 .map(|rc| rc as &Turn)
                 .chain(self.handoff_divider.iter().map(|rc| rc as &Turn))
-                .chain(own.iter().filter(|turn| hidden.as_deref() != Some(turn.id())))
+                .chain(own.iter().filter(|turn| {
+                    hidden.as_deref() != Some(turn.id()) && hidden_reply.as_deref() != Some(turn.id())
+                }))
                 .collect();
             let turns: Vec<Rc<Turn>> = visible
                 .into_iter()
@@ -2837,6 +2851,7 @@ mod tests {
                         ProviderId::ClaudeCode,
                         ProviderId::Codex,
                         Some("gpt-5"),
+                        Some(2),
                     ),
                     Some(pack.to_owned()),
                     Some("Handed off from Claude Code: the goal".to_owned()),
@@ -2846,10 +2861,15 @@ mod tests {
         });
         assert_eq!(
             cached_ids(vc, &view),
-            vec!["u1", "a1", "handoff-divider-dest-1", "a2", "u2"],
-            "prefix…, one divider, own turns — and no user bubble for the pack"
+            vec!["u1", "a1", "handoff-divider-dest-1", "u2"],
+            "prefix…, one divider, own turns — no user bubble for the pack, \
+             and no echo for the pack's one-sentence acknowledgement"
         );
-        assert_eq!(cached_handoff_dividers(vc, &view).len(), 1, "exactly one divider, not two");
+        assert_eq!(
+            cached_handoff_dividers(vc, &view),
+            vec!["Handed off from Claude Code to Codex · gpt-5 · 2 turns carried".to_owned()],
+            "the divider says what crossed over"
+        );
         // The pack stays in the provider history: the fold still holds it,
         // only the frame does not draw it.
         let folded: Vec<String> = vc.update(|_, cx| {
@@ -2893,7 +2913,10 @@ mod tests {
                 );
             });
         });
-        assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-r", "a1"]);
+        // The pack bubble hides by its summary — and the acknowledgement
+        // answering it hides too, so a replayed destination opens on the
+        // divider alone until real turns arrive.
+        assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-r"]);
         assert_eq!(
             cached_handoff_dividers(vc, &view),
             vec!["Handed off from Muse — earlier turns are in the previous session".to_owned()]
@@ -2957,6 +2980,7 @@ mod tests {
                         ProviderId::Muse,
                         ProviderId::ClaudeCode,
                         None,
+                        Some(2),
                     ),
                     Some("pack-a".to_owned()),
                     Some("display-a".to_owned()),
@@ -2990,6 +3014,7 @@ mod tests {
                         ProviderId::ClaudeCode,
                         ProviderId::Codex,
                         Some("gpt-5"),
+                        Some(1),
                     ),
                     Some("pack-b".to_owned()),
                     Some("display-b".to_owned()),
