@@ -465,32 +465,47 @@ fn file_change_diff(path: &str, changes: &[FileChangeEntry]) -> Diff {
 }
 
 /// The money guard's feed: the latest `account/rateLimits/updated` push, kept
-/// beside the seam's account shape.
+/// beside the seam's account shape. The window lengths ride along with the
+/// percents so the usage card can label each window from its length.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccountSnapshot {
     /// Primary window usage percent, when reported.
     pub used_percent: Option<u64>,
+    /// Primary window length in minutes, when reported.
+    pub primary_minutes: Option<u64>,
     /// Plan name (`prolite`, …), when reported.
     pub plan: Option<String>,
     /// Unix time the window resets, when reported.
     pub resets_at: Option<u64>,
+    /// Secondary window usage percent, when reported.
+    pub secondary_used_percent: Option<u64>,
+    /// Secondary window length in minutes, when reported.
+    pub secondary_minutes: Option<u64>,
+    /// Unix time the secondary window resets, when reported.
+    pub secondary_resets_at: Option<u64>,
 }
 
 impl AccountSnapshot {
     /// Record a push. Unknown fields are ignored; a push that names no
-    /// window at all still counts as "a reading was seen".
+    /// window at all still counts as "a reading was seen". Accepts either
+    /// the push params (`{rateLimits: …}`) or the bare limits object the
+    /// `account/rateLimits/read` answer carries — same object, either
+    /// wrapping.
     pub fn observe(&mut self, params: &Value) {
-        let limits = params.get("rateLimits");
-        let primary = limits.and_then(|limits| limits.get("primary"));
+        let limits = params.get("rateLimits").unwrap_or(params);
+        let primary = limits.get("primary");
         if let Some(used) =
             primary.and_then(|primary| primary.get("usedPercent")).and_then(Value::as_u64)
         {
             self.used_percent = Some(used);
         }
-        if let Some(plan) = limits
-            .and_then(|limits| limits.get("planType"))
-            .and_then(Value::as_str)
+        if let Some(minutes) = primary
+            .and_then(|primary| primary.get("windowDurationMins"))
+            .and_then(Value::as_u64)
         {
+            self.primary_minutes = Some(minutes);
+        }
+        if let Some(plan) = limits.get("planType").and_then(Value::as_str) {
             self.plan = Some(plan.to_owned());
         }
         if let Some(resets) = primary
@@ -499,6 +514,57 @@ impl AccountSnapshot {
         {
             self.resets_at = Some(resets);
         }
+        let secondary = limits.get("secondary");
+        if let Some(used) =
+            secondary.and_then(|secondary| secondary.get("usedPercent")).and_then(Value::as_u64)
+        {
+            self.secondary_used_percent = Some(used);
+        }
+        if let Some(minutes) = secondary
+            .and_then(|secondary| secondary.get("windowDurationMins"))
+            .and_then(Value::as_u64)
+        {
+            self.secondary_minutes = Some(minutes);
+        }
+        if let Some(resets) = secondary
+            .and_then(|secondary| secondary.get("resetsAt"))
+            .and_then(Value::as_u64)
+        {
+            self.secondary_resets_at = Some(resets);
+        }
+    }
+
+    /// The structured usage reading for the seam: the plan plus one window
+    /// per reported percent, labelled from each window's length. `None`
+    /// until a push or a rate-limits read has been seen.
+    pub fn usage_report(&self) -> Option<provider::UsageReport> {
+        if !self.has_reading() {
+            return None;
+        }
+        let mut windows = Vec::new();
+        if let Some(used) = self.used_percent {
+            windows.push(provider::UsageWindow {
+                label: self
+                    .primary_minutes
+                    .map(provider::window_label)
+                    .unwrap_or_else(|| "Primary".into()),
+                used_fraction: (used as f64 / 100.0).clamp(0.0, 1.0),
+                resets_at: self.resets_at.map(|resets| resets as i64),
+                window_minutes: self.primary_minutes,
+            });
+        }
+        if let Some(used) = self.secondary_used_percent {
+            windows.push(provider::UsageWindow {
+                label: self
+                    .secondary_minutes
+                    .map(provider::window_label)
+                    .unwrap_or_else(|| "Secondary".into()),
+                used_fraction: (used as f64 / 100.0).clamp(0.0, 1.0),
+                resets_at: self.secondary_resets_at.map(|resets| resets as i64),
+                window_minutes: self.secondary_minutes,
+            });
+        }
+        Some(provider::UsageReport { plan: self.plan.clone(), windows })
     }
 
     /// Whether any push has been seen at all.
@@ -751,6 +817,14 @@ impl CodexFold {
     /// The latest account reading (see [`AccountSnapshot`]).
     pub fn account(&self) -> &AccountSnapshot {
         &self.account
+    }
+
+    /// Fold an `account/rateLimits/read` answer into the account snapshot:
+    /// the same object the `account/rateLimits/updated` push carries, so
+    /// one observe path serves the lane's connect-time read and the live
+    /// pushes alike.
+    pub fn observe_rate_limits(&mut self, result: &Value) {
+        self.account.observe(result);
     }
 
     /// Fold one resumed history turn's items plus its completion into
@@ -2020,6 +2094,40 @@ mod tests {
         let (fold, _) = replay("basic.jsonl");
         let label = fold.account().label().expect("a push was seen");
         assert!(label.contains("19%"), "live meter label: {label}");
+    }
+
+    #[test]
+    fn pushes_and_read_answers_feed_one_structured_report() {
+        // The card's shape, not a label: window lengths label the
+        // windows, percents scale to fractions, resets ride along — from
+        // a push and from a bare `account/rateLimits/read` answer alike.
+        let mut snapshot = AccountSnapshot::default();
+        assert!(snapshot.usage_report().is_none(), "no reading, no report");
+        snapshot.observe(&serde_json::json!({
+            "rateLimits": {
+                "planType": "prolite",
+                "primary": {"usedPercent": 19, "windowDurationMins": 10080, "resetsAt": 1790588038},
+                "secondary": {"usedPercent": 50, "windowDurationMins": 300, "resetsAt": 1790187000}
+            }
+        }));
+        let report = snapshot.usage_report().expect("a push was seen");
+        assert_eq!(report.plan.as_deref(), Some("prolite"));
+        assert_eq!(report.windows.len(), 2);
+        assert_eq!(report.windows[0].label, "Weekly");
+        assert!((report.windows[0].used_fraction - 0.19).abs() < 1e-9);
+        assert_eq!(report.windows[1].label, "Session · 5h");
+        assert!((report.windows[1].used_fraction - 0.50).abs() < 1e-9);
+        // The read answer carries the same object bare, without the
+        // push's `rateLimits` wrapping.
+        let mut bare = AccountSnapshot::default();
+        bare.observe(&serde_json::json!({
+            "planType": "prolite",
+            "primary": {"usedPercent": 85, "windowDurationMins": 10080, "resetsAt": 1790588038},
+            "secondary": null
+        }));
+        let report = bare.usage_report().expect("a read was seen");
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].label, "Weekly");
     }
 
     /// Every `CommandExecutionStatus` in the schema maps off the spinner:

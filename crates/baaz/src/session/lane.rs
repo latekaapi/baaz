@@ -322,11 +322,21 @@ impl SessionView {
     /// `turn_id` (`crates/provider-codex/src/lib.rs`) — both millisecond
     /// RPCs, after which the turn streams back as events. The mutex hold is
     /// that RPC, so a stop press waits behind at most one short send.
-    pub(super) fn lane_provider(&self) -> Option<SharedProvider> {
+    pub(crate) fn lane_provider(&self) -> Option<SharedProvider> {
         match &self.lane {
             Lane::Provider(lane) => Some(lane.provider.clone()),
             Lane::Muse => None,
         }
+    }
+
+    /// The lane's latest usage reading, if any. A peek only — no wire
+    /// call — and `None` while the lane is busy, so the account menu's
+    /// refresh never blocks the UI thread on a streaming turn. The
+    /// caller pairs it with [`SessionView::provider_kind`].
+    pub(crate) fn lane_usage(&self) -> Option<provider::UsageReport> {
+        let provider = self.lane_provider()?;
+        let guard = provider.try_lock().ok()?;
+        guard.read_usage()
     }
 
     /// Send one neutral command on the provider lane and hand its ack to

@@ -1219,6 +1219,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         self.rx.clone()
     }
 
+    /// The fold's latest `rate_limit_event`, if any. A peek only — no
+    /// wire call — and `None` while the pump holds the fold, so a menu
+    /// refresh never blocks on a streaming turn.
+    fn read_usage(&self) -> Option<provider::UsageReport> {
+        self.fold.try_lock().ok()?.account().usage_report()
+    }
+
     fn shutdown(&mut self) {
         if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
             running.shutdown();

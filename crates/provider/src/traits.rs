@@ -110,6 +110,15 @@ pub trait ProviderAdapter: Send {
 
     /// Hang up. Idempotent; also runs on drop.
     fn shutdown(&mut self);
+
+    /// The latest usage reading this adapter has observed, if any. A
+    /// read-only peek at the fold — never a wire call, never a spend —
+    /// so the account menu can refresh without probing. `None` means no
+    /// reading yet (the card reads "Not reported yet"), never a guess.
+    /// The default sees nothing; adapters with a meter override it.
+    fn read_usage(&self) -> Option<crate::UsageReport> {
+        None
+    }
 }
 
 /// The one way to talk to a provider: an adapter behind the enforced gate.
@@ -168,6 +177,13 @@ impl Provider {
     /// [`ProviderAdapter::events`]).
     pub fn events(&self) -> Receiver<ProviderEvent> {
         self.inner.events()
+    }
+
+    /// The latest usage reading the adapter has observed, if any (see
+    /// [`ProviderAdapter::read_usage`]). Ungated by design: it reads the
+    /// fold, never the wire, so no capability is needed to ask.
+    pub fn read_usage(&self) -> Option<crate::UsageReport> {
+        self.inner.read_usage()
     }
 
     /// Hang up. Idempotent; also runs on drop.
