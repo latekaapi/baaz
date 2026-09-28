@@ -1910,7 +1910,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
         // The chip wears the session's own provider mark: a Codex session
         // never shows the Muse "M".
-        let mut element = composer("composer", &self.composer, self.provider_kind().icon(), self.model())
+        let mut element = composer("composer", &self.composer, self.display_provider().icon(), self.model())
             .docked(true)
             .mode(self.mode_label())
             .effort(crate::overlays::effort_label(self.effort))
@@ -1946,6 +1946,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // `performance-8`).
             .can_send(
                 !blocked
+                    && !self.input_locked
                     && !self.attachments_pending()
                     && (!self.draft_empty || !self.images.is_empty() || !self.files.is_empty()),
             )
