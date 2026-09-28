@@ -57,7 +57,6 @@ impl SessionView {
             self.newest_pending_approval().is_some() || self.external_approvals.has_pending(),
         );
         let status = self.render_status();
-        let capabilities = self.render_capability_strip(cx);
         let external = self.render_external_approvals(window, cx);
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
@@ -68,7 +67,6 @@ impl SessionView {
             .size_full()
             .child(transcript)
             .children(status)
-            .children(capabilities)
             .children(external)
             .children(needs_you)
             .children(banner)
@@ -2207,53 +2205,10 @@ fn wheel_capture(cx: &mut Context<SessionView>) -> gpui::AnyElement {
 }
 
 impl SessionView {
-    /// The capability strip: what this session's provider cannot do, with
-    /// the typed reason beside each refusal — one short line each, in
-    /// plain words.
-    ///
-    /// This is the point of the seam made visible: the same screen
-    /// renders differently per provider — Claude Code shows questions as
-    /// unavailable-in-prose, Codex and muse show no strip at all.
-    /// `Unverified` capabilities are attempted everywhere and never
-    /// advertised here. `None` is the muse answer: nothing refused,
-    /// nothing shown.
-    pub(super) fn render_capability_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let kind = self.provider_kind();
-        // The refusal list, never the ignorance list: `Unverified`
-        // capabilities are attempted everywhere and unadvertised.
-        let rows = self.capability_strip_rows();
-        if rows.is_empty() {
-            return None;
-        }
-        let p = cx.aui().colors;
-        Some(
-            div()
-                .w_full()
-                .px(px(TRANSCRIPT_PAD_X))
-                .pb(px(scale::SP_3))
-                .child(centred(
-                    v_flex()
-                        .id("capability-strip")
-                        .role(gpui::Role::Group)
-                        .aria_label(format!("Provider capabilities for {}", kind.label()))
-                        .gap(px(scale::SP_1))
-                        .child(
-                            div()
-                                .text_color(p.ink_3)
-                                .child(format!("On {} in this session:", kind.label())),
-                        )
-                        .children(rows.into_iter().enumerate().map(|(index, (label, reason))| {
-                            div()
-                                .id(format!("capability-row-{index}"))
-                                .role(gpui::Role::Label)
-                                .aria_label(format!("{label} unavailable: {reason}"))
-                                .text_color(p.ink_2)
-                                .child(format!("{label} — {reason}"))
-                        })),
-                ))
-                .into_any_element(),
-        )
-    }
+    // The always-on capability strip is gone (X4): refusals surface at
+    // the point of use — the steer/stop/shell/compact/fork controls
+    // banner the registry's own reason when invoked — and "Answer
+    // questions" has no control, so it simply disappears.
 
     /// Which parked provider taps the strip below the transcript may show.
     /// Empty on a provider lane: the fold's inline approval card carries

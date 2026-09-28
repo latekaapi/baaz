@@ -385,6 +385,9 @@ impl SessionView {
                     // session names its model before any live turn runs —
                     // and a refused pick (see `pick_model`) never clears
                     // it, because that path touches `pending_model` only.
+                    // The application also persists a Claude Code report
+                    // as the next fresh session's display-only chip seed
+                    // (see `ProviderTurnFinished`).
                     if !meta.model.is_empty() {
                         self.history_model = Some(meta.model.clone());
                     }
@@ -2062,10 +2065,6 @@ mod tests {
             assert_eq!(meter.used_tokens, 1500, "the footer meter shows real numbers");
             assert_eq!(meter.window_tokens, None, "no adapter reports a window");
             assert!(meter.label().contains("tokens"), "no window, no percentage: {}", meter.label());
-            assert!(
-                view.capability_strip_rows().is_empty(),
-                "codex refuses nothing: no strip at all"
-            );
         });
     }
 
@@ -2081,6 +2080,9 @@ mod tests {
     ) {
         use aui_protocol::{Block, Delta, Turn, TurnMeta};
 
+        // The sandbox seeds nothing, so the pre-history chip reads the
+        // supplied default rather than whatever this machine runs.
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lane-reopen");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
@@ -2213,29 +2215,28 @@ mod tests {
         });
     }
 
-    /// W4: the strip names only refusals. Claude Code's questions ask in
-    /// prose — the one `Unavailable` row — while steering, interruption
-    /// and everything else stay attempted and unadvertised.
+    /// X4: no always-on strip — the refusal lives at the point of use.
+    /// Claude Code's questions ask in prose (the one `Unavailable` cell),
+    /// and a stray answer press banners the registry's own reason instead
+    /// of sending a command the seam refuses. "Answer questions" has no
+    /// control, so it otherwise simply disappears.
     #[gpui::test]
-    fn the_strip_lists_only_unavailable(cx: &mut gpui::TestAppContext) {
+    fn questions_refuse_at_the_point_of_use(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (claude, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
-            let rows = claude.read(cx).capability_strip_rows();
-            assert_eq!(rows.len(), 1, "one refusal on this lane, drew {rows:?}");
-            assert_eq!(rows[0].0, "Answer questions");
-            assert!(rows[0].1.contains("prose"), "the human reason, in plain words");
-            assert!(
-                rows.iter().all(|(_, reason)| !reason.contains("nobody has probed")),
-                "no developer wording about unverified cells: {rows:?}"
-            );
+            claude.update(cx, |view, cx| view.answer_question("no-such-question".to_owned(), cx));
         });
-        let (adapter, _handle) = RecordingProvider::new();
-        let (muse, _tx) = open_recording_view(vc, "s-m", "muse", adapter);
+        vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(muse.read(cx).capability_strip_rows().is_empty(), "muse shows no strip");
+            let view = claude.read(cx);
+            assert!(
+                view.banner.as_deref().is_some_and(|banner| banner.contains("prose")),
+                "the refusal's reason reaches the banner, drew {:?}",
+                view.banner
+            );
         });
     }
 
@@ -2677,9 +2678,11 @@ mod tests {
 
     /// V1: a new Claude Code session's chip names the model the CLI will
     /// use, not the provider. Nothing is known yet — no pick, no fold
-    /// model, no history — so the chip reads the supplied default.
+    /// model, no history — and the sandbox seeds nothing, so the chip
+    /// reads the supplied default.
     #[gpui::test]
     fn a_new_claude_session_chips_its_default_model(cx: &mut gpui::TestAppContext) {
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lane-default");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();

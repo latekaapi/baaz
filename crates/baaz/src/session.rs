@@ -1182,7 +1182,8 @@ impl SessionView {
     /// catalog's active row counts too — a fresh Codex open flags its
     /// effective model there, with no pick yet — then the session's own
     /// history (a reopen names the model it ran on), then the catalog's
-    /// default row, then the provider's out-of-box default. The muse
+    /// default row — then empty, so no `--model` flag is implied: the
+    /// chip's display seed lives in [`Self::model`], never here. The muse
     /// fallback is the provider id, exactly as it always was.
     pub(crate) fn model_id(&self) -> String {
         if let Some(pending) = self.pending_model.as_deref() {
@@ -1225,8 +1226,9 @@ impl SessionView {
     /// exactly as it always did. A provider lane shows the effective
     /// model's human name from the live catalog — never the provider's
     /// wire id (`claude-code` is not a model); with no model known yet,
-    /// a Claude Code session chips the CLI's out-of-box default (V1),
-    /// anything else the provider's human label.
+    /// a Claude Code session chips the seed (env, `claude` settings, last
+    /// reported model, then the out-of-box default), anything else the
+    /// provider's human label.
     pub fn model(&self) -> SharedString {
         if crate::providers::uses_legacy_pump(self.provider_kind()) {
             return SharedString::from(self.model_id());
@@ -1234,12 +1236,17 @@ impl SessionView {
         let id = self.model_id();
         if id.is_empty() {
             // Display-only fallback: the id stays empty (nothing is
-            // marked active, no pick is implied) while the chip names a
-            // model. A `claude`-settings seed or the first init frame
-            // would outrank this; neither reaches the view yet.
+            // marked active, no pick is implied, no `--model` flag is
+            // added) while the chip names the seed. The first init
+            // frame still updates the chip exactly as before.
             if self.provider_kind() == crate::providers::ProviderId::ClaudeCode {
-                let default = crate::providers::claude_code_default_model();
-                return SharedString::from(crate::providers::claude_code_model_label(default));
+                let workspace = if self.workspace.is_empty() {
+                    None
+                } else {
+                    Some(std::path::Path::new(self.workspace.as_str()))
+                };
+                let seed = crate::providers::claude_code_seed_model(workspace);
+                return SharedString::from(crate::providers::claude_code_model_label(&seed));
             }
             return SharedString::from(self.provider_kind().label().to_owned());
         }
@@ -1320,33 +1327,6 @@ impl SessionView {
             output_tokens,
             total_tokens,
         }
-    }
-
-    /// The capability strip's rows: one `(label, reason)` per `Unavailable`
-    /// capability with a user-facing control. `Unverified` capabilities are
-    /// attempted everywhere and never advertised — the strip is the refusal
-    /// list, not the ignorance list. muse has no strip at all.
-    pub(super) fn capability_strip_rows(&self) -> Vec<(String, String)> {
-        let kind = self.provider_kind();
-        if crate::providers::uses_legacy_pump(kind) {
-            return Vec::new();
-        }
-        [
-            ("Steer into the running turn", provider::Capability::SteerTurn),
-            ("Stop the running turn", provider::Capability::TurnControl),
-            ("Answer questions", provider::Capability::Questions),
-            ("Run shell commands", provider::Capability::SessionShell),
-            ("Compact the context", provider::Capability::CompactSession),
-            ("Fork this session", provider::Capability::ForkSession),
-        ]
-        .into_iter()
-        .filter_map(|(label, capability)| match crate::providers::capability_state(kind, capability) {
-            provider::CapabilityState::Unavailable { reason } => {
-                Some((label.to_owned(), reason))
-            }
-            _ => None,
-        })
-        .collect()
     }
 
     /// The approval mode chip's label.

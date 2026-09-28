@@ -355,11 +355,232 @@ pub struct SuppliedModel {
 /// The model a fresh Claude Code session runs on when nothing else says
 /// otherwise (V1): the CLI's out-of-box default, matching the supplied
 /// list's standing first row. The chip reads this before the first turn
-/// so a new session names a model, never the provider. A seed from
-/// `claude` settings or the first init frame would outrank it; neither
-/// reaches the view yet.
+/// so a new session names a model, never the provider — see
+/// [`claude_code_seed_model`], which outranks this with the operator's own
+/// settings and the last reported model before falling back here.
 pub fn claude_code_default_model() -> &'static str {
     "sonnet"
+}
+
+/// The file holding the last model a Claude Code init/result frame
+/// reported on this machine, inside Baaz's own state dir.
+const CLAUDE_CODE_LAST_MODEL_FILE: &str = "claude-code-last-model.json";
+
+/// What the state dir remembers: the last reported Claude Code model.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct LastClaudeCodeModel {
+    /// The wire model id, as the frame reported it.
+    #[serde(default)]
+    model: String,
+}
+
+/// Where the last reported Claude Code model lives: one small JSON file in
+/// Baaz's own store, beside `provider.json`. Every read is best-effort;
+/// every write is atomic.
+fn claude_code_last_model_path() -> std::path::PathBuf {
+    crate::store::support_dir().join(CLAUDE_CODE_LAST_MODEL_FILE)
+}
+
+/// Whether this is a deterministic capture: the last-reported model then
+/// reads as nothing and never writes, the same hermeticity rule the
+/// provider-session store follows, so a capture never paints the owner's
+/// real model into the chip.
+fn claude_code_seed_deterministic() -> bool {
+    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
+}
+
+/// The last model a Claude Code init/result frame reported on this
+/// machine, as [`write_claude_code_last_reported_model`] stored it. `None`
+/// when nothing was ever reported, the file names no model, or this is a
+/// deterministic capture.
+pub fn read_claude_code_last_reported_model() -> Option<String> {
+    if claude_code_seed_deterministic() {
+        return None;
+    }
+    let stored: LastClaudeCodeModel = crate::store::read_json(&claude_code_last_model_path());
+    let model = stored.model.trim().to_owned();
+    if model.is_empty() { None } else { Some(model) }
+}
+
+/// Remember the last model a Claude Code session reported. Best-effort: a
+/// store that cannot be written loses the seed, never the session. A
+/// deterministic capture never writes.
+pub fn write_claude_code_last_reported_model(model: &str) {
+    if claude_code_seed_deterministic() {
+        return;
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string(&LastClaudeCodeModel { model: model.to_owned() }) {
+        let _ = crate::store::write_atomic(&claude_code_last_model_path(), text.as_bytes());
+    }
+}
+
+/// The `ANTHROPIC_MODEL` seed: the env var the CLI itself honours. Empty
+/// or whitespace-only means unset — there is no empty-named model.
+pub fn claude_code_env_model() -> Option<String> {
+    let model = std::env::var("ANTHROPIC_MODEL").ok()?;
+    let model = model.trim().to_owned();
+    if model.is_empty() { None } else { Some(model) }
+}
+
+/// The `model` key of one `settings.json`-shaped file. Anything unreadable
+/// — missing, truncated, unparseable, or a non-string `model` — is `None`,
+/// never an error.
+fn settings_model_at(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let model = value.get("model")?.as_str()?;
+    let model = model.trim().to_owned();
+    if model.is_empty() { None } else { Some(model) }
+}
+
+/// The `claude` settings seed: `model` in `~/.claude/settings.json`,
+/// overridden by `<workspace>/.claude/settings.json` and then by
+/// `<workspace>/.claude/settings.local.json`, matching the CLI's own
+/// precedence. `HOME` names the home dir (tests point it at a temp dir);
+/// `workspace` is the session's workspace root.
+pub fn claude_code_settings_model(
+    home: Option<&std::path::Path>,
+    workspace: Option<&std::path::Path>,
+) -> Option<String> {
+    let home = home
+        .map(|home| home.to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))?;
+    let mut seed = settings_model_at(&home.join(".claude").join("settings.json"));
+    if let Some(workspace) = workspace {
+        if let Some(model) =
+            settings_model_at(&workspace.join(".claude").join("settings.json"))
+        {
+            seed = Some(model);
+        }
+        if let Some(model) =
+            settings_model_at(&workspace.join(".claude").join("settings.local.json"))
+        {
+            seed = Some(model);
+        }
+    }
+    seed
+}
+
+/// The chip's pre-first-turn model for a Claude Code session with no
+/// stored pick: `ANTHROPIC_MODEL`, then `claude` settings, then the last
+/// model an init/result frame reported on this machine, then `"sonnet"`.
+///
+/// Display-only: the session's own stored pick (pending, fold, history,
+/// catalog) outranks all of this in the view, and none of this reaches
+/// the child's argv — a session the person never picked a model for still
+/// spawns with no `--model` flag, letting the CLI resolve its own
+/// default exactly as before.
+pub fn claude_code_seed_model(workspace: Option<&std::path::Path>) -> String {
+    if let Some(model) = claude_code_env_model() {
+        return model;
+    }
+    if let Some(model) = claude_code_settings_model(None, workspace) {
+        return model;
+    }
+    if let Some(model) = read_claude_code_last_reported_model() {
+        return model;
+    }
+    claude_code_default_model().to_owned()
+}
+
+/// A hermetic `HOME` + `BAAZ_STATE_DIR` for tests that read the seed:
+/// temp dirs, no `ANTHROPIC_MODEL`, no deterministic flag. Holding the
+/// store's env lock serializes every test that points these variables
+/// elsewhere (see `the_last_chosen_provider_survives_a_relaunch`), and
+/// `Drop` restores everything and removes the sandbox, so a failure
+/// cannot leak one test's seed into the next — or into the owner's real
+/// home and store.
+#[cfg(test)]
+pub(crate) struct TestEnvSandbox {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    base: std::path::PathBuf,
+    home: std::path::PathBuf,
+    state_dir: std::path::PathBuf,
+    old_home: Option<std::ffi::OsString>,
+    old_state_dir: Option<std::ffi::OsString>,
+    old_anthropic: Option<std::ffi::OsString>,
+    old_deterministic: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestEnvSandbox {
+    pub(crate) fn enter(name: &str) -> Self {
+        let guard = crate::store::test_env_lock();
+        let base = std::env::temp_dir().join(format!(
+            "baaz-claude-seed-{}-{name}",
+            std::process::id()
+        ));
+        let home = base.join("home");
+        let state_dir = base.join("state");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&home).expect("temp home");
+        std::fs::create_dir_all(&state_dir).expect("temp state dir");
+        let sandbox = TestEnvSandbox {
+            _guard: guard,
+            base,
+            home,
+            state_dir,
+            old_home: std::env::var_os("HOME"),
+            old_state_dir: std::env::var_os("BAAZ_STATE_DIR"),
+            old_anthropic: std::env::var_os("ANTHROPIC_MODEL"),
+            old_deterministic: std::env::var_os("BAAZ_DETERMINISTIC"),
+        };
+        std::env::set_var("HOME", &sandbox.home);
+        std::env::set_var("BAAZ_STATE_DIR", &sandbox.state_dir);
+        std::env::remove_var("ANTHROPIC_MODEL");
+        std::env::remove_var("BAAZ_DETERMINISTIC");
+        sandbox
+    }
+
+    pub(crate) fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
+    }
+
+    pub(crate) fn write_home_settings(&self, model: &str) {
+        let dir = self.home.join(".claude");
+        std::fs::create_dir_all(&dir).expect("home .claude");
+        std::fs::write(dir.join("settings.json"), format!("{{\"model\": \"{model}\"}}"))
+            .expect("home settings");
+    }
+
+    pub(crate) fn write_workspace_settings(
+        &self,
+        workspace: &std::path::Path,
+        file: &str,
+        model: &str,
+    ) {
+        let dir = workspace.join(".claude");
+        std::fs::create_dir_all(&dir).expect("workspace .claude");
+        std::fs::write(dir.join(file), format!("{{\"model\": \"{model}\"}}"))
+            .expect("workspace settings");
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvSandbox {
+    fn drop(&mut self) {
+        match &self.old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.old_state_dir {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        match &self.old_anthropic {
+            Some(value) => std::env::set_var("ANTHROPIC_MODEL", value),
+            None => std::env::remove_var("ANTHROPIC_MODEL"),
+        }
+        match &self.old_deterministic {
+            Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+            None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+        }
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
 }
 
 /// The Claude Code models Baaz offers: aliases `--model` accepts, in
@@ -774,6 +995,66 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_seed_prefers_env_over_everything() {
+        let sandbox = TestEnvSandbox::enter("env");
+        sandbox.write_home_settings("haiku");
+        write_claude_code_last_reported_model("claude-opus-5[1m]");
+        std::env::set_var("ANTHROPIC_MODEL", "opus");
+        assert_eq!(claude_code_seed_model(None), "opus");
+        // Whitespace-only env is unset — there is no empty-named model —
+        // so the next rung answers instead.
+        std::env::set_var("ANTHROPIC_MODEL", "   ");
+        assert_eq!(claude_code_seed_model(None), "haiku");
+    }
+
+    #[test]
+    fn claude_code_seed_reads_settings_with_workspace_precedence() {
+        let sandbox = TestEnvSandbox::enter("settings");
+        // Nothing anywhere: the out-of-box default, as today.
+        assert_eq!(claude_code_seed_model(None), "sonnet");
+        // The global file seeds the chip.
+        sandbox.write_home_settings("opus");
+        assert_eq!(claude_code_seed_model(None), "opus");
+        // The workspace file overrides the global one, and the local
+        // file overrides both — the CLI's own precedence.
+        let workspace = sandbox.state_dir().join("work");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        sandbox.write_workspace_settings(&workspace, "settings.json", "haiku");
+        assert_eq!(claude_code_seed_model(Some(&workspace)), "haiku");
+        // A session elsewhere still reads the global seed.
+        assert_eq!(claude_code_seed_model(None), "opus");
+        sandbox.write_workspace_settings(&workspace, "settings.local.json", "sonnet");
+        assert_eq!(claude_code_seed_model(Some(&workspace)), "sonnet");
+    }
+
+    #[test]
+    fn claude_code_seed_falls_back_to_the_last_reported_model() {
+        // Named for its `Drop`: nothing is read through it, but it owns
+        // the temp HOME / state dir and the env lock while this runs.
+        let _sandbox = TestEnvSandbox::enter("last");
+        assert_eq!(read_claude_code_last_reported_model(), None);
+        write_claude_code_last_reported_model("claude-opus-5[1m]");
+        assert_eq!(
+            read_claude_code_last_reported_model().as_deref(),
+            Some("claude-opus-5[1m]")
+        );
+        assert_eq!(claude_code_seed_model(None), "claude-opus-5[1m]");
+        assert_eq!(claude_code_model_label(&claude_code_seed_model(None)), "Opus 5 · 1M");
+        // The hermeticity rule the other stores follow: a deterministic
+        // capture neither reads nor writes the owner's last model.
+        std::env::set_var("BAAZ_DETERMINISTIC", "1");
+        assert_eq!(read_claude_code_last_reported_model(), None);
+        assert_eq!(claude_code_seed_model(None), "sonnet");
+        write_claude_code_last_reported_model("opus");
+        std::env::remove_var("BAAZ_DETERMINISTIC");
+        assert_eq!(
+            read_claude_code_last_reported_model().as_deref(),
+            Some("claude-opus-5[1m]"),
+            "the capture wrote nothing over the owner's seed"
+        );
+    }
+
+    #[test]
     fn session_chrome_names_the_session_provider() {
         // The hero subtitle, composer placeholder, chip badge and
         // needs-you headline all derive from the session's provider: a
@@ -837,8 +1118,8 @@ mod tests {
     #[test]
     fn the_same_screen_differs_between_providers() {
         // SteerTurn: Unverified on Claude Code (marked, attempted),
-        // Native on Codex (offered plainly). The capability strip reads
-        // the gate, so the same screen cannot render the same for both.
+        // Native on Codex (offered plainly). The point-of-use gates read
+        // this table, so the same control cannot offer the same on both.
         assert!(gate(ProviderId::ClaudeCode, Capability::SteerTurn).is_some());
         assert!(gate(ProviderId::Codex, Capability::SteerTurn).is_none());
         assert!(gate(ProviderId::ClaudeCode, Capability::TurnControl).is_some());

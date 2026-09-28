@@ -453,17 +453,20 @@ Each task compiles and leaves the app working; muse sessions stay on
     `TurnMeta`'s own double-count warning. `CompactSession` and
     `ForkSession` travel where not `Unavailable`, refusals banner their
     reason, and a forked ack opens as a new lane view on the same
-    provider (fresh child + `ResumeSession`). The strip names only
-    `Unavailable` cells with their human reason; `Unverified` is
-    attempted, never advertised. Known seam gap, stated not hidden: the
+    provider (fresh child + `ResumeSession`). **X4 update:** there is no
+    always-on strip any more — every refusal surfaces at its point of
+    use (the steer/stop/shell/compact/fork controls banner the
+    registry's own reason when invoked), and "Answer questions" has no
+    control, so it simply disappears. `Unverified` is attempted, never
+    advertised. Known seam gap, stated not hidden: the
     `ModelCatalog` ack carries ids, labels and the active flag but no
     per-model reasoning levels, so a production Codex lane fills the
     model menu live while its effort menu still waits on the raw
     `model/list` answer — until the seam extends the ack, that menu
     shows the typed reason. Verified by lane tests over recording
     doubles in baaz test code (adapter crates untouched): catalog,
-    pick, meter, compact/fork, mode/plan, strip, and the table-equality
-    pin — each failing with its arm removed.
+    pick, meter, compact/fork, mode/plan, the point-of-use refusal, and
+    the table-equality pin — each failing with its arm removed.
 - **W5 — Sidebar/persistence/ledger for lane sessions.** Title: local rows,
   resume, titles, byline, ledger tagging. Globs:
   `crates/baaz/src/sessions.rs`, `crates/baaz/src/sidebar.rs`,
