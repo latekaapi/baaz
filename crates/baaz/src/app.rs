@@ -642,7 +642,7 @@ pub struct Harness {
     pub(crate) tier_probing: bool,
     /// Baaz's own facts about each session: its name, whether it is
     /// hidden, and the title derived from its first shell command (spec §3.7).
-    overrides: sessions::Overrides,
+    pub(crate) overrides: sessions::Overrides,
     /// The local record of provider-lane sessions: which provider serves
     /// each, where it ran, and when it last moved. `session/list` never
     /// names these sessions, so without this the sidebar forgets them on
@@ -1597,8 +1597,15 @@ impl Harness {
                 // names nothing this window can title, so it inserts no row.
                 let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
                 let workspace = self.session_workspace(&session_id);
-                let label =
-                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned());
+                // A handoff destination's rowless first turn is the pack, not
+                // the person's words: the row carries the chain title (Y2a).
+                let label = if sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides) {
+                    sidebar::handoff_title_of(&session_id, &self.provider_sessions, &self.overrides)
+                        .map(|t| sidebar::one_line(&t))
+                        .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
+                } else {
+                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned())
+                };
                 let row = sidebar::local_started_row(
                     &session_id,
                     label,

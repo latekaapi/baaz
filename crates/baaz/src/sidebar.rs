@@ -943,6 +943,16 @@ pub fn is_pack_text(text: &str) -> bool {
     t.starts_with(crate::handoff_snapshot::PACK_HEAD_PREFIX) || t.starts_with("Handed off from ")
 }
 
+/// The byline halves that land: the pack turn and its acknowledgement are
+/// the handoff speaking, so when the newest ask is the pack, neither half
+/// lands (`record_last_summary`, Y2a).
+pub fn byline_landable(summary: Option<String>, ask: Option<String>) -> (Option<String>, Option<String>) {
+    match ask {
+        Some(ref a) if is_pack_text(a) => (None, None),
+        _ => (summary, ask),
+    }
+}
+
 /// Whether `id` was born from a handoff (whichever store holds the link).
 pub fn is_handoff_dest(
     id: &str,
@@ -2322,7 +2332,7 @@ mod tests {
         let mut row = entry("s-wire");
         assert!(row.is_empty());
         assert!(!row.local);
-        let changed = first_send_update(&mut row, Some("Fix the header"), now);
+        let changed = first_send_update(&mut row, Some("Fix the header"), now, false);
         assert!(changed);
         assert!(row.running);
         assert_eq!(row.label, "Fix the header");
@@ -2341,7 +2351,7 @@ mod tests {
         let now = Local::now();
         let mut row = local_started_row("s-local", UNNAMED.to_owned(), None, None, now);
         row.running = false; // as it would be once parked back into `self.sessions`
-        let changed = first_send_update(&mut row, Some("Fix the header"), now);
+        let changed = first_send_update(&mut row, Some("Fix the header"), now, false);
         assert!(changed);
         assert!(row.running);
         assert_eq!(row.label, "Fix the header");
@@ -2357,7 +2367,7 @@ mod tests {
         row.turns = 3;
         row.label = "Existing title".into();
         let before = row.clone();
-        let changed = first_send_update(&mut row, Some("Ignored prompt"), now);
+        let changed = first_send_update(&mut row, Some("Ignored prompt"), now, false);
         assert!(!changed);
         assert_eq!(row, before);
     }
@@ -2370,7 +2380,7 @@ mod tests {
         let mut row = entry("s-named");
         row.named = true;
         row.label = "My name".into();
-        first_send_update(&mut row, Some("Ignored prompt"), now);
+        first_send_update(&mut row, Some("Ignored prompt"), now, false);
         assert_eq!(row.label, "My name");
     }
 
@@ -3301,6 +3311,156 @@ mod tests {
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed[0].label, "Mine");
         assert_eq!(collapsed[0].turns, 8, "the rename changes the title, not the count");
+    }
+
+    /// Y2a: the pack turn and its bubble are the handoff speaking, never
+    /// words to title or byline from — matched by header and by display.
+    #[test]
+    fn pack_text_is_never_title_or_byline_material() {
+        assert!(is_pack_text("Continuing a session handed off from Muse: goal words"));
+        assert!(is_pack_text("Handed off from Muse: Fix it (3 recent turns, 1 open todo, 2 files touched)"));
+        assert!(!is_pack_text("Fix the header"));
+        assert!(!is_pack_text(""));
+    }
+
+    /// Y2a: the destination's first real message is a live turn, not a
+    /// first send — the row goes running, the chain title stands.
+    #[test]
+    fn a_handoff_destinations_first_send_keeps_the_chain_title() {
+        let now = Local::now();
+        let mut row = entry("dest");
+        row.label = "Chart the Greyport ferry routes".into();
+        let changed = first_send_update(&mut row, Some("my next message"), now, true);
+        assert!(changed, "the live turn still reveals the row");
+        assert!(row.running);
+        assert_eq!(row.label, "Chart the Greyport ferry routes");
+        assert_eq!(row.updated, now);
+    }
+
+    /// Y2a: a pack prompt titles nothing, even outside a chain.
+    #[test]
+    fn a_pack_prompt_never_titles_a_row() {
+        let now = Local::now();
+        let mut row = entry("fresh");
+        row.label = UNNAMED.into();
+        let changed = first_send_update(
+            &mut row,
+            Some("Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)"),
+            now,
+            false,
+        );
+        assert!(changed, "the pack submit still reveals the row");
+        assert!(row.running);
+        assert_eq!(row.label, UNNAMED, "the pack is not the session's own words");
+    }
+
+    /// Y2a: the persisted chain title outranks the destination's own
+    /// title and first prompt — record half first, then the override's.
+    #[test]
+    fn the_chain_title_outranks_a_destinations_own_words() {
+        let projects = Projects::default();
+        let mut record = provider_record();
+        record.session_id = "dest".into();
+        record.title = Some("Handed off from Muse: Fix it".into());
+        record.first_prompt = Some("my next message".into());
+        record.handoff_title = Some("Chart the Greyport ferry routes".into());
+        let row = SessionEntry::provider_row(&record, None, &projects);
+        assert_eq!(row.label, "Chart the Greyport ferry routes");
+        record.handoff_title = None;
+        let meta = SessionMeta {
+            handoff_title: Some("Chart the Greyport ferry routes".into()),
+            ..SessionMeta::default()
+        };
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
+        assert_eq!(row.label, "Chart the Greyport ferry routes", "the override half reads too");
+        let row = SessionEntry::provider_row(&record, None, &projects);
+        assert_eq!(row.label, "Handed off from Muse: Fix it", "without a chain title the ladder is untouched");
+    }
+
+    /// Y2a: whichever store holds the chain title, the head reads it.
+    #[test]
+    fn handoff_title_reads_from_whichever_store_holds_it() {
+        let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+        let mut overrides = crate::sessions::Overrides::new();
+        assert!(handoff_title_of("dest", &provider, &overrides).is_none());
+        overrides.insert(
+            "dest".into(),
+            SessionMeta { handoff_title: Some("  Chart the routes  ".into()), ..SessionMeta::default() },
+        );
+        assert_eq!(handoff_title_of("dest", &provider, &overrides).as_deref(), Some("Chart the routes"));
+        let mut record = provider_record();
+        record.session_id = "dest".into();
+        record.handoff_title = Some("Record half wins".into());
+        provider.insert("dest".into(), record);
+        assert_eq!(handoff_title_of("dest", &provider, &overrides).as_deref(), Some("Record half wins"));
+    }
+
+    /// Y2a: the pack turn and its acknowledgement never become the
+    /// byline — when the newest ask is the pack, neither half lands —
+    /// while real turns pass through untouched.
+    #[test]
+    fn byline_skips_the_pack_turn_and_its_acknowledgement() {
+        let (summary, ask) = byline_landable(
+            Some("Context received; I will wait.".into()),
+            Some("Handed off from Muse: Fix it (1 recent turn, 0 open todos, 0 files touched)".into()),
+        );
+        assert_eq!((summary, ask), (None, None));
+        let (summary, ask) =
+            byline_landable(Some("Fixed it".into()), Some("Fix the header".into()));
+        assert_eq!(summary.as_deref(), Some("Fixed it"));
+        assert_eq!(ask.as_deref(), Some("Fix the header"));
+    }
+
+    /// Y2a: collapse is idempotent and order-independent — storage keeps
+    /// every member, the view derives the same head row however the rows
+    /// arrived.
+    #[test]
+    fn collapse_is_idempotent_in_any_order() {
+        let (mut provider, mut overrides) = chain_stores();
+        for id in ["chain-b", "chain-c"] {
+            if let Some(record) = provider.get_mut(id) {
+                record.handoff_title = Some("Chart the Greyport ferry routes".into());
+            }
+        }
+        overrides.entry("chain-c".into()).or_default().handoff_title =
+            Some("Chart the Greyport ferry routes".into());
+        let mut rows = chain_rows(&provider);
+        // The tail row reads stale words now; the persisted chain title —
+        // copied at activation — still wins over any member relabel.
+        rows[0].label = "Stale tail words".into();
+        let once = collapse_handoff_chains(rows.clone(), &provider, &overrides);
+        assert_eq!(once.len(), 1, "three members, one row");
+        assert_eq!(once[0].id, "chain-c");
+        assert_eq!(once[0].label, "Chart the Greyport ferry routes", "the persisted title, not a member relabel");
+        let twice = collapse_handoff_chains(once.clone(), &provider, &overrides);
+        assert_eq!(twice, once, "a second run changes nothing");
+        let mut reversed = rows;
+        reversed.reverse();
+        let flipped = collapse_handoff_chains(reversed, &provider, &overrides);
+        assert_eq!(flipped, once, "arrival order changes nothing");
+    }
+
+    /// Y2a: the collapsed head carries the chain's state — pinned and
+    /// needs-you attention ORed across members, newest time, summed
+    /// honest turns.
+    #[test]
+    fn the_collapsed_head_carries_the_chains_state() {
+        use muse_client::schema::AttentionFlag;
+        let (provider, overrides) = chain_stores();
+        let mut rows = chain_rows(&provider);
+        rows[0].pinned = true;
+        rows[0].attention = vec![AttentionFlag::ApprovalPending];
+        rows[1].attention = vec![AttentionFlag::InputPending];
+        let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
+        assert_eq!(collapsed.len(), 1);
+        let head = &collapsed[0];
+        assert!(head.pinned, "pin rides the head even though the source holds it");
+        assert!(
+            head.attention.contains(&AttentionFlag::ApprovalPending)
+                && head.attention.contains(&AttentionFlag::InputPending),
+            "needs-you from any member shows on the one row, drew {:?}",
+            head.attention
+        );
     }
 
     /// An unlinked session passes through untouched.

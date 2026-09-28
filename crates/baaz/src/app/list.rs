@@ -339,10 +339,7 @@ impl Harness {
         // The pack turn and its acknowledgement never become the byline:
         // when the newest ask is the pack, the newest summary is its
         // acknowledgement, so neither lands (Y2a).
-        let (summary, ask) = match ask {
-            Some(ref a) if crate::sidebar::is_pack_text(a) => (None, None),
-            _ => (summary, ask),
-        };
+        let (summary, ask) = crate::sidebar::byline_landable(summary, ask);
         if summary.is_none() && ask.is_none() {
             return;
         }
