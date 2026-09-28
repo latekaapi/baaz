@@ -338,9 +338,16 @@ pub fn drive_codex_login(
             return state.clone();
         }
         let Some(line) = io.read_line() else {
-            // An exit before `account/login/completed` is a death mid-flow
-            // (a clean finish already returned above).
-            *state = CodexLogin::Failed { reason: "The Codex helper exited.".into() };
+            // EOF: the watchdog kills the child on Cancel or the deadline
+            // (that is what unblocks a read waiting on the browser), so
+            // name those first; anything else is a death mid-flow.
+            if cancel.load(Ordering::SeqCst) {
+                state.cancel();
+            } else if Instant::now() >= deadline {
+                *state = CodexLogin::Failed { reason: "The sign-in timed out.".into() };
+            } else {
+                *state = CodexLogin::Failed { reason: "The Codex helper exited.".into() };
+            }
             return state.clone();
         };
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
@@ -409,12 +416,33 @@ pub fn run_codex_login(program: &str, cancel: &AtomicBool) -> CodexLogin {
     let mut io = PipeIo { stdin, lines: std::io::BufReader::new(stdout).lines() };
     let deadline = Instant::now() + CODEX_LOGIN_TIMEOUT;
     let mut state = CodexLogin::Idle;
-    // The browser opens once, when the start answer names its URL.
-    let terminal = drive_codex_login(&mut io, &mut state, cancel, deadline, |auth_url| {
-        let _ = crate::auth::open_in_browser(auth_url);
-    });
-    let _ = child.kill();
-    terminal
+    // The read below blocks while the person is in the browser, so it can
+    // never notice Cancel or the deadline itself. A watchdog owns the child
+    // and kills it on either (or once the drive finishes): the kill closes
+    // stdout, the read returns EOF, and the drive names the reason.
+    let child = std::sync::Mutex::new(child);
+    let finished = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| loop {
+            if finished.load(Ordering::SeqCst)
+                || cancel.load(Ordering::SeqCst)
+                || Instant::now() >= deadline
+            {
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        // The browser opens once, when the start answer names its URL.
+        let terminal = drive_codex_login(&mut io, &mut state, cancel, deadline, |auth_url| {
+            let _ = crate::auth::open_in_browser(auth_url);
+        });
+        finished.store(true, Ordering::SeqCst);
+        terminal
+    })
 }
 
 // ------------------------------------------------------------ app wiring
@@ -772,6 +800,31 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
+
+    /// Cancel reaches a login blocked on a silent helper (the person is in
+    /// the browser): the watchdog kills the child, the read unblocks, the
+    /// row reads Cancelled — and no helper process outlives it.
+    #[test]
+    fn cancel_kills_a_login_blocked_on_a_silent_helper() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("baaz-codex-login-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("codex");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").expect("script");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let terminal = run_codex_login(&script.to_string_lossy(), &cancel);
+        assert_eq!(terminal, CodexLogin::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(5), "cancel took {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
     use crate::provider_status::{Advisory, Headline, Installed};
     use gpui::prelude::*;
