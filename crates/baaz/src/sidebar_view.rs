@@ -215,7 +215,8 @@ impl SidebarKey {
         let selected = baaz
             .pending_id
             .clone()
-            .or_else(|| baaz.active.as_ref().map(|a| a.read(cx).session_id.clone()));
+            .or_else(|| baaz.active.as_ref().map(|a| a.read(cx).session_id.clone()))
+            .map(|id| crate::sidebar::chain_head(&id, &baaz.provider_sessions, &baaz.overrides, &baaz.sessions));
         let auth = match &baaz.auth {
             Auth::Probing => (0, String::new(), String::new(), String::new(), false),
             Auth::SignedOut => (1, String::new(), String::new(), String::new(), false),
@@ -486,8 +487,14 @@ impl Harness {
         // rested on a row, clearing the armed row before the delay elapsed).
         // The click's target first: the row highlights on the click's own
         // frame, before the new view (or any page) exists.
-        let selected =
-            self.pending_id.clone().or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()));
+        // One identity per chain: the selected row key resolves the raw
+        // active/pending id to its head, which is the only row the view
+        // lists (Y2a).
+        let selected = self
+            .pending_id
+            .clone()
+            .or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()))
+            .map(|id| crate::sidebar::chain_head(&id, &self.provider_sessions, &self.overrides, &self.sessions));
         let select = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             // A sidebar click never arms the reveal: the clicked row is
             // under the cursor, hence painted inside the viewport (owner
