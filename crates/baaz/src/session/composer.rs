@@ -518,8 +518,8 @@ impl SessionView {
         true
     }
 
-    /// Whether the `+` menu stands open, for the Escape test.
-    #[cfg(test)]
+    /// Whether the `+` menu stands open: the Escape test, and the browser
+    /// pane's cover check (a native view cannot sit under a gpui popover).
     pub(crate) fn plus_open(&self) -> bool {
         self.plus_open
     }
