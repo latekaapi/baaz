@@ -88,6 +88,9 @@ pub const READ_MAX: usize = 32_768;
 
 /// At most this many early/late browser answers wait in the stash.
 const EVAL_STASH_MAX: usize = 64;
+
+/// How long `browser_open` waits for a page title after the URL matches.
+const OPEN_TITLE_GRACE: Duration = Duration::from_secs(3);
 /// `terminal_run`'s default `timeout_ms`.
 pub const RUN_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// `terminal_run`'s maximum `timeout_ms`.
@@ -1194,7 +1197,14 @@ impl TerminalService {
                     }
                     let current = view.read(cx).url().to_string();
                     let title = view.read(cx).title().to_string();
-                    if current == *url {
+                    // The URL flips the moment navigation starts; the title only
+                    // once the page is in (seen live: `"title": ""` every time).
+                    // Answer when the title arrives, or after a short grace for a
+                    // page that has none.
+                    let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
+                    let waited = timeout.saturating_sub(item.deadline.saturating_duration_since(Instant::now()));
+                    let settled = !title.is_empty() || waited >= OPEN_TITLE_GRACE.min(timeout / 2);
+                    if current == *url && settled {
                         send(&item.reply, &item.id, true, json!({"url": current, "title": title}));
                         done.push(index);
                     } else if Instant::now() >= item.deadline {
