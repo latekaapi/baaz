@@ -21,12 +21,11 @@ use std::rc::Rc;
 
 use aui::data::{icon_button, ButtonSize};
 use aui::nav::{
-    SESSION_DETAIL_GAP, anchored_session_detail_at_sidebar, dense_field, ensure_row_visible, flatten_sidebar,
-    group_row, nav_item, rail, row_index_for_session, sidebar_footer, view_menu, virtual_sidebar_view, GroupAction,
-    MenuRow, RailItem, RowAction, SidebarRow,
+    SESSION_DETAIL_GAP, account_menu, anchored_session_detail_at_sidebar, dense_field, ensure_row_visible,
+    flatten_sidebar, group_row, nav_item, rail, row_index_for_session, sidebar_footer, view_menu,
+    virtual_sidebar_view, AccountMenuItem, GroupAction, MenuRow, RailItem, RowAction, SidebarRow,
 };
 use aui::overlay::{anchored_menu, popover_layer, MenuAlign, MenuSide};
-use aui::screens::{usage_card, UsageWindow as UsageCardWindow};
 use aui_icons::IconName;
 use aui_motion::pulse_phase;
 use aui_tokens::{scale, ActiveAui, AgentState, AuiStyled, Palette};
@@ -42,6 +41,7 @@ use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
 use crate::login::Auth;
 use crate::overlays::MenuKind;
 use crate::sidebar::{Grouping, SessionEntry};
+use crate::tier::Tier;
 
 /// How many sessions the collapsed rail shows: enough to reach the ones a
 /// person switches between, few enough to stay a rail.
@@ -1591,46 +1591,24 @@ impl Harness {
         )
     }
 
-    /// The footer's account menu: a Usage section with one card per
-    /// Connected provider, then Settings…, Providers…, and Sign out of Muse
-    /// (or Sign in to Muse while signed out — the login screen is never the
-    /// app's first screen, but it stays reachable here). The environment
-    /// lane names itself: `META_API_KEY` survives a sign-out, so the row
-    /// says where the credential really comes from (D28).
+    /// The footer's account menu: one aligned panel with a header, a Usage
+    /// section with one row per enabled provider, then Settings…,
+    /// Providers…, and Sign out of Muse (or Sign in to Muse while signed
+    /// out — the login screen is never the app's first screen, but it
+    /// stays reachable here). The environment lane names itself:
+    /// `META_API_KEY` survives a sign-out, so the row says where the
+    /// credential really comes from (D28). The panel seats above the
+    /// footer with its left edge on the footer's left edge, at the
+    /// sidebar's own width, so it never flips over the transcript.
     pub(crate) fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
         }
-        let muse_row: &str = match &self.auth {
-            Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
-                "Sign out of Muse (set by META_API_KEY)"
-            }
-            Auth::SignedIn(_) => "Sign out of Muse",
-            _ => "Sign in to Muse",
-        };
-        let rows = vec![
-            MenuRow::Toggle { label: "Settings…".into(), checked: false },
-            MenuRow::Toggle { label: "Providers…".into(), checked: false },
-            MenuRow::Toggle { label: muse_row.into(), checked: false },
-        ];
-        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
-            match *index {
-                0 => this.open_settings(0, cx),
-                1 => this.open_providers(cx),
-                _ if matches!(this.auth, Auth::SignedIn(_)) => this.logout(cx),
-                _ => {
-                    this.login.reset_to_choose();
-                    this.muse_sheet = true;
-                    cx.notify();
-                }
-            }
-        });
-        // Above the footer's top edge, right edges aligned, at any sidebar
-        // width — `anchored_menu` flips below and slides inside the window
-        // when the seat would overflow. No footer bounds yet: no menu this
-        // frame (the rail guard keeps a scripted menu there from repainting
-        // forever).
+        // Above the footer's top edge, left edges aligned, at the
+        // sidebar's width — `anchored_menu` flips below and slides inside
+        // the window when the seat would overflow. No footer bounds yet:
+        // no menu this frame (the rail guard keeps a scripted menu there
+        // from repainting forever).
         let Some(trigger) = self.footer_bounds else {
             if self.sidebar_open {
                 cx.notify();
@@ -1649,54 +1627,136 @@ impl Harness {
             .absolute()
             .inset_0()
             .on_click(move |_, w, cx| dismiss(&(), w, cx));
+        let signed_in = matches!(self.auth, Auth::SignedIn(_));
+        let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
+            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            match account_menu_action(*index) {
+                Some(AccountMenuAction::OpenSettings) => this.open_settings(0, cx),
+                Some(AccountMenuAction::OpenProviders) => this.open_providers(cx),
+                Some(AccountMenuAction::ToggleMuse) if matches!(this.auth, Auth::SignedIn(_)) => {
+                    this.logout(cx)
+                }
+                Some(AccountMenuAction::ToggleMuse) => {
+                    this.login.reset_to_choose();
+                    this.muse_sheet = true;
+                    cx.notify();
+                }
+                None => {}
+            }
+        });
         let now = crate::account_usage::now_secs();
-        let cards = crate::account_usage::usage_cards(&crate::provider_status::live_statuses());
-        let p = cx.aui().colors;
-        let mut popover = v_flex().gap(px(8.0)).child(
-            div()
-                .ui(scale::FS_11)
-                .medium()
-                .text_color(p.ink_3)
-                .child("Usage"),
-        );
-        for card in &cards {
-            let mut element = usage_card(
-                SharedString::from(format!("account-usage-{}", card.provider.as_str())),
-                card.provider.icon(),
-                card.windows
-                    .iter()
-                    .map(|window| {
-                        UsageCardWindow::new(
-                            window.label.clone(),
-                            window.used_fraction as f32,
-                            crate::account_usage::resets_in_text(window.resets_at, now),
-                        )
-                    })
-                    .collect(),
-            );
-            if let Some(plan) = &card.plan {
-                element = element.plan(plan.clone());
-            }
-            // No reading, no footnote: a card with nothing reported omits
-            // "as of" rather than dating a guess.
-            if let Some(as_of) = card.as_of {
-                element = element.as_of(crate::account_usage::age_text(as_of, now));
-            }
-            popover = popover.child(element);
-        }
-        popover = popover.child(
-            view_menu("account", rows).at_rest().on_activate(move |i, w, cx| {
+        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed {
+            plan: muse_plan_label(self.tier.as_ref()),
+            weekly_fraction: self
+                .tier
+                .as_ref()
+                .and_then(|tier| tier.weekly_fraction())
+                .map(|fraction| fraction as f64),
+        });
+        let rows =
+            crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), muse_feed, now);
+        let (header_name, header_detail) = account_menu_header(&self.auth, self.tier.as_ref());
+        let menu = account_menu("account-menu")
+            .header(header_name, header_detail)
+            .usage("Usage", rows)
+            .rows(account_menu_items(&self.auth))
+            .width(account_menu_width(self.resize.width))
+            .at_rest()
+            .on_activate(move |i, w, cx| {
                 activate(&i, w, cx)
-            }),
-        );
+            });
         Some(
             div()
                 .absolute()
                 .inset_0()
                 .child(catcher)
-                .child(anchored_menu(trigger, MenuSide::Above, MenuAlign::End, popover))
+                .child(anchored_menu(trigger, MenuSide::Above, MenuAlign::Start, menu))
                 .into_any_element(),
         )
+    }
+}
+
+/// What one account-menu activation does, by activation index (separators
+/// skipped): the same order the menu always had — Settings…, Providers…,
+/// then the Muse sign-in/out row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountMenuAction {
+    /// Open Settings on its first section.
+    OpenSettings,
+    /// Open the Providers page.
+    OpenProviders,
+    /// Sign out of Muse, or open the Muse sign-in sheet while signed out.
+    ToggleMuse,
+}
+
+/// The account menu's item rows in order: Settings…, Providers…, a
+/// separator, then the Muse sign-in/out row — destructive while signed
+/// in. The activation index counts items only, so these map to 0, 1, 2,
+/// exactly like the rows they replace.
+pub(crate) fn account_menu_items(auth: &Auth) -> Vec<AccountMenuItem> {
+    let (muse_label, destructive) = match auth {
+        Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
+            ("Sign out of Muse (set by META_API_KEY)", true)
+        }
+        Auth::SignedIn(_) => ("Sign out of Muse", true),
+        _ => ("Sign in to Muse", false),
+    };
+    let muse = AccountMenuItem::new(muse_label);
+    let muse = if destructive { muse.destructive() } else { muse };
+    vec![
+        AccountMenuItem::new("Settings…"),
+        AccountMenuItem::new("Providers…"),
+        AccountMenuItem::Separator,
+        muse,
+    ]
+}
+
+/// The activation index → action mapping: 0 opens Settings, 1 opens
+/// Providers, 2 toggles the Muse sign-in state. Anything else does
+/// nothing. The sign-in/out direction reads the live auth state at
+/// activation, never the state at open time.
+pub(crate) fn account_menu_action(index: usize) -> Option<AccountMenuAction> {
+    match index {
+        0 => Some(AccountMenuAction::OpenSettings),
+        1 => Some(AccountMenuAction::OpenProviders),
+        2 => Some(AccountMenuAction::ToggleMuse),
+        _ => None,
+    }
+}
+
+/// The panel's width from the sidebar's: the menu fills the sidebar less
+/// 16 px of air, clamped to the panel's own 220–260 px range so a narrow
+/// sidebar never squeezes it and a wide one never stretches it.
+pub(crate) fn account_menu_width(sidebar_width: f32) -> f32 {
+    (sidebar_width - 16.0).clamp(220.0, 260.0)
+}
+
+/// The panel header: the signed-in email (or display name when no email
+/// was stored) with the tier's plan label, or a bare "Account" while
+/// signed out.
+pub(crate) fn account_menu_header(
+    auth: &Auth,
+    tier: Option<&Tier>,
+) -> (SharedString, Option<SharedString>) {
+    match auth {
+        Auth::SignedIn(identity) => {
+            let name = if identity.email.is_empty() {
+                identity.display_name()
+            } else {
+                identity.email.clone()
+            };
+            (SharedString::from(name), muse_plan_label(tier).map(SharedString::from))
+        }
+        _ => (SharedString::from("Account"), None),
+    }
+}
+
+/// The tier's plan label for the menu, or `None` when the tier is still
+/// unknown: the header and the Muse row never read "Plan unknown".
+pub(crate) fn muse_plan_label(tier: Option<&Tier>) -> Option<String> {
+    match tier {
+        Some(Tier::Unavailable(_)) | None => None,
+        Some(tier) => Some(tier.footer_label()),
     }
 }
 
@@ -2533,6 +2593,77 @@ mod tests {
         // narrower than the 250 px menu). The seat takes no scroll offset,
         // so it stays under the sliders icon at any scroll position.
         assert_eq!(view_menu_seat(caption(0.0, 146.0, 252.0, 28.0)), (178.0, 8.0));
+    }
+
+    /// The account panel fills the sidebar less 16 px of air, inside its
+    /// own 220–260 px range: a default 252 px sidebar seats a 236 px
+    /// panel, a narrow one never squeezes past 220, a wide one never
+    /// stretches past 260.
+    #[test]
+    fn account_menu_width_fills_the_sidebar_inside_its_range() {
+        assert_eq!(account_menu_width(252.0), 236.0);
+        assert_eq!(account_menu_width(200.0), 220.0);
+        assert_eq!(account_menu_width(800.0), 260.0);
+    }
+
+    /// The activation mapping the panel replaced: Settings… is 0,
+    /// Providers… is 1, the Muse sign-in/out row is 2 — the separator
+    /// between Providers… and the Muse row reports no activation of its
+    /// own, so the handler's 0/1/2 order never moved.
+    #[test]
+    fn account_menu_activation_mapping_is_unchanged() {
+        use aui::nav::account_menu;
+        let items = account_menu_items(&Auth::SignedOut);
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].label().map(|label| label.to_string()).as_deref(), Some("Settings…"));
+        assert_eq!(items[1].label().map(|label| label.to_string()).as_deref(), Some("Providers…"));
+        assert!(items[2].is_separator());
+        assert_eq!(
+            items[3].label().map(|label| label.to_string()).as_deref(),
+            Some("Sign in to Muse")
+        );
+        let panel = account_menu("account-menu").rows(items);
+        assert_eq!(panel.item_index_at_row(0), Some(0));
+        assert_eq!(panel.item_index_at_row(1), Some(1));
+        assert_eq!(panel.item_index_at_row(2), None, "the separator never activates");
+        assert_eq!(panel.item_index_at_row(3), Some(2));
+        assert_eq!(panel.item_count(), 3);
+        assert_eq!(account_menu_action(0), Some(AccountMenuAction::OpenSettings));
+        assert_eq!(account_menu_action(1), Some(AccountMenuAction::OpenProviders));
+        assert_eq!(account_menu_action(2), Some(AccountMenuAction::ToggleMuse));
+        assert_eq!(account_menu_action(3), None);
+    }
+
+    /// While signed in the Muse row offers sign-out in danger ink; the
+    /// environment lane names where the credential really comes from.
+    #[test]
+    fn account_menu_muse_row_names_sign_out_while_signed_in() {
+        use muse_client::schema::AccountStateKind;
+        let identity = crate::auth::Identity {
+            lane: AccountStateKind::AccountLogin,
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+        };
+        let items = account_menu_items(&Auth::SignedIn(identity));
+        assert_eq!(
+            items[3].label().map(|label| label.to_string()).as_deref(),
+            Some("Sign out of Muse")
+        );
+        assert_eq!(
+            items[3],
+            AccountMenuItem::new("Sign out of Muse").destructive(),
+            "sign-out wears danger ink"
+        );
+        let env_identity = crate::auth::Identity {
+            lane: AccountStateKind::EnvKey,
+            name: "API key (environment)".into(),
+            email: String::new(),
+        };
+        let env_items = account_menu_items(&Auth::SignedIn(env_identity));
+        assert_eq!(
+            env_items[3].label().map(|label| label.to_string()).as_deref(),
+            Some("Sign out of Muse (set by META_API_KEY)")
+        );
     }
 
     /// An id with no row yet keeps its reveal armed across misses instead
