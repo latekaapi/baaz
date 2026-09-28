@@ -241,6 +241,13 @@ impl SessionView {
     /// person can steer, and the server validates the pick per turn.
     const CODEX_OFF_CATALOG_NOTE: &str = "Not in Codex's model list — Codex validates the level";
 
+    /// The Claude Code twin of [`Self::CODEX_OFF_CATALOG_NOTE`]: a model
+    /// the catalog omits (a resolved full id the menu never lists) still
+    /// offers the catalog's union, with the muted note saying whose
+    /// validation the levels carry.
+    const CLAUDE_OFF_CATALOG_NOTE: &str =
+        "Not in Claude Code's model list — Claude Code validates the level";
+
     /// The level order a union follows: the closed enum's own spellings,
     /// least to most budget. A catalog id outside this list fails
     /// `parse_effort` at option build and is skipped, never fabricated.
@@ -375,7 +382,10 @@ impl SessionView {
                     .filter(|level| union.contains(level))
                     .map(str::to_owned)
                     .collect();
-                EffortOptions::Available(Self::claude_level_options(&union))
+                EffortOptions::AvailableWithNote {
+                    options: Self::claude_level_options(&union),
+                    note: Self::CLAUDE_OFF_CATALOG_NOTE.to_owned(),
+                }
             }
         }
     }
