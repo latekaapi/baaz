@@ -375,8 +375,11 @@ impl Probes {
 }
 
 /// The production resolver: the provider lane's search for `claude` /
-/// `codex`, and `BAAZ_MUSE` (else `PATH`) for `muse`, which rides the
-/// legacy pump and has no lane binary.
+/// `codex`, and the `muse` binary for `muse`, which rides the legacy pump
+/// and has no lane binary. The `muse` search is the env override, then
+/// `PATH`, then the shared login-shell `PATH` (which already ends in the
+/// Dock fallbacks). A Dock launch still finds a home install the minimal
+/// `PATH` never names.
 fn default_resolve(id: ProviderId) -> Option<PathBuf> {
     match id {
         ProviderId::Muse => {
@@ -386,7 +389,12 @@ fn default_resolve(id: ProviderId) -> Option<PathBuf> {
                     return Some(candidate);
                 }
             }
-            find_on_path("muse")
+            // The same resolver Muse sessions and the tier probe use, so the
+            // Providers page can never disagree with a session that works.
+            if let Some(program) = muse_client::program::resolve_muse_program() {
+                return Some(program);
+            }
+            provider::env_path::find_program("muse")
         }
         ProviderId::ClaudeCode | ProviderId::Codex => crate::providers::resolve_program(id),
     }
@@ -398,20 +406,17 @@ pub fn binary_path(id: ProviderId) -> Option<PathBuf> {
     default_resolve(id)
 }
 
-/// A `PATH` lookup for `binary`, honouring nothing else.
-fn find_on_path(binary: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.is_file())
-}
-
 /// Run `program` with `args`, waiting at most `timeout`. Read-only by
 /// construction: the callers only ever ask for `--version` and
 /// `auth status --json`. Blocking; call it off the UI thread.
+///
+/// The child's `PATH` is the login-shell `PATH` with the program's own
+/// directory first, so a Dock launch (minimal `PATH`) still runs a home
+/// install and its `env`-shebang neighbours. No other env var is changed.
 fn real_run(program: &str, args: &[String], timeout: Duration) -> RunOutcome {
     let mut child = match std::process::Command::new(program)
         .args(args)
+        .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1503,6 +1508,59 @@ mod tests {
         assert_eq!(loaded.installed, Installed::yes("1.4.0", "/bin/muse"));
         assert_eq!(loaded.headline_text(), "Connected · a@x.com · Ultra");
         assert_eq!(loaded.usage.as_ref().unwrap().windows.len(), 1);
+    }
+
+    #[test]
+    fn muse_resolves_through_fallbacks_when_path_lacks_it() {
+        // The Dock case: `PATH` names almost nothing, but `muse` sits in
+        // `~/.local/bin`. The production resolver must still find it —
+        // through the injected `resolve` surface the existing tests drive.
+        let _lock = crate::store::test_env_lock();
+        let old_path = std::env::var_os("PATH");
+        let old_home = std::env::var_os("HOME");
+        let old_muse = std::env::var_os("BAAZ_MUSE");
+        let old_login = std::env::var_os(provider::env_path::LOGIN_PATH_ENV);
+        let home = std::env::temp_dir().join(format!(
+            "baaz-status-muse-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).expect("temp home");
+        let expected = local_bin.join("muse");
+        std::fs::write(&expected, b"fake").expect("seed muse");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "/usr/bin:/bin");
+        std::env::remove_var("BAAZ_MUSE");
+        std::env::remove_var(provider::env_path::LOGIN_PATH_ENV);
+        let probes = Probes {
+            resolve: Arc::new(default_resolve),
+            run: Arc::new(|_, _| panic!("no run needed: resolution is the claim")),
+            codex_server: Arc::new(|_, _| Err("unreachable".into())),
+        };
+        let resolved = (probes.resolve)(ProviderId::Muse);
+        match &old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match &old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &old_muse {
+            Some(value) => std::env::set_var("BAAZ_MUSE", value),
+            None => std::env::remove_var("BAAZ_MUSE"),
+        }
+        match &old_login {
+            Some(value) => std::env::set_var(provider::env_path::LOGIN_PATH_ENV, value),
+            None => std::env::remove_var(provider::env_path::LOGIN_PATH_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(resolved, Some(expected));
     }
 
     #[test]

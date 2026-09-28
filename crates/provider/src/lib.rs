@@ -41,6 +41,7 @@
 mod ack;
 mod capability;
 mod command;
+pub mod env_path;
 mod error;
 mod event;
 pub mod scripted;
