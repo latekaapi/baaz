@@ -42,6 +42,7 @@ mod bench;
 mod billing;
 mod byline;
 mod clock;
+mod connect;
 mod conn;
 mod dialogs;
 mod files;
@@ -125,6 +126,9 @@ pub enum LoginSample {
     /// The signed-in shell with sample identity, for captures past the
     /// login screen (the Projects hero). Sample data only, like the rest.
     SignedIn,
+    /// The first-run Connect your providers screen, fed from the scripted
+    /// statuses (`BAAZ_PROVIDER_STATUS_SCRIPT`) or all Checking when unset.
+    Connect,
 }
 
 /// Everything the command line and the environment decide.
@@ -205,10 +209,12 @@ pub struct Args {
     pub approval_mode: Option<muse_client::schema::ApprovalMode>,
     /// `--login <state>`: which login-screen state `--no-connect` boots
     /// into for a capture — `choose` (the default), `device`, `apikey`,
-    /// `apikey-error`, `validating`, `error`, or `signed-in` (the shell with
-    /// sample identity, for captures past the login screen). Honoured only
-    /// without a connection; a live boot always starts at the method choice
-    /// and lets `account/read` decide.
+    /// `apikey-error`, `validating`, `error`, `signed-in` (the shell with
+    /// sample identity, for captures past the login screen), or `connect`
+    /// (the first-run providers screen from scripted statuses). Honoured
+    /// only without a connection; a live boot decides from stored facts
+    /// (`onboarding_completed`, sessions, projects) and lets `account/read`
+    /// report without gating the window.
     pub login: LoginSample,
     /// `--login-steps <a;b;c>`: what to do on the login screen before the
     /// capture. Honoured only when the app is really connected (never with
@@ -383,7 +389,8 @@ fn parse_args() -> Args {
                     "validating" => LoginSample::Validating,
                     "error" => LoginSample::Error,
                     "signed-in" => LoginSample::SignedIn,
-                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in, not `{other}`")),
+                    "connect" => LoginSample::Connect,
+                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in|connect, not `{other}`")),
                 };
             }
             "--login-steps" => {

@@ -208,6 +208,12 @@ impl Harness {
                 ));
                 crate::provider_status::refresh_muse_status();
                 self.auth = Auth::SignedIn(identity);
+                // A Muse sign-in lands wherever it started: it closes the
+                // sheet, clears Muse's quiet banner, and marks Muse seen
+                // so a later sign-out earns the banner instead of a gate.
+                self.muse_sheet = false;
+                self.provider_banners.remove(&crate::providers::ProviderId::Muse);
+                self.seen_connected.insert(crate::providers::ProviderId::Muse);
                 self.load_sessions(cx);
                 // `--tier` fakes the probe for a screenshot, and nothing else:
                 // it wins over the lane, exactly as `probe_tier` does, so a
@@ -234,20 +240,23 @@ impl Harness {
                 crate::provider_status::note_muse_account(None);
                 crate::provider_status::refresh_muse_status();
                 let was_in = matches!(self.auth, Auth::SignedIn(_));
-                self.active = None;
-                self.sessions.clear();
-            self.invalidate_list();
                 self.auth = Auth::SignedOut;
                 self.login.reset_to_choose();
-                if was_in {
-                    self.set_dialog(cx, Dialog {
-                        title: "Signed out of Muse".into(),
-                        detail: "The credential was removed outside the app.".into(),
-                        kind: DialogKind::Warning,
-                        primary: "Sign in",
-                        action: DialogAction::SignIn,
-                        archive_target: None,
-                    });
+                // Never a full-screen gate: on the connect screen the rows
+                // already show it; in the shell the sessions wait on the
+                // connection and a quiet banner names the way back.
+                if self.show_connect {
+                    self.active = None;
+                    self.sessions.clear();
+                    self.invalidate_list();
+                } else if was_in {
+                    self.seen_connected.insert(crate::providers::ProviderId::Muse);
+                    self.provider_banners.insert(
+                        crate::providers::ProviderId::Muse,
+                        crate::connect::signed_out_banner_text(
+                            crate::providers::ProviderId::Muse,
+                        ),
+                    );
                 }
                 self.run_login_steps(cx);
                 cx.notify();
@@ -463,6 +472,18 @@ impl Harness {
                     this.invalidate_list();
                     this.auth = Auth::SignedOut;
                     this.login.reset_to_choose();
+                    // A deliberate sign-out still clears, but outside the
+                    // connect screen it lands in the shell with the quiet
+                    // banner — never the old full-screen gate.
+                    if !this.show_connect {
+                        this.seen_connected.insert(crate::providers::ProviderId::Muse);
+                        this.provider_banners.insert(
+                            crate::providers::ProviderId::Muse,
+                            crate::connect::signed_out_banner_text(
+                                crate::providers::ProviderId::Muse,
+                            ),
+                        );
+                    }
                     cx.notify();
                 }
             },
@@ -691,18 +712,28 @@ impl Harness {
                 self.wire = crate::app::Wire::Ready;
                 cx.notify();
             }
+            // The first-run Connect your providers screen, for captures:
+            // rows from the scripted statuses, all Checking when unset.
+            LoginSample::Connect => {
+                self.show_connect = true;
+                self.muse_sheet = false;
+                self.connect_statuses = crate::connect::initial_connect_statuses();
+                self.connect_cache_mtime = crate::connect::cache_mtime();
+                cx.notify();
+            }
         }
     }
 
 
-    /// The signed-out screen: a drag strip standing in for the shell's
+    /// The Muse sign-in screen: a drag strip standing in for the shell's
     /// header, the welcome that says what Baaz is, and the sign-in card.
     ///
-    /// This is the first thing a new install shows, and the only screen the
-    /// app draws without the shell — so the window chrome the shell's header
-    /// normally carries has to be built here instead. Without the strip the
-    /// window cannot be moved or zoomed at all while signed out, which is
-    /// what a person meets before anything else.
+    /// Once the app's first screen, now a sheet over the connect screen (or
+    /// over the shell, from the account menu) and the offline captures'
+    /// sample — so the window chrome the shell's header normally carries
+    /// has to be built here instead. Without the strip the window cannot be
+    /// moved or zoomed at all while signed out, which is what a person meets
+    /// before anything else.
     pub(crate) fn render_login(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
             this.login_intent(*intent, window, cx);

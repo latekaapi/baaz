@@ -1163,6 +1163,16 @@ pub fn refresh_muse_status() {
     refresh_in_background(vec![ProviderId::Muse]);
 }
 
+/// Re-probe one provider now, off this thread (the connect screen's
+/// Re-check, and the re-probe after a sign-in). A no-op in deterministic
+/// mode: captures never probe.
+pub fn reprobe_provider(id: crate::providers::ProviderId) {
+    if deterministic() {
+        return;
+    }
+    refresh_in_background(vec![id]);
+}
+
 /// A window-activation edge, called every frame with
 /// `window.is_window_active()`: a regained focus re-probes what is due
 /// (at most every [`FOCUS_THROTTLE`] per provider) off this thread and
