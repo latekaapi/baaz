@@ -85,6 +85,9 @@ pub const RUN_OUTPUT_CAP: usize = 4_096;
 pub const READ_DEFAULT_MAX: usize = 4_096;
 /// `terminal_read`'s maximum `max_bytes`.
 pub const READ_MAX: usize = 32_768;
+
+/// At most this many early/late browser answers wait in the stash.
+const EVAL_STASH_MAX: usize = 64;
 /// `terminal_run`'s default `timeout_ms`.
 pub const RUN_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// `terminal_run`'s maximum `timeout_ms`.
@@ -1130,7 +1133,9 @@ impl TerminalService {
                     .get("max_chars")
                     .and_then(Value::as_u64)
                     .unwrap_or(BROWSER_READ_DEFAULT_MAX as u64)
-                    as usize;
+                    // Capped like `terminal_read` (review): a caller cannot pull a
+                    // whole huge page through the socket into the model.
+                    .min(READ_MAX as u64) as usize;
                 Some((agent_js::page_text(max_chars), BrowserRender::Read))
             }
             "browser_links" => {
@@ -1226,11 +1231,14 @@ impl TerminalService {
                         if id == request_id && ours.is_none() {
                             ours = Some(answer);
                         } else {
-                            self.shared
-                                .eval_stash
-                                .lock()
-                                .expect("eval stash")
-                                .insert((item.session.clone(), id), answer);
+                            let mut stash = self.shared.eval_stash.lock().expect("eval stash");
+                            // Bounded (review): an answer whose request already
+                            // timed out is never collected, so the stash must not
+                            // grow for the life of the process.
+                            if stash.len() >= EVAL_STASH_MAX {
+                                stash.clear();
+                            }
+                            stash.insert((item.session.clone(), id), answer);
                         }
                     }
                     if let Some(answer) = ours {
