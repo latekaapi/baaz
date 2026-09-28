@@ -599,6 +599,19 @@ impl Service {
         // A re-probe never re-enables: the switch is the person's, not
         // the probe's.
         status.enabled = enabled;
+        self.install_probed(status);
+    }
+
+    /// Install a fresh probe result. A probe that read no usage keeps the
+    /// reading already held (restored from the cache at boot, or recorded
+    /// from a live turn): a Claude Code status probe never reads usage, so
+    /// replacing wholesale wiped the saved reading at every launch and
+    /// wrote the wipe back to disk.
+    fn install_probed(&mut self, mut status: ProviderStatus) {
+        let id = status.provider;
+        if status.usage.is_none() {
+            status.usage = self.statuses.get(&id).and_then(|old| old.usage.clone());
+        }
         self.statuses.insert(id, status);
         self.last_probe.insert(id, Instant::now());
         self.save_cache();
@@ -633,10 +646,7 @@ impl Service {
         }
         for handle in handles {
             let status = handle.join().expect("a probe thread panicked");
-            let id = status.provider;
-            self.statuses.insert(id, status);
-            self.last_probe.insert(id, Instant::now());
-            self.save_cache();
+            self.install_probed(status);
         }
     }
 
@@ -1452,6 +1462,36 @@ mod tests {
         let status = service.status(ProviderId::ClaudeCode);
         assert_eq!(status.headline(), Headline::Unverified);
         assert_eq!(status.headline_text(), "Installed · sign-in not verified");
+    }
+
+    #[test]
+    fn a_reprobe_keeps_the_saved_usage_reading() {
+        // Review finding: boot restores the cache, then probes; the Claude
+        // Code probe reads no usage and used to replace the status whole,
+        // wiping the saved reading on every launch.
+        let _env = sandbox();
+        let mut versions = HashMap::new();
+        versions.insert(ProviderId::ClaudeCode, ok_version("2.1.276"));
+        let mut service = scripted_service(
+            versions,
+            RunOutcome::Output {
+                code: Some(0),
+                stdout: r#"{"loggedIn":true,"authMethod":"oauth","email":"a@x.com","subscriptionType":"max"}"#.into(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+            Err("unreachable".into()),
+        );
+        let saved = UsageSnapshot {
+            provider: "claude-code".into(),
+            plan: Some("Max".into()),
+            windows: Vec::new(),
+            as_of: 1_700_000_000,
+        };
+        service.statuses.entry(ProviderId::ClaudeCode).or_insert_with(|| ProviderStatus::checking(ProviderId::ClaudeCode)).usage =
+            Some(saved.clone());
+        service.probe_one(ProviderId::ClaudeCode);
+        assert_eq!(service.status(ProviderId::ClaudeCode).usage, Some(saved));
     }
 
     #[test]
