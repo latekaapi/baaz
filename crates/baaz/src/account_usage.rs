@@ -68,9 +68,20 @@ pub fn usage_rows(
 /// the card's own reset clauses — then the snapshot's own words.
 fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData {
     let snapshot = status.usage.as_ref();
-    if snapshot.is_some_and(|snapshot| {
-        snapshot.windows.iter().any(|window| window.resets_at.is_none_or(|at| at > now))
-    }) {
+    // The tier card is the richer source (both windows, their reset
+    // clauses) and the app's own refresh derives the stored Muse snapshot
+    // FROM it (weekly only, no resets) — so a card with numbers wins, and
+    // the snapshot only stands in when the card has none.
+    let card_has_numbers = matches!(
+        feed.tier.as_ref(),
+        Some(Tier::Subscription { current_pct, weekly_pct, .. })
+            if current_pct.is_some() || weekly_pct.is_some()
+    );
+    if !card_has_numbers
+        && snapshot.is_some_and(|snapshot| {
+            snapshot.windows.iter().any(|window| window.resets_at.is_none_or(|at| at > now))
+        })
+    {
         return connected_row(status, now);
     }
     match feed.tier.as_ref() {
@@ -471,9 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn muse_row_prefers_a_live_reading_over_the_tier() {
-        // A live snapshot with an unexpired window wins even when the tier
-        // probe already answered.
+    fn muse_row_prefers_the_tier_card_and_falls_back_to_the_snapshot() {
+        // The app derives the stored Muse snapshot from the tier (weekly
+        // only, no resets), so a card with numbers must win: both windows,
+        // real reset clauses. The snapshot stands in only when the card has
+        // no numbers.
         let mut muse = status(ProviderId::Muse);
         muse.usage = Some(UsageSnapshot {
             provider: "muse".into(),
@@ -485,14 +498,19 @@ mod tests {
             }],
             as_of: 1700000000,
         });
-        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
-        assert_eq!(rows.len(), 1);
+        let rows = usage_rows(&[muse.clone()], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
         match &rows[0].state {
             UsageRowState::Windows(windows, _) => {
-                assert_eq!(windows.len(), 1);
-                assert_eq!(windows[0].label.to_string(), "Session");
+                let labels: Vec<String> = windows.iter().map(|w| w.label.to_string()).collect();
+                assert_eq!(labels, ["Current", "Weekly"]);
+                assert_ne!(windows[0].resets_at_text.to_string(), "unknown");
             }
-            other => panic!("expected the live reading's bar, got {other:?}"),
+            other => panic!("expected the tier card's bars, got {other:?}"),
+        }
+        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", None, None)) }), 1700000000);
+        match &rows[0].state {
+            UsageRowState::Windows(windows, _) => assert_eq!(windows[0].label.to_string(), "Session"),
+            other => panic!("expected the snapshot's bar, got {other:?}"),
         }
     }
 
