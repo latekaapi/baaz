@@ -19,6 +19,7 @@ pub mod argv;
 pub mod auth_status;
 pub mod caps;
 pub mod child;
+pub mod controls;
 pub mod fold;
 pub mod frame;
 pub mod history;
@@ -26,6 +27,7 @@ pub mod terminal;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use aui_protocol::Delta;
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -38,8 +40,13 @@ pub use caps::{capabilities, claude_version_supported, CLAUDE_VERSION_FLOOR};
 
 use argv::SessionLaunch;
 use child::RunningChild;
+use controls::{ControlHub, PendingControl, PendingControlKind};
 use fold::{ClaudeFold, UnknownControlRequest};
 use frame::ApprovalRequest;
+
+pub use controls::{
+    CONTROL_CONFIRM_TIMEOUT, CONTROL_EFFORT_REJECTED_CARD, CONTROL_MODEL_REJECTED_CARD,
+};
 
 /// One claimed answer: the request is already out of its queue, so this
 /// value is the only right to answer it. Exactly one claimant can hold
@@ -74,16 +81,26 @@ pub struct ClaudeCodeAdapter {
     rx: Receiver<ProviderEvent>,
     fold: Arc<Mutex<ClaudeFold>>,
     child: Mutex<Option<RunningChild>>,
-    session_id: Mutex<Option<String>>,
-    model: Mutex<Option<String>>,
+    /// The held session id, shared with the [`ControlHub`] so a refusal
+    /// banner scopes to the right session even when the pump confirms it.
+    session_id: Arc<Mutex<Option<String>>>,
+    /// The session's recorded model, shared with the [`ControlHub`]: the
+    /// optimistic pick from here on, rolled back when the child refuses.
+    model: Arc<Mutex<Option<String>>>,
     /// The effort level in effect on the running child, when one was set:
     /// raised with `apply_flag_settings{effortLevel}` (verified live
     /// 2026-09-28 — the next turn's session jsonl carries the level), or
     /// the `--effort` launch flag when the child spawned with one. `None`
     /// is Default: no override in effect. Clearing back to Default has no
     /// verified control-channel reset, so it keeps the `--resume`
-    /// relaunch path (see [`Self::resume_launch_for_effort`]).
-    effort: Mutex<Option<String>>,
+    /// relaunch path (see [`Self::resume_launch_for_effort`]). Shared with
+    /// the [`ControlHub`], which rolls it back when the child refuses.
+    effort: Arc<Mutex<Option<String>>>,
+    /// The confirmation hub: pending host control requests, matched by
+    /// `request_id` when the child's answers arrive on the pump. The pump
+    /// holds the same [`Arc`], so confirmation runs on arrival — never on
+    /// the next dispatch.
+    hub: Arc<ControlHub>,
     /// Host→child control `request_id` sequence (`baaz-ctl-…`), shared by
     /// `initialize`, `set_model` and `apply_flag_settings` alike.
     control_seq: Mutex<u64>,
@@ -164,15 +181,27 @@ impl ClaudeCodeAdapter {
     /// spawn — every test runs offline against the checked-in fixtures.
     pub fn new(program: &str) -> Self {
         let (tx, rx) = unbounded();
+        let fold = Arc::new(Mutex::new(ClaudeFold::new()));
+        let model = Arc::new(Mutex::new(None));
+        let effort = Arc::new(Mutex::new(None));
+        let session_id = Arc::new(Mutex::new(None));
+        let hub = Arc::new(ControlHub::new(
+            Arc::clone(&fold),
+            tx.clone(),
+            Arc::clone(&model),
+            Arc::clone(&effort),
+            Arc::clone(&session_id),
+        ));
         Self {
             program: program.into(),
             tx,
             rx,
-            fold: Arc::new(Mutex::new(ClaudeFold::new())),
+            fold,
             child: Mutex::new(None),
-            session_id: Mutex::new(None),
-            model: Mutex::new(None),
-            effort: Mutex::new(None),
+            session_id,
+            model,
+            effort,
+            hub,
             control_seq: Mutex::new(1),
             sent_control: Mutex::new(Vec::new()),
             workspace: Mutex::new(None),
@@ -285,41 +314,101 @@ impl ClaudeCodeAdapter {
     }
 
     /// Address one host→child control request: recorded always, written
-    /// when a child runs. With no child there is nothing to deliver to, so
-    /// the line is recorded but not delivered — an admission the child
-    /// never saw, matching `SelectModel`'s offline-capable contract.
-    fn send_control(&self, line: &str) -> Result<(), ProviderError> {
+    /// when a child runs, and TRACKED from the send until the child's
+    /// answer confirms or refuses it (see [`ControlHub`]). With no child
+    /// there is nothing to deliver to, so the line is recorded but not
+    /// delivered — an admission the child never saw, matching
+    /// `SelectModel`'s offline-capable contract — and still tracked, so a
+    /// silence past the timeout refuses loudly rather than posing as
+    /// applied. A delivery failure untracks at once: no answer can arrive
+    /// for a line the child never took.
+    fn send_control(&self, line: &str, pending: PendingControl) -> Result<(), ProviderError> {
         self.sent_control.lock().expect("sent control mutex").push(line.to_owned());
-        match self.child.lock().expect("child mutex").as_mut() {
+        let request_id = pending.request_id.clone();
+        self.hub.track(pending);
+        let delivered = match self.child.lock().expect("child mutex").as_mut() {
             Some(running) => running.send_line(line).map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
             }),
             None => Ok(()),
+        };
+        if delivered.is_err() {
+            self.hub.untrack(&request_id);
         }
+        delivered
     }
 
     /// The `initialize` line for a freshly spawned child: the answer
-    /// restates the model catalog, which the fold keeps for `ListModels`.
+    /// restates the model catalog, which the adapter keeps for `ListModels`
+    /// once it confirms the reply matches this line's `request_id`.
     /// Best-effort after a spawn — a child whose stdin is already broken
     /// still opened, and `ListModels` refuses honestly until an answer
     /// lands.
     fn send_initialize(&self) {
-        let _ = self.send_control(&initialize_control_request(&self.next_control_id()));
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::Initialize,
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        };
+        let _ = self.send_control(&initialize_control_request(&request_id), pending);
     }
 
     /// The `set_model` line for the live child, switching its model from
-    /// the next turn with no relaunch. Best-effort like [`Self::send_control`]:
-    /// a delivery failure un-records the pick at the dispatch site.
-    fn send_set_model(&self, model: &str) -> Result<(), ProviderError> {
-        self.send_control(&set_model_control_request(&self.next_control_id(), model))
+    /// the next turn with no relaunch. Best-effort: a delivery failure
+    /// un-records the pick at the dispatch site, and a delivered line the
+    /// child refuses rolls the pick back when the answer arrives.
+    fn send_set_model(
+        &self,
+        model: &str,
+        previous_model: Option<String>,
+        previous_fold_model: Option<String>,
+    ) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::SetModel,
+            request_id: request_id.clone(),
+            wanted_model: Some(model.to_owned()),
+            previous_model,
+            previous_fold_model,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        };
+        self.send_control(&set_model_control_request(&request_id, model), pending)
     }
 
     /// The `apply_flag_settings` line raising the live child's effort from
-    /// the next turn, with no relaunch. Best-effort like
-    /// [`Self::send_control`]: a delivery failure leaves the recorded
-    /// level untouched at the dispatch site.
-    fn send_apply_effort(&self, level: &str) -> Result<(), ProviderError> {
-        self.send_control(&apply_effort_control_request(&self.next_control_id(), level))
+    /// the next turn, with no relaunch. Best-effort: a delivery failure
+    /// leaves the recorded level untouched at the dispatch site, and a
+    /// delivered line the child refuses rolls the level back — and records
+    /// a resume relaunch carrying it — when the answer arrives.
+    fn send_apply_effort(&self, level: &str, previous_effort: Option<String>) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::ApplyEffort,
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: Some(level.to_owned()),
+            previous_effort,
+            sent_at: Instant::now(),
+        };
+        self.send_control(&apply_effort_control_request(&request_id, level), pending)
+    }
+
+    /// Fold one raw child stdout line and confirm whatever it settles: the
+    /// same [`ControlHub::ingest_line`] the live pump runs per line, so a
+    /// scripted frame in tests settles exactly what the live child would.
+    /// Public so scripted-frame tests drive confirmation without a child.
+    pub fn ingest_child_line(&self, line: &str) {
+        self.hub.ingest_line(line);
     }
 
     /// Control lines addressed so far, in order (see [`Self::send_control`]).
@@ -336,14 +425,8 @@ impl ClaudeCodeAdapter {
                     .into(),
             });
         }
-        let running = RunningChild::spawn(
-            &self.program,
-            launch,
-            Arc::clone(&self.fold),
-            self.tx.clone(),
-        )
-        .map_err(|error| ProviderError::Unavailable {
-            reason: format!("could not spawn claude: {error}"),
+        let running = RunningChild::spawn(&self.program, launch, &self.hub).map_err(|error| {
+            ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
         })?;
         *child = Some(running);
         // The guard drops here: `send_initialize` locks the child again to
@@ -528,14 +611,8 @@ impl ClaudeCodeAdapter {
         }
         *self.child.lock().expect("child mutex") = None;
         let launch = self.with_mcp_config(launch.clone())?;
-        let running = RunningChild::spawn(
-            &self.program,
-            &launch,
-            Arc::clone(&self.fold),
-            self.tx.clone(),
-        )
-        .map_err(|error| ProviderError::Unavailable {
-            reason: format!("could not respawn claude: {error}"),
+        let running = RunningChild::spawn(&self.program, &launch, &self.hub).map_err(|error| {
+            ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
         })?;
         *self.child.lock().expect("child mutex") = Some(running);
         // A relaunched child restates the whole session, catalog included.
@@ -766,6 +843,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
+        // Settle whatever the pump folded since the last command: a refusal
+        // the child already answered must roll back before this command
+        // reads the record — never one command later.
+        self.hub.drain_confirmations();
         match command {
             Command::OpenSession { request_id, workspace, model, .. } => {
                 let launch =
@@ -861,15 +942,20 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // effective model from here on — the chip, the next
                 // footers, and the next resume's `--model`. Applies to a
                 // session with turns in it exactly as to a fresh one:
-                // nothing here counts turns. A delivery failure un-records
-                // the pick, so the chip never claims a model the child
+                // nothing here counts turns. The pick is optimistic: the
+                // child's answer confirms it, and a refusal — or a silence
+                // past the timeout — rolls it back and banners the reason
+                // (see [`ControlHub`]). A delivery failure un-records the
+                // pick at once, so the chip never claims a model the child
                 // never took.
                 let previous_model = self.model.lock().expect("model mutex").clone();
                 let previous_fold =
                     self.fold.lock().expect("fold mutex").model().map(str::to_owned);
                 *self.model.lock().expect("model mutex") = Some(model.clone());
                 self.fold.lock().expect("fold mutex").set_model(&model);
-                if let Err(error) = self.send_set_model(&model) {
+                if let Err(error) =
+                    self.send_set_model(&model, previous_model.clone(), previous_fold.clone())
+                {
                     *self.model.lock().expect("model mutex") = previous_model;
                     let mut fold = self.fold.lock().expect("fold mutex");
                     match previous_fold {
@@ -899,15 +985,27 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // Default has no verified control-channel reset, so only
                 // that direction keeps the `--resume` relaunch path (the
                 // relaunched child spawns without `--effort`). A rejected
-                // level fails the submit loudly — never silently — and the
-                // recorded level stays where the child actually is.
+                // level never sticks silently: the answer rolls the recorded
+                // level back to where the child actually is, banners the
+                // CLI's reason, and records a `--resume` relaunch carrying
+                // the level — performed above, before the next turn — so
+                // the effort lands after all.
+                // A refused `apply_flag_settings` records a resume relaunch
+                // carrying the level (the pump owns no spawn): perform it
+                // here, before the turn goes out, so the turn runs at the
+                // picked level after all. A relaunch that cannot spawn
+                // fails this submit loudly — never silently.
+                if let Some(launch) = self.hub.take_effort_relaunch() {
+                    self.check_session(&session_id)?;
+                    self.relaunch(&launch)?;
+                }
                 let wanted = effort.filter(|effort| !effort.is_empty());
                 let recorded = self.effort.lock().expect("effort mutex").clone();
                 if wanted != recorded {
                     match wanted.clone() {
                         Some(level) => {
                             self.check_session(&session_id)?;
-                            self.send_apply_effort(&level)?;
+                            self.send_apply_effort(&level, recorded)?;
                             *self.effort.lock().expect("effort mutex") = Some(level);
                         }
                         None => {
@@ -1208,21 +1306,36 @@ mod tests {
     fn list_models_serves_the_initialize_catalog_including_fable() {
         // Offline throughout: the program name does not exist, so a stray
         // spawn would fail loudly, and the transcript below is
-        // `permission.jsonl` folded through the shared stream path — the
-        // initialize answer lands in the fold exactly as live.
+        // `permission.jsonl` ingested through the shared ingest path — the
+        // initialize answer confirms by id exactly as live.
         let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
         let path =
             format!("{}/../../fixtures/claude-code/permission.jsonl", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(path).expect("fixture reads");
         {
-            let mut fold = adapter.fold.lock().expect("fold mutex");
+            // The fixture's catalog answer echoes `req_init_1`: track the
+            // initialize request it replies to, or the id match refuses it.
+            adapter.hub.track(PendingControl {
+                kind: PendingControlKind::Initialize,
+                request_id: "req_init_1".into(),
+                wanted_model: None,
+                previous_model: None,
+                previous_fold_model: None,
+                wanted_effort: None,
+                previous_effort: None,
+                sent_at: Instant::now(),
+            });
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                crate::fold::step_line(&mut fold, line, &mut |_| {});
+                adapter.ingest_child_line(line);
             }
-            assert_eq!(fold.catalog_models().len(), 5, "the initialize answer lands");
+            assert_eq!(
+                adapter.fold.lock().expect("fold mutex").catalog_models().len(),
+                5,
+                "the initialize answer lands on its id match"
+            );
         }
         // Before any answer lands the catalog is honestly unknown — never
         // the supplied fallback served as the child's own.
@@ -1537,6 +1650,327 @@ mod tests {
         let error =
             adapter.claim_approval("req-race", "deny", None).expect_err("nothing left to claim");
         assert!(matches!(error, ProviderError::Rejected { .. }));
+    }
+
+    /// Scripted-frame helpers for the confirmation tests below: mint the
+    /// child lines a live CLI would print, and pull refusal banners off
+    /// the event stream.
+    fn success_line(request_id: &str) -> String {
+        serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": request_id},
+        })
+        .to_string()
+    }
+
+    fn error_line(request_id: &str, reason: &str) -> String {
+        serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "error", "request_id": request_id, "error": reason},
+        })
+        .to_string()
+    }
+
+    fn catalog_line(request_id: &str, subtype: &str, error: Option<&str>) -> String {
+        let mut response =
+            serde_json::json!({"subtype": subtype, "request_id": request_id, "response": {
+                "models": [
+                    {"value": "sonnet", "displayName": "Sonnet",
+                     "resolvedModel": "claude-sonnet-5",
+                     "supportedEffortLevels": ["low", "high"]},
+                    {"value": "haiku", "displayName": "Haiku",
+                     "resolvedModel": "claude-haiku-4-5-20251001"},
+                ],
+            }});
+        if let Some(reason) = error {
+            response["error"] = serde_json::Value::String(reason.to_owned());
+        }
+        serde_json::json!({"type": "control_response", "response": response}).to_string()
+    }
+
+    fn pending_id(adapter: &ClaudeCodeAdapter) -> String {
+        adapter
+            .hub
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .keys()
+            .next()
+            .cloned()
+            .expect("one tracked request")
+    }
+
+    fn drain_events(adapter: &ClaudeCodeAdapter) -> Vec<ProviderEvent> {
+        let events = adapter.events();
+        let mut out = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn control_cards(events: &[ProviderEvent]) -> Vec<(String, String)> {
+        use aui_protocol::{Block, Delta};
+        events
+            .iter()
+            .flat_map(|event| match event {
+                ProviderEvent::Deltas { deltas, .. } => deltas.clone(),
+                _ => Vec::new(),
+            })
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Generic { kind, text, .. }, .. } => {
+                    Some((kind, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `set_model` the child confirms stays picked: success finalises
+    /// the optimistic record and banners nothing.
+    #[test]
+    fn set_model_success_confirms_the_pick() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        adapter.ingest_child_line(&success_line(&pending_id(&adapter)));
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("opus"),
+            "success keeps the pick"
+        );
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").model(),
+            Some("opus"),
+            "the fold agrees"
+        );
+        assert!(adapter.hub.pending.lock().expect("pending mutex").is_empty(), "settled");
+        assert!(
+            control_cards(&drain_events(&adapter)).is_empty(),
+            "a confirm banners nothing"
+        );
+    }
+
+    /// A `set_model` the child rejects rolls back to the recorded model
+    /// and banners the CLI's reason: the chip shows what is in effect.
+    #[test]
+    fn set_model_error_rolls_back_and_banners() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        adapter.fold.lock().expect("fold mutex").set_model("sonnet");
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("opus"),
+            "optimistic until answered"
+        );
+        adapter.ingest_child_line(&error_line(&pending_id(&adapter), "Model 'opus' not found"));
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("sonnet"),
+            "the refusal restores the recorded model"
+        );
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").model(),
+            Some("sonnet"),
+            "the fold follows"
+        );
+        let cards = control_cards(&drain_events(&adapter));
+        assert_eq!(cards.len(), 1, "one refusal banner: {cards:?}");
+        assert_eq!(cards[0].0, CONTROL_MODEL_REJECTED_CARD);
+        assert!(cards[0].1.contains("Model 'opus' not found"), "the CLI reason: {:?}", cards[0].1);
+        assert!(cards[0].1.contains("sonnet"), "the model in effect: {:?}", cards[0].1);
+    }
+
+    /// A `set_model` the child never answers refuses after the timeout:
+    /// silence rolls back with a clear message, never poses as applied.
+    #[test]
+    fn set_model_timeout_rolls_back() {
+        use std::time::Duration;
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        adapter.fold.lock().expect("fold mutex").set_model("sonnet");
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        // Age the tracked request past the timeout: the next dispatch —
+        // any command — settles it without waiting the clock out.
+        for request in adapter.hub.pending.lock().expect("pending mutex").values_mut() {
+            request.sent_at -= CONTROL_CONFIRM_TIMEOUT + Duration::from_secs(1);
+        }
+        let _ = adapter.dispatch(Command::ListModels { session: None });
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("sonnet"),
+            "the silence restores the recorded model"
+        );
+        let cards = control_cards(&drain_events(&adapter));
+        assert_eq!(cards.len(), 1, "one timeout banner: {cards:?}");
+        assert!(cards[0].1.contains("no answer arrived within 10s"), "{:?}", cards[0].1);
+    }
+
+    /// An `apply_flag_settings` the child rejects falls back to the
+    /// resume relaunch carrying the level — never left unapplied — and
+    /// banners the CLI's reason.
+    #[test]
+    fn apply_effort_error_falls_back_to_relaunch() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-9");
+        *adapter.model.lock().expect("model mutex") = Some("sonnet".into());
+        // No child runs, so the submit itself cannot go out — but the
+        // effort arm runs first, and its tracked request is what the
+        // scripted answer settles.
+        let _ = adapter.dispatch(Command::SubmitInput {
+            request_id: "t-1".into(),
+            session_id: "sess-9".into(),
+            parts: vec![provider::SubmissionPart::Text("hi".into())],
+            display_text: None,
+            effort: Some("high".into()),
+        });
+        assert_eq!(
+            adapter.effort.lock().expect("effort mutex").as_deref(),
+            Some("high"),
+            "optimistic until answered"
+        );
+        adapter.ingest_child_line(&error_line(&pending_id(&adapter), "unsupported effort: high"));
+        assert_eq!(
+            adapter.effort.lock().expect("effort mutex").clone(),
+            None,
+            "the refusal restores the level in effect"
+        );
+        let launch =
+            adapter.hub.take_effort_relaunch().expect("the refusal records a relaunch");
+        assert_eq!(launch.session_id, "sess-9");
+        assert!(
+            launch.argv.iter().any(|arg| arg == "--resume"),
+            "the fallback resumes: {:?}",
+            launch.argv
+        );
+        let effort = launch.argv.iter().position(|arg| arg == "--effort").expect("--effort");
+        assert_eq!(launch.argv.get(effort + 1).map(String::as_str), Some("high"));
+        let model = launch.argv.iter().position(|arg| arg == "--model").expect("--model");
+        assert_eq!(launch.argv.get(model + 1).map(String::as_str), Some("sonnet"));
+        let cards = control_cards(&drain_events(&adapter));
+        assert_eq!(cards.len(), 1, "one refusal banner: {cards:?}");
+        assert_eq!(cards[0].0, CONTROL_EFFORT_REJECTED_CARD);
+        assert!(cards[0].1.contains("unsupported effort: high"), "{:?}", cards[0].1);
+    }
+
+    /// A `control_response` matching no tracked id changes nothing: not
+    /// the catalog, not the model, and no banner.
+    #[test]
+    fn stray_control_response_changes_nothing() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        // A confirmed catalog to defend: one tracked initialize, answered.
+        adapter.hub.track(PendingControl {
+            kind: PendingControlKind::Initialize,
+            request_id: "init-1".into(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            sent_at: Instant::now(),
+        });
+        adapter.ingest_child_line(&catalog_line("init-1", "success", None));
+        assert_eq!(adapter.fold.lock().expect("fold mutex").catalog_models().len(), 2);
+        adapter
+            .dispatch(Command::SelectModel {
+                request_id: "r-1".into(),
+                session_id: "sess-1".into(),
+                model: "opus".into(),
+                model_provider: None,
+            })
+            .expect("a pick lands");
+        // Foreign ids, success and error alike, with and without a catalog
+        // payload: none of them may move anything.
+        adapter.ingest_child_line(&catalog_line("foreign-9", "success", None));
+        adapter.ingest_child_line(&error_line("foreign-10", "Model 'opus' not found"));
+        assert_eq!(
+            adapter.model.lock().expect("model mutex").as_deref(),
+            Some("opus"),
+            "the pick stands"
+        );
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").catalog_models().len(),
+            2,
+            "the catalog stands"
+        );
+        assert!(
+            control_cards(&drain_events(&adapter)).is_empty(),
+            "a stray banners nothing"
+        );
+        assert!(
+            adapter.hub.pending.lock().expect("pending mutex").len() == 1,
+            "the real request still waits"
+        );
+    }
+
+    /// The initialize reply counts only on its own id and only on
+    /// success: a foreign answer never populates the catalog, and an
+    /// error keeps the fallback even when it carries rows.
+    #[test]
+    fn initialize_reply_matches_by_id() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        let track_init = |adapter: &ClaudeCodeAdapter, id: &str| {
+            adapter.hub.track(PendingControl {
+                kind: PendingControlKind::Initialize,
+                request_id: id.into(),
+                wanted_model: None,
+                previous_model: None,
+                previous_fold_model: None,
+                wanted_effort: None,
+                previous_effort: None,
+                sent_at: Instant::now(),
+            });
+        };
+        track_init(&adapter, "init-1");
+        // A foreign success with rows: not ours, not kept.
+        adapter.ingest_child_line(&catalog_line("foreign-1", "success", None));
+        assert!(
+            adapter.fold.lock().expect("fold mutex").catalog_models().is_empty(),
+            "a foreign answer never populates the catalog"
+        );
+        // Our error, rows or not: the fallback stands, logged, no banner.
+        adapter.ingest_child_line(&catalog_line("init-1", "error", Some("handshake busy")));
+        assert!(
+            adapter.fold.lock().expect("fold mutex").catalog_models().is_empty(),
+            "an error keeps the fallback catalog"
+        );
+        assert!(
+            control_cards(&drain_events(&adapter)).is_empty(),
+            "an initialize refusal banners nothing"
+        );
+        // Our success: the catalog lands.
+        track_init(&adapter, "init-2");
+        adapter.ingest_child_line(&catalog_line("init-2", "success", None));
+        assert_eq!(
+            adapter.fold.lock().expect("fold mutex").catalog_models().len(),
+            2,
+            "the matching success restates the catalog"
+        );
     }
 
     /// An unknown control subtype arrives, the caller answers, a response

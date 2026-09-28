@@ -692,11 +692,36 @@ pub struct ClaudeFold {
     /// Answered through `DecideApproval` with `"deny"` (a refusal) or
     /// `"allow"`; never auto-answered, never unanswerable.
     pending_unknown: Vec<UnknownControlRequest>,
-    /// The model catalog from the last `initialize` answer, in answer
-    /// order: what `ListModels` serves. Replaced wholesale on every
-    /// `initialize` answer — the child restates the whole list — and empty
-    /// until the first one lands.
+    /// The model catalog from the last CONFIRMED `initialize` answer, in
+    /// answer order: what `ListModels` serves. Replaced wholesale only when
+    /// the adapter confirms the reply matches its own `initialize` request
+    /// id (see [`ClaudeFold::set_catalog`]) — the child restates the whole
+    /// list — and empty until the first one lands.
     catalog: Vec<crate::frame::CatalogModel>,
+    /// Child→host `control_response` answers not yet confirmed: the adapter
+    /// drains these and matches each against its pending host requests (see
+    /// `drain_control_outcomes`). Queued here — never applied here — so a
+    /// stray answer with a foreign id cannot move the catalog, the model,
+    /// or the effort: only the adapter's id match acts.
+    control_outcomes: Vec<ControlOutcome>,
+}
+
+/// One child→host `control_response`: the raw answer, queued for the
+/// adapter to confirm against its pending host control requests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlOutcome {
+    /// The `response.request_id` this answers: the join key.
+    pub request_id: String,
+    /// The `response.subtype`: `"success"` confirms, `"error"` refuses.
+    /// Any other spelling is neither — the adapter leaves the request
+    /// pending until its timeout.
+    pub subtype: String,
+    /// The CLI's rejection text, when this answer refuses.
+    pub error: Option<String>,
+    /// The catalog rows, when this answer carries them: the `initialize`
+    /// reply only, empty otherwise. Applied only when the adapter confirms
+    /// the id — never straight into [`ClaudeFold::catalog_models`].
+    pub models: Vec<crate::frame::CatalogModel>,
 }
 
 impl ClaudeFold {
@@ -721,11 +746,35 @@ impl ClaudeFold {
         self.model.as_deref()
     }
 
-    /// The model catalog from the last `initialize` answer, in answer
-    /// order. Empty until the first answer lands — `ListModels` refuses
-    /// honestly rather than serving Baaz's fallback as the child's own.
+    /// The model catalog from the last CONFIRMED `initialize` answer, in
+    /// answer order. Empty until the first confirmed answer lands —
+    /// `ListModels` refuses honestly rather than serving Baaz's fallback
+    /// as the child's own.
     pub fn catalog_models(&self) -> &[crate::frame::CatalogModel] {
         &self.catalog
+    }
+
+    /// Keep a confirmed `initialize` catalog: the adapter calls this only
+    /// for the reply to its own `initialize` request id on `"success"`.
+    /// The child restates the whole list, so this replaces wholesale. An
+    /// error reply never reaches here — the fallback catalog stands and the
+    /// refusal is logged at the confirmation site instead.
+    pub fn set_catalog(&mut self, models: Vec<crate::frame::CatalogModel>) {
+        self.catalog = models;
+    }
+
+    /// The queued `control_response` answers not yet confirmed, oldest
+    /// first. The adapter drains these after every folded line.
+    pub fn control_outcomes(&self) -> &[ControlOutcome] {
+        &self.control_outcomes
+    }
+
+    /// Take every queued `control_response` answer, oldest first, leaving
+    /// the queue empty. Each taken outcome is confirmed exactly once — the
+    /// take is the claim, the same way `take_approval` claims an answerable
+    /// request.
+    pub fn drain_control_outcomes(&mut self) -> Vec<ControlOutcome> {
+        std::mem::take(&mut self.control_outcomes)
     }
 
     /// Remember the effective model from a `SelectModel` admission: the next
@@ -994,12 +1043,19 @@ impl ClaudeFold {
             }
             // A child→host `control_response` (e.g. the answer to our
             // `initialize` handshake). Host-initiated, so nothing about it
-            // needs answering — but an `initialize` answer restates the
-            // model catalog, which `ListModels` serves from here.
-            Frame::ControlResponse { models, .. } => {
-                if !models.is_empty() {
-                    self.catalog = models.clone();
-                }
+            // needs answering — but the answer confirms or refuses one of
+            // our pending host requests, so it queues for the adapter to
+            // match by `request_id`. Nothing here applies it: matching any
+            // catalog-carrying answer straight into the catalog let a
+            // rejected model/effort change claim success, and let a stray
+            // id rewrite `ListModels`.
+            Frame::ControlResponse { request_id, subtype, models, error } => {
+                self.control_outcomes.push(ControlOutcome {
+                    request_id: request_id.clone(),
+                    subtype: subtype.clone(),
+                    error: error.clone(),
+                    models: models.clone(),
+                });
                 Vec::new()
             }
             // The other lane, by choice (see module docs): parsed, ignored.
