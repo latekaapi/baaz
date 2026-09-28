@@ -1615,22 +1615,30 @@ impl Harness {
         )
     }
 
-    /// The footer's account menu: Settings at the top, then Sign out. The
-    /// environment lane names itself: `META_API_KEY` survives a sign-out, so
-    /// the row says where the credential really comes from (D28).
+    /// The footer's account menu: Settings at the top, then Sign in to Muse
+    /// while signed out, else Sign out. The environment lane names itself:
+    /// `META_API_KEY` survives a sign-out, so the row says where the
+    /// credential really comes from (D28). Sign in opens the Muse login
+    /// sheet — the login screen is never the app's first screen, but it
+    /// stays reachable here.
     pub(crate) fn render_account_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Account) {
             return None;
         }
-        let label = match &self.auth {
-            Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
-                "Sign out (set by META_API_KEY)"
+        let signed_in = matches!(self.auth, Auth::SignedIn(_));
+        let label: SharedString = if signed_in {
+            match &self.auth {
+                Auth::SignedIn(identity) if identity.lane == AccountStateKind::EnvKey => {
+                    "Sign out (set by META_API_KEY)".into()
+                }
+                _ => "Sign out".into(),
             }
-            _ => "Sign out",
+        } else {
+            "Sign in to Muse".into()
         };
         let rows = vec![
             MenuRow::Toggle { label: "Settings…".into(), checked: false },
-            MenuRow::Toggle { label: label.into(), checked: false },
+            MenuRow::Toggle { label, checked: false },
         ];
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
             if *index == 0 {
@@ -1638,7 +1646,13 @@ impl Harness {
                 this.open_settings(0, cx);
             } else if *index == 1 {
                 this.overlays.update(cx, |overlays, _| overlays.menu = None);
-                this.logout(cx);
+                if matches!(this.auth, Auth::SignedIn(_)) {
+                    this.logout(cx);
+                } else {
+                    this.login.reset_to_choose();
+                    this.muse_sheet = true;
+                    cx.notify();
+                }
             }
         });
         // Above the footer's top edge, right edges aligned, at any sidebar
