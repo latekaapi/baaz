@@ -885,7 +885,11 @@ impl CodexFold {
     /// item settles the card from the press. Only the completing item
     /// moves the card — never the press itself.
     pub fn record_decision(&mut self, approval_id: &str, choice: &str) {
-        if approval_id.is_empty() {
+        // Only elicitation gates settle from the recorded press; every
+        // other approval settles through its own completion, and keeping
+        // their presses would fill the bounded map until it refused the
+        // elicitations it exists for.
+        if approval_id.is_empty() || !approval_id.starts_with(MCP_ELICITATION_ID_PREFIX) {
             return;
         }
         if self.decisions.len() >= 64 && !self.decisions.contains_key(approval_id) {
@@ -3439,6 +3443,30 @@ mod tests {
                 Some(ApprovalState::AllowedOnce { .. })
             ),
             "an allow press reads allowed once: {deltas:?}"
+        );
+    }
+
+    /// Command and file-change presses are never kept: a long session of
+    /// ordinary approvals must not fill the bounded map and starve the
+    /// elicitation press that follows them.
+    #[test]
+    fn ordinary_approval_presses_never_crowd_out_an_elicitation_press() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        for n in 0..200 {
+            fold.record_decision(&format!("exec-{n}"), "accept");
+        }
+        assert!(fold.decisions.is_empty(), "non-elicitation presses are not recorded");
+        fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        fold.record_decision("mcp-elicitation-0", "cancel");
+        let deltas = fold.apply(&browser_call_completed("tool call failed"));
+        assert!(
+            matches!(settled_state(&deltas, "mcp-elicitation-0"), Some(ApprovalState::Denied { .. })),
+            "the cancel press still settles denied after 200 ordinary approvals: {deltas:?}"
         );
     }
 

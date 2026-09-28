@@ -345,6 +345,11 @@ impl CodexAdapter {
         let deltas = {
             let mut fold = self.fold.lock().expect("fold mutex");
             fold.set_model(&model);
+            // Same as an open: elicitation approvals raised after a resume
+            // name the thread's cwd, never an empty "Runs in".
+            if let Some(cwd) = child::resume_cwd(&answer) {
+                fold.set_workspace(&cwd);
+            }
             let mut deltas = fold.apply(&crate::frame::Frame::Notification(
                 crate::frame::Notification::ThreadStarted {
                     thread_id: thread_id.clone(),
