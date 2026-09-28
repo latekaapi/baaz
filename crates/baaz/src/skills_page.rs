@@ -1712,10 +1712,16 @@ impl Harness {
             }
         }
 
+        // `h_flex` centres on the cross axis: without `items_stretch` the
+        // scroll box keeps its content height and centres in the body, so
+        // its top starts inside the header whenever content and body
+        // differ (Y3a) — cross sizes never flex-shrink. Stretch pins it to
+        // the body's full height; the 460 px detail pane is unaffected.
         let mut body = h_flex()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
+            .items_stretch()
             .child(
                 div()
                     .id("skills-list-scroll")
@@ -1737,7 +1743,13 @@ impl Harness {
         // modal layer centred on a scrim. Neither joins the column, so
         // neither moves the page's layout.
         let overlay = self.render_skills_dialog(window, cx);
-        let mut root = div().size_full().relative().child(column);
+        // The page fills what the centre column leaves after the wire
+        // banner and the terminal dock: `flex_1` with `min_h(0)`, never
+        // `size_full`. A full-height root plus the dock overflowed the
+        // centre cell and pushed the dock below the fold (Y3a).
+        // `overflow_hidden` keeps the absolute popover/dialog layer —
+        // seated at this relative root — clipped to the page.
+        let mut root = div().flex_1().min_h(px(0.0)).w_full().overflow_hidden().relative().child(column);
         if self.skills.add_menu_open {
             root = root.child(self.render_add_menu(cx));
         }
