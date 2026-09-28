@@ -84,12 +84,20 @@ impl Harness {
                 },
             ],
         },
+        providers_section(),
         shortcuts_section(
             &self.shortcuts_cache,
             self.recording_shortcut.as_deref(),
             &self.shortcut_errors,
         ),
         ]
+    }
+
+    /// Open the Settings dialog on the Providers section, closing whatever
+    /// it covers: where the account menu's "Providers…" row lands.
+    pub(crate) fn open_providers(&mut self, cx: &mut Context<Self>) {
+        let section = settings_section_index(&self.settings_sections(), "providers");
+        self.open_settings(section, cx);
     }
 
     /// Open the Settings dialog on `section`, closing whatever it covers.
@@ -305,6 +313,25 @@ fn shortcut_is_editable(id: &str) -> bool {
     parse_shortcut_row_id(id).is_some_and(|(action, context)| {
         crate::keymap::effective_binding(&action, context.as_deref()).is_some_and(|binding| binding.editable)
     })
+}
+
+/// The Settings Providers section: one muted paragraph per backend under
+/// a caps heading — the provider's name and its headline (`Connected ·
+/// a@x.com · Ultra`, `Signed out`, …), read live from the status service
+/// every frame. Read-only: switches and actions stay in the providers'
+/// own surfaces. Pure, so tests drive it without a window.
+pub(crate) fn providers_section() -> SettingsSection {
+    let mut rows = vec![SettingsRow::Heading { text: SharedString::from("Connections") }];
+    for status in crate::provider_status::live_statuses() {
+        rows.push(SettingsRow::Note {
+            text: SharedString::from(format!(
+                "{} — {}",
+                status.provider.label(),
+                status.headline_text()
+            )),
+        });
+    }
+    SettingsSection { id: SharedString::from("providers"), label: SharedString::from("Providers"), rows }
 }
 
 /// The Settings Shortcuts section: one [`SettingsRow::Shortcut`] per live

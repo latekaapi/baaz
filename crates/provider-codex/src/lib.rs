@@ -24,6 +24,7 @@ pub mod probe;
 pub mod terminal;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use provider::{
@@ -213,8 +214,33 @@ impl CodexAdapter {
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.model.lock().expect("model mutex") = Some(resolved.clone());
         self.fold.lock().expect("fold mutex").set_model(&resolved);
+        // The lane is up: ask its own server for the rate limits before
+        // handing over the child, so the usage card has a reading from
+        // the first frame rather than waiting on the first push.
+        self.refresh_rate_limits(&running);
         *self.child.lock().expect("child mutex") = Some(running);
         Ok(Ack::Session { session_id, title: None })
+    }
+
+    /// How long the lane waits for the usage read on connect. The method
+    /// is read-only and normally answers at once; the bound is what keeps
+    /// a hung server from holding a session open hostage.
+    const RATE_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Ask the lane's own server for its rate limits and fold the answer
+    /// into the account snapshot. Best-effort: an old server that never
+    /// learned the method, or one that hangs past the timeout, simply
+    /// leaves the snapshot to the `account/rateLimits/updated` pushes —
+    /// a session must never fail to open for want of a meter.
+    fn refresh_rate_limits(&self, running: &RunningChild) {
+        let answer = running.send_request_with_timeout(
+            "account/rateLimits/read",
+            serde_json::json!({}),
+            Self::RATE_LIMITS_TIMEOUT,
+        );
+        if let Ok(result) = answer {
+            self.fold.lock().expect("fold mutex").observe_rate_limits(&result);
+        }
     }
 
     fn with_child<T>(&self, f: impl FnOnce(&RunningChild) -> T) -> Result<T, ProviderError> {
@@ -299,6 +325,9 @@ impl CodexAdapter {
         *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.model.lock().expect("model mutex") = Some(model);
+        // A resumed lane reconnects its server: re-read the limits the
+        // same way an open does, best-effort.
+        self.refresh_rate_limits(&running);
         *self.child.lock().expect("child mutex") = Some(running);
         if !deltas.is_empty() {
             let _ = self.tx.send(provider::ProviderEvent::Deltas {
@@ -817,6 +846,13 @@ impl ProviderAdapter for CodexAdapter {
         self.rx.clone()
     }
 
+    /// The fold's latest rate-limits reading, if any. A peek only — no
+    /// wire call — and `None` while the pump holds the fold, so a menu
+    /// refresh never blocks on a streaming turn.
+    fn read_usage(&self) -> Option<provider::UsageReport> {
+        self.fold.try_lock().ok()?.account().usage_report()
+    }
+
     fn shutdown(&mut self) {
         if let Some(running) = self.child.lock().expect("child mutex").as_mut() {
             running.shutdown();
@@ -850,6 +886,114 @@ mod tests {
             matches!(ack, Ack::Account { signed_in: false, label: None }),
             "no push seen, no login claimed: {ack:?}"
         );
+    }
+
+    /// A scripted `codex app-server`: answers `--version`, the handshake,
+    /// one catalog page, `thread/start`, and the rate-limits read, logging
+    /// every client→server method it saw. Written to a temp dir so the
+    /// test spawns a real child over a real pipe — scripted RPC, no
+    /// network, no owner credential.
+    fn scripted_server() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "baaz-codex-fake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let log = dir.join("methods.log");
+        let script = dir.join("fake-codex");
+        let body = r#"#!/usr/bin/env python3
+import json, os, sys
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    print("codex-cli 0.200.0")
+    sys.exit(0)
+log = os.environ["FAKE_CODEX_LOG"]
+seen = []
+def result_for(method):
+    if method == "model/list":
+        return {"data": [{"id": "gpt-test", "displayName": "GPT Test", "isDefault": True}],
+                "nextCursor": None}
+    if method == "thread/start":
+        return {"thread": {"id": "thread-1", "sessionId": "sess-1"}}
+    if method == "account/rateLimits/read":
+        return {"planType": "prolite",
+                "primary": {"usedPercent": 85, "windowDurationMins": 10080,
+                            "resetsAt": 1790588038},
+                "secondary": None}
+    return {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        frame = json.loads(line)
+    except ValueError:
+        continue
+    method = frame.get("method")
+    if method:
+        seen.append(method)
+    if "id" in frame and method:
+        sys.stdout.write(json.dumps({"id": frame["id"], "result": result_for(method)}) + "\n")
+        sys.stdout.flush()
+with open(log, "w") as handle:
+    handle.write("\n".join(seen))
+"#;
+        std::fs::write(&script, body).expect("fake server writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = std::fs::metadata(&script).expect("fake metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("fake executable");
+        }
+        (script, log)
+    }
+
+    /// The fake finds its method log through one process-global variable,
+    /// so the connect test holds this while its child is alive — two
+    /// fakes at once would cross their logs.
+    static FAKE_SERVER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn open_session_reads_rate_limits_on_connect() {
+        // Against the scripted server above: opening a lane sends
+        // `account/rateLimits/read` and folds the answer, so the usage
+        // card has a reading before the first push. Without the
+        // connect-time read the method never appears in the log and the
+        // report stays `None`.
+        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let (script, log) = scripted_server();
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy());
+        adapter
+            .connect(&ConnectInfo::new("baaz", "0.0.0"))
+            .expect("fake version clears the floor");
+        let ack = adapter
+            .dispatch(Command::OpenSession {
+                request_id: "r-open".into(),
+                workspace: None,
+                model: Some("gpt-test".into()),
+                model_provider: None,
+            })
+            .expect("fake handshake opens");
+        assert!(matches!(ack, Ack::Session { .. }), "opened: {ack:?}");
+        // The folded answer behind `read_usage`: plan plus a weekly
+        // window at 85% — the shape the account menu's card renders, not
+        // a label string.
+        let report = adapter.read_usage().expect("a reading was folded");
+        assert_eq!(report.plan.as_deref(), Some("prolite"));
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].label, "Weekly");
+        assert!((report.windows[0].used_fraction - 0.85).abs() < 1e-9);
+        assert_eq!(report.windows[0].resets_at, Some(1790588038));
+        // The report above can only come from the answer to
+        // `account/rateLimits/read` (the scripted server pushes no limits
+        // unprompted), so the connect-time read is proven by the fold.
+        drop(adapter);
+        let _ = log;
     }
 
     #[test]

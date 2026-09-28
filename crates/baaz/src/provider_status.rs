@@ -125,7 +125,7 @@ impl Advisory {
 /// One usage window in the neutral shape every provider stores.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UsageWindow {
-    /// e.g. `Primary · 7d`.
+    /// Labelled from the window's length (`Weekly`, `Session · 5h`, …).
     pub label: String,
     /// Fraction used, 0.0–1.0.
     pub used_fraction: f64,
@@ -642,9 +642,6 @@ impl Service {
     }
 
     /// Store a usage snapshot a probe or a live session yielded.
-    /// Kept for the later usage-cards task; the probe path stores its
-    /// snapshots inline today.
-    #[allow(dead_code)]
     pub fn record_usage(&mut self, snapshot: UsageSnapshot) {
         let id = ProviderId::parse(&snapshot.provider);
         if let Some(status) = self.statuses.get_mut(&id) {
@@ -652,19 +649,19 @@ impl Service {
         }
     }
 
-    /// Store Codex windows from an `account/rateLimits/read` result or an
-    /// `account/rateLimits/updated` push (same object shape).
-    /// Kept for the later usage-cards task, which will feed live pushes.
-    #[allow(dead_code)]
-    pub fn record_codex_rate_limits(&mut self, result: &serde_json::Value) {
-        let (plan, windows) = provider_codex::probe::parse_rate_limit_windows(result);
+    /// Store a live lane's structured usage reading (see
+    /// [`provider::UsageReport`]): what `read_usage` on an open Codex or
+    /// Claude Code session last observed. The report's labels already
+    /// name each window from its length, so they ride through verbatim.
+    pub fn record_lane_usage(&mut self, id: ProviderId, report: &provider::UsageReport) {
         self.record_usage(UsageSnapshot {
-            provider: ProviderId::Codex.as_str().into(),
-            plan,
-            windows: windows
-                .into_iter()
+            provider: id.as_str().into(),
+            plan: report.plan.clone(),
+            windows: report
+                .windows
+                .iter()
                 .map(|window| UsageWindow {
-                    label: window.label,
+                    label: window.label.clone(),
                     used_fraction: window.used_fraction,
                     resets_at: window.resets_at,
                 })
@@ -673,48 +670,9 @@ impl Service {
         });
     }
 
-    /// Store Claude Code's latest `rate_limit_event` info: the named
-    /// window plus its five-hour and seven-day windows, when reported.
-    /// Kept for the later usage-cards task, which will feed live events.
-    #[allow(dead_code)]
-    pub fn record_claude_rate_limit(&mut self, info: &serde_json::Value) {
-        let mut windows = Vec::new();
-        let utilization = info.get("utilization").and_then(serde_json::Value::as_f64);
-        let resets_at = info.get("resetsAt").and_then(serde_json::Value::as_i64);
-        let kind = info.get("rateLimitType").and_then(serde_json::Value::as_str);
-        if let (Some(utilization), Some(kind)) = (utilization, kind) {
-            windows.push(UsageWindow {
-                label: kind.to_owned(),
-                used_fraction: utilization.clamp(0.0, 1.0),
-                resets_at,
-            });
-        }
-        for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
-            let window = info
-                .get("unifiedWindows")
-                .and_then(|unified| unified.get(key));
-            if let Some(window) = window {
-                let used = window.get("utilization").and_then(serde_json::Value::as_f64);
-                if let Some(used) = used {
-                    windows.push(UsageWindow {
-                        label: label.to_owned(),
-                        used_fraction: used.clamp(0.0, 1.0),
-                        resets_at: window.get("resetsAt").and_then(serde_json::Value::as_i64),
-                    });
-                }
-            }
-        }
-        self.record_usage(UsageSnapshot {
-            provider: ProviderId::ClaudeCode.as_str().into(),
-            plan: None,
-            windows,
-            as_of: now_secs(),
-        });
-    }
-
-    /// Store Muse's usage in the neutral shape: what its tier probe and
-    /// account state report today. Kept for the later usage-cards task.
-    #[allow(dead_code)]
+    /// Store Muse's usage in the neutral shape: what its tier probe
+    /// reports today. The weekly fraction is the Weekly window; the plan
+    /// is the tier's own label.
     pub fn record_muse_usage(
         &mut self,
         plan: Option<String>,
@@ -724,7 +682,7 @@ impl Service {
         let windows = used_fraction
             .map(|used| {
                 vec![UsageWindow {
-                    label: "plan".into(),
+                    label: "Weekly".into(),
                     used_fraction: used.clamp(0.0, 1.0),
                     resets_at,
                 }]
@@ -1028,6 +986,11 @@ impl Drop for TestSandbox {
 /// launch reports Muse Connected once the connection signs in.
 static MUSE_LIVE: OnceLock<Mutex<Option<MuseAccount>>> = OnceLock::new();
 
+/// How often the account menu refreshes its usage cards: lane peeks are
+/// cheap but not free, and the probes behind a re-check are not cheap at
+/// all.
+pub const USAGE_REFRESH_THROTTLE: Duration = Duration::from_secs(60);
+
 /// The window-activation edge plus the service behind it: the same
 /// service boot probes, so focus refreshes reuse its per-provider
 /// throttle instead of keeping a second clock.
@@ -1036,6 +999,8 @@ struct LiveService {
     was_active: bool,
     /// The statuses boot probed, refreshed on focus regain.
     service: Service,
+    /// When the account menu last refreshed its usage cards.
+    last_usage_refresh: Option<Instant>,
 }
 
 static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
@@ -1052,10 +1017,62 @@ fn live_service() -> MutexGuard<'static, LiveService> {
         Mutex::new(LiveService {
             was_active: false,
             service: Service::with_probes(Probes::real()),
+            last_usage_refresh: None,
         })
     })
     .lock()
     .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Seed the live service with `statuses`: what boot renders from before
+/// any probe lands — the on-disk cache, or the scripted source in
+/// deterministic mode.
+fn seed_live(statuses: &HashMap<ProviderId, ProviderStatus>) {
+    let mut live = live_service();
+    for (id, status) in statuses {
+        live.service.put(status.clone());
+        if status.checked_at.is_some() {
+            live.service.mark_probed(*id, Instant::now());
+        }
+    }
+}
+
+/// The live statuses for the account menu, in registry order: what boot
+/// seeded and the probes and lane refreshes have updated since. Cards
+/// render one per Connected entry.
+pub fn live_statuses() -> Vec<ProviderStatus> {
+    let live = live_service();
+    ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
+}
+
+/// Whether the account menu's usage refresh is due: at most every
+/// [`USAGE_REFRESH_THROTTLE`]. Marks the refresh when due, so the caller
+/// that goes ahead owns exactly one refresh per window.
+pub fn note_usage_refresh() -> bool {
+    let mut live = live_service();
+    let now = Instant::now();
+    let due = live
+        .last_usage_refresh
+        .is_none_or(|at| now.duration_since(at) >= USAGE_REFRESH_THROTTLE);
+    if due {
+        live.last_usage_refresh = Some(now);
+    }
+    due
+}
+
+/// Store lane and Muse readings the account menu just refreshed: one
+/// snapshot per provider, in the single store the cards render from.
+pub fn record_refreshed_usage(
+    lanes: &[(ProviderId, provider::UsageReport)],
+    muse: Option<(Option<String>, Option<f64>)>,
+) {
+    let mut live = live_service();
+    for (id, report) in lanes {
+        live.service.record_lane_usage(*id, report);
+    }
+    if let Some((plan, used_fraction)) = muse {
+        live.service.record_muse_usage(plan, used_fraction, None);
+    }
 }
 
 /// Remember the existing muse connection's account state: the Muse auth
@@ -1140,7 +1157,12 @@ pub fn note_window_active(active: bool) {
 /// re-logs the line as it lands). Deterministic runs report the
 /// scripted source and never probe, read or write.
 pub fn boot() {
-    log_statuses(&boot_statuses());
+    let seeded = boot_statuses();
+    log_statuses(&seeded);
+    // The menu renders from the live service from its first frame: seed
+    // it with the cache (or the script, deterministically) before any
+    // probe lands, so the cards never wait on a background thread.
+    seed_live(&seeded);
     // The first-run fact is stored facts only, never a live probe — log
     // it here so the next task can wire the screen; nothing shown changes.
     eprintln!("baaz: first_run={}", is_first_run());
@@ -1433,6 +1455,46 @@ mod tests {
             !env.state_dir().join("provider-status.json").exists(),
             "deterministic mode never writes the cache"
         );
+    }
+
+    #[test]
+    fn lane_readings_land_in_the_single_store_the_cards_render() {
+        let _env = sandbox();
+        let mut service = Service::with_probes(Probes::never());
+        assert!(service.status(ProviderId::Codex).usage.is_none());
+        service.record_lane_usage(
+            ProviderId::Codex,
+            &provider::UsageReport {
+                plan: Some("prolite".into()),
+                windows: vec![provider::UsageWindow {
+                    label: "Weekly".into(),
+                    used_fraction: 0.85,
+                    resets_at: Some(1790588038),
+                    window_minutes: Some(10080),
+                }],
+            },
+        );
+        let snapshot = service.status(ProviderId::Codex).usage.expect("a reading was stored");
+        assert_eq!(snapshot.plan.as_deref(), Some("prolite"));
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].label, "Weekly");
+        assert!((snapshot.windows[0].used_fraction - 0.85).abs() < 1e-9);
+        // Muse's weekly fraction is the Weekly window under the tier's
+        // own plan label.
+        service.record_muse_usage(Some("High Usage".into()), Some(0.02), None);
+        let muse = service.status(ProviderId::Muse).usage.expect("muse stored");
+        assert_eq!(muse.plan.as_deref(), Some("High Usage"));
+        assert_eq!(muse.windows.len(), 1);
+        assert_eq!(muse.windows[0].label, "Weekly");
+    }
+
+    #[test]
+    fn menu_usage_refresh_runs_at_most_once_a_minute() {
+        // Against the live throttle: the first menu open refreshes, the
+        // second (seconds later) does not. No other test touches the
+        // throttle, so the first call here owns the window.
+        assert!(note_usage_refresh(), "the first open refreshes");
+        assert!(!note_usage_refresh(), "the second open rides the first");
     }
 
     #[test]
