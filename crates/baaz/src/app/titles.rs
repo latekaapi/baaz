@@ -27,6 +27,12 @@ use crate::{byline, titles};
 
 /// One title generation in flight: which real session it names, and which
 /// attempt of this run's budget it is on.
+///
+/// The same map also carries handoff-summary jobs (Z8): when
+/// `handoff_epoch` is `Some`, the side session is a checkpoint's summary
+/// turn for `real_id` (the handoff source) under that owner-epoch — never
+/// a title. [`Harness::harvest_title`] diverts those to the summary
+/// harvest, and the title settle paths leave them alone.
 #[derive(Clone, Debug)]
 pub(crate) struct TitleJob {
     /// The real session this names.
@@ -36,6 +42,8 @@ pub(crate) struct TitleJob {
     /// The first message the prompt was built from, so a harvest retry
     /// re-asks about the same text rather than about nothing.
     pub first_message: String,
+    /// `Some(epoch)` when this job is a handoff summary, `None` for a title.
+    pub handoff_epoch: Option<u64>,
 }
 
 impl Harness {
@@ -188,7 +196,7 @@ impl Harness {
                 // starts nothing — no second generation, never a retry.
                 this.title_jobs.insert(
                     side_id.clone(),
-                    TitleJob { real_id: real_id.clone(), tries, first_message: retry_message },
+                    TitleJob { real_id: real_id.clone(), tries, first_message: retry_message, handoff_epoch: None },
                 );
                 cx.notify();
             }
@@ -219,6 +227,12 @@ impl Harness {
         // re-reads the pending set: a stand-down can land between here and
         // the read coming back.)
         if !self.title_jobs.contains_key(side_id) {
+            return;
+        }
+        // A handoff-summary side session rides the same map under its
+        // `handoff_epoch` marker: harvest the summary, never a title.
+        if self.title_jobs.get(side_id).is_some_and(|job| job.handoff_epoch.is_some()) {
+            self.harvest_handoff_summary(side_id, cx);
             return;
         }
         let Some(client) = self.client.clone() else { return };
@@ -290,11 +304,13 @@ impl Harness {
     }
 
     /// Silent and cheap: one log line, the first-prompt label stands, never
-    /// a dialog, never another attempt.
+    /// a dialog, never another attempt. A handoff-summary job for the same
+    /// session is not a title and survives this — it settles on its own
+    /// harvest or watchdog.
     fn fail_title(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-title for {real_id} failed ({reason}); keeping the first prompt");
         self.titles_pending.remove(real_id);
-        self.title_jobs.retain(|_, job| job.real_id != real_id);
+        self.title_jobs.retain(|_, job| job.real_id != real_id || job.handoff_epoch.is_some());
         if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
             entry.title_pending = false;
         }
@@ -399,6 +415,275 @@ impl Harness {
         }
         self.invalidate_list();
         cx.notify();
+    }
+}
+
+/// A handoff checkpoint's model-written summary (Z8): the side-session
+/// driver, same shape as a title.
+///
+/// At checkpoint, with the switch on and a Muse sign-in, the app starts
+/// one hidden side session on the cheapest model and sends the pack's
+/// goal + transcript excerpt ([`crate::handoff::summary_prompt`]). The
+/// run stays Checkpointed — the card reads "Summarising…" — until the
+/// side session's `turn/completed` harvests into the pack's summary field
+/// or the 20 s watchdog keeps the extractive text; only then does the
+/// destination open. Timeout, wire error, empty reply and signed-out all
+/// keep the extractive summary with one log line, never a dialog, never
+/// a retry. Cancel during the wait abandons the hidden side session: the
+/// run is already Cancelled, so the harvest and the watchdog drop their
+/// answers and no destination ever opens.
+impl Harness {
+    /// Start the checkpoint's summary side session. Called once from the
+    /// handoff checkpoint path, after the run went Checkpointed with its
+    /// extractive pack and the card went "Summarising…".
+    pub(crate) fn start_handoff_summary(
+        &mut self,
+        source: String,
+        epoch: u64,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            // Signed out between the checkpoint's check and now: keep the
+            // extractive text and open the destination.
+            self.resolve_handoff_summary(source, epoch, None, cx);
+            return;
+        };
+        // The side workspace, never the real session's: the prompt already
+        // carries the goal and the excerpt, so the side session needs no
+        // repo — and outside every adoption it can never match a project.
+        let workspace = titles::side_workspace_dir().to_string_lossy().into_owned();
+        let side_id = titles::side_session_id();
+        // Recorded before the start runs, so a crash between the start and
+        // the hide still hides by record after a restart.
+        self.remember_side_session(&side_id, cx);
+        // The watchdog is armed NOW, not once the start returns: a Muse that
+        // is connected but hangs in `session/start` or `turn/start` would
+        // otherwise hold the handoff until the client's own 180 s request
+        // timeout (review finding). A start that lands after the watchdog
+        // settled finds no waiting run and is dropped by the harvest guard.
+        self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
+        let work = move || -> Result<String, String> {
+            // Free pre-flight: the pinned id when listed, else `None` — omit
+            // `modelId` and take the server default rather than failing.
+            let models = client
+                .model_list(&muse_client::schema::ModelListParams { session_id: None })
+                .map(|result| result.models)
+                .unwrap_or_default();
+            let model_id = titles::pick_title_model(&models);
+            let started = client
+                .session_start(&muse_client::schema::SessionStartParams {
+                    command_id: muse_client::new_command_id(),
+                    model_id,
+                    session_id: Some(side_id.clone()),
+                    workspace_root: Some(workspace),
+                    ..Default::default()
+                })
+                .map_err(|error| format!("session/start: {error}"))?;
+            let started_id = started.session.session_id.clone();
+            client
+                .turn_start(&muse_client::schema::TurnStartParams {
+                    command_id: muse_client::new_command_id(),
+                    session_id: started_id.clone(),
+                    input: vec![muse_client::schema::TurnInputPart::text(prompt)],
+                    display_text: Some("baaz handoff summary".to_owned()),
+                    ..Default::default()
+                })
+                .map_err(|error| format!("turn/start: {error}"))?;
+            Ok(started_id)
+        };
+        self.wire_call(cx, work, move |this, result, cx| match result {
+            Ok(side_id) => {
+                // Already hidden by the pre-start record, before any list
+                // refresh could show it. Marked as a summary job, so the
+                // shared `turn/completed` route harvests a summary, and so
+                // a title settle for the same session never touches it.
+                this.title_jobs.insert(
+                    side_id,
+                    TitleJob {
+                        real_id: source.clone(),
+                        tries: 1,
+                        first_message: String::new(),
+                        handoff_epoch: Some(epoch),
+                    },
+                );
+                cx.notify();
+            }
+            Err(reason) => {
+                crate::baaz_log!(
+                    "handoff summary for {source} failed ({reason}); keeping the extractive summary"
+                );
+                this.resolve_handoff_summary(source, epoch, None, cx);
+            }
+        });
+    }
+
+    /// A `turn/completed` on a summary side session: harvest its answer
+    /// with a free `session/read`, then resolve the wait — model text in,
+    /// or the extractive text on an empty reply or a wire error — and open
+    /// the destination. A reply that lands after Cancel (or a supersede)
+    /// finds no waiting run and is dropped: the side session stays hidden,
+    /// nothing opens.
+    fn harvest_handoff_summary(&mut self, side_id: &str, cx: &mut Context<Self>) {
+        let Some(job) = self.title_jobs.get(side_id).cloned() else { return };
+        let Some(epoch) = job.handoff_epoch else { return };
+        if !self.handoff_summary_waiting(&job.real_id, epoch) {
+            self.title_jobs.remove(side_id);
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.resolve_handoff_summary(job.real_id, epoch, None, cx);
+            return;
+        };
+        let side_id = side_id.to_owned();
+        let read_id = side_id.clone();
+        let work = move || {
+            client.session_read(&muse_client::schema::SessionReadParams {
+                session_id: read_id.clone(),
+                exclude_items: Some(false),
+            })
+        };
+        self.wire_call(cx, work, move |this, result, cx| {
+            // Abandoned while the read ran (cancelled, superseded): drop.
+            if !this.handoff_summary_waiting(&job.real_id, epoch) {
+                this.title_jobs.remove(&side_id);
+                return;
+            }
+            match result {
+                Ok(read) => {
+                    let harvested = titles::harvest_summary_text(&read);
+                    if harvested.is_none() {
+                        crate::baaz_log!(
+                            "handoff summary for {} came back empty; keeping the extractive summary",
+                            job.real_id
+                        );
+                    }
+                    this.resolve_handoff_summary(job.real_id, epoch, harvested, cx);
+                }
+                Err(error) => {
+                    crate::baaz_log!(
+                        "handoff summary read for {} failed ({error}); keeping the extractive summary",
+                        job.real_id
+                    );
+                    this.resolve_handoff_summary(job.real_id, epoch, None, cx);
+                }
+            }
+        });
+    }
+
+    /// Whether the summary side session may still land: the run exists
+    /// under this epoch, is still Checkpointed, and is still waiting.
+    fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
+        self.handoffs.get(source).is_some_and(|run| {
+            run.epoch == epoch && run.summarising && matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
+        })
+    }
+
+    /// Settle the summary wait and open the destination. `Some` harvested
+    /// text upgrades the pack to a model summary; `None` keeps the
+    /// extractive one. A run that stopped waiting meanwhile (cancelled,
+    /// superseded, failed) is left alone and nothing opens.
+    fn resolve_handoff_summary(
+        &mut self,
+        source: String,
+        epoch: u64,
+        harvested: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
+        if run.epoch != epoch
+            || !run.summarising
+            || !matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
+        {
+            self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
+            return;
+        }
+        match harvested.filter(|text| !text.trim().is_empty()) {
+            Some(text) => run.apply_model_summary(text),
+            None => run.note_summary_fallback(),
+        }
+        self.handoffs.insert(source.clone(), run);
+        self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
+        self.refresh_handoff_card(&source, cx);
+        // The destination opens on a window, like every other open: back
+        // through `update_in`, the way a window-less event reopens.
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| this.open_handoff_destination(source, epoch, window, cx));
+        }));
+        cx.notify();
+    }
+
+    /// One watchdog per summary: [`crate::handoff::SUMMARY_TIMEOUT_SECS`]
+    /// on the background executor, then back on the UI thread. Single
+    /// attempt, never a retry — the turn may still be running server-side,
+    /// so another `turn/start` would double-bill a turn this checkpoint
+    /// already owns.
+    fn arm_handoff_summary_timeout(&mut self, source: String, epoch: u64, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(crate::handoff::SUMMARY_TIMEOUT_SECS))
+                .await;
+            let _ = this.update(cx, |this, cx| this.handoff_summary_timeout(&source, epoch, cx));
+        });
+        self.wire_tasks().push(task);
+    }
+
+    /// The watchdog fired: still waiting means the summary did not arrive
+    /// in time — keep the extractive text and open the destination. A late
+    /// answer afterwards finds no waiting run and is dropped.
+    fn handoff_summary_timeout(&mut self, source: &str, epoch: u64, cx: &mut Context<Self>) {
+        if !self.handoff_summary_waiting(source, epoch) {
+            return;
+        }
+        crate::baaz_log!("handoff summary for {source} timed out; keeping the extractive summary");
+        self.resolve_handoff_summary(source.to_owned(), epoch, None, cx);
+    }
+
+    /// Refresh the source's card from the run, when the source view is the
+    /// active one (it is: the destination has not opened yet). A parked
+    /// source heals at landing, which rebuilds its card from the run.
+    fn refresh_handoff_card(&mut self, source: &str, cx: &mut Context<Self>) {
+        let Some(run) = self.handoffs.get(source) else { return };
+        let card = run.card();
+        let card_id = run.card_id.clone();
+        if let Some(view) = self.active.clone() {
+            if view.read(cx).session_id == source {
+                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            }
+        }
+    }
+
+    /// Open the handoff destination after the summary settled: the
+    /// checkpoint path's own tail (`pending_handoff`, then the lane open),
+    /// rerun with the resolved pack. Guarded like the settle — a run that
+    /// stopped waiting meanwhile opens nothing.
+    fn open_handoff_destination(
+        &mut self,
+        source: String,
+        epoch: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(run) = self.handoffs.get(&source).cloned() else { return };
+        if run.epoch != epoch
+            || run.summarising
+            || !matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
+        {
+            return;
+        }
+        let workspace = run.pack.map(|pack| pack.workspace).unwrap_or_default();
+        let to = run.to;
+        self.pending_handoff = Some(crate::handoff::PendingHandoff { source_session: source.clone(), epoch });
+        if to == crate::providers::ProviderId::Muse {
+            self.select_new_provider(crate::providers::ProviderId::Muse, cx);
+            self.session_switch_pending = true;
+            self.switch_claim = Some((source, self.switch_epoch));
+            self.new_session(window, cx);
+        } else {
+            let project =
+                self.projects.resolve_available(Some(&workspace), None).map(|p| p.id.clone());
+            self.open_on_provider(to, project, workspace, window, cx);
+        }
     }
 }
 
