@@ -418,7 +418,10 @@ pub fn display_path(path: &str, workspace_root: &str, home: &str) -> String {
     let candidate = std::path::Path::new(path);
     if candidate.is_absolute() {
         let root = std::path::Path::new(workspace_root);
-        if let Ok(relative) = candidate.strip_prefix(root) {
+        // An empty root (a session with no workspace) or `/` contains every
+        // absolute path; neither is a workspace to be relative to.
+        let has_root = root.is_absolute() && root.parent().is_some();
+        if let Some(relative) = has_root.then(|| candidate.strip_prefix(root).ok()).flatten() {
             if !relative.as_os_str().is_empty() {
                 return relative.to_string_lossy().into_owned();
             }
@@ -1829,6 +1832,14 @@ mod tests {
             summary: None,
             state: ThinkingState::Done,
         }
+    }
+
+    #[test]
+    fn display_path_without_a_workspace_still_abbreviates_home() {
+        // Review finding: an empty root made every path "inside".
+        assert_eq!(display_path("/Users/ada/notes/a.md", "", "/Users/ada"), "~/notes/a.md");
+        assert_eq!(display_path("/Users/ada/notes/a.md", "/", "/Users/ada"), "~/notes/a.md");
+        assert_eq!(display_path("/etc/hosts", "", "/Users/ada"), "/etc/hosts");
     }
 
     #[test]

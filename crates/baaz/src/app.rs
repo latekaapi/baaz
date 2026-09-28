@@ -475,9 +475,10 @@ pub struct Harness {
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Login,
-    /// Y5: first-run connect screen state. `show_connect` is decided once at
-    /// boot from stored facts only; the shell renders immediately otherwise,
-    /// and Muse's `account/read` never gates the window.
+    /// Y5: first-run connect screen state. At boot `show_connect` is decided
+    /// from stored facts only (the shell renders immediately otherwise, and
+    /// Muse's `account/read` never gates the window); afterwards only the
+    /// person sets it, from Settings → Providers → "Set up providers…".
     pub(crate) show_connect: bool,
     /// The statuses the connect screen renders: cache/script at boot, kept
     /// fresh from the cache file while shown.
