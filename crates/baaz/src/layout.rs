@@ -42,6 +42,13 @@ pub enum RightKind {
     Files,
 }
 
+impl Default for RightKind {
+    /// Files: what the pane shows when nothing was ever stored.
+    fn default() -> Self {
+        RightKind::Files
+    }
+}
+
 impl RightKind {
     /// Every kind, for the toggle-all-kinds test and T3's palette rows.
     pub const ALL: [RightKind; 4] =

@@ -616,10 +616,15 @@ saying nothing happened. A button that looked live and did nothing would be wors
 that says plainly it is not wired yet. The browser pane has no web engine attached, so it
 is chrome over a placeholder that says so; the address bar does nothing for now.
 
-The pane's state is global, not per-session: open, width and last-shown kind persist in
-`layout.json` as `rightOpen`, `rightWidth` and `rightKind` (restored at boot, `Files` when
-nothing was ever stored), and there is no per-session state for it
-(B-DEAD-3, 2026-09-12). The divider drags against the pointer — it sits on the pane's
+The pane's open state and last-shown kind belong to each session, not the window:
+every user change while a session is active is saved onto that session in
+`sessions.json`, and switching sessions restores the newly shown session's pane —
+open sessions reopen as left (Diff, Browser, Files with its preview, or closed),
+sessions with no stored state (and brand-new ones) show it closed — without the
+open/close animation playing on the switch. Only the width stays global,
+persisting in `layout.json` as `rightWidth` (restored at boot, 400 px when never
+resized); `rightOpen`/`rightKind` there are the no-session fallback, `Files` when
+nothing was ever stored (B-DEAD-3, 2026-09-12, per-session since Z2). The divider drags against the pointer — it sits on the pane's
 left edge, so moving right narrows — and settles clamped into the library range
 (`aui::shell::RIGHT_MIN_WIDTH` to `RIGHT_MAX_WIDTH`, 280 to 720 px; 400 px when never
 resized). `--steps right:<browser|diff|git|files|off>` opens the pane on that kind (`off`
