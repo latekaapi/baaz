@@ -175,7 +175,25 @@ fn version_key(name: &str) -> Option<(u64, u64, u64)> {
 /// between the markers, or `None` on any failure, timeout, or unparseable
 /// output — rc noise outside the markers is ignored.
 fn shell_path_dirs(shell: &Path, timeout: Duration) -> Option<Vec<PathBuf>> {
-    let mut child = std::process::Command::new(shell)
+    use std::os::unix::process::CommandExt as _;
+    let mut command = std::process::Command::new(shell);
+    // A new SESSION (not just a process group): the probe shell leads its
+    // own group, so a timeout kills whatever the rc files started along
+    // with the shell (killing only the leader left a `sleep` orphaned); and
+    // it has no controlling terminal, so an interactive shell run from a
+    // terminal launch cannot be stopped by SIGTTOU/SIGTTIN for touching a
+    // tty whose foreground group it is not in (a bare `process_group(0)`
+    // stopped it and every terminal launch hit the timeout).
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
         .arg("-ilc")
         .arg(SHELL_PROBE)
         .stdin(std::process::Stdio::null())
@@ -202,6 +220,7 @@ fn shell_path_dirs(shell: &Path, timeout: Duration) -> Option<Vec<PathBuf>> {
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    kill_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     return None;
@@ -209,10 +228,22 @@ fn shell_path_dirs(shell: &Path, timeout: Duration) -> Option<Vec<PathBuf>> {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
+        }
+    }
+}
+
+/// SIGKILL every process in the group `pgid` (the probe shell leads its own
+/// session and group, see [`shell_path_dirs`]).
+fn kill_group(pgid: u32) {
+    if let Ok(pgid) = libc::pid_t::try_from(pgid) {
+        // SAFETY: a plain syscall on a group this module created.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
         }
     }
 }
@@ -281,6 +312,46 @@ fn join_dirs(dirs: &[PathBuf]) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review finding: a timeout killed only the shell and left what its rc
+    /// started running. The fake shell backgrounds a long `sleep`, records
+    /// its pid and never prints the markers; after the timeout the sleep
+    /// must be gone too.
+    #[test]
+    fn a_timeout_kills_what_the_rc_started() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("baaz-envpath-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("sleep.pid");
+        let shell = dir.join("fake-shell");
+        std::fs::write(
+            &shell,
+            format!("#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n", pidfile.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 2.5 s, not less: macOS takes several hundred ms to first-exec a
+        // freshly written script, and the rc must have run before the
+        // timeout for there to be anything to orphan.
+        assert_eq!(shell_path_dirs(&shell, Duration::from_millis(2500)), None);
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_owned();
+        // `kill -0` succeeds only while the process exists.
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!alive, "the rc's background sleep {pid} outlived the timeout");
+    }
 
     /// Serialize the tests that mutate the process environment: the
     /// runner executes tests on threads sharing one environment.
