@@ -470,10 +470,15 @@ impl Harness {
         let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
             this.flip_use_own_mcp(id, *next, cx);
         });
+        // Inset like the card above it: the card's padding plus its 20 px
+        // provider mark and gap, so this row's text starts under the
+        // provider's name and its switch sits under the card's switch.
         h_flex()
             .w_full()
             .items_center()
             .gap(px(scale::SP_3))
+            .pl(px(scale::SP_4 + 20.0 + scale::SP_2))
+            .pr(px(scale::SP_4))
             .child(
                 v_flex()
                     .flex_1()
