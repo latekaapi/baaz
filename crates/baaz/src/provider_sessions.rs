@@ -67,6 +67,11 @@ pub struct ProviderSessionRecord {
     /// without joining the source's own record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_from_provider: Option<String>,
+    /// The chain's title, written on the destination at activation from the
+    /// source's current display title (`docs/22-handoff.md` §8). Ranked
+    /// directly under a user rename, above the record's own title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_title: Option<String>,
     /// Full submitted text → the bubble text for submits that carried
     /// `display_text` (handoff packs, plan-mode prompts): what a replayed
     /// history shows instead of the whole input. Written on submit, read
@@ -154,6 +159,7 @@ pub fn upsert_open(
             handoff_to: None,
             handoff_from: None,
             handoff_from_provider: None,
+            handoff_title: None,
             display_texts: HashMap::new(),
         });
 }
@@ -211,6 +217,10 @@ pub fn note_display_text(
 pub fn note_first_prompt(store: &mut ProviderSessionStore, session_id: &str, prompt: &str) {
     let prompt = prompt.trim();
     if prompt.is_empty() {
+        return;
+    }
+    // A handoff pack is never a session's own words (Y2a).
+    if crate::sidebar::is_pack_text(prompt) {
         return;
     }
     if let Some(record) = store.get_mut(session_id) {
@@ -414,6 +424,22 @@ mod tests {
             Some("Fix the header second line"),
             "the session keeps its own first words"
         );
+    }
+
+    /// Y2a: a handoff pack is never a session's own words — neither the
+    /// full pack nor its bubble summary becomes the first prompt.
+    #[test]
+    fn the_handoff_pack_is_never_a_first_prompt() {
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        note_first_prompt(&mut store, "s-1", "Continuing a session handed off from Muse: goal words");
+        assert!(store["s-1"].first_prompt.is_none(), "the pack turn records nothing");
+        note_first_prompt(
+            &mut store,
+            "s-1",
+            "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)",
+        );
+        assert!(store["s-1"].first_prompt.is_none(), "the bubble records nothing either");
     }
 
     #[test]

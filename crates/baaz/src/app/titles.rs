@@ -83,6 +83,14 @@ impl Harness {
         first_message: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // A handoff destination keeps the chain title: never start the
+        // paid titler there, whatever the turn count reads (Y2a).
+        if crate::sidebar::is_handoff_dest(session_id, &self.provider_sessions, &self.overrides) {
+            return;
+        }
+        if first_message.as_deref().is_some_and(crate::sidebar::is_pack_text) {
+            return;
+        }
         let entry = self.sessions.iter().find(|e| e.id == session_id);
         let turns = entry.map(|e| e.turns).unwrap_or(0);
         let eligible = titles::should_title(
@@ -428,6 +436,11 @@ impl Harness {
         let running = view.read(cx).is_sending();
         let ask = view.read(cx).last_user_text();
         let result = view.read(cx).last_summary_text();
+        // The pack turn and its acknowledgement are the handoff speaking,
+        // never words to rewrite a byline from (Y2a).
+        if ask.as_deref().is_some_and(crate::sidebar::is_pack_text) {
+            return;
+        }
         if ask.is_none() && result.is_none() {
             return;
         }

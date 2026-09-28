@@ -105,6 +105,12 @@ pub struct SessionMeta {
     /// "from <Provider>" byline reads without joining another record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_from_provider: Option<String>,
+    /// The chain's title, written on the destination at activation from the
+    /// source's current display title (`docs/22-handoff.md` §8). Ranked
+    /// directly under a user rename of the head, above the session's own
+    /// title, so the chain keeps one title across providers and restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_title: Option<String>,
 }
 
 impl SessionMeta {
@@ -126,6 +132,7 @@ impl SessionMeta {
             && self.handoff_to.is_none()
             && self.handoff_from.is_none()
             && self.handoff_from_provider.is_none()
+            && self.handoff_title.is_none()
     }
 }
 

@@ -268,3 +268,44 @@ provider session underneath. What changes is what the user sees:
   the index rows, the decision function and the counts. It does NOT
   prove what the palette or the sidebar draw — those remain unverified
   here.
+
+### 8.5 As built (Y2a, one title / one row / one selection)
+
+Supersedes the *presentation* in §8.3's collapse paragraph. Storage now
+keeps every member row; the one-row-per-chain view is derived in
+`visible_sessions` from the pure `collapse_handoff_chains`
+(`crates/baaz/src/sidebar.rs`), so collapsing is idempotent and
+order-independent — a second run, in any order, yields the same rows.
+
+- **One title.** At activation the destination records `handoff_title`
+  (provider record and/or override), copied from the source's current
+  display title — user name first, then its title — and carried forward
+  down chains of any length. The title ladder for a member reads: user
+  rename of the head, then `handoff_title`, then its own title. The
+  collapsed head row derives its label the same way, with the tail
+  member's row label as fallback. No handoff turn renames: `should_title`
+  is false for any session with `handoff_from`; `title_from_transcript`,
+  `first_send_update`, `note_first_prompt` and `maybe_start_title` skip
+  the pack turn, its acknowledgement and the destination's first real
+  message (the pack match is `sidebar::is_pack_text`: the pack header or
+  the "Handed off from …" bubble).
+- **One row, one selection.** Header crumb, window title and the
+  sidebar's selected-row key all resolve the raw active/pending id
+  through `chain_head`; the active/pending head is never filtered as
+  empty, so the destination row stays highlighted while the pack runs.
+- **Row state.** The pack submit marks the row running and touches
+  `updated`, like `ProviderTurnAccepted`; activation copies pinned,
+  project, user name and archived from source to destination; the
+  collapsed head ORs needs-you attention (and pinned/archived) across
+  members, takes the newest time and sums the honest member turns.
+- **Restart.** A muse-lane destination exists only as an override until
+  the wire answers, so `merge_provider_rows` synthesises its row from
+  the local stores (chain-titled, hence kept by the empty filter); lane
+  destinations rebuild from their records, whose ladder already prefers
+  `handoff_title`.
+- **Byline.** `record_last_summary` and `maybe_rewrite_byline` skip the
+  pack turn and its acknowledgement, so neither becomes the byline.
+- **What the gate proves, and does not.** `cargo test -p baaz` proves
+  the derived rows, the title ladder and the skip rules. It does NOT
+  prove pixels, highlight colour or real-child timing — only a live
+  capture speaks to those, at that moment.
