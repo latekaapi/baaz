@@ -470,6 +470,13 @@ pub fn resume_ids(result: &Value) -> Option<(String, String, String)> {
     ))
 }
 
+/// The resumed thread's working directory (`result.thread.cwd`), when the
+/// server says it: the gated MCP tools run there, and their elicitation
+/// approvals name it.
+pub fn resume_cwd(result: &Value) -> Option<String> {
+    result.get("thread")?.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()).map(str::to_owned)
+}
+
 /// The history turns out of a `thread/resume` response:
 /// `result.thread.turns[]`, each carrying its own `items[]` (see `Turn`
 /// in the v2 schema bundle). Empty (not missing-is-an-error) when the
@@ -1325,6 +1332,18 @@ impl Drop for RunningChild {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_resume_answer_names_the_thread_cwd() {
+        let fixture = include_str!("../../../fixtures/codex/resume.jsonl");
+        let cwd = fixture
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|line| line.get("frame").and_then(|frame| frame.get("result")).cloned())
+            .find_map(|result| resume_cwd(&result));
+        assert_eq!(cwd.as_deref(), Some("/tmp/codex-resume-work"), "the live resume answer carries thread.cwd");
+        assert_eq!(resume_cwd(&serde_json::json!({"thread": {"cwd": ""}})), None);
+    }
+
     use super::*;
     use crate::frame::{decode_envelope, Direction};
 

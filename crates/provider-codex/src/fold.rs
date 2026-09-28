@@ -119,9 +119,26 @@ fn mcp_command(arguments: &Value) -> Option<String> {
 /// Whether an `mcpToolCall` error refuses the call rather than failing
 /// it: the wire reports a declined elicitation as a failed call with a
 /// rejection message (`user rejected MCP tool call`), and the card must
-/// read denied — never a success tick, never a forged run.
+/// read denied — never a success tick, never a forged run. A cancel
+/// reports no rejection message, so the match covers its tokens too;
+/// the recorded press (see [`CodexFold::record_decision`]) still wins
+/// over this text fallback.
 fn is_mcp_rejection(message: &str) -> bool {
-    message.to_lowercase().contains("reject")
+    let message = message.to_lowercase();
+    ["reject", "declin", "cancel", "abort", "denied"].iter().any(|token| message.contains(token))
+}
+
+/// The carried title of a non-terminal `mcpToolCall` card: Baaz draws
+/// the generic kind as the title, so it names `server/tool` — never the
+/// wire kind, which would title every failed call `mcpToolCall`.
+fn mcp_card_kind(server: &str, tool: &str) -> String {
+    if tool.is_empty() {
+        if server.is_empty() { "MCP tool".to_owned() } else { server.to_owned() }
+    } else if server.is_empty() {
+        tool.to_owned()
+    } else {
+        format!("{server}/{tool}")
+    }
 }
 
 /// The joined `text` content of an `mcpToolCall` result
@@ -659,6 +676,31 @@ struct CodexApprovalSite {
 /// elicitation for a triple wins.
 type ElicitationSite = String;
 
+/// The person's pressed choice on one approval card, remembered when the
+/// adapter answers so the completing item settles from the press rather
+/// than the wire's error text. A cancel reports no rejection message,
+/// so without this the card would read allowed after "Deny and stop".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersonDecision {
+    Accept,
+    AcceptForSession,
+    Decline,
+    Cancel,
+    Unknown,
+}
+
+impl PersonDecision {
+    fn from_choice(choice: &str) -> Self {
+        match choice {
+            "accept" => PersonDecision::Accept,
+            "accept-for-session" => PersonDecision::AcceptForSession,
+            "decline" => PersonDecision::Decline,
+            "cancel" => PersonDecision::Cancel,
+            _ => PersonDecision::Unknown,
+        }
+    }
+}
+
 /// The three answers an MCP tool-call elicitation takes — allow once,
 /// deny, deny and stop. The ids ride `DecideApproval` verbatim: the
 /// adapter answers exactly these three on the elicitation lane, so the
@@ -794,6 +836,16 @@ pub struct CodexFold {
     /// no item id, so this is the join its `mcpToolCall` item settles
     /// through.
     elicitation_sites: HashMap<(String, String, String), ElicitationSite>,
+    /// Approval id → the person's pressed choice, recorded when the
+    /// adapter answers (`DecideApproval`). The completing item settles
+    /// from this first; the error-text match is only the fallback when
+    /// no press was recorded. Consumed on settle and bounded, so a gate
+    /// that never completes cannot grow it.
+    decisions: HashMap<String, PersonDecision>,
+    /// The session workspace (`thread/start` cwd): what an MCP
+    /// elicitation approval names as its cwd, since the gated tool runs
+    /// there and the request itself names none.
+    workspace: Option<String>,
 }
 
 impl CodexFold {
@@ -816,6 +868,34 @@ impl CodexFold {
     /// it lands in the [`TurnMeta`] footer.
     pub fn set_model(&mut self, model: &str) {
         self.model = Some(model.to_owned());
+    }
+
+    /// Remember the session workspace (`thread/start` cwd): an MCP
+    /// elicitation approval names this as its cwd, since the gated tool
+    /// runs there and the request itself names none. Empty records
+    /// nothing, so a missing workspace never blanks a known one.
+    pub fn set_workspace(&mut self, workspace: &str) {
+        if !workspace.trim().is_empty() {
+            self.workspace = Some(workspace.to_owned());
+        }
+    }
+
+    /// Remember the person's pressed choice for one approval id: called
+    /// when the adapter answers (`DecideApproval`), so the completing
+    /// item settles the card from the press. Only the completing item
+    /// moves the card — never the press itself.
+    pub fn record_decision(&mut self, approval_id: &str, choice: &str) {
+        // Only elicitation gates settle from the recorded press; every
+        // other approval settles through its own completion, and keeping
+        // their presses would fill the bounded map until it refused the
+        // elicitations it exists for.
+        if approval_id.is_empty() || !approval_id.starts_with(MCP_ELICITATION_ID_PREFIX) {
+            return;
+        }
+        if self.decisions.len() >= 64 && !self.decisions.contains_key(approval_id) {
+            return;
+        }
+        self.decisions.insert(approval_id.to_owned(), PersonDecision::from_choice(choice));
     }
 
     /// Remember the bubble text for a submit carrying `display_text`.
@@ -1260,7 +1340,7 @@ impl CodexFold {
                 tool,
                 command,
                 reason,
-                cwd: String::new(),
+                cwd: self.workspace.clone().unwrap_or_default(),
                 capabilities: Vec::new(),
                 scope: ApprovalScope::ThisCommand,
                 body_kind: ApprovalBodyKind::Other,
@@ -1285,13 +1365,16 @@ impl CodexFold {
         deltas
     }
 
-    /// Settle one pending MCP tool-call elicitation from its call's
-    /// outcome: denied when the call reports it rejected, allowed when
-    /// the call ran (even when it then failed) — the same ran/refused
-    /// rule the command lane settles by. The join is the
-    /// `(turn, server, tool)` triple the elicitation indexed; a call
-    /// whose triple names nothing pending settles the turn's oldest
-    /// instead, so a gate the message parse could not name still clears.
+    /// Settle one pending MCP tool-call elicitation from the person's
+    /// pressed choice first: accept reads allowed once, decline and
+    /// cancel read denied (`ApprovalState` carries no stopped state, so
+    /// "Deny and stop" settles `Denied` like a deny). Only when no press
+    /// was recorded does the call's error text decide — denied when it
+    /// reports a refusal, allowed when the call ran (even when it then
+    /// failed). The join is the `(turn, server, tool)` triple the
+    /// elicitation indexed; a call whose triple names nothing pending
+    /// settles the turn's oldest instead, so a gate the message parse
+    /// could not name still clears.
     fn settle_mcp_elicitation(
         &mut self,
         turn_id: &str,
@@ -1315,14 +1398,19 @@ impl CodexFold {
                 None => return,
             }
         };
-        let rejected = item.mcp_error().is_some_and(is_mcp_rejection);
-        let state = if rejected {
-            ApprovalState::Denied
-        } else {
-            ApprovalState::AllowedOnce {
-                exit_code: mcp_exit_code(item).unwrap_or(0),
-                duration_ms: item.mcp_duration_ms().unwrap_or(0),
+        let allowed_once = || ApprovalState::AllowedOnce {
+            exit_code: mcp_exit_code(item).unwrap_or(0),
+            duration_ms: item.mcp_duration_ms().unwrap_or(0),
+        };
+        let state = match self.decisions.remove(&approval_id) {
+            Some(PersonDecision::Accept) | Some(PersonDecision::AcceptForSession) => allowed_once(),
+            Some(PersonDecision::Decline) | Some(PersonDecision::Cancel) => ApprovalState::Denied,
+            Some(PersonDecision::Unknown) | None
+                if item.mcp_error().is_some_and(is_mcp_rejection) =>
+            {
+                ApprovalState::Denied
             }
+            Some(PersonDecision::Unknown) | None => allowed_once(),
         };
         self.resolve_approval(&approval_id, state, deltas);
     }
@@ -1781,7 +1869,7 @@ impl CodexFold {
         self.push_block(
             turn_id,
             Block::Generic {
-                kind: "mcpToolCall".into(),
+                kind: mcp_card_kind(server, tool),
                 status: match status {
                     ToolStatus::Running => "inProgress".into(),
                     ToolStatus::Success => "completed".into(),
@@ -3239,6 +3327,213 @@ mod tests {
         );
     }
 
+    /// A browser-tool gate through the real fold: card the elicitation,
+    /// record the person's press as the adapter would on `DecideApproval`,
+    /// then complete the gated call. Helpers for the press-first tests.
+    fn browser_gate() -> serde_json::Value {
+        serde_json::json!({
+            "threadId": "t",
+            "turnId": "u",
+            "serverName": "baaz",
+            "message": "Allow the baaz MCP server to run tool \"browser_open\"?",
+            "mode": "tool",
+            "requestedSchema": {},
+            "_meta": {"codex_approval_kind": "mcp_tool_call"},
+        })
+    }
+
+    fn browser_call_completed(error: &str) -> Frame {
+        let line = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "t",
+                "turnId": "u",
+                "item": {
+                    "type": "mcpToolCall",
+                    "id": "exec-2",
+                    "server": "baaz",
+                    "tool": "browser_open",
+                    "status": "failed",
+                    "arguments": {"url": "https://example.com"},
+                    "error": {"message": error},
+                    "result": null,
+                    "durationMs": 7,
+                },
+            },
+        })
+        .to_string();
+        crate::frame::decode_line(&line).expect("synthetic line decodes")
+    }
+
+    fn settled_state(deltas: &[Delta], id: &str) -> Option<ApprovalState> {
+        deltas.iter().find_map(|delta| match delta {
+            Delta::BlockUpdated { block: Block::Approval { id: card_id, state, .. }, .. }
+                if card_id == id =>
+            {
+                Some(state.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// "Deny and stop" settles denied even though a cancel reports no
+    /// rejection message: the recorded press decides, not the error text.
+    #[test]
+    fn recorded_cancel_settles_denied_without_rejection_text() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        let carded = fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        assert!(
+            carded.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Approval { id, .. }, .. } if id == "mcp-elicitation-0"
+            )),
+            "the gate cards: {carded:?}"
+        );
+        fold.record_decision("mcp-elicitation-0", "cancel");
+        let mut deltas = fold.apply(&browser_call_completed("the bridge exploded"));
+        deltas.extend(carded);
+        assert_eq!(
+            settled_state(&deltas, "mcp-elicitation-0"),
+            Some(ApprovalState::Denied),
+            "a cancel press reads denied: {deltas:?}"
+        );
+    }
+
+    /// A deny press settles denied even when the wire carries no refusal
+    /// wording at all.
+    #[test]
+    fn recorded_decline_settles_denied_without_rejection_text() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        fold.record_decision("mcp-elicitation-0", "decline");
+        let deltas = fold.apply(&browser_call_completed("boom"));
+        assert_eq!(
+            settled_state(&deltas, "mcp-elicitation-0"),
+            Some(ApprovalState::Denied),
+            "a deny press reads denied: {deltas:?}"
+        );
+    }
+
+    /// An allow press settles allowed even when the error text sounds
+    /// like a refusal: the press outranks the text fallback.
+    #[test]
+    fn recorded_accept_settles_allowed_despite_rejection_text() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        fold.record_decision("mcp-elicitation-0", "accept");
+        let deltas = fold.apply(&browser_call_completed("user rejected MCP tool call"));
+        assert!(
+            matches!(
+                settled_state(&deltas, "mcp-elicitation-0"),
+                Some(ApprovalState::AllowedOnce { .. })
+            ),
+            "an allow press reads allowed once: {deltas:?}"
+        );
+    }
+
+    /// Command and file-change presses are never kept: a long session of
+    /// ordinary approvals must not fill the bounded map and starve the
+    /// elicitation press that follows them.
+    #[test]
+    fn ordinary_approval_presses_never_crowd_out_an_elicitation_press() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        for n in 0..200 {
+            fold.record_decision(&format!("exec-{n}"), "accept");
+        }
+        assert!(fold.decisions.is_empty(), "non-elicitation presses are not recorded");
+        fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        fold.record_decision("mcp-elicitation-0", "cancel");
+        let deltas = fold.apply(&browser_call_completed("tool call failed"));
+        assert!(
+            matches!(settled_state(&deltas, "mcp-elicitation-0"), Some(ApprovalState::Denied { .. })),
+            "the cancel press still settles denied after 200 ordinary approvals: {deltas:?}"
+        );
+    }
+
+    /// With no recorded press the widened error-text fallback still
+    /// catches a cancel the wire reports only as cancelled.
+    #[test]
+    fn unrecorded_cancel_text_still_denies() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        let deltas = fold.apply(&browser_call_completed("the request was cancelled by the user"));
+        assert_eq!(
+            settled_state(&deltas, "mcp-elicitation-0"),
+            Some(ApprovalState::Denied),
+            "cancel wording reads denied without a recorded press: {deltas:?}"
+        );
+    }
+
+    /// A failed browser-tool call carries `server/tool` as its generic
+    /// kind — Baaz draws the kind as the title, never `mcpToolCall`.
+    #[test]
+    fn failed_browser_call_titles_server_slash_tool() {
+        let mut fold = CodexFold::new();
+        let deltas = fold.apply(&browser_call_completed("boom"));
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, status, text }, .. }
+                    if kind == "baaz/browser_open" && status == "failed" && text == "boom"
+            )),
+            "titled baaz/browser_open: {deltas:?}"
+        );
+        assert!(
+            !deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::Generic { kind, .. }, .. } if kind == "mcpToolCall"
+            )),
+            "no bare mcpToolCall title: {deltas:?}"
+        );
+    }
+
+    /// The elicitation approval names the session workspace as its cwd:
+    /// the request carries none, and an empty one would header `Runs in`
+    /// with nothing after it.
+    #[test]
+    fn mcp_approval_names_workspace_cwd() {
+        let mut fold = CodexFold::new();
+        fold.set_workspace("/tmp/work");
+        let deltas = fold.apply_request(
+            "mcpServer/elicitation/request",
+            &browser_gate(),
+            &serde_json::json!(0),
+        );
+        let cwd = deltas
+            .iter()
+            .find_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Approval { cwd, .. }, .. } => Some(cwd.clone()),
+                _ => None,
+            })
+            .expect("the gate cards an approval");
+        assert_eq!(cwd, "/tmp/work", "the workspace stands in for the missing cwd");
+    }
+
     /// One synthetic `mcpToolCall` per outcome, through the real fold: a
     /// clean terminal run reads success with its output and exit code, a
     /// nonzero exit fails closed, a still-open call reads running, and a
@@ -3347,7 +3642,8 @@ mod tests {
     }
 
     /// A non-baaz `mcpToolCall` is carried, never forged: its wire status
-    /// survives and its message rides the card — no raw result JSON, and
+    /// survives, its message rides the card, and the card titles
+    /// `server/tool` — no raw result JSON, no `mcpToolCall` title, and
     /// a failure never reads success.
     #[test]
     fn foreign_mcp_tool_calls_are_carried_never_forged() {
@@ -3379,7 +3675,7 @@ mod tests {
                 Delta::BlockAdded {
                     block: Block::Generic { kind, status, text },
                     ..
-                } if kind == "mcpToolCall" && status == "failed" && text == "boom"
+                } if kind == "other/thing" && status == "failed" && text == "boom"
             )),
             "carried with its status and message: {deltas:?}"
         );
