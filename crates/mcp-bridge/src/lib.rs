@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 /// The terminal relay: the seven tools as MCP, forwarded to Baaz's socket.
 pub mod terminal;
+/// The browser relay: the six tools as MCP, over the same socket.
+pub mod browser;
 
 /// Protocol version the probe server answered with, and this bridge keeps.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -25,11 +27,18 @@ pub const SERVER_NAME: &str = "mcp-bridge";
 /// One content block in a `tools/call` result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContentBlock {
-    /// Always `"text"` for now; kept as a string so richer blocks fit later.
+    /// `"text"` or `"image"`; kept as a string so richer blocks fit later.
     #[serde(rename = "type")]
     pub kind: String,
-    /// The text payload.
-    pub text: String,
+    /// The text payload. Absent on image blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Base64-encoded bytes. Present on image blocks only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// The image's media type (`image/png`). Present on image blocks only.
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
 }
 
 impl ContentBlock {
@@ -37,7 +46,19 @@ impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             kind: "text".to_string(),
-            text: text.into(),
+            text: Some(text.into()),
+            data: None,
+            mime_type: None,
+        }
+    }
+
+    /// A single image block: base64 bytes with their media type.
+    pub fn image(base64: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            kind: "image".to_string(),
+            text: None,
+            data: Some(base64.into()),
+            mime_type: Some(mime_type.into()),
         }
     }
 }
