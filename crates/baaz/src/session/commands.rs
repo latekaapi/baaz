@@ -607,6 +607,7 @@ impl SessionView {
                 model_provider: None,
             };
             let previous = self.pending_model.clone();
+            let had_row = self.models.iter().any(|row| row.model_id == model_id);
             self.apply_model_selected(model_id, cx);
             if self.is_provider_lane() {
                 let picked = model_id.to_owned();
@@ -614,9 +615,13 @@ impl SessionView {
                     if let Err(error) = result {
                         // The pick never landed: drop the recording so the
                         // chip stops claiming a model the child never took,
-                        // and banner the reason — never silence.
+                        // and banner the reason — never silence. A row the
+                        // failed pick itself added leaves with it.
                         if this.pending_model.as_deref() == Some(picked.as_str()) {
                             this.pending_model = previous;
+                            if !had_row {
+                                this.models.retain(|row| row.model_id != picked);
+                            }
                             for row in &mut this.models {
                                 row.is_active = this
                                     .pending_model
@@ -664,7 +669,12 @@ impl SessionView {
     /// Fold a neutral model catalog into the picker: human labels shown,
     /// wire ids kept, the current model marked. An empty answer is a
     /// failure with its reason, never an empty menu: the picker renders
-    /// the reason row instead of nothing.
+    /// the reason row instead of nothing. A session model the catalog omits
+    /// still lists as a checked row, so the menu never hides what the
+    /// session runs (hidden rows arrive pre-filtered: the adapter lists one
+    /// only when it is the session's model). The per-model effort levels
+    /// fold into the effort maps beside the menu, so the effort picker
+    /// follows the selected model with no second fetch.
     pub(super) fn apply_model_catalog(
         &mut self,
         rows: Vec<provider::ModelSummary>,
@@ -677,15 +687,41 @@ impl SessionView {
             cx.notify();
             return;
         }
+        let current = self.model_id();
+        if self.provider_kind() == ProviderId::Codex {
+            self.codex_efforts = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.id.clone(),
+                        row.efforts
+                            .iter()
+                            .map(|level| provider_codex::child::SupportedEffort {
+                                id: level.clone(),
+                                description: None,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+        } else if self.provider_kind() == ProviderId::ClaudeCode
+            && rows.iter().any(|row| !row.efforts.is_empty())
+        {
+            // A fold that names no levels anywhere is the supplied offline
+            // fallback, not the child's answer: it leaves the map alone so
+            // the menu keeps listing the launch flag's levels.
+            self.claude_efforts =
+                rows.iter().map(|row| (row.id.clone(), row.efforts.clone())).collect();
+        }
         self.models = rows
             .into_iter()
             .map(|row| ModelCatalogEntry {
                 context_limit: None,
                 cost: None,
-                description: None,
+                description: row.description,
                 display_label: row.label,
                 is_active: row.active,
-                is_default: false,
+                is_default: row.is_default,
                 model_id: row.id,
                 output_limit: None,
                 profile_id: None,
@@ -693,39 +729,62 @@ impl SessionView {
                 release_date: None,
             })
             .collect();
+        // The session's model names no catalog row (Codex serves models its
+        // list omits; Claude Code reports resolved full ids): list it as a
+        // checked row rather than hiding what the session runs. A refold
+        // never duplicates the pick path's row.
+        if !current.is_empty() && !self.models.iter().any(|row| row.model_id == current) {
+            let label = match self.provider_kind() {
+                ProviderId::ClaudeCode => crate::providers::claude_code_model_label(&current),
+                _ => current.clone(),
+            };
+            self.models.push(ModelCatalogEntry {
+                context_limit: None,
+                cost: None,
+                description: None,
+                display_label: label,
+                is_active: true,
+                is_default: false,
+                model_id: current,
+                output_limit: None,
+                profile_id: None,
+                provider_id: provider_id.to_owned(),
+                release_date: None,
+            });
+        }
         self.models_error = None;
         cx.notify();
     }
 
     /// Record a model pick on the provider lane: the matching row marks
     /// active and the chip reads the pick at once. A bare id still
-    /// applies (aliases travel) without marking a row it does not name.
+    /// applies (aliases travel): when no row names it — a model the catalog
+    /// omits — the menu gains a checked row for it, so the pick stays
+    /// visible instead of unmarking every row.
     pub(super) fn apply_model_selected(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        if !self.models.iter().any(|row| row.model_id == model_id) {
+            let label = match self.provider_kind() {
+                ProviderId::ClaudeCode => crate::providers::claude_code_model_label(model_id),
+                _ => model_id.to_owned(),
+            };
+            self.models.push(ModelCatalogEntry {
+                context_limit: None,
+                cost: None,
+                description: None,
+                display_label: label,
+                is_active: false,
+                is_default: false,
+                model_id: model_id.to_owned(),
+                output_limit: None,
+                profile_id: None,
+                provider_id: self.provider_id.clone(),
+                release_date: None,
+            });
+        }
         for row in &mut self.models {
             row.is_active = row.model_id == model_id;
         }
         self.pending_model = Some(model_id.to_owned());
-        cx.notify();
-    }
-
-    /// Fold a Codex `model/list` answer into the per-model effort map: each
-    /// catalog row's `supportedReasoningEfforts`, parsed by the adapter
-    /// that owns the shape. The effort menu reads the selected model's
-    /// entry, so changing the model changes the levels with no second
-    /// fetch — a snapshot, like [`SessionView::models`].
-    ///
-    /// No production caller yet: the lane feeds this the moment it lands,
-    /// the way the model lane drains its outbox today.
-    #[allow(dead_code)]
-    pub(super) fn apply_codex_catalog(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
-        let mut efforts = std::collections::HashMap::new();
-        for row in provider_codex::child::model_catalog(result) {
-            efforts.insert(
-                row.id.clone(),
-                provider_codex::child::supported_efforts(result, &row.id),
-            );
-        }
-        self.codex_efforts = efforts;
         cx.notify();
     }
 
@@ -814,18 +873,23 @@ impl SessionView {
     /// Fetch the catalog for this session. A snapshot, on every open: MSP has
     /// no catalog subscription, so a stale list would be worse than a wait.
     ///
-    /// Per lane: muse lists over its own wire; Claude Code folds Baaz's
-    /// supplied alias list (the `Emulated` cell — no fixture enumerates
-    /// them, so Baaz owns them); Codex asks its session child with
-    /// `ListModels` after open, and the menu lists what the child returns
-    /// — with no lane attached the picker says why instead of opening
-    /// empty. Whatever cannot answer explains itself in the picker's
-    /// typed-reason row — never a dead click and never a silently empty
-    /// menu. A background fetch that fails stays quiet apart from that
-    /// row: it never banners (see `request_provider_models`).
+    /// Per lane: muse lists over its own wire; Claude Code and Codex ask
+    /// their session child with `ListModels` after open, and the menu lists
+    /// what the child returns — Claude Code's `initialize` answer, Codex's
+    /// `model/list`. With no lane attached the picker says why instead of
+    /// opening empty; a Claude Code view with no lane folds Baaz's supplied
+    /// alias list, the offline fallback. Whatever cannot answer explains
+    /// itself in the picker's typed-reason row — never a dead click and
+    /// never a silently empty menu. A background fetch that fails stays
+    /// quiet apart from that row: it never banners (see
+    /// `request_provider_models`).
     pub(super) fn load_models(&mut self, cx: &mut Context<Self>) {
         match self.provider_kind() {
             ProviderId::ClaudeCode => {
+                if self.is_provider_lane() {
+                    self.request_provider_models(cx);
+                    return;
+                }
                 let current = self.model_id();
                 let rows = crate::providers::claude_code_catalog(Some(current.as_str()));
                 let provider = self.provider_id.clone();
@@ -838,7 +902,7 @@ impl SessionView {
                 }
                 self.models_error = Some(
                     "Codex lists models from its own session child, and this view holds none: \
-                     reopen the session on its lane to list them"
+                     open the session to list them"
                         .to_owned(),
                 );
                 cx.notify();
@@ -1150,7 +1214,8 @@ mod tests {
 
     /// The real `model/list` response out of `fixtures/codex/basic.jsonl`,
     /// mapped the way provider-codex's `ListModels` maps it: `displayName`
-    /// into the seam's `label`, the id kept for the wire.
+    /// into the seam's `label`, each row's own `supportedReasoningEfforts`
+    /// into `efforts`, the id kept for the wire.
     fn codex_fixture_catalog() -> Vec<provider::ModelSummary> {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1184,9 +1249,87 @@ mod tests {
                         .unwrap_or(id)
                         .to_owned(),
                     active: id == "gpt-5.6-sol",
+                    efforts: provider_codex::child::supported_efforts(&result, id)
+                        .into_iter()
+                        .map(|level| level.id)
+                        .collect(),
+                    hidden: row
+                        .get("hidden")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    is_default: row
+                        .get("isDefault")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    description: row
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 }
             })
             .collect()
+    }
+
+    /// A Claude Code catalog in the seam's neutral shape, mapped the way
+    /// provider-claude-code's `ListModels` maps the `initialize` answer:
+    /// `value` into the id, `displayName` into the label, the description
+    /// plus the resolved id into the detail, each row's own
+    /// `supportedEffortLevels` into `efforts`.
+    fn claude_fixture_catalog() -> Vec<provider::ModelSummary> {
+        vec![
+            provider::ModelSummary {
+                id: "default".into(),
+                label: "Default (recommended)".into(),
+                active: false,
+                efforts: vec!["low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                hidden: false,
+                is_default: true,
+                description: Some(
+                    "Opus 5 with 1M context · Best for everyday, complex tasks (claude-opus-5[1m])"
+                        .into(),
+                ),
+            },
+            provider::ModelSummary {
+                id: "claude-fable-5-1[1m]".into(),
+                label: "Fable".into(),
+                active: false,
+                efforts: vec!["low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                hidden: false,
+                is_default: false,
+                description: Some(
+                    "Fable 5.1 · Most capable for your hardest and longest-running tasks \
+                     (claude-fable-5-1)"
+                        .into(),
+                ),
+            },
+            provider::ModelSummary {
+                id: "sonnet".into(),
+                label: "Sonnet".into(),
+                active: false,
+                efforts: vec!["low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                hidden: false,
+                is_default: false,
+                description: Some("Sonnet 5 · Efficient for routine tasks (claude-sonnet-5)".into()),
+            },
+            provider::ModelSummary {
+                id: "haiku".into(),
+                label: "Haiku".into(),
+                active: false,
+                efforts: Vec::new(),
+                hidden: false,
+                is_default: false,
+                description: Some("Haiku 4.5 · Fastest for quick answers".into()),
+            },
+        ]
     }
 
     /// P3, codex: the catalog folds into `self.models` from the real
@@ -1219,6 +1362,13 @@ mod tests {
                     .map(|m| m.model_id.as_str())
                     .collect();
                 assert_eq!(active, ["gpt-5.6-sol"], "the current one is marked");
+                let sol = view.models.iter().find(|m| m.model_id == "gpt-5.6-sol").expect("sol");
+                assert!(sol.is_default, "the default flag folds");
+                assert!(
+                    sol.description.as_deref().is_some_and(|detail| !detail.is_empty()),
+                    "the description folds: {:?}",
+                    sol.description
+                );
             });
         });
     }
@@ -1353,33 +1503,11 @@ mod tests {
         });
     }
 
-    /// The raw `model/list` answer behind [`codex_fixture_catalog`]: the
-    /// `result` of the id-10 frame in `fixtures/codex/basic.jsonl`, so the
-    /// effort fold below reads the same bytes the adapter parses.
-    fn codex_fixture_result() -> serde_json::Value {
-        let text = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/codex/basic.jsonl"
-        ))
-        .expect("codex fixture reads");
-        let mut result = None;
-        for line in text.lines() {
-            let frame: serde_json::Value = serde_json::from_str(line).expect("fixture decodes");
-            let is_answer = frame.get("_dir").and_then(serde_json::Value::as_str)
-                == Some("server->client")
-                && frame.get("frame").and_then(|frame| frame.get("id"))
-                    == Some(&serde_json::json!(10));
-            if is_answer {
-                result = frame.get("frame").and_then(|frame| frame.get("result")).cloned();
-            }
-        }
-        result.expect("model/list response id 10")
-    }
-
-    /// P4, codex: the effort list for `gpt-5.6-sol` comes from the fixture's
-    /// `supportedReasoningEfforts` — with the provider's own descriptions —
-    /// and selecting a different model changes the list. That second half
-    /// is the per-model proof: a hardcoded menu cannot pass it.
+    /// P4, codex: the effort list for `gpt-5.6-sol` comes from the fixture
+    /// catalog's own `efforts` — folded through the neutral seam, never a
+    /// raw `model/list` answer — and selecting a different model changes
+    /// the list. That second half is the per-model proof: a hardcoded menu
+    /// cannot pass it.
     #[gpui::test]
     fn codex_effort_list_comes_from_the_fixture_and_follows_the_model(cx: &mut gpui::TestAppContext) {
         use crate::overlays::{EffortOptions, effort_label, effort_row_id};
@@ -1389,7 +1517,6 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
-                view.apply_codex_catalog(&codex_fixture_result(), cx);
             });
             view.update(cx, |view, _| {
                 let EffortOptions::Available(options) = view.effort_options() else {
@@ -1398,10 +1525,6 @@ mod tests {
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
                 assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max", "Ultra"]);
                 let low = options.iter().find(|o| effort_row_id(o.effort) == "Low").expect("low");
-                assert_eq!(
-                    low.detail, "Fast responses with lighter reasoning",
-                    "the detail line is the provider's text, not ours"
-                );
                 assert_eq!(effort_label(low.effort), "Low");
             });
             // Selecting a different model changes the list: gpt-5.5 stops
@@ -1422,6 +1545,110 @@ mod tests {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             let rows = view.read(cx).menu_rows(cx);
             assert_eq!(rows, 5, "the menu follows the new model, not the old constant");
+        });
+    }
+
+    /// Y1, codex: the session runs `gpt-6-astra`, which the catalog omits.
+    /// The model menu still lists the current model as a checked row, and
+    /// the effort menu offers the catalog's union with the muted note —
+    /// never "unavailable", never "reopen the session on its lane".
+    #[gpui::test]
+    fn codex_off_catalog_model_lists_and_offers_the_union(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-off-catalog");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.apply_model_catalog(codex_fixture_catalog(), "openai", cx));
+            // The session runs a model the catalog omits.
+            view.update(cx, |view, cx| view.set_model("gpt-6-astra", cx));
+            view.update(cx, |view, _| {
+                let current: Vec<&str> = view
+                    .models
+                    .iter()
+                    .filter(|m| m.is_active)
+                    .map(|m| m.model_id.as_str())
+                    .collect();
+                assert_eq!(current, ["gpt-6-astra"], "the current model lists, checked");
+                assert_eq!(view.model().as_ref(), "gpt-6-astra");
+            });
+            view.update(cx, |view, _| {
+                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+                else {
+                    panic!("an off-catalog model still gets an effort list");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(
+                    ids,
+                    ["default", "Low", "Medium", "High", "Xhigh", "Max", "Ultra"],
+                    "the union of levels the catalog reports: {ids:?}"
+                );
+                assert_eq!(note, "Not in Codex's model list — Codex validates the level");
+                assert!(
+                    !note.contains("reopen"),
+                    "no reopen-the-session wording: {note:?}"
+                );
+            });
+            // The open menu counts the union, note included in no extra row.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
+            let rows = view.read(cx).menu_rows(cx);
+            assert_eq!(rows, 7, "Default plus the six union levels");
+        });
+    }
+
+    /// Y1, claude-code: folding the `initialize` catalog lists the real
+    /// rows — Fable included, with the resolved id in the detail — and the
+    /// effort menu follows each row: sonnet's own levels, Haiku's reason.
+    #[gpui::test]
+    fn claude_code_catalog_folds_with_fable_and_per_row_effort(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "claude-code", "s-catalog");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+            });
+            view.update(cx, |view, _| {
+                let ids: Vec<&str> =
+                    view.models.iter().map(|m| m.model_id.as_str()).collect();
+                assert_eq!(ids, ["default", "claude-fable-5-1[1m]", "sonnet", "haiku"]);
+                let labels: Vec<&str> =
+                    view.models.iter().map(|m| m.display_label.as_str()).collect();
+                assert_eq!(labels, ["Default (recommended)", "Fable", "Sonnet", "Haiku"]);
+                let fable = view
+                    .models
+                    .iter()
+                    .find(|m| m.model_id == "claude-fable-5-1[1m]")
+                    .expect("fable folds");
+                assert!(
+                    fable.description.as_deref().is_some_and(|detail| detail
+                        .contains("claude-fable-5-1")),
+                    "the detail line names the resolved id: {:?}",
+                    fable.description
+                );
+            });
+            // Sonnet's row names five levels: the menu lists them.
+            view.update(cx, |view, cx| view.set_model("sonnet", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("sonnet names effort levels");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max"]);
+            });
+            // Haiku's row names none: the menu says why instead of listing
+            // the launch flag's levels.
+            view.update(cx, |view, cx| view.set_model("haiku", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Unavailable(reason) = view.effort_options() else {
+                    panic!("haiku names no effort levels");
+                };
+                assert!(
+                    reason.contains("haiku"),
+                    "the reason names the model: {reason:?}"
+                );
+            });
         });
     }
 
@@ -1477,7 +1704,6 @@ mod tests {
                 );
                 assert!(view.has_turns(), "the session has turns in it");
                 view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
-                view.apply_codex_catalog(&codex_fixture_result(), cx);
             });
             view.update(cx, |view, cx| {
                 view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx)

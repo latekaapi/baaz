@@ -29,15 +29,12 @@ use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ModelSummary, PendingApproval,
     PendingQuestion, ProviderAdapter, ProviderError, ProviderEvent, ProviderId, SubmissionPart,
 };
-use serde_json::json;
-
 pub use caps::{capabilities, codex_version_supported, CODEX_VERSION_FLOOR};
 
 use child::{
-    default_model, initialize_request, initialized_notification, model_catalog, thread_ids,
-    thread_start_request, turn_id_from, turn_interrupt_request, turn_start_request,
-    turn_steer_request, ApprovalAnswer, ApprovalKind, CommandApprovalDecision,
-    FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
+    initialize_request, initialized_notification, thread_ids, thread_start_request, turn_id_from,
+    turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
+    CommandApprovalDecision, FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
     PermissionsApprovalAnswer, RunningChild,
 };
 use fold::CodexFold;
@@ -184,15 +181,21 @@ impl CodexAdapter {
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("the session child is unreachable: {error}"),
             })?;
-        let catalog = running.send_request("model/list", json!({})).map_err(Self::unavailable)?;
+        let rows = Self::fetch_catalog(&running).map_err(Self::unavailable)?;
         // A requested model is taken as named even when the catalog does not
-        // list it (aliases travel here); only an absent request falls back to
-        // the catalog default.
+        // list it (aliases travel here — `gpt-6-*` runs while `model/list`
+        // names no such row); only an absent request falls back to the
+        // catalog default.
         let resolved = match model {
             Some(requested) => requested.to_owned(),
-            None => default_model(&catalog).ok_or_else(|| ProviderError::Unavailable {
-                reason: "model/list answered with no usable model".into(),
-            })?,
+            None => rows
+                .iter()
+                .find(|row| row.is_default)
+                .or_else(|| rows.first())
+                .map(|row| row.id.clone())
+                .ok_or_else(|| ProviderError::Unavailable {
+                    reason: "model/list answered with no usable model".into(),
+                })?,
         };
         let cwd = workspace.map(str::to_owned).or_else(|| {
             std::env::current_dir().ok().map(|cwd| cwd.to_string_lossy().into_owned())
@@ -218,6 +221,29 @@ impl CodexAdapter {
         let child = self.child.lock().expect("child mutex");
         let running = child.as_ref().expect("checked present above");
         Ok(f(running))
+    }
+
+    /// Walk every `model/list` page over `running`: `includeHidden` on page
+    /// one, the returned `nextCursor` riding `cursor` after, rows
+    /// concatenated in provider order (see [`child::model_list_request`]
+    /// and [`child::next_cursor`]). A repeated cursor ends the walk rather
+    /// than looping — the server names each successor once.
+    fn fetch_catalog(running: &RunningChild) -> Result<Vec<child::ModelInfo>, child::RequestError> {
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let answer = running.send_frame(child::model_list_request(
+                running.next_request_id(),
+                cursor.as_deref(),
+            ))?;
+            rows.extend(child::model_catalog(&answer));
+            match child::next_cursor(&answer) {
+                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
+                _ => break,
+            }
+        }
+        Ok(rows)
     }
 
     /// Rejoin a stored thread by id: a fresh child, the handshake, then
@@ -656,13 +682,6 @@ impl ProviderAdapter for CodexAdapter {
                 reason: "no queued-turn lane was captured on this protocol".into(),
             }),
             Command::ListModels { session } => {
-                let catalog = self
-                    .with_child(|running| running.send_request("model/list", json!({})))?
-                    .map_err(Self::unavailable)?;
-                // Human labels ride `label`; the wire id stays in `id`.
-                // A row without a `displayName` falls back to its id rather
-                // than vanishing: an empty menu is a failure, not a state.
-                let rows = model_catalog(&catalog);
                 let active = session
                     .as_deref()
                     .and_then(|session| {
@@ -671,13 +690,30 @@ impl ProviderAdapter for CodexAdapter {
                             .flatten()
                     })
                     .unwrap_or_default();
+                let rows = self
+                    .with_child(Self::fetch_catalog)?
+                    .map_err(Self::unavailable)?;
+                // Human labels ride `label`; the wire id stays in `id`.
+                // A row without a `displayName` falls back to its id rather
+                // than vanishing: an empty menu is a failure, not a state.
+                // Hidden rows list only when active — the session's own
+                // model stays nameable even when the catalog hides it.
                 Ok(Ack::ModelCatalog {
                     models: rows
                         .into_iter()
+                        .filter(|row| !row.hidden || row.id == active)
                         .map(|row| ModelSummary {
                             active: row.id == active,
                             label: row.label,
                             id: row.id,
+                            efforts: row
+                                .efforts
+                                .into_iter()
+                                .map(|level| level.id)
+                                .collect(),
+                            hidden: row.hidden,
+                            is_default: row.is_default,
+                            description: row.description,
                         })
                         .collect(),
                     provider: "openai".into(),

@@ -71,9 +71,19 @@ Then a thread and a turn:
 `schemas/codex/`, "override the reasoning effort for this turn and
 subsequent turns"): the chip's pick rides `SubmitInput.effort` into that
 field for the turn (`child::turn_start_request`); Default omits the key.
+A model or effort change in an existing session applies from the next
+turn — the adapter records the pick and the next `turn/start` carries it,
+so chip, menus and wire agree, and the effort persists for the session. A
+level the server rejects fails the submit loudly, never silently.
 `turn/steer` admits no such field, so steers carry none. Which levels a
 model takes comes from its `model/list` row's `supportedReasoningEfforts`
-— per model, not per provider.
+— per model, not per provider. `model/list` is always sent with
+`{"includeHidden": true}` and paged through `nextCursor` (probed live
+2026-09-28: six rows — `gpt-reserve` hidden first, then the catalog —
+`nextCursor` null; `gpt-6-*` runs while listed nowhere). Hidden rows list
+in the menu only when active; a session model the catalog omits still
+lists as a checked row while its effort menu offers the catalog's union
+with the note "Not in Codex's model list — Codex validates the level".
 
 **`threadId` and `sessionId` are the same string** on a fresh thread. Baaz can
 choose neither — unlike Claude Code's `--session-id`, the server mints it. That
@@ -193,7 +203,7 @@ same defect stage 3 found, in a new place.** Not yet probed. S4.2 owns it.
 | `SteerTurn` | **Native** | `turn/steer` → `{"turnId":…}`, mid-turn, `fixtures/codex/interrupt.jsonl`. Needs `expectedTurnId` |
 | `TurnControl` | **Native** | `turn/interrupt` → `turn/completed` with `status:"interrupted"` after 14.3s of a 49s turn |
 | `CompactSession` | **Native** | `thread/compact/start` + `thread/compacted` notification *(method present; not executed)* |
-| `ModelCatalog` | **Native** | `model/list` → 4 models with `displayName`, `description`, `supportedReasoningEfforts`, `hidden` |
+| `ModelCatalog` | **Native** | `model/list` with `includeHidden: true`, paged via `nextCursor` → 6 rows with `displayName`, `description`, `supportedReasoningEfforts`, `hidden`, `isDefault` (probed live 2026-09-28) |
 | `Account` | **Native** | `account/read` → `{type:"chatgpt",email,planType:"prolite"}`; `account/rateLimits/read` → `usedPercent`, `windowDurationMins`, `resetsAt`, `credits` |
 | `Questions` | **Native** | `item/tool/requestUserInput` + `mcpServer/elicitation/request` are server requests *(shape read; not executed)* |
 | `Approvals` | **Native** | five request kinds, round trip proven end to end |

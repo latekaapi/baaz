@@ -616,21 +616,24 @@ pub fn claude_code_catalog(current: Option<&str>) -> Vec<provider::ModelSummary>
             id: row.id.to_owned(),
             label: row.label.to_owned(),
             active: Some(row.id) == current,
+            ..Default::default()
         })
         .collect()
 }
 
 /// The human name the composer chip shows for a Claude Code model id the
 /// catalog has no row for. The wire reports full ids (`claude-opus-5[1m]`,
-/// `claude-opus-5`, dated `claude-sonnet-4-5-…`) while the supplied menu
-/// only names aliases — so without this the chip falls back to the raw
-/// id. The menu keeps the id in the row detail; the chip shows this label
-/// instead (W8: the chip read `claude-opus-5[1m]`).
+/// `claude-opus-5`, dated `claude-haiku-4-5-20251001`) while the supplied
+/// menu only names aliases — so without this the chip falls back to the
+/// raw id. The menu keeps the id in the row detail; the chip shows this
+/// label instead (W8: the chip read `claude-opus-5[1m]`).
 ///
 /// Aliases resolve through the menu's own labels; full ids prettify to
-/// family plus version plus context (`claude-opus-5[1m]` → `Opus 5 · 1M`).
-/// Anything unrecognised passes through unchanged — an honest raw id, not
-/// a mangled guess.
+/// family plus dotted version plus context (`claude-opus-5[1m]` →
+/// `Opus 5 · 1M`, `claude-haiku-4-5-20251001` → `Haiku 4.5`). A trailing
+/// `-YYYYMMDD` date strip is dropped, version dashes join with `.`, and
+/// `fable` is known. Anything unrecognised passes through unchanged — an
+/// honest raw id, not a mangled guess.
 pub fn claude_code_model_label(id: &str) -> String {
     if let Some(row) = claude_code_models().into_iter().find(|row| row.id == id) {
         return row.label.to_owned();
@@ -649,12 +652,21 @@ pub fn claude_code_model_label(id: &str) -> String {
         "opus" => "Opus",
         "sonnet" => "Sonnet",
         "haiku" => "Haiku",
+        "fable" => "Fable",
         _ => return id.to_owned(),
     };
+    // A dated id ends in `-YYYYMMDD`: the date is a build stamp, not the
+    // version, so it goes before the dashes join with dots.
+    let mut segments: Vec<&str> = version.split('-').filter(|segment| !segment.is_empty()).collect();
+    if let Some(date) = segments.last() {
+        if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) {
+            segments.pop();
+        }
+    }
     let mut label = family_label.to_owned();
-    if !version.is_empty() {
+    if !segments.is_empty() {
         label.push(' ');
-        label.push_str(version);
+        label.push_str(&segments.join("."));
     }
     if let Some(context) = context.filter(|context| !context.is_empty()) {
         label.push_str(" · ");
@@ -985,8 +997,13 @@ mod tests {
     fn claude_code_chip_names_full_model_ids() {
         assert_eq!(claude_code_model_label("claude-opus-5[1m]"), "Opus 5 · 1M");
         assert_eq!(claude_code_model_label("claude-opus-5"), "Opus 5");
-        assert_eq!(claude_code_model_label("claude-sonnet-4-5"), "Sonnet 4-5");
-        assert_eq!(claude_code_model_label("claude-haiku-4-5"), "Haiku 4-5");
+        assert_eq!(claude_code_model_label("claude-sonnet-4-5"), "Sonnet 4.5");
+        assert_eq!(claude_code_model_label("claude-haiku-4-5"), "Haiku 4.5");
+        // Dated ids drop the build stamp and join the version with dots;
+        // fable is a known family; the 1M context suffix is kept.
+        assert_eq!(claude_code_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(claude_code_model_label("claude-fable-5-1[1m]"), "Fable 5.1 · 1M");
+        assert_eq!(claude_code_model_label("fable"), "Fable");
         assert_eq!(claude_code_model_label("opus"), "Claude Opus");
         assert_eq!(claude_code_model_label("sonnet"), "Claude Sonnet");
         assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");

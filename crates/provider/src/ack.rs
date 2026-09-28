@@ -19,7 +19,7 @@ pub struct SessionSummary {
 }
 
 /// One row of the model catalog.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModelSummary {
     /// Catalog model id.
     pub id: String,
@@ -27,6 +27,16 @@ pub struct ModelSummary {
     pub label: String,
     /// Whether this row is the named session's effective model.
     pub active: bool,
+    /// Reasoning levels this model accepts, in provider order, as neutral
+    /// level ids (`"low"`, `"medium"`, …). Empty when the provider names
+    /// none — a model with no row, or no levels, offers no control.
+    pub efforts: Vec<String>,
+    /// A hidden row: the menu lists it only when it is the active one.
+    pub hidden: bool,
+    /// The provider's default row, when it names one.
+    pub is_default: bool,
+    /// The provider's one-line description, when it sends one.
+    pub description: Option<String>,
 }
 
 /// One pending approval, pointed at — not the full card, which arrives as a

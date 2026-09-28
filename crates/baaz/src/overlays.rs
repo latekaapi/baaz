@@ -522,8 +522,32 @@ pub enum EffortOptions {
     /// The levels to list, `Default` first. Details are the provider's own
     /// text where it sends any, else [`effort_detail`].
     Available(Vec<EffortOption>),
+    /// Like [`EffortOptions::Available`], plus a muted note the menu shows
+    /// with the list — e.g. an off-catalog Codex model whose levels are the
+    /// catalog's union, which the server validates per turn.
+    AvailableWithNote { options: Vec<EffortOption>, note: String },
     /// No reasoning control here, and why.
     Unavailable(String),
+}
+
+impl EffortOptions {
+    /// The listed levels, when the menu lists any.
+    pub fn options(&self) -> Option<&[EffortOption]> {
+        match self {
+            EffortOptions::Available(options) | EffortOptions::AvailableWithNote { options, .. } => {
+                Some(options)
+            }
+            EffortOptions::Unavailable(_) => None,
+        }
+    }
+
+    /// The muted note riding the list, when one rides it.
+    pub fn note(&self) -> Option<&str> {
+        match self {
+            EffortOptions::AvailableWithNote { note, .. } => Some(note),
+            EffortOptions::Available(_) | EffortOptions::Unavailable(_) => None,
+        }
+    }
 }
 
 /// One row of an available effort menu: the level and its detail line.

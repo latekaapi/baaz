@@ -50,14 +50,12 @@ pub fn capabilities() -> CapabilitySet {
         (Capability::SubmitTurn, CapabilityState::Native),
         (Capability::SteerTurn, CapabilityState::Unverified),
         (Capability::TurnControl, CapabilityState::Unverified),
-        (
-            Capability::ModelCatalog,
-            CapabilityState::Emulated {
-                reason: "--model takes aliases and ids, but no fixture enumerates them; Baaz \
-                         supplies the list"
-                    .into(),
-            },
-        ),
+        // Native: the adapter sends `initialize` after every spawn and
+        // answers `ListModels` from the answer's `models[]` (fixture
+        // `permission.jsonl`; probed live 2026-09-28). Baaz's supplied
+        // alias list stays as the offline/failure fallback, never the
+        // served catalog.
+        (Capability::ModelCatalog, CapabilityState::Native),
         (Capability::Approvals, CapabilityState::Native),
         (
             Capability::Questions,
@@ -93,7 +91,7 @@ mod tests {
         // NOT Native: nothing probed them. Do not upgrade without a fixture.
         assert_eq!(set.state(C::SteerTurn), &S::Unverified);
         assert_eq!(set.state(C::TurnControl), &S::Unverified);
-        assert!(matches!(set.state(C::ModelCatalog), S::Emulated { .. }));
+        assert_eq!(set.state(C::ModelCatalog), &S::Native);
         assert_eq!(set.state(C::Approvals), &S::Native);
         assert!(matches!(
             set.state(C::Questions),
