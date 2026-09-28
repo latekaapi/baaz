@@ -84,3 +84,47 @@ fn inspect_fixture_previews_the_selected_bundled_skill() {
         "the scripted page must read the fixture through the live inspect parse"
     );
 }
+
+/// Y3a: the header never overlaps the list, dock open or not.
+///
+/// Two layout rules pin it, both readable off the page source. The page
+/// root takes the centre column's REMAINDER (`flex_1` + `min_h(0)`, never
+/// `size_full`, which stacked a full page plus the dock and pushed the
+/// dock below the fold), and the body row stretches — never cross-centres
+/// — the scroll box to the body's full height (cross sizes never
+/// flex-shrink, so a centred scroll box started inside the header).
+/// The look itself is probe-verified (`skills-dock`).
+#[test]
+fn skills_page_fills_the_remainder_and_stretches_its_list() {
+    let src = page_source();
+    let root = src.find("let mut root = div()").expect("the page builds its root off `div()`");
+    let root_tail = &src[root..];
+    assert!(
+        root_tail.starts_with("let mut root = div().flex_1().min_h(px(0.0))"),
+        "the page root must take the centre's remainder, never `size_full`"
+    );
+    assert!(
+        !root_tail.starts_with("let mut root = div().size_full()"),
+        "a full-height root plus the dock overflows the centre cell"
+    );
+    let body = src.find("let mut body = h_flex()").expect("the page builds its body off `h_flex()`");
+    let body_tail = &src[body..src[body..].find(".child(").map(|i| body + i).unwrap_or(src.len())];
+    assert!(
+        body_tail.contains(".items_stretch()"),
+        "the body row must stretch the scroll box: `h_flex` centres on the cross axis"
+    );
+}
+
+/// Y3a's Tier V cover: the `skills-dock` probe entry opens the page with
+/// the terminal dock up — the condition that overlapped header and list —
+/// offline, on the fixture catalog.
+#[test]
+fn uiprobe_covers_the_skills_page_with_the_dock_open() {
+    let path = manifest().join("../../scripts/uiprobe.py");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("probe reads: {}", path.display()));
+    assert!(text.contains("\"skills-dock\""), "uiprobe must keep the dock-open Skills entry");
+    assert!(
+        text.contains("project:.;skills:page;terminal-dock:terminal"),
+        "the entry must adopt a project (the dock needs a root), open the page, then the dock"
+    );
+}
