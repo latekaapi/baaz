@@ -100,6 +100,10 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
 /// this same 44 px.
 const HEADER_PX: f32 = 44.0;
 
+/// The webview's nav row (back, forward, reload, address), which aui-webview
+/// draws at a 38 px minimum above the native page.
+const BROWSER_NAV_PX: f32 = 38.0;
+
 /// The browser pane's rectangle in window coordinates, derived from the
 /// window's content box: the pane hangs off the content's right edge,
 /// under the header, `right_width` wide. Pure so tests can drive it.
@@ -602,7 +606,13 @@ impl Harness {
         };
         let Some(state) = state else { return };
         let content = window.content_mask().bounds;
-        let page = browser_page_bounds(content, gpui::px(self.right_resize.width));
+        // The live page sits under the webview's nav row: a press on the
+        // row itself is outside the page and takes the keyboard back too.
+        let pane = browser_page_bounds(content, gpui::px(self.right_resize.width));
+        let page = gpui::Bounds::new(
+            gpui::point(pane.origin.x, pane.origin.y + gpui::px(BROWSER_NAV_PX)),
+            gpui::size(pane.size.width, (pane.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.))),
+        );
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
             event.position,
