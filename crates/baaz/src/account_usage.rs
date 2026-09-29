@@ -157,8 +157,45 @@ fn tier_fraction(pct: u32) -> f32 {
 fn tier_reset_text(clause: Option<&ResetClause>, now: i64) -> String {
     match clause.and_then(|clause| clause.resets_at_ms) {
         Some(ms) => resets_in_text(Some((ms / 1000) as i64), now),
-        None => resets_in_text(None, now),
+        // A clause that arrived as text only (the usage card, an older
+        // tier.json): read the instant back out of its own words.
+        None => resets_in_text(clause.and_then(|clause| clause_instant(&clause.text, now)), now),
     }
+}
+
+/// The next instant a card clause names, in local time: `Resets at 3:46 PM`
+/// (today, or tomorrow when that time has passed) or `Resets Oct 5 at 5:30
+/// AM` (this year, or next when that date has passed). `None` for any other
+/// wording — the row then says the reset is unknown rather than guessing.
+fn clause_instant(text: &str, now: i64) -> Option<i64> {
+    use chrono::{Datelike, Local, NaiveDate, NaiveTime, TimeZone};
+    let rest = text.trim().strip_prefix("Resets ")?.trim();
+    let now_local = Local.timestamp_opt(now, 0).single()?;
+    let (date_part, time_part) = match rest.strip_prefix("at ") {
+        Some(time) => (None, time),
+        None => {
+            let (date, time) = rest.split_once(" at ")?;
+            (Some(date), time)
+        }
+    };
+    let time = NaiveTime::parse_from_str(time_part.trim(), "%I:%M %p").ok()?;
+    let local = |date: NaiveDate| Local.from_local_datetime(&date.and_time(time)).earliest();
+    let at = match date_part {
+        None => {
+            let today = local(now_local.date_naive())?;
+            if today.timestamp() > now { today } else { local(now_local.date_naive().succ_opt()?)? }
+        }
+        Some(date) => {
+            let this_year = NaiveDate::parse_from_str(&format!("{date} {}", now_local.year()), "%b %e %Y").ok()?;
+            let candidate = local(this_year)?;
+            if candidate.timestamp() > now {
+                candidate
+            } else {
+                local(NaiveDate::parse_from_str(&format!("{date} {}", now_local.year() + 1), "%b %e %Y").ok()?)?
+            }
+        }
+    };
+    Some(at.timestamp())
 }
 
 /// A connected provider's row: live windows as bars, an all-expired
@@ -314,6 +351,20 @@ pub fn age_text(as_of: i64, now: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_text_only_clause_still_reads_as_a_duration() {
+        use chrono::{Local, TimeZone};
+        let now = Local.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap().timestamp();
+        let at = |text: &str| clause_instant(text, now).map(|instant| resets_in_text(Some(instant), now));
+        assert_eq!(at("Resets at 3:46 PM").as_deref(), Some("3h 46m"), "later today");
+        assert_eq!(at("Resets at 9:15 AM").as_deref(), Some("21h 15m"), "passed today: tomorrow");
+        assert_eq!(at("Resets Oct 5 at 5:30 AM").as_deref(), Some("5d 17h"), "a date this year");
+        assert_eq!(at("Resets Sep 1 at 5:30 AM").map(|text| text.ends_with('h')), Some(true), "a passed date: next year");
+        assert_eq!(clause_instant("Usage currently unavailable", now), None);
+        let text_only = ResetClause::from("Resets at 3:46 PM");
+        assert_eq!(tier_reset_text(Some(&text_only), now), "3h 46m", "never 'unknown' for a readable clause");
+    }
     use super::*;
     use crate::provider_status::{Auth, Installed, UsageSnapshot, UsageWindow as SnapshotWindow};
 
@@ -477,11 +528,13 @@ mod tests {
                 assert_eq!(windows[0].label.to_string(), "Current");
                 assert!((windows[0].used_fraction - 0.0).abs() < f32::EPSILON);
                 // Words only, no instant (the probe path, old cache files):
-                // unknown, never `resets in at …`.
-                assert_eq!(windows[0].resets_at_text.to_string(), "unknown");
+                // read back as a duration, never `resets in at …`.
+                for window in windows.iter() {
+                    let text = window.resets_at_text.to_string();
+                    assert!(text != "unknown" && !text.contains("at "), "a readable clause reads as a duration: {text}");
+                }
                 assert_eq!(windows[1].label.to_string(), "Weekly");
                 assert!((windows[1].used_fraction - 0.03).abs() < f32::EPSILON);
-                assert_eq!(windows[1].resets_at_text.to_string(), "unknown");
                 // The age only: the library renders the "as of" prefix, so
                 // this string must never start with it.
                 if let Some(as_of) = as_of {
