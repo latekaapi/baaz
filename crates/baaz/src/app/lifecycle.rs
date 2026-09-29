@@ -7956,13 +7956,10 @@ mod tests {
         (view, tx)
     }
 
-    /// B3b: a turn finishing under another id still stands the lane down.
-    /// The cancel path can end the turn under a different id than the
-    /// running one; before the fix only a matching id cleared running, so
-    /// `busy` below stayed true. Both turns are known to the fold — a
-    /// finish for an unknown turn never lands there at all.
+    /// B3b: a late finish for an earlier turn never clears the turn still
+    /// in flight; the running turn's own finish does.
     #[gpui::test]
-    fn a_turn_finished_under_another_id_still_stands_the_lane_down(cx: &mut gpui::TestAppContext) {
+    fn an_earlier_turns_finish_leaves_the_running_turn_busy(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (view, tx) = b3b_lane_view(vc, "s-b3b-1");
@@ -7994,7 +7991,19 @@ mod tests {
             .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        vc.update(|_, cx| assert!(!view.read(cx).busy(), "any finished turn stands the lane down"));
+        vc.update(|_, cx| assert!(view.read(cx).busy(), "a-2 is still in flight after a-1's finish"));
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-1".into()),
+                deltas: vec![aui_protocol::Delta::TurnFinished {
+                    turn_id: "a-2".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| assert!(!view.read(cx).busy(), "the running turn's own finish stands the lane down"));
     }
 
     /// B3b: a finished turn's still-Pending card settles for row purposes.
