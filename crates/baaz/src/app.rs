@@ -3936,6 +3936,15 @@ impl Render for Harness {
                 .relative()
                 .key_context(aui::keys::ROOT_CONTEXT)
                 .track_focus(&self.focus_root)
+                // A mouse-down outside the browser page's rect hands the
+                // keyboard back when the page holds it. Capture phase, next
+                // to `track_pointer`, and never consuming: the click still
+                // reaches its target.
+                .capture_any_mouse_down(cx.listener(
+                    |this, event: &gpui::MouseDownEvent, window, cx| {
+                        this.release_browser_keyboard_on_mouse_down(event, window, cx);
+                    },
+                ))
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
@@ -3962,6 +3971,14 @@ impl Render for Harness {
                 // next to the library's other actions.
                 .on_action(cx.listener(|this, _: &aui::keys::ToggleRightPane, _, cx| {
                     this.toggle_right(cx);
+                }))
+                // ⌘L at window level: the webview's own `cmd-l` binding
+                // only fires while gpui holds the keyboard, so this root
+                // binding carries it when the native page has focus. The
+                // handler itself routes to the browser only while the
+                // right pane shows it.
+                .on_action(cx.listener(|this, _: &aui_webview::FocusAddress, window, cx| {
+                    this.focus_browser_address(window, cx);
                 }))
                 .on_action(|_: &FocusNext, window, cx| {
                     aui::keys::set_keyboard_nav(true, cx);

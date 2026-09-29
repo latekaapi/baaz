@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use aui::workbench::Annotation;
 use aui_webview::{FakeWebBackend, WebBackend, WebviewIntent, WebviewState, WryBackend};
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{AppContext as _, Bounds, Context, Entity, Pixels, Point, Window};
 
 use crate::app::Harness;
 use crate::layout::RightKind;
@@ -68,7 +68,11 @@ pub(crate) struct BrowserVisibility {
     pub dialog_open: bool,
     /// The file-drop overlay covers the window.
     pub drop_cover: bool,
-    /// The terminal dock stands open under the centre.
+    /// The terminal dock covers the browser pane: open AND its laid-out
+    /// bounds intersect the pane's. The dock lives in the centre column
+    /// and the pane on the right, so with today's layout they never
+    /// intersect — an open dock leaves the page live. The input stays so
+    /// a future full-width dock still hides the page.
     pub terminal_covering: bool,
     /// The window holds the keyboard focus (its last frame landed).
     pub window_active: bool,
@@ -89,6 +93,77 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.drop_cover
         && !inputs.terminal_covering
         && inputs.window_active
+}
+
+/// The shell header's height in pixels: the columns — and the browser
+/// pane — hang under it. The centre column's height is the window minus
+/// this same 44 px.
+const HEADER_PX: f32 = 44.0;
+
+/// The webview's nav row (back, forward, reload, address), which aui-webview
+/// draws at a 38 px minimum above the native page.
+const BROWSER_NAV_PX: f32 = 38.0;
+
+/// The browser pane's rectangle in window coordinates, derived from the
+/// window's content box: the pane hangs off the content's right edge,
+/// under the header, `right_width` wide. Pure so tests can drive it.
+pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) -> Bounds<Pixels> {
+    Bounds {
+        origin: Point {
+            x: content.origin.x + content.size.width - right_width,
+            y: content.origin.y + gpui::px(HEADER_PX),
+        },
+        size: gpui::size(right_width, content.size.height - gpui::px(HEADER_PX)),
+    }
+}
+
+/// The terminal dock's rectangle in window coordinates: the centre
+/// column's `[centre_left, centre_right)` run at the content box's
+/// bottom, `height` tall. Pure so tests can drive it.
+pub(crate) fn terminal_dock_bounds(
+    content: Bounds<Pixels>,
+    centre_left: Pixels,
+    centre_right: Pixels,
+    height: Pixels,
+) -> Bounds<Pixels> {
+    Bounds {
+        origin: Point { x: centre_left, y: content.origin.y + content.size.height - height },
+        size: gpui::size(centre_right - centre_left, height),
+    }
+}
+
+/// Whether the terminal dock covers the browser pane: only when the dock
+/// stands open AND its laid-out bounds intersect the pane's. The dock
+/// lives in the centre column and the pane on the right, so with today's
+/// layout the two never intersect and an open dock leaves the page live;
+/// the predicate keeps the input so a future full-width dock still hides
+/// the page. A missing rect (pane closed, dock unmounted) is no cover.
+/// Pure so the truth table below covers it.
+pub(crate) fn terminal_covers_browser(
+    terminal_open: bool,
+    dock: Option<Bounds<Pixels>>,
+    pane: Option<Bounds<Pixels>>,
+) -> bool {
+    terminal_open && dock.zip(pane).is_some_and(|(dock, pane)| dock.intersects(&pane))
+}
+
+/// Whether the frame shows the live browser: the right pane stands open
+/// on the Browser kind. Gates both the ⌘L route and the outside-click
+/// keyboard release below.
+pub(crate) fn browser_pane_showing(pane_open: bool, kind_browser: bool) -> bool {
+    pane_open && kind_browser
+}
+
+/// Whether a window-coordinate mouse-down outside the browser page's rect
+/// must hand the keyboard back: the page holds it and the click landed
+/// outside. Pure; the capture handler resolves the rect and the webview,
+/// and tests drive this against the fake backend.
+pub(crate) fn should_release_keyboard_on_mouse_down(
+    holds_keyboard: bool,
+    position: Point<Pixels>,
+    page: Option<Bounds<Pixels>>,
+) -> bool {
+    holds_keyboard && page.is_some_and(|page| !page.contains(&position))
 }
 
 /// The draft text a `SendAnnotations` intent appends: the URL plus one line
@@ -445,6 +520,34 @@ impl Harness {
         // covers the right pane, so the `+` menu is the only extra input.
         let plus_open = self.active.as_ref().is_some_and(|view| view.read(cx).plus_open());
         let kind = crate::layout::right_kind(&self.layout);
+        // Covering is geometric, not "the dock stands open": the dock
+        // lives in the centre column and the pane on the right, so their
+        // laid-out rects never intersect and an open dock leaves the page
+        // live. Both rects derive from the window's content box, so a
+        // future full-width dock intersects and hides the page again.
+        let content = window.content_mask().bounds;
+        let pane = self
+            .layout
+            .right_open
+            .then(|| browser_page_bounds(content, gpui::px(self.right_resize.width)));
+        let dock = self.layout.terminal_open.then(|| {
+            let left = content.origin.x
+                + (if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) });
+            let right = content.origin.x + content.size.width
+                - (if self.layout.right_open {
+                    gpui::px(self.right_resize.width)
+                } else {
+                    gpui::px(0.0)
+                });
+            let centre_height = f32::from(window.bounds().size.height).max(0.0) - HEADER_PX;
+            let want = self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
+            terminal_dock_bounds(
+                content,
+                left,
+                right,
+                gpui::px(crate::terminal::clamp_dock_height(want, centre_height)),
+            )
+        });
         let base = BrowserVisibility {
             pane_open: self.layout.right_open,
             kind_browser: kind == RightKind::Browser,
@@ -456,7 +559,7 @@ impl Harness {
             account_menu_open,
             dialog_open,
             drop_cover: self.browser.drop_cover,
-            terminal_covering: self.layout.terminal_open,
+            terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
             window_active: window.is_window_active(),
         };
         let mut keys: Vec<(String, Entity<WebviewState>)> = self
@@ -474,6 +577,71 @@ impl Harness {
             });
             state.update(cx, |state, _cx| state.set_obscured(!visible));
         }
+    }
+
+    /// Capture-phase mouse-down anywhere in the window: a click outside
+    /// the browser page's rect hands the keyboard back when the page
+    /// holds it (the WKWebView keeps the NSWindow first responder after
+    /// one click in the page, which used to kill typing app-wide until
+    /// relaunch). Never consumes the event — the click still reaches its
+    /// target. No-ops unless the right pane shows the Browser, and never
+    /// creates a webview as a side effect.
+    pub(crate) fn release_browser_keyboard_on_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !browser_pane_showing(
+            self.layout.right_open,
+            crate::layout::right_kind(&self.layout) == RightKind::Browser,
+        ) {
+            return;
+        }
+        let key = self.browser_key(cx);
+        let state = if key == HOME_KEY {
+            self.browser.home.clone()
+        } else {
+            self.browser.states.get(&key).cloned()
+        };
+        let Some(state) = state else { return };
+        let content = window.content_mask().bounds;
+        // The live page sits under the webview's nav row: a press on the
+        // row itself is outside the page and takes the keyboard back too.
+        let pane = browser_page_bounds(content, gpui::px(self.right_resize.width));
+        let page = gpui::Bounds::new(
+            gpui::point(pane.origin.x, pane.origin.y + gpui::px(BROWSER_NAV_PX)),
+            gpui::size(pane.size.width, (pane.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.))),
+        );
+        if should_release_keyboard_on_mouse_down(
+            state.read(cx).holds_keyboard(),
+            event.position,
+            Some(page),
+        ) {
+            state.update(cx, |state, _| state.release_keyboard());
+        }
+    }
+
+    /// ⌘L from anywhere at window level: begin editing the address field
+    /// (whole URL selected) when the right pane shows the Browser, and
+    /// otherwise ignore the key. The webview's own `cmd-l` binding only
+    /// fires while gpui holds the keyboard — with the native page focused
+    /// the keystroke never reaches the pane, so this root binding carries
+    /// it ([`aui_webview::FocusAddress`]). Already editing is a no-op, so
+    /// a press that already reached the pane does not restart the edit.
+    pub(crate) fn focus_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !browser_pane_showing(
+            self.layout.right_open,
+            crate::layout::right_kind(&self.layout) == RightKind::Browser,
+        ) {
+            return;
+        }
+        let key = self.browser_key(cx);
+        let state = self.browser_for(&key, false, window, cx);
+        if state.read(cx).is_editing() {
+            return;
+        }
+        state.update(cx, |state, cx| state.begin_editing(window, cx));
     }
 }
 
@@ -501,7 +669,12 @@ impl BrowserRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotations_draft_block, browser_visible, initial_url, should_remember, Annotation, BrowserVisibility};
+    use super::{
+        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_visible, initial_url,
+        should_release_keyboard_on_mouse_down, should_remember, terminal_covers_browser, terminal_dock_bounds,
+        Annotation, BrowserVisibility, FakeWebBackend, WebviewState,
+    };
+    use aui_webview::WebBackend as _;
     use std::collections::HashMap;
 
     fn all_clear() -> BrowserVisibility {
@@ -572,8 +745,14 @@ mod tests {
                 inputs.drop_cover = true;
                 inputs
             }),
-            ("terminal dock", |mut inputs| {
-                inputs.terminal_covering = true;
+            ("covering dock", |mut inputs| {
+                // The input now means "intersects", not "open": a
+                // full-width dock over the pane still hides the page.
+                inputs.terminal_covering = super::terminal_covers_browser(
+                    true,
+                    Some(full_width_dock_rect()),
+                    Some(overlapping_pane_rect()),
+                );
                 inputs
             }),
             ("dead window", |mut inputs| {
@@ -584,6 +763,157 @@ mod tests {
         for (name, flip) in cases {
             assert!(!browser_visible(flip(all_clear())), "{name} must obscure the native view");
         }
+    }
+
+    /// Laid-out rects for the geometry tests on a 1440x900 window: the
+    /// centre-column dock beside the right-edge pane.
+    fn dock_rect() -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds {
+            origin: gpui::point(gpui::px(260.0), gpui::px(640.0)),
+            size: gpui::size(gpui::px(780.0), gpui::px(260.0)),
+        }
+    }
+
+    /// Today's layout: the pane hangs off the right edge, beside the dock.
+    fn beside_pane_rect() -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds {
+            origin: gpui::point(gpui::px(1040.0), gpui::px(44.0)),
+            size: gpui::size(gpui::px(400.0), gpui::px(856.0)),
+        }
+    }
+
+    /// A future full-width dock runs under the pane.
+    fn full_width_dock_rect() -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(640.0)),
+            size: gpui::size(gpui::px(1440.0), gpui::px(260.0)),
+        }
+    }
+
+    /// The pane a full-width dock runs under.
+    fn overlapping_pane_rect() -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds {
+            origin: gpui::point(gpui::px(1040.0), gpui::px(44.0)),
+            size: gpui::size(gpui::px(400.0), gpui::px(700.0)),
+        }
+    }
+
+    #[test]
+    fn open_dock_beside_the_pane_leaves_the_page_live() {
+        // The dock stands open in the centre column while the pane hangs
+        // off the right edge. Their rects never meet, so the page stays
+        // live: dock open + pane open, no overlap → visible.
+        let covering = terminal_covers_browser(true, Some(dock_rect()), Some(beside_pane_rect()));
+        assert!(!covering, "an open centre-column dock never covers the right pane");
+        let mut inputs = all_clear();
+        inputs.terminal_covering = covering;
+        assert!(browser_visible(inputs), "dock open + pane open, no overlap → the native view shows");
+    }
+
+    #[test]
+    fn full_width_dock_still_covers_the_page() {
+        assert!(
+            terminal_covers_browser(true, Some(full_width_dock_rect()), Some(overlapping_pane_rect())),
+            "a dock under the pane keeps the input meaningful"
+        );
+        assert!(
+            !terminal_covers_browser(false, Some(full_width_dock_rect()), Some(overlapping_pane_rect())),
+            "a closed dock covers nothing even where it would overlap"
+        );
+        assert!(
+            !terminal_covers_browser(true, None, Some(overlapping_pane_rect())),
+            "no laid-out dock rect is no cover"
+        );
+    }
+
+    #[test]
+    fn derived_centre_and_right_rects_never_share_pixels() {
+        // The sync path derives both rects from the content box: the dock
+        // fills the centre run (sidebar 260, pane 400 of a 1440 window),
+        // the pane hangs off the right edge under the 44 px header.
+        let content = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(1440.0), gpui::px(900.0)),
+        };
+        let pane = browser_page_bounds(content, gpui::px(400.0));
+        assert_eq!(f32::from(pane.origin.x), 1040.0);
+        assert_eq!(f32::from(pane.origin.y), 44.0);
+        assert_eq!(f32::from(pane.size.width), 400.0);
+        let dock = terminal_dock_bounds(content, gpui::px(260.0), gpui::px(1040.0), gpui::px(260.0));
+        assert_eq!(f32::from(dock.origin.y), 640.0);
+        assert!(
+            !terminal_covers_browser(true, Some(dock), Some(pane)),
+            "centre dock vs right pane: structurally disjoint"
+        );
+    }
+
+    #[test]
+    fn outside_click_releases_only_while_the_page_holds_the_keyboard() {
+        let outside = gpui::point(gpui::px(100.0), gpui::px(100.0));
+        let inside = gpui::point(gpui::px(1200.0), gpui::px(200.0));
+        assert!(beside_pane_rect().contains(&inside));
+        assert!(!beside_pane_rect().contains(&outside));
+        assert!(should_release_keyboard_on_mouse_down(true, outside, Some(beside_pane_rect())));
+        assert!(!should_release_keyboard_on_mouse_down(true, inside, Some(beside_pane_rect())));
+        assert!(!should_release_keyboard_on_mouse_down(false, outside, Some(beside_pane_rect())));
+        assert!(!should_release_keyboard_on_mouse_down(true, outside, None));
+    }
+
+    /// A fake-backed page holding the keyboard, the way a click in the
+    /// page leaves it.
+    fn focused_state(cx: &mut gpui::TestAppContext) -> gpui::Entity<WebviewState> {
+        use gpui::AppContext as _;
+        let mut backend = FakeWebBackend::new();
+        backend.point_clicked((1.0, 1.0));
+        cx.new(|cx| WebviewState::new(Box::new(backend), cx))
+    }
+
+    /// The capture releases a real (fake-backed) page: outside the rect
+    /// the keyboard comes back, inside it the page keeps typing.
+    #[gpui::test]
+    fn outside_click_hands_the_fake_pages_keyboard_back(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let outside = gpui::point(gpui::px(100.0), gpui::px(100.0));
+        let state = focused_state(cx);
+        assert!(state.update(cx, |state, _| state.holds_keyboard()));
+        let released = state.update(cx, |state, _| {
+            if should_release_keyboard_on_mouse_down(
+                state.holds_keyboard(),
+                outside,
+                Some(beside_pane_rect()),
+            ) {
+                state.release_keyboard();
+                true
+            } else {
+                false
+            }
+        });
+        assert!(released, "an outside click while holding releases");
+        assert!(!state.update(cx, |state, _| state.holds_keyboard()));
+
+        let inside = gpui::point(gpui::px(1200.0), gpui::px(200.0));
+        let state = focused_state(cx);
+        let released = state.update(cx, |state, _| {
+            if should_release_keyboard_on_mouse_down(
+                state.holds_keyboard(),
+                inside,
+                Some(beside_pane_rect()),
+            ) {
+                state.release_keyboard();
+                true
+            } else {
+                false
+            }
+        });
+        assert!(!released, "a click in the page never releases");
+        assert!(state.update(cx, |state, _| state.holds_keyboard()));
+    }
+
+    #[test]
+    fn cmd_l_routes_to_the_browser_only_while_it_shows() {
+        assert!(browser_pane_showing(true, true));
+        assert!(!browser_pane_showing(false, true), "a closed pane eats ⌘L");
+        assert!(!browser_pane_showing(true, false), "another kind eats ⌘L");
     }
 
     #[test]
