@@ -60,6 +60,19 @@ impl SessionView {
         (state.value().to_string(), state.cursor())
     }
 
+    /// Toggle the composer's `+` menu. Opening it closes any overlay menu
+    /// first: the `+` menu is plain view state no overlay close ever sees,
+    /// so without this the two would stack.
+    pub fn toggle_plus_menu(&mut self, cx: &mut Context<Self>) {
+        if self.plus_open {
+            self.plus_open = false;
+        } else {
+            self.overlays.update(cx, |overlays, _| overlays.menu = None);
+            self.plus_open = true;
+        }
+        cx.notify();
+    }
+
     /// Open (or close) one of the chip pickers.
     pub fn toggle_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         let open = self.overlays.read(cx).is_open(kind);
@@ -68,6 +81,9 @@ impl SessionView {
             cx.notify();
             return;
         }
+        // One menu at a time: the `+` menu is view-local, so the overlay
+        // stack never saw it — close it before the picker opens.
+        self.plus_open = false;
         let selected = match kind {
             MenuKind::Model => {
                 self.load_models(cx);

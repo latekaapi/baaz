@@ -613,6 +613,12 @@ impl Harness {
         if kind == MenuKind::Account {
             self.refresh_account_usage(cx);
         }
+        // One menu at a time: the composer's `+` menu is view-local state
+        // the overlay stack never sees, so close it before this menu opens
+        // — otherwise the two stack.
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.close_plus_menu(cx));
+        }
         let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };
@@ -1300,7 +1306,8 @@ mod tests {
     use super::{filter_commands, tilde_root};
     use crate::app::Harness;
     use crate::layout::RightKind;
-    use crate::overlays::{Command, DialogAction, PaletteKind};
+    use crate::overlays::{Command, DialogAction, MenuKind, PaletteKind};
+    use crate::session::{SessionHost, SessionView};
     // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
     use gpui::AppContext as _;
     use std::path::PathBuf;
@@ -1820,5 +1827,79 @@ mod tests {
             assert_eq!(tilde_root(&home), "~");
         }
         assert_eq!(tilde_root("/private/tmp/h4ws"), "/private/tmp/h4ws");
+    }
+
+    /// B6: a harness with an open lane, wired the way `open_on_provider`
+    /// wires one — the view shares the harness's own overlay stack, so the
+    /// header menu and the composer's `+` menu meet in one place.
+    fn harness_with_lane(
+        vc: &mut gpui::VisualTestContext,
+        state_dir: &std::path::Path,
+    ) -> (gpui::Entity<Harness>, gpui::Entity<SessionView>) {
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(state_dir), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let view = vc.update(|window, cx| {
+            let host = SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: state_dir.to_string_lossy().into_owned(),
+                overlays: baaz.read(cx).overlays.clone(),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| SessionView::new("s-plus".to_owned(), None, host, window, cx))
+        });
+        vc.update(|_, cx| baaz.update(cx, |harness, _| harness.active = Some(view.clone())));
+        (baaz, view)
+    }
+
+    /// Which menus stand open: the view-local `+` menu plus the shared
+    /// overlay menu. B6 leaves exactly one set after either opening order.
+    fn open_menu_count(
+        vc: &mut gpui::VisualTestContext,
+        baaz: &gpui::Entity<Harness>,
+        view: &gpui::Entity<SessionView>,
+    ) -> (bool, bool) {
+        vc.update(|_, cx| {
+            (view.read(cx).plus_open(), baaz.read(cx).overlays.read(cx).menu.is_some())
+        })
+    }
+
+    /// B6: opening the header `…` menu while the composer's `+` menu is
+    /// open leaves exactly one menu open — `open_menu` closes plus first.
+    /// Without the close both stood open, stacked.
+    #[gpui::test]
+    fn opening_the_header_menu_closes_the_plus_menu(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-plus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, view) = harness_with_lane(vc, &state.2);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
+        let (plus, menu) = open_menu_count(vc, &baaz, &view);
+        assert!(!plus, "the header menu closed the `+` menu");
+        assert!(menu, "the header menu still opened");
+        assert_eq!(usize::from(plus) + usize::from(menu), 1, "exactly one menu stays open");
+        restore_state(state);
+    }
+
+    /// B6: opening `+` while the header `…` menu is open leaves exactly
+    /// one menu open — the plus toggle drops the overlay menu first.
+    /// Without the drop both stood open, stacked.
+    #[gpui::test]
+    fn opening_plus_closes_the_header_menu(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("plus-header");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, view) = harness_with_lane(vc, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "the header menu opened");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
+        let (plus, menu) = open_menu_count(vc, &baaz, &view);
+        assert!(plus, "the `+` menu opened");
+        assert!(!menu, "opening `+` closed the header menu");
+        assert_eq!(usize::from(plus) + usize::from(menu), 1, "exactly one menu stays open");
+        restore_state(state);
     }
 }

@@ -1882,8 +1882,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             ComposerIntent::Mode => this.toggle_picker(MenuKind::Mode, cx),
             ComposerIntent::Provider => this.toggle_picker(MenuKind::Provider, cx),
             ComposerIntent::TogglePlus => {
-                this.plus_open = !this.plus_open;
-                cx.notify();
+                this.toggle_plus_menu(cx);
             }
             ComposerIntent::RemoveChip(id) => {
                 this.images.retain(|image| image.id != id.as_ref());
@@ -1901,6 +1900,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             }
             cx.notify();
         });
+        // An outside press reports here through the menu's occluding
+        // catcher — the same `close_plus_menu` Escape's `cancel` calls —
+        // so a click on `+` while open closes instead of close-then-reopen.
+        let plus_close = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.close_plus_menu(cx);
+        });
         let plus_item = plus_menu(
             "plus",
             vec![
@@ -1910,7 +1915,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             ],
             self.plus_open,
         )
-        .on_activate(move |id, window, cx| plus(id, window, cx));
+        .on_activate(move |id, window, cx| plus(id, window, cx))
+        .on_close(move |window, cx| plus_close(&(), window, cx));
         let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
         // The chip wears the session's own provider mark: a Codex session
         // never shows the Muse "M".
@@ -3016,5 +3022,49 @@ mod tests {
         assert_eq!(dividers.len(), 2, "one divider per hop");
         assert!(dividers[0].contains("Muse to Claude Code"), "A→B first, got: {}", dividers[0]);
         assert!(dividers[1].contains("Claude Code to Codex"), "B→C second, got: {}", dividers[1]);
+    }
+
+    /// B6: opening the `+` menu closes any overlay menu first, so the two
+    /// never stack. Without the close the old toggle left both open.
+    #[gpui::test]
+    fn opening_plus_closes_the_overlay_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "plus-over-overlay", "codex");
+        // A chip picker stands open, the way the mode chip leaves it.
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
+        assert!(
+            vc.update(|_, cx| view
+                .read(cx)
+                .overlays
+                .read(cx)
+                .menu
+                .as_ref()
+                .is_some_and(|m| m.kind == MenuKind::Mode)),
+            "the mode picker opened"
+        );
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
+        let (plus, menu) =
+            vc.update(|_, cx| (view.read(cx).plus_open(), view.read(cx).overlays.read(cx).menu.is_some()));
+        assert!(plus, "the `+` menu opened");
+        assert!(!menu, "opening `+` closed the overlay menu");
+    }
+
+    /// B6: opening a chip picker closes the `+` menu first, so the two
+    /// never stack. Without the close the picker opened over plus.
+    #[gpui::test]
+    fn opening_a_picker_closes_the_plus_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "picker-over-plus", "codex");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
+        let (plus, mode) = vc.update(|_, cx| {
+            let view = view.read(cx);
+            (view.plus_open(), view.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == MenuKind::Mode))
+        });
+        assert!(!plus, "opening the picker closed the `+` menu");
+        assert!(mode, "the picker still opened");
     }
 }
