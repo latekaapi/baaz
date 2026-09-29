@@ -2193,6 +2193,11 @@ impl Harness {
         // because `work` below moves the originals into the background.
         let retry_new =
             ProviderOpenRetry::OpenNew { project: project.clone(), workspace: workspace.clone() };
+        // The thread id replaces this request id on the view once the lane
+        // lands (Codex mints one server-side): carried into the finish below
+        // so the relay keeps routing the bridge's `--session <request_id>`
+        // calls at the lane's browser and tabs.
+        let alias_from = request_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2229,6 +2234,7 @@ impl Harness {
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
+                this.terminal_service.alias_session(&alias_from, &open.session_id);
                 this.finish_provider_open(open, window, cx);
             }
             Err(error) => {
@@ -2801,6 +2807,12 @@ impl Harness {
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
+                // The bridge was spawned under the stored id; if the resume
+                // answered another, the agent's tools must still reach this
+                // session's browser and terminal.
+                if open.session_id != retry_id {
+                    this.terminal_service.alias_session(&retry_id, &open.session_id);
+                }
                 this.finish_provider_open(open, window, cx);
             }
             Err(error) => {
@@ -2958,6 +2970,7 @@ impl Harness {
             std::path::PathBuf::from(workspace.clone()),
             provider_id.as_str(),
         );
+        let registered = session_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory(provider_id)?;
             #[cfg(not(test))]
@@ -2992,6 +3005,11 @@ impl Harness {
         };
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
+                // As on a reopen: a resume that answers another id keeps
+                // the fork's bridge reaching this session.
+                if open.session_id != registered {
+                    this.terminal_service.alias_session(&registered, &open.session_id);
+                }
                 this.finish_provider_open(open, window, cx);
             }
             Err(error) => {
