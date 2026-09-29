@@ -2188,8 +2188,18 @@ impl Harness {
         let expanded = self.right_cache.expanded_for(&root);
         if crate::clock::deterministic() {
             let at = std::time::Instant::now();
-            let snapshot = crate::right::read_snapshot_for(&root, &expanded);
+            let snapshot = {
+                let dir_cache = self.right_cache.dir_cache_for_root(&root);
+                crate::right::read_snapshot_for_cached(&root, &expanded, dir_cache)
+            };
+            let reload = self
+                .right_cache
+                .preview_for(&root)
+                .and_then(|preview| crate::right::preview_reload_for(&root, &preview));
             self.right_cache.apply_snapshot(snapshot, at);
+            if let Some(reload) = reload {
+                crate::right::apply_preview_reload(&mut self.right_cache, &root, reload);
+            }
             self.right_last_key = Some((true, kind, Some(root)));
             cx.notify();
             return;
@@ -2198,14 +2208,32 @@ impl Harness {
             return;
         }
         self.right_refresh_in_flight = true;
+        // The listing cache and the open preview travel into the background
+        // task: unchanged directories are replayed there, and a preview whose
+        // file changed on disk is re-read there — never on the render path.
+        let dir_cache = self.right_cache.take_dir_cache();
+        let preview = self.right_cache.preview_for(&root);
         cx.spawn(async move |this, cx| {
-            let snapshot = cx
+            let (snapshot, dir_cache, reload) = cx
                 .background_executor()
-                .spawn(async move { crate::right::read_snapshot_for(&root, &expanded) })
+                .spawn(async move {
+                    let mut dir_cache = dir_cache;
+                    let snapshot =
+                        crate::right::read_snapshot_for_cached(&root, &expanded, &mut dir_cache);
+                    let reload = preview
+                        .as_ref()
+                        .and_then(|preview| crate::right::preview_reload_for(&root, preview));
+                    (snapshot, dir_cache, reload)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.right_refresh_in_flight = false;
+                this.right_cache.restore_dir_cache(dir_cache);
+                let root = snapshot.root.clone();
                 this.right_cache.apply_snapshot(snapshot, std::time::Instant::now());
+                if let Some(reload) = reload {
+                    crate::right::apply_preview_reload(&mut this.right_cache, &root, reload);
+                }
                 cx.notify();
             });
         })
@@ -4812,6 +4840,51 @@ mod tests {
         assert!(
             vc.update(|_, cx| baaz.read(cx).right_cache.files_for(&root)).is_some(),
             "the Refresh re-read lands in the cache too"
+        );
+        restore_state(state);
+    }
+
+    /// H1: an open preview follows the file. Rewriting the previewed file on
+    /// disk and running the pane's refresh lands the new bytes — the same
+    /// background path the 2 s poll takes.
+    #[gpui::test]
+    fn right_refresh_reloads_a_previewed_file_rewritten_on_disk(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-preview-follows");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+        });
+        vc.run_until_parked();
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        std::fs::write(root.join("note.txt"), "version one\n").unwrap();
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.begin_file_preview_for(&root, "note.txt", cx)));
+        vc.run_until_parked();
+        let shows = |vc: &mut gpui::VisualTestContext, baaz: &gpui::Entity<Harness>| {
+            vc.update(|_, cx| {
+                baaz.read(cx)
+                    .right_cache
+                    .preview_for(&root)
+                    .and_then(|preview| crate::right::preview_text_shown(&preview).map(str::to_string))
+            })
+        };
+        assert!(
+            shows(vc, &baaz).is_some_and(|code| code.contains("version one")),
+            "the preview opens on the file's bytes"
+        );
+        // Rewritten longer, so the size stamp moves even on a coarse-mtime
+        // filesystem; the next refresh lands the new bytes.
+        std::fs::write(root.join("note.txt"), "version two, rewritten at length\n").unwrap();
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.refresh_right_now(cx)));
+        vc.run_until_parked();
+        assert!(
+            shows(vc, &baaz).is_some_and(|code| code.contains("version two")),
+            "the refresh reloads the rewritten file into the open preview"
         );
         restore_state(state);
     }
