@@ -874,6 +874,10 @@ impl Harness {
     /// mismatch never panics in the list — it paints blanks past the model
     /// — so the debug assertion below is the contract, not a guardrail.
     pub(crate) fn sync_sidebar_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>) {
+        // The splice below tracks the top item by index, so rows inserted
+        // above carry a steered or parked top away from its row; repaired
+        // after the sync, once the new rows are in.
+        let top_before = self.sidebar_list.logical_scroll_top();
         let key = self.regroup_key();
         if self.prev_sidebar_regroup.as_ref() != Some(&key) {
             self.sidebar_list.reset(rows.len());
@@ -917,6 +921,38 @@ impl Harness {
             self.sidebar_list.item_count(),
             rows.len()
         );
+        self.repair_sidebar_scroll(top_before, rows, grouping);
+    }
+
+    /// Re-anchor the scroll position after [`Self::sync_sidebar_list`]
+    /// spliced: gpui's splice keeps the top *item by index*, so rows the
+    /// staged boot loads insert above carry a steered or parked top away
+    /// from where it belongs. While the user has not scrolled, an armed
+    /// reveal re-steers to its row by id (a reveal for an id with no row
+    /// waits without moving anything), and a top-parked list with nothing
+    /// to steer to stays parked at row 0. A user-scrolled, gesture-driven
+    /// or resizing list is never touched — same gate as the frame renderer.
+    fn repair_sidebar_scroll(&mut self, before: ListOffset, rows: &[SidebarRow], grouping: &Grouping) {
+        if self.sidebar_user_scrolled || self.sidebar_gesture_active() || self.resize.active {
+            return;
+        }
+        if let Some(reveal_id) = self.reveal.clone() {
+            let wanted = SharedString::from(reveal_id.as_str());
+            let target = row_index_for_session(rows, grouping, &wanted)
+                .or_else(|| self.reveal_head_row(rows, grouping, &reveal_id));
+            if let Some(ix) = target {
+                ensure_row_visible(&self.sidebar_list, ix);
+                return;
+            }
+            // No row (yet): the wait itself must not move the list, nor let
+            // the splice carry a parked top away under it.
+        }
+        if before.item_ix == 0 && before.offset_in_item == px(0.0) {
+            let after = self.sidebar_list.logical_scroll_top();
+            if after.item_ix != 0 || after.offset_in_item != px(0.0) {
+                ensure_row_visible(&self.sidebar_list, 0);
+            }
+        }
     }
 
     /// The id `render_sidebar` hands the virtual list.
@@ -1015,9 +1051,10 @@ impl Harness {
     /// on the first miss, same as before — only an unrecognised id gets
     /// the grace period). A sidebar
     /// click never sets the flag; wheel and resize disarm it. Called on
-    /// selection change and the frames after, until the row reports
-    /// visible: before the first layout the viewport is unknown and the
-    /// steer is a no-op, and a fully visible row moves nothing.
+    /// selection change and the frames after, until the row reports visible
+    /// once the rows have settled (`sessions_loaded`): before the first
+    /// layout the viewport is unknown and the steer is a no-op, and a fully
+    /// visible row moves nothing.
     fn reveal_sidebar_row(
         &mut self,
         rows: &[SidebarRow],
@@ -1065,7 +1102,14 @@ impl Harness {
         let above = self.sidebar_list.item_is_above_viewport(ix);
         let below = self.sidebar_list.item_is_below_viewport(ix);
         if above == Some(false) && below == Some(false) {
-            self.reveal = None;
+            // The row is on screen — but while the first `session/list` is
+            // still landing, later stages reindex around it and the splice
+            // carries the steered top away (see `repair_sidebar_scroll`,
+            // which tracks the row by id meanwhile): stay armed until the
+            // rows settle. No poke meanwhile — nothing is outstanding.
+            if self.sessions_loaded {
+                self.reveal = None;
+            }
         } else if above.is_none() || below.is_none() {
             // The list has not laid out yet: a degenerate zero-height sidebar rect would otherwise
             // have every pane render spawn another pane-notify task, which
@@ -2726,5 +2770,360 @@ mod tests {
         }
         let (_, streak) = state.expect("streak recorded");
         assert!(streak > REVEAL_UNKNOWN_FRAMES, "streak {streak} did not pass the bound");
+    }
+
+    /// B3c: one date-bucket summary, pinned on request.
+    fn b3c_summary(id: &str, pinned: bool) -> aui::nav::SessionSummary {
+        use aui_tokens::AgentState;
+        let mut summary = aui::nav::SessionSummary::new(id, id, AgentState::Idle, "now");
+        summary.pinned = pinned;
+        summary
+    }
+
+    /// B3c: hermetic state plus boot args for a throwaway window, for
+    /// driving `sync_sidebar_list` the way the staged boot loads do. The
+    /// caller builds the window itself: the empty window borrows the test
+    /// context, so it cannot come back out of a helper.
+    fn b3c_state(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+        crate::Args,
+    ) {
+        let dir = std::env::temp_dir().join(format!("baaz-b3c-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        let args = crate::Args {
+            workspace: dir.clone(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::Choose,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_out: None,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            sidebar_fixture: None,
+            no_project: false,
+        };
+        (dir, guard, old, args)
+    }
+
+    /// B3c: a throwaway signed-in window on the hermetic state above.
+    fn b3c_window(vc: &mut gpui::VisualTestContext, args: crate::Args) -> Entity<Harness> {
+        use muse_client::schema::AccountStateKind;
+        vc.update(|window, cx| {
+            let baaz =
+                cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            baaz.update(cx, |h, _| {
+                h.auth = crate::login::Auth::SignedIn(crate::auth::Identity {
+                    lane: AccountStateKind::AccountLogin,
+                    name: "Probe".into(),
+                    email: String::new(),
+                });
+            });
+            baaz
+        })
+    }
+
+    /// B3c: put the hermetic state back.
+    fn b3c_teardown(
+        dir: &std::path::Path,
+        guard: std::sync::MutexGuard<'static, ()>,
+        old: Option<std::ffi::OsString>,
+    ) {
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B3c: the harness's own list state, drawn small enough that a deep
+    /// row starts below the fold.
+    struct B3cListProbe {
+        grouping: Grouping,
+        state: gpui::ListState,
+    }
+
+    impl Render for B3cListProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            v_flex().w(px(300.)).h(px(120.)).child(virtual_sidebar_view(
+                "b3c-probe",
+                self.grouping.clone(),
+                self.state.clone(),
+            ))
+        }
+    }
+
+    fn draw_b3c_list(vc: &mut gpui::VisualTestContext, grouping: &Grouping, state: &gpui::ListState) {
+        let host = B3cListProbe { grouping: grouping.clone(), state: state.clone() };
+        vc.draw(point(px(0.), px(0.)), gpui::size(px(300.), px(120.)), |_, cx| {
+            cx.new(|_| host).into_any_element()
+        });
+        vc.run_until_parked();
+    }
+
+    /// B3c, no active session: the staged boot loads splice rows above a
+    /// top-parked list (a newly pinned row lifts a Pinned section over the
+    /// date bucket the first batch painted), and gpui's splice carries the
+    /// parked top down with the insertion. Launch must still open at row 0.
+    #[gpui::test]
+    fn b3c_staged_loads_keep_a_top_parked_list_at_row_zero(cx: &mut TestAppContext) {
+        use aui::nav::DateGroup;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("top");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        // First batch: one date bucket, nothing pinned.
+        let g1 = Grouping::Date(vec![DateGroup::new(
+            "Older",
+            vec![b3c_summary("u-1", false), b3c_summary("u-2", false), b3c_summary("u-3", false)],
+        )]);
+        let rows1 = flatten_sidebar(&g1, false);
+        assert_eq!(rows1.len(), 4, "header plus three sessions");
+        let g1 = Rc::new(g1);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                assert!(h.reveal.is_none(), "no session is active, so nothing arms a reveal");
+                h.sync_sidebar_list(&rows1, &g1);
+                assert_eq!(h.sidebar_list.item_count(), rows1.len());
+                // Park the list the way a painted top leaves it: the splice
+                // below only carries a materialised scroll top.
+                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+                assert_eq!(h.sidebar_list_top().item_ix, 0, "the first paint parks at the top");
+            })
+        });
+        // Second batch: the wire list adds a pinned session, which lifts a
+        // Pinned section above the bucket the first batch painted — a pure
+        // insertion at index 0 with the old rows as a verbatim suffix.
+        let g2 = Grouping::Date(vec![DateGroup::new(
+            "Older",
+            vec![
+                b3c_summary("u-1", false),
+                b3c_summary("u-2", false),
+                b3c_summary("u-3", false),
+                b3c_summary("p-0", true),
+            ],
+        )]);
+        let rows2 = flatten_sidebar(&g2, false);
+        assert_eq!(rows2.len(), 6, "pinned header, pinned row, then the old rows");
+        let g2 = Rc::new(g2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sync_sidebar_list(&rows2, &g2);
+                assert_eq!(h.sidebar_list.item_count(), rows2.len());
+                assert_eq!(
+                    h.sidebar_list_top().item_ix,
+                    0,
+                    "staged loads must not carry a top-parked list with no active session"
+                );
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B3c, boot reveal for a rowless id: a draft's reveal arms before its
+    /// row exists and waits while the staged loads land around it. The wait
+    /// must neither steer the list nor let the splices carry a top-parked
+    /// list away: with no session active the top stays row 0 and the arm
+    /// survives for the row's eventual birth.
+    #[gpui::test]
+    fn b3c_rowless_boot_reveal_waits_without_moving_the_list(cx: &mut TestAppContext) {
+        use aui::nav::DateGroup;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("unknown");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let g1 = Grouping::Date(vec![DateGroup::new(
+            "Older",
+            vec![b3c_summary("u-1", false), b3c_summary("u-2", false), b3c_summary("u-3", false)],
+        )]);
+        let rows1 = flatten_sidebar(&g1, false);
+        let g1 = Rc::new(g1);
+        // Boot order: the activation arms the reveal before any rows land.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.reveal = Some("s-draft".to_owned());
+                h.reveal_unknown = None;
+                h.sidebar_user_scrolled = false;
+                h.sync_sidebar_list(&rows1, &g1);
+                // Park the list the way a painted top leaves it (a parked
+                // scroll, not a reveal steer — the draft has no row).
+                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+                assert_eq!(h.sidebar_list_top().item_ix, 0, "the first paint parks at the top");
+            })
+        });
+        let g2 = Grouping::Date(vec![DateGroup::new(
+            "Older",
+            vec![
+                b3c_summary("u-1", false),
+                b3c_summary("u-2", false),
+                b3c_summary("u-3", false),
+                b3c_summary("p-0", true),
+            ],
+        )]);
+        let rows2 = flatten_sidebar(&g2, false);
+        let g2 = Rc::new(g2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sync_sidebar_list(&rows2, &g2);
+                // The wait itself never steers, even called every frame: the
+                // draft has no row anywhere yet.
+                h.reveal_sidebar_row(&rows2, &g2, "s-draft", cx);
+                assert_eq!(
+                    h.sidebar_list_top().item_ix,
+                    0,
+                    "a reveal for an id with no row must not move the list"
+                );
+                assert_eq!(
+                    h.reveal.as_deref(),
+                    Some("s-draft"),
+                    "the rowless reveal keeps waiting for its row"
+                );
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// B3c, boot session open: the outside activation arms the reveal before
+    /// the rows land; the first batch shows the row, later batches reindex
+    /// around it. The reveal must track its row by id until the rows settle
+    /// (`sessions_loaded`), then complete — never strand the list mid-list
+    /// with the arm already consumed.
+    #[gpui::test]
+    fn b3c_boot_reveal_tracks_its_row_through_staged_loads(cx: &mut TestAppContext) {
+        use aui::nav::StatusGroup;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("reveal");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        // First batch: three sessions, the boot session last — small enough
+        // that its row is on screen, so the reveal below completes (or, once
+        // fixed, waits out the staging) before the big batch lands.
+        let first: Vec<aui::nav::SessionSummary> =
+            (0..3).map(|i| b3c_summary(&format!("s-{i}"), false)).collect();
+        let g1 = Grouping::Status(vec![StatusGroup::new("g", "G", "3", first.clone())]);
+        let rows1 = flatten_sidebar(&g1, false);
+        assert_eq!(rows1.len(), 4, "header plus three sessions");
+        let g1 = Rc::new(g1);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                assert!(!h.sessions_loaded, "the wire list has not landed yet");
+                h.sync_sidebar_list(&rows1, &g1);
+                assert_eq!(h.sidebar_list.item_count(), rows1.len());
+            })
+        });
+        let state = vc.update(|_, cx| baaz.read(cx).sidebar_list.clone());
+        draw_b3c_list(vc, &g1, &state);
+        // Boot order: the activation arms the reveal while staging.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.reveal = Some("s-2".to_owned());
+                h.reveal_unknown = None;
+                h.sidebar_user_scrolled = false;
+                h.reveal_sidebar_row(&rows1, &g1, "s-2", cx);
+            })
+        });
+        draw_b3c_list(vc, &g1, &state);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.reveal_sidebar_row(&rows1, &g1, "s-2", cx);
+            })
+        });
+        // Second batch: twenty newer sessions land above (provider rows,
+        // then the wire list), reindexing every batch-1 row and burying the
+        // boot row far below a top-parked list.
+        let mut second: Vec<aui::nav::SessionSummary> =
+            (0..20).map(|i| b3c_summary(&format!("n-{i}"), false)).collect();
+        second.extend(first);
+        let g2 = Grouping::Status(vec![StatusGroup::new("g", "G", "23", second)]);
+        let rows2 = flatten_sidebar(&g2, false);
+        assert_eq!(rows2.len(), 24, "header plus twenty-three sessions");
+        let g2 = Rc::new(g2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sync_sidebar_list(&rows2, &g2);
+                assert_eq!(h.sidebar_list.item_count(), rows2.len());
+            })
+        });
+        // Frame pump, the way the renderer drives the armed reveal: each
+        // frame steers by id again (measuring further each time) until the
+        // row reports visible. A consumed reveal steers no more frames.
+        let target = row_index_for_session(&rows2, &g2, &"s-2".into()).expect("the boot row has an index");
+        for _ in 0..30 {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    if let Some(id) = h.reveal.clone() {
+                        h.reveal_sidebar_row(&rows2, &g2, &id, cx);
+                    }
+                })
+            });
+            draw_b3c_list(vc, &g2, &state);
+            let settled = vc.update(|_, cx| {
+                baaz.read(cx).sidebar_list.item_is_above_viewport(target) == Some(false)
+                    && baaz.read(cx).sidebar_list.item_is_below_viewport(target) == Some(false)
+            });
+            if settled {
+                break;
+            }
+        }
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                assert_eq!(
+                    h.reveal.as_deref(),
+                    Some("s-2"),
+                    "the staged reveal stays armed until the rows settle"
+                );
+                assert_eq!(
+                    h.sidebar_list.item_is_above_viewport(target),
+                    Some(false),
+                    "the active row is not above the viewport after the loads settle"
+                );
+                assert_eq!(
+                    h.sidebar_list.item_is_below_viewport(target),
+                    Some(false),
+                    "the active row is visible after the loads settle"
+                );
+                assert!(
+                    h.sidebar_list_top().item_ix > 0,
+                    "the list steered to the active row, not row 0"
+                );
+            })
+        });
+        // The wire list lands: rows settle, the same reveal completes.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions_loaded = true;
+                h.reveal_sidebar_row(&rows2, &g2, "s-2", cx);
+                assert_eq!(h.reveal, None, "the settled reveal completes once its row is visible");
+            })
+        });
+        b3c_teardown(&dir, guard, old);
     }
 }
