@@ -1072,6 +1072,7 @@ mod tests {
             bench_shell: false,
             sidebar_fixture: None,
             no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
         }
     }
 

@@ -4941,6 +4941,7 @@ mod tests {
             bench_out: None,
             sidebar_fixture: None,
             no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
         }
     }
 
