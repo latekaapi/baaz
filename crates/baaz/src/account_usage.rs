@@ -14,7 +14,7 @@ use aui_icons::Provider as AuiProvider;
 
 use crate::providers::ProviderId;
 use crate::provider_status::{Auth, Headline, ProviderStatus};
-use crate::tier::Tier;
+use crate::tier::{ResetClause, Tier, resolve_plan_name};
 
 /// The app's live muse connection and tier for the Muse row: present
 /// exactly when the app is signed in to Muse. The row then reports the
@@ -85,8 +85,11 @@ fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData 
         return connected_row(status, now);
     }
     match feed.tier.as_ref() {
-        Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) => {
-            let plan = plan.strip_prefix("Muse Code ").unwrap_or(plan).to_owned();
+        Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable, .. }) => {
+            // The wire may carry a numeric tier id, never a name: resolve it
+            // before it reaches the row, exactly as the header does.
+            let shown = resolve_plan_name(plan, None);
+            let plan = shown.strip_prefix("Muse Code ").unwrap_or(&shown).to_owned();
             if *usage_unavailable {
                 return UsageRowData::new(
                     AuiProvider::Muse,
@@ -146,13 +149,14 @@ fn tier_fraction(pct: u32) -> f32 {
     (pct as f32 / 100.0).clamp(0.0, 1.0)
 }
 
-/// One tier-card reset clause as a window's reset text: the card's own
-/// words after its leading "Resets " ("Resets at 2:57 AM" → "at 2:57 AM"),
-/// so the row reads the card's clock instead of a countdown. A missing
-/// clause reads unknown, never a fabricated countdown.
-fn tier_reset_text(clause: Option<&String>, now: i64) -> String {
-    match clause {
-        Some(clause) => clause.strip_prefix("Resets ").unwrap_or(clause).to_owned(),
+/// One tier-card reset clause as a window's reset text: the clause's reset
+/// instant as a duration (`3h 12m`), through the same [`resets_in_text`] the
+/// other rows use — the library renders `resets in {text}`, so an absolute
+/// clause would read `resets in at …`. A clause without an instant (the probe
+/// path, old cache files) reads unknown, never a fabricated countdown.
+fn tier_reset_text(clause: Option<&ResetClause>, now: i64) -> String {
+    match clause.and_then(|clause| clause.resets_at_ms) {
+        Some(ms) => resets_in_text(Some((ms / 1000) as i64), now),
         None => resets_in_text(None, now),
     }
 }
@@ -428,6 +432,34 @@ mod tests {
         usage_rows(&[muse], Some(MuseFeed { tier }), now)
     }
 
+    /// One wire-built Muse tier with fixed reset instants: the Current
+    /// window resets 3h 2m after `now`, the Weekly block 4d 20h after.
+    fn wired_subscription() -> Tier {
+        // Built the way `tier_from_usage` builds it from the wire, without
+        // naming the wire type here (the seam ratchet keeps the Muse client
+        // out of new files).
+        let now = 1700000000u64;
+        Tier::Subscription {
+            plan: "Muse Code Power Usage".into(),
+            current_pct: Some(0),
+            weekly_pct: Some(3),
+            resets: vec![
+                crate::tier::ResetClause::timed("Resets at 5:02 AM".into(), (now + 3 * 3600 + 2 * 60) * 1000),
+                crate::tier::ResetClause::timed("Resets Nov 19 at 10:13 PM".into(), (now + 4 * 86400 + 20 * 3600) * 1000),
+            ],
+            usage_unavailable: false,
+        }
+    }
+
+    fn window_texts(row: &UsageRowData) -> Vec<String> {
+        match &row.state {
+            UsageRowState::Windows(windows, _) => {
+                windows.iter().map(|window| window.resets_at_text.to_string()).collect()
+            }
+            other => panic!("expected windows, got {other:?}"),
+        }
+    }
+
     #[test]
     fn muse_row_reads_tier_without_a_binary() {
         // No `muse` binary: Not installed. The app is signed in, so the
@@ -444,10 +476,12 @@ mod tests {
                 assert_eq!(windows.len(), 2);
                 assert_eq!(windows[0].label.to_string(), "Current");
                 assert!((windows[0].used_fraction - 0.0).abs() < f32::EPSILON);
-                assert_eq!(windows[0].resets_at_text.to_string(), "at 2:57 AM");
+                // Words only, no instant (the probe path, old cache files):
+                // unknown, never `resets in at …`.
+                assert_eq!(windows[0].resets_at_text.to_string(), "unknown");
                 assert_eq!(windows[1].label.to_string(), "Weekly");
                 assert!((windows[1].used_fraction - 0.03).abs() < f32::EPSILON);
-                assert_eq!(windows[1].resets_at_text.to_string(), "Oct 5 at 5:30 AM");
+                assert_eq!(windows[1].resets_at_text.to_string(), "unknown");
                 // The age only: the library renders the "as of" prefix, so
                 // this string must never start with it.
                 if let Some(as_of) = as_of {
@@ -456,6 +490,43 @@ mod tests {
             }
             other => panic!("expected the tier's Current and Weekly bars, got {other:?}"),
         }
+    }
+
+    /// Wire-built Muse windows pass durations to the library — the same
+    /// `resets_in_text` the Codex/Claude rows use — so the menu reads
+    /// `resets in 3h 2m`, never `resets in at …`.
+    #[test]
+    fn muse_windows_pass_durations_to_the_library() {
+        let rows = muse_rows(Some(wired_subscription()), 1700000000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].plan.as_deref(), Some("Power Usage"));
+        assert_eq!(window_texts(&rows[0]), vec!["3h 2m".to_owned(), "4d 20h".to_owned()]);
+    }
+
+    /// A numeric wire plan id never reaches the Muse row: the generic label
+    /// stands in when no human name is known (the live tier already carries
+    /// the last human name when there is one).
+    #[test]
+    fn a_numeric_plan_never_reaches_the_muse_row() {
+        let tier = Tier::Subscription {
+            plan: "27681631238169137".into(),
+            current_pct: Some(0),
+            weekly_pct: Some(5),
+            resets: vec![
+                ResetClause::timed("Resets at 7:57 AM".into(), (1700000000 + 3 * 3600) as u64 * 1000),
+                ResetClause::timed("Resets Oct 5 at 5:30 AM".into(), (1700000000 + 4 * 86400) as u64 * 1000),
+            ],
+            usage_unavailable: false,
+        };
+        let rows = muse_rows(Some(tier), 1700000000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].plan.as_deref(), Some("Subscription"));
+        assert!(
+            !rows[0].plan.as_deref().unwrap_or_default().contains("27681631238169137"),
+            "the id never shows: {:?}",
+            rows[0].plan
+        );
+        assert_eq!(window_texts(&rows[0]), vec!["3h 0m".to_owned(), "4d 0h".to_owned()]);
     }
 
     #[test]
@@ -498,12 +569,13 @@ mod tests {
             }],
             as_of: 1700000000,
         });
-        let rows = usage_rows(&[muse.clone()], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
+        let rows = usage_rows(&[muse.clone()], Some(MuseFeed { tier: Some(wired_subscription()) }), 1700000000);
         match &rows[0].state {
             UsageRowState::Windows(windows, _) => {
                 let labels: Vec<String> = windows.iter().map(|w| w.label.to_string()).collect();
                 assert_eq!(labels, ["Current", "Weekly"]);
-                assert_ne!(windows[0].resets_at_text.to_string(), "unknown");
+                assert_eq!(windows[0].resets_at_text.to_string(), "3h 2m");
+                assert_eq!(windows[1].resets_at_text.to_string(), "4d 20h");
             }
             other => panic!("expected the tier card's bars, got {other:?}"),
         }

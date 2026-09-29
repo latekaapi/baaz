@@ -95,6 +95,114 @@ const JOIN_GRACE: Duration = Duration::from_secs(5);
 /// reason to grow without bound.
 const MAX_OUTPUT: usize = 512 * 1024;
 
+/// A plan string fit to show: it names the plan in words.
+///
+/// The wire (`SubscriptionUsage.tier`, muse 1.4.0) carries an opaque numeric
+/// id there instead of a name. Anything without a letter is such an id —
+/// all digits or otherwise id-shaped — never a name, and must never reach a
+/// surface.
+pub fn is_human_plan_name(plan: &str) -> bool {
+    !plan.is_empty() && plan.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// The generic label a subscription shows when no human plan name is known
+/// for this login.
+pub const GENERIC_PLAN_LABEL: &str = "Subscription";
+
+/// The plan name to show for `raw`: the raw name when it is human, else the
+/// last human name `known` for this login, else the generic label. A numeric
+/// plan id is never displayed.
+pub fn resolve_plan_name(raw: &str, known: Option<&str>) -> String {
+    if is_human_plan_name(raw) {
+        return raw.to_owned();
+    }
+    if let Some(known) = known {
+        if is_human_plan_name(known) {
+            return known.to_owned();
+        }
+    }
+    GENERIC_PLAN_LABEL.to_owned()
+}
+
+/// One tier reset clause: the card's own words, plus the reset instant they
+/// were rendered from when the wire supplied one.
+///
+/// Wire-built tiers carry `resets_at_ms`, and the account menu's Muse rows
+/// format durations from it ([`crate::account_usage::resets_in_text`]).
+/// Probe-built clauses and old cache files carry words only and read as
+/// unknown there — never a fabricated countdown, and never `resets in at …`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResetClause {
+    /// The clause as printed, e.g. `Resets at 5:17 PM`.
+    pub text: String,
+    /// The reset instant in epoch milliseconds, when known.
+    pub resets_at_ms: Option<u64>,
+}
+
+impl ResetClause {
+    /// A clause rendered from a wire stamp, carrying the stamp.
+    pub fn timed(text: String, resets_at_ms: u64) -> Self {
+        Self { text, resets_at_ms: Some(resets_at_ms) }
+    }
+}
+
+impl From<String> for ResetClause {
+    fn from(text: String) -> Self {
+        Self { text, resets_at_ms: None }
+    }
+}
+
+impl From<&str> for ResetClause {
+    fn from(text: &str) -> Self {
+        Self { text: text.to_owned(), resets_at_ms: None }
+    }
+}
+
+impl serde::Serialize for ResetClause {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.resets_at_ms {
+            // Probe-style files stay plain strings, exactly as older builds
+            // wrote them.
+            None => serializer.serialize_str(&self.text),
+            Some(resets_at_ms) => {
+                use serde::ser::SerializeStruct;
+                let mut clause = serializer.serialize_struct("ResetClause", 2)?;
+                clause.serialize_field("text", &self.text)?;
+                clause.serialize_field("resetsAtMs", &resets_at_ms)?;
+                clause.end()
+            }
+        }
+    }
+}
+
+/// The two shapes a clause takes in `tier.json`: a plain string (the probe
+/// path and every file older builds wrote) or a map carrying the instant.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ResetClauseWire {
+    Text(String),
+    Full(ResetClauseFull),
+}
+
+/// The map shape of [`ResetClause`], in the file's camelCase register.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetClauseFull {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    resets_at_ms: Option<u64>,
+}
+
+impl<'de> serde::Deserialize<'de> for ResetClause {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match ResetClauseWire::deserialize(deserializer)? {
+            ResetClauseWire::Text(text) => ResetClause::from(text),
+            ResetClauseWire::Full(full) => ResetClause { text: full.text, resets_at_ms: full.resets_at_ms },
+        })
+    }
+}
+
 /// What the login token is entitled to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tier", rename_all = "camelCase")]
@@ -102,7 +210,9 @@ pub enum Tier {
     /// A subscription plan, with whatever the card said about it.
     #[serde(rename_all = "camelCase")]
     Subscription {
-        /// The plan's name, e.g. `Muse Code High Usage`.
+        /// The plan's name, e.g. `Muse Code High Usage`. The wire may carry
+        /// an opaque numeric tier id instead (muse 1.4.0): surfaces resolve
+        /// it through [`resolve_plan_name`], never verbatim.
         plan: String,
         /// The current window's usage, as a whole percent. `None` either
         /// because the card has not finished drawing yet, or because
@@ -112,7 +222,7 @@ pub enum Tier {
         /// as `current_pct`.
         weekly_pct: Option<u32>,
         /// The reset clauses, in the order the card printed them.
-        resets: Vec<String>,
+        resets: Vec<ResetClause>,
         /// The card said `Usage currently unavailable` instead of either
         /// percentage (muse 1.3.0): a known plan whose usage windows the
         /// server is not reporting right now — seen while this login's
@@ -138,7 +248,10 @@ impl Tier {
     /// matters. `/status` keeps the full name.
     pub fn footer_label(&self) -> String {
         match self {
-            Tier::Subscription { plan, .. } => plan.strip_prefix("Muse Code ").unwrap_or(plan).to_owned(),
+            Tier::Subscription { plan, .. } => {
+                let shown = resolve_plan_name(plan, None);
+                shown.strip_prefix("Muse Code ").unwrap_or(&shown).to_owned()
+            }
             Tier::PayAsYouGo => "Pay-as-you-go".to_owned(),
             Tier::Unavailable(_) => "Plan unknown".to_owned(),
         }
@@ -169,7 +282,7 @@ impl Tier {
     /// [`print_tier_field`] already applies to `--print-tier`.
     pub fn status_lines(&self) -> String {
         match self {
-            Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable } => {
+            Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable, .. } => {
                 let usage = |p: &Option<u32>| {
                     match p {
                         Some(p) => format!("{p}% used"),
@@ -178,13 +291,14 @@ impl Tier {
                     }
                 };
                 let mut text = format!(
-                    "Plan: {plan}\nCurrent usage: {}\nWeekly usage: {}",
+                    "Plan: {}\nCurrent usage: {}\nWeekly usage: {}",
+                    resolve_plan_name(plan, None),
                     usage(current_pct),
                     usage(weekly_pct)
                 );
                 for reset in resets {
                     text.push('\n');
-                    text.push_str(reset);
+                    text.push_str(&reset.text);
                 }
                 text
             }
@@ -205,6 +319,11 @@ pub struct Cached {
     pub auth_mtime: Option<u64>,
     /// What the probe said.
     pub tier: Option<Tier>,
+    /// The last human plan name seen for this login, persisted alongside the
+    /// tier so a later numeric wire reading resolves back to it. Absent in
+    /// files older builds wrote.
+    #[serde(default)]
+    pub last_human_plan: Option<String>,
 }
 
 /// `~/Library/Application Support/baaz/tier.json`.
@@ -239,14 +358,46 @@ pub fn cached() -> Option<Tier> {
     if cached.auth_mtime != auth_mtime() {
         return None;
     }
-    cached.tier
+    let Cached { tier, last_human_plan, .. } = cached;
+    let mut tier = tier?;
+    // Files written before the id guard (or by hand) may hold a numeric
+    // plan: resolve it here so no surface ever shows it.
+    if let Tier::Subscription { plan, .. } = &mut tier {
+        if !is_human_plan_name(plan) {
+            *plan = resolve_plan_name(plan, last_human_plan.as_deref());
+        }
+    }
+    Some(tier)
 }
 
 /// Remember `tier` against the `auth.json` on disk now. Best-effort: a store
 /// that cannot be written means the next boot probes again, which is a cost
 /// and not a failure.
+///
+/// A numeric wire plan is resolved before it is persisted — to the last
+/// human name for this login, else the generic label — and that name is kept
+/// alongside, so what is stored never shows an id. A failed probe never
+/// erases the name a previous reading established.
 pub fn remember(tier: &Tier) {
-    let cached = Cached { auth_mtime: auth_mtime(), tier: Some(tier.clone()) };
+    let mtime = auth_mtime();
+    let prev: Cached = crate::store::read_json(&cache_path());
+    let prev_known = if prev.auth_mtime == mtime {
+        prev.last_human_plan.filter(|name| is_human_plan_name(name))
+    } else {
+        None
+    };
+    let own = match tier {
+        Tier::Subscription { plan, .. } if is_human_plan_name(plan) => Some(plan.clone()),
+        _ => None,
+    };
+    let last_human_plan = own.clone().or(prev_known);
+    let mut tier = tier.clone();
+    if let Tier::Subscription { plan, .. } = &mut tier {
+        if !is_human_plan_name(plan) {
+            *plan = last_human_plan.clone().unwrap_or_else(|| GENERIC_PLAN_LABEL.to_owned());
+        }
+    }
+    let cached = Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan };
     if let Ok(text) = serde_json::to_vec_pretty(&cached) {
         let _ = crate::store::write_atomic(&cache_path(), &text);
     }
@@ -282,12 +433,12 @@ pub fn print_and_exit(muse: &str) -> ! {
         remember(tier);
     }
     match probed {
-        Ok(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable }) => {
-            println!("Subscription: {plan}");
+        Ok(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable, .. }) => {
+            println!("Subscription: {}", resolve_plan_name(&plan, None));
             println!("Current: {}", print_tier_field(current_pct, usage_unavailable));
             println!("Weekly: {}", print_tier_field(weekly_pct, usage_unavailable));
             for reset in resets {
-                println!("{reset}");
+                println!("{}", reset.text);
             }
             std::process::exit(0)
         }
@@ -568,10 +719,13 @@ fn complete(tier: &Tier) -> bool {
 
 /// Build a [`Tier::Subscription`] from one wire observation.
 ///
-/// `plan` is the provider's subscription tier id verbatim, `current_pct` the
-/// window's `used_percent`, `weekly_pct` the weekly block's, and `resets`
-/// the two reset clauses rendered from their epoch-millisecond stamps in the
-/// card's own register (see [`format_reset`]).
+/// `plan` is the provider's subscription tier id verbatim when it names the
+/// plan in words, else the generic label (muse 1.4.0 sends an opaque numeric
+/// id there); `current_pct` the window's `used_percent`, `weekly_pct` the
+/// weekly block's, and `resets` the two reset clauses rendered from their
+/// epoch-millisecond stamps in the card's own register (see [`format_reset`]),
+/// each carrying its stamp for the duration rows. Callers that know the
+/// login restore the last human name through [`restore_known_plan`].
 ///
 /// The percentages are verbatim, including over-quota values above 100 — the
 /// schema says those are valid. [`Tier::weekly_fraction`] clamps for the
@@ -588,18 +742,52 @@ fn complete(tier: &Tier) -> bool {
 /// pay-as-you-go rates with no blocking banner.
 pub fn tier_from_usage(usage: &SubscriptionUsage) -> Tier {
     let mut resets = Vec::new();
-    if let Some(clause) = format_reset(usage.window.resets_at_ms, false) {
+    if let Some(clause) = reset_clause(usage.window.resets_at_ms, false) {
         resets.push(clause);
     }
-    if let Some(clause) = format_reset(usage.weekly.resets_at_ms, true) {
+    if let Some(clause) = reset_clause(usage.weekly.resets_at_ms, true) {
         resets.push(clause);
     }
     Tier::Subscription {
-        plan: usage.tier.clone(),
+        // The wire may carry an opaque numeric tier id (muse 1.4.0), never
+        // a name: with no previous reading this reads as the generic label,
+        // and the admitting callers restore the last human name below.
+        plan: resolve_plan_name(&usage.tier, None),
         current_pct: Some(usage.window.used_percent),
         weekly_pct: Some(usage.weekly.used_percent),
         resets,
         usage_unavailable: false,
+    }
+}
+
+/// One wire reset clause: the card's words rendered from the stamp, carrying
+/// the stamp for the duration rows. `None` only when the stamp is not a
+/// representable local time (see [`format_reset`]).
+fn reset_clause(resets_at_ms: u64, with_date: bool) -> Option<ResetClause> {
+    format_reset(resets_at_ms, with_date).map(|text| ResetClause::timed(text, resets_at_ms))
+}
+
+/// The last human plan name persisted for the login installed at
+/// `auth_mtime_secs`, or `None` when none was ever known. Reads `tier.json`
+/// directly with no freshness bound: the name stays valid while the login
+/// does.
+fn last_human_plan(auth_mtime_secs: Option<u64>) -> Option<String> {
+    let auth_mtime_secs = auth_mtime_secs?;
+    let cached: Cached = crate::store::read_json(&cache_path());
+    if cached.auth_mtime != Some(auth_mtime_secs) {
+        return None;
+    }
+    cached.last_human_plan.filter(|name| is_human_plan_name(name))
+}
+
+/// Restore the last human plan name onto a wire-built tier whose raw tier id
+/// is not a name. A no-op for human plans and non-subscriptions.
+fn restore_known_plan(tier: &mut Tier, raw_tier: &str, auth_mtime_secs: Option<u64>) {
+    if is_human_plan_name(raw_tier) {
+        return;
+    }
+    if let Tier::Subscription { plan, .. } = tier {
+        *plan = last_human_plan(auth_mtime_secs).unwrap_or_else(|| GENERIC_PLAN_LABEL.to_owned());
     }
 }
 
@@ -645,7 +833,9 @@ pub fn tier_from_changed_current(
     if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
         return None;
     }
-    tier_from_changed(params)
+    let mut tier = tier_from_usage(&usage);
+    restore_known_plan(&mut tier, &usage.tier, auth_mtime_secs);
+    Some(tier)
 }
 
 /// One reset clause in the card's own register, from an epoch-millisecond
@@ -716,7 +906,9 @@ pub fn tier_from_read_current(
     if !observation_is_current(usage.observed_at_ms, auth_mtime_secs) {
         return None;
     }
-    tier_from_read_value(value)
+    let mut tier = tier_from_usage(usage);
+    restore_known_plan(&mut tier, &usage.tier, auth_mtime_secs);
+    Some(tier)
 }
 
 /// Decide the primary oracle's answer from an already-read `usage/read`
@@ -914,8 +1106,9 @@ fn percent_after(text: &str, keyword: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Every `Resets …` clause, cut where the next clause starts.
-fn reset_clauses(text: &str) -> Vec<String> {
+/// Every `Resets …` clause, cut where the next clause starts. The probe path
+/// carries words only: no stamp, so the rows read these as unknown.
+fn reset_clauses(text: &str) -> Vec<ResetClause> {
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(found) = text[from..].find("Resets") {
@@ -929,8 +1122,8 @@ fn reset_clauses(text: &str) -> Vec<String> {
             .min()
             .unwrap_or(rest.len());
         let clause = rest[..end].trim().trim_end_matches('.').to_owned();
-        if clause.len() > "Resets".len() && !out.contains(&clause) {
-            out.push(clause);
+        if clause.len() > "Resets".len() && !out.iter().any(|known: &ResetClause| known.text == clause) {
+            out.push(ResetClause::from(clause));
         }
         from = start + "Resets".len();
     }
@@ -1220,7 +1413,11 @@ mod tests {
         assert_eq!(plan, "Muse Code High Usage");
         assert_eq!(current_pct, Some(2));
         assert_eq!(weekly_pct, Some(7));
-        assert_eq!(resets, vec!["Resets at 3:00 PM".to_owned(), "Resets Monday".to_owned()]);
+        assert_eq!(
+            resets,
+            vec![ResetClause::from("Resets at 3:00 PM"), ResetClause::from("Resets Monday")]
+        );
+        assert!(resets.iter().all(|clause| clause.resets_at_ms.is_none()), "the probe path carries words only");
         assert!(!usage_unavailable);
     }
 
@@ -1241,7 +1438,10 @@ mod tests {
         assert_eq!(plan, "Muse Code High Usage");
         assert_eq!(current_pct, Some(0));
         assert_eq!(weekly_pct, Some(2));
-        assert_eq!(resets, vec!["Resets at 5:17 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+        assert_eq!(
+            resets,
+            vec![ResetClause::from("Resets at 5:17 PM"), ResetClause::from("Resets Sep 14 at 5:30 AM")]
+        );
         assert!(!usage_unavailable);
     }
 
@@ -1492,7 +1692,10 @@ mod tests {
         assert_eq!(plan, "Muse Code Power Usage");
         assert_eq!(current_pct, Some(13));
         assert_eq!(weekly_pct, Some(36));
-        assert_eq!(resets, vec!["Resets at 7:14 PM".to_owned(), "Resets Sep 14 at 5:30 AM".to_owned()]);
+        assert_eq!(
+            resets,
+            vec![ResetClause::from("Resets at 7:14 PM"), ResetClause::from("Resets Sep 14 at 5:30 AM")]
+        );
         assert!(!usage_unavailable);
         assert!(complete(&Tier::Subscription {
             plan,
@@ -1609,8 +1812,8 @@ mod tests {
         assert_eq!(*weekly_pct, Some(137));
         assert!(!usage_unavailable);
         assert_eq!(resets.len(), 2, "{resets:?}");
-        assert!(resets[0].starts_with("Resets at "), "{resets:?}");
-        assert!(resets[1].starts_with("Resets ") && resets[1].contains(" at "), "{resets:?}");
+        assert!(resets[0].text.starts_with("Resets at "), "{resets:?}");
+        assert!(resets[1].text.starts_with("Resets ") && resets[1].text.contains(" at "), "{resets:?}");
         // The meter clamps; the status lines print the true number.
         assert_eq!(tier.weekly_fraction(), Some(1.0));
         assert!(tier.status_lines().contains("Weekly usage: 137% used"), "{}", tier.status_lines());
@@ -1806,6 +2009,181 @@ mod tests {
         assert_eq!(*current_pct, Some(4));
         assert_eq!(*weekly_pct, Some(9));
         assert_eq!(tier_from_changed_current(&fresh, None), None, "no credential trusts nothing");
+    }
+
+    /// A plan string fit to show names the plan in words. The wire (muse
+    /// 1.4.0) sends an opaque numeric id in `SubscriptionUsage.tier`
+    /// instead — observed live as `27681631238169137` — and anything without
+    /// a letter is such an id, never a name.
+    #[test]
+    fn id_shaped_plan_names_are_never_human() {
+        assert!(!is_human_plan_name("27681631238169137"));
+        assert!(!is_human_plan_name(""));
+        assert!(!is_human_plan_name("   "));
+        assert!(!is_human_plan_name("123-456"));
+        assert!(is_human_plan_name("Power Usage"));
+        assert!(is_human_plan_name("Muse Code High Usage"));
+        assert_eq!(resolve_plan_name("Power Usage", None), "Power Usage");
+        assert_eq!(resolve_plan_name("27681631238169137", Some("Power Usage")), "Power Usage");
+        assert_eq!(resolve_plan_name("27681631238169137", None), "Subscription");
+        assert_eq!(resolve_plan_name("27681631238169137", Some("123")), "Subscription");
+    }
+
+    /// One wire observation with fixed stamps, for driving the builders
+    /// without a live connection.
+    fn wire_usage(tier: &str) -> SubscriptionUsage {
+        SubscriptionUsage {
+            observed_at_ms: 1_786_000_000_000,
+            tier: tier.to_owned(),
+            weekly: muse_client::schema::SubscriptionUsageWeekly {
+                resets_at_ms: 1_786_012_200_000,
+                used_percent: 9,
+            },
+            window: muse_client::schema::SubscriptionUsageWindow {
+                resets_at_ms: 1_786_003_020_000,
+                used_percent: 4,
+                window_duration_mins: 300,
+            },
+        }
+    }
+
+    /// A numeric wire plan with no previous reading reads as the generic
+    /// label everywhere — never the raw id — while the reset instants still
+    /// ride along for the duration rows.
+    #[test]
+    fn a_numeric_wire_plan_falls_back_to_the_generic_label() {
+        let tier = tier_from_usage(&wire_usage("27681631238169137"));
+        let Tier::Subscription { plan, resets, .. } = &tier else {
+            panic!("expected a subscription, got {tier:?}");
+        };
+        assert_eq!(plan, "Subscription");
+        assert_eq!(tier.footer_label(), "Subscription");
+        assert!(tier.status_lines().contains("Plan: Subscription"), "{}", tier.status_lines());
+        assert!(!tier.status_lines().contains("27681631238169137"), "{}", tier.status_lines());
+        assert_eq!(resets.len(), 2);
+        assert!(resets.iter().all(|clause| clause.resets_at_ms.is_some()), "{resets:?}");
+        assert_eq!(resets[0].resets_at_ms, Some(1_786_003_020_000));
+        assert_eq!(resets[1].resets_at_ms, Some(1_786_012_200_000));
+    }
+
+    /// A numeric wire reading keeps the last human plan name for this login:
+    /// first launch read "Power Usage" from the probe, and the usage
+    /// notification that follows must not switch the menu to the id.
+    #[test]
+    fn a_numeric_wire_reading_keeps_the_last_human_plan() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let mtime = 1_786_000_000u64;
+        let prev = Cached {
+            auth_mtime: Some(mtime),
+            tier: Some(Tier::Subscription {
+                plan: "Muse Code Power Usage".into(),
+                current_pct: Some(0),
+                weekly_pct: Some(2),
+                resets: vec![ResetClause::from("Resets at 5:17 PM")],
+                usage_unavailable: false,
+            }),
+            last_human_plan: Some("Muse Code Power Usage".into()),
+        };
+        crate::store::write_atomic(&cache_path(), &serde_json::to_vec_pretty(&prev).expect("seed"))
+            .expect("seed tier.json");
+        let params = serde_json::json!({
+            "observedAtMs": (mtime + 60) * 1000,
+            "tier": "27681631238169137",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": { "resetsAtMs": 1_786_003_020_000u64, "usedPercent": 4, "windowDurationMins": 300 },
+        });
+        let tier = tier_from_changed_current(&params, Some(mtime)).expect("a current notification is an answer");
+        let Tier::Subscription { plan, current_pct, weekly_pct, .. } = &tier else {
+            panic!("expected a subscription, got {tier:?}");
+        };
+        assert_eq!(plan, "Muse Code Power Usage");
+        assert_eq!(tier.footer_label(), "Power Usage");
+        assert_eq!(*current_pct, Some(4));
+        assert_eq!(*weekly_pct, Some(9));
+    }
+
+    /// `remember` persists the last human name alongside the tier and never a
+    /// numeric id: a numeric wire reading for the same login keeps the probe's
+    /// name, and with no history at all the file holds the generic label. A
+    /// failed probe never erases the established name.
+    #[test]
+    fn remember_persists_the_last_human_plan_and_never_a_numeric_id() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let human = Tier::Subscription {
+            plan: "Muse Code Power Usage".into(),
+            current_pct: Some(0),
+            weekly_pct: Some(2),
+            resets: vec![ResetClause::from("Resets at 5:17 PM")],
+            usage_unavailable: false,
+        };
+        let numeric = Tier::Subscription {
+            plan: "27681631238169137".into(),
+            current_pct: Some(4),
+            weekly_pct: Some(9),
+            resets: vec![ResetClause::timed("Resets at 5:17 PM".into(), 1_786_003_020_000)],
+            usage_unavailable: false,
+        };
+        remember(&human);
+        remember(&numeric);
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.auth_mtime, auth_mtime());
+        assert_eq!(back.last_human_plan.as_deref(), Some("Muse Code Power Usage"));
+        let Tier::Subscription { plan, .. } = back.tier.expect("a tier was remembered") else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(plan, "Muse Code Power Usage");
+        // A failed probe keeps the established name.
+        remember(&Tier::Unavailable("no tty".into()));
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.last_human_plan.as_deref(), Some("Muse Code Power Usage"));
+        // No history at all: the generic label, never the id.
+        std::fs::remove_file(cache_path()).expect("clear tier.json");
+        remember(&numeric);
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.last_human_plan, None);
+        let Tier::Subscription { plan, .. } = back.tier.expect("a tier was remembered") else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(plan, "Subscription");
+    }
+
+    /// `tier.json` as older builds wrote it — string clauses, no
+    /// `lastHumanPlan`, possibly a numeric plan — still reads, and resolves
+    /// to words, never an id.
+    #[test]
+    fn old_tier_json_without_new_keys_still_reads() {
+        let old = r#"{"authMtime":1,"tier":{"tier":"subscription","plan":"Muse Code Power Usage","currentPct":0,"weeklyPct":2,"resets":["Resets at 5:17 PM","Resets Sep 14 at 5:30 AM"],"usageUnavailable":false}}"#;
+        let cached: Cached = serde_json::from_str(old).expect("old tier.json deserialises");
+        assert_eq!(cached.last_human_plan, None);
+        let Tier::Subscription { plan, resets, .. } = cached.tier.expect("a tier") else {
+            panic!("expected a subscription");
+        };
+        assert_eq!(plan, "Muse Code Power Usage");
+        assert_eq!(resets.len(), 2);
+        assert!(resets.iter().all(|clause| clause.resets_at_ms.is_none()));
+        // And a numeric plan from such a file never reaches a surface.
+        let old_numeric = r#"{"authMtime":1,"tier":{"tier":"subscription","plan":"27681631238169137","currentPct":0,"weeklyPct":5,"resets":["Resets at 7:57 AM"],"usageUnavailable":false}}"#;
+        let cached: Cached = serde_json::from_str(old_numeric).expect("old tier.json deserialises");
+        let tier = cached.tier.expect("a tier");
+        assert_eq!(tier.footer_label(), "Subscription");
+        assert!(!tier.status_lines().contains("27681631238169137"), "{}", tier.status_lines());
+    }
+
+    /// Clauses round-trip through `tier.json`: timed clauses as maps carrying
+    /// the instant, probe-style clauses as the plain strings older builds
+    /// wrote — and those strings still read.
+    #[test]
+    fn reset_clauses_keep_their_instant_across_tier_json() {
+        let clause = ResetClause::timed("Resets at 5:17 PM".into(), 1_786_003_020_000);
+        let value = serde_json::to_value(&clause).expect("a timed clause serialises");
+        assert_eq!(value, serde_json::json!({"text": "Resets at 5:17 PM", "resetsAtMs": 1_786_003_020_000_i64}));
+        let back: ResetClause = serde_json::from_value(value).expect("a timed clause deserialises");
+        assert_eq!(back, clause);
+        let plain: ResetClause = serde_json::from_str("\"Resets at 5:17 PM\"").expect("a string clause reads");
+        assert_eq!(plain, ResetClause::from("Resets at 5:17 PM"));
+        assert_eq!(plain.resets_at_ms, None);
+        let plain_value = serde_json::to_value(&plain).expect("a plain clause serialises");
+        assert_eq!(plain_value, serde_json::Value::String("Resets at 5:17 PM".into()));
     }
 
     /// The `Drop` kill path sends SIGKILL: `/bin/sleep` through the same
