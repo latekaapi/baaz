@@ -122,6 +122,36 @@ pub struct CatalogModel {
     pub efforts: Vec<String>,
 }
 
+/// Normalize a Claude Code model id for catalog matching: lowercase, strip
+/// a trailing `[...]` context suffix (`opus[1m]`, `claude-opus-5[1m]`),
+/// strip a trailing `-YYYYMMDD` build-date stamp
+/// (`claude-haiku-4-5-20251001`), strip a leading `claude-`. The stream
+/// reports resolved full ids (`init`'s `model`) while the catalog keys on
+/// `value` aliases, so both sides normalize before comparing; callers match
+/// on the normalized form first, then on the family (the first `-`
+/// segment), so `claude-opus-5[1m]` finds an `opus[1m]` row.
+pub fn normalize_model_id(id: &str) -> String {
+    let lower = id.to_lowercase();
+    let no_context = match lower.strip_suffix(']') {
+        Some(inner) => match inner.split_once('[') {
+            Some((base, _)) => base.to_owned(),
+            None => lower.clone(),
+        },
+        None => lower,
+    };
+    let no_date = if no_context.len() > 9 {
+        let (head, tail) = no_context.split_at(no_context.len() - 8);
+        if tail.bytes().all(|byte| byte.is_ascii_digit()) && head.ends_with('-') {
+            head[..head.len() - 1].to_owned()
+        } else {
+            no_context
+        }
+    } else {
+        no_context
+    };
+    no_date.strip_prefix("claude-").unwrap_or(&no_date).to_owned()
+}
+
 /// The catalog rows out of an `initialize` answer's `response.response`:
 /// one [`CatalogModel`] per `models[]` entry, in answer order. Rows
 /// without a `value` are skipped, never fabricated; a missing or

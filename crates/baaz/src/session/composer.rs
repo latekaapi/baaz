@@ -228,10 +228,10 @@ impl SessionView {
     /// reads the selected model's `supportedReasoningEfforts` with the
     /// provider's own descriptions (or the catalog's union with a note when
     /// the model names no row); Claude Code reads the selected value's own
-    /// `supportedEffortLevels`, falling back to the `--effort` launch
-    /// flag's levels (`argv::CLAUDE_EFFORT_LEVELS`) before any catalog
-    /// folds. Nothing here is a constant shared across providers: changing
-    /// the model re-derives the list, so the chooser follows the selection.
+    /// `supportedEffortLevels`, offering only `Default` with a note before
+    /// any catalog folds. Nothing here is a constant shared across
+    /// providers: changing the model re-derives the list, so the chooser
+    /// follows the selection.
     pub(super) fn effort_options(&self) -> EffortOptions {
         match self.provider_kind() {
             ProviderId::Muse => EffortOptions::Available(muse_efforts()),
@@ -246,11 +246,20 @@ impl SessionView {
     const CODEX_OFF_CATALOG_NOTE: &str = "Not in Codex's model list — Codex validates the level";
 
     /// The Claude Code twin of [`Self::CODEX_OFF_CATALOG_NOTE`]: a model
-    /// the catalog omits (a resolved full id the menu never lists) still
-    /// offers the catalog's union, with the muted note saying whose
-    /// validation the levels carry.
+    /// no catalog row matches, even after normalising, still offers the
+    /// levels every row supports (the intersection), with the muted note
+    /// saying whose validation the levels carry.
     const CLAUDE_OFF_CATALOG_NOTE: &str =
         "Not in Claude Code's model list — Claude Code validates the level";
+
+    /// What the Claude Code effort menu says before any catalog folds: the
+    /// picker component has no disabled row, so the menu offers only
+    /// `Default`, and this note rides its detail line saying when the
+    /// levels arrive. The `--effort` launch flag's levels
+    /// (`argv::CLAUDE_EFFORT_LEVELS`) stay argv validation only — never a
+    /// menu offered as if the model validated them.
+    const CLAUDE_PRE_CATALOG_NOTE: &str =
+        "Effort levels load when the session starts — only Default until then";
 
     /// The level order a union follows: the closed enum's own spellings,
     /// least to most budget. A catalog id outside this list fails
@@ -350,14 +359,23 @@ impl SessionView {
 
     /// The Claude Code arm of [`SessionView::effort_options`]: the selected
     /// catalog value's own `supportedEffortLevels`, `Default` first. A row
-    /// that names no levels (Haiku) explains itself instead of listing the
-    /// launch flag's levels; a model the catalog omits (a resolved full id
-    /// the menu never lists) offers the catalog's union; with no catalog
-    /// folded yet the menu lists the `--effort` launch flag's own levels.
-    /// A level the closed enum cannot spell is skipped, never fabricated.
+    /// that names no levels (Haiku, or `supportsEffort: false`) explains
+    /// itself instead of listing levels; a resolved full id the menu never
+    /// lists (the chip reads "Opus 5 · 1M" after a turn) first resolves to
+    /// its catalog row by normalised id, and only a model no row matches
+    /// offers the levels every row supports (the intersection); with no
+    /// catalog folded yet the menu offers only `Default` with the note
+    /// saying the levels load when the session starts. A level the closed
+    /// enum cannot spell is skipped, never fabricated.
     fn claude_code_efforts(&self) -> EffortOptions {
         if self.claude_efforts.is_empty() {
-            return EffortOptions::Available(Self::claude_flag_efforts());
+            return EffortOptions::AvailableWithNote {
+                options: vec![EffortOption {
+                    effort: None,
+                    detail: effort_detail(None).to_owned(),
+                }],
+                note: Self::CLAUDE_PRE_CATALOG_NOTE.to_owned(),
+            };
         }
         let current = self
             .models
@@ -365,33 +383,77 @@ impl SessionView {
             .find(|m| m.is_active)
             .map(|m| m.model_id.as_str())
             .or(self.pending_model.as_deref());
-        let levels = current.and_then(|model| self.claude_efforts.get(model));
-        match levels {
-            Some(levels) if levels.is_empty() => {
-                let model = current.unwrap_or("this model");
-                EffortOptions::Unavailable(format!(
-                    "{model} offers no reasoning levels, so there is no effort to set."
-                ))
-            }
-            Some(levels) => EffortOptions::Available(Self::claude_level_options(levels)),
-            None => {
-                let mut union = std::collections::HashSet::new();
-                for levels in self.claude_efforts.values() {
-                    for level in levels {
-                        union.insert(level.as_str());
-                    }
-                }
-                let union: Vec<String> = Self::CODEX_LEVEL_ORDER
-                    .into_iter()
-                    .filter(|level| union.contains(level))
-                    .map(str::to_owned)
-                    .collect();
-                EffortOptions::AvailableWithNote {
-                    options: Self::claude_level_options(&union),
-                    note: Self::CLAUDE_OFF_CATALOG_NOTE.to_owned(),
-                }
+        if let Some(levels) = current.and_then(|model| self.claude_efforts.get(model)) {
+            return Self::claude_row_options(current.unwrap_or("this model"), levels);
+        }
+        if let Some(model) = current {
+            if let Some(levels) = Self::resolve_claude_row(model, &self.claude_efforts) {
+                return Self::claude_row_options(model, levels);
             }
         }
+        EffortOptions::AvailableWithNote {
+            options: Self::claude_level_options(&Self::claude_intersection_levels(&self.claude_efforts)),
+            note: Self::CLAUDE_OFF_CATALOG_NOTE.to_owned(),
+        }
+    }
+
+    /// One Claude Code catalog row as a menu: its own levels, or the
+    /// no-levels reason when the row names none.
+    fn claude_row_options(model: &str, levels: &[String]) -> EffortOptions {
+        if levels.is_empty() {
+            return EffortOptions::Unavailable(format!(
+                "{model} offers no reasoning levels, so there is no effort to set."
+            ));
+        }
+        EffortOptions::Available(Self::claude_level_options(levels))
+    }
+
+    /// Resolve an off-catalog Claude Code model id to its catalog row's
+    /// levels: both sides normalize through
+    /// `provider_claude_code::frame::normalize_model_id` (case, `[...]`
+    /// context, `-YYYYMMDD` date, leading `claude-`), so an alias still
+    /// finds its row; then the family (the first `-` segment) matches, so
+    /// a resolved `claude-opus-5[1m]` finds the `opus[1m]` row. Exact
+    /// normalized equality wins over family, catalog order decides ties.
+    fn resolve_claude_row<'a>(
+        model: &str,
+        efforts: &'a std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<&'a Vec<String>> {
+        let want = provider_claude_code::frame::normalize_model_id(model);
+        let want_family = want.split('-').next().unwrap_or(&want);
+        let mut family_match = None;
+        for (key, levels) in efforts {
+            let have = provider_claude_code::frame::normalize_model_id(key);
+            if have == want {
+                return Some(levels);
+            }
+            if family_match.is_none() && have.split('-').next().unwrap_or(&have) == want_family {
+                family_match = Some(levels);
+            }
+        }
+        family_match
+    }
+
+    /// The levels every catalog row supports, in launch-flag order: rows
+    /// that name no levels offer no control at all, so only rows with
+    /// levels intersect. An empty intersection is `Default` alone — still
+    /// offered with the off-catalog note, never the hardcoded flag list.
+    fn claude_intersection_levels(
+        efforts: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let mut sets: Vec<std::collections::HashSet<&str>> = efforts
+            .values()
+            .filter(|levels| !levels.is_empty())
+            .map(|levels| levels.iter().map(String::as_str).collect())
+            .collect();
+        let Some(first) = sets.pop() else { return Vec::new() };
+        let shared: std::collections::HashSet<&str> =
+            sets.into_iter().fold(first, |acc, set| acc.intersection(&set).copied().collect());
+        provider_claude_code::argv::CLAUDE_EFFORT_LEVELS
+            .into_iter()
+            .filter(|level| shared.contains(level))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// One effort menu from catalog level ids, `Default` first, with the
@@ -414,25 +476,6 @@ impl SessionView {
             }
         }
         options
-    }
-
-    /// The `--effort` launch flag's own levels
-    /// (`provider_claude_code::argv::CLAUDE_EFFORT_LEVELS`): what the menu
-    /// lists before any catalog folds. A level the closed enum cannot spell
-    /// would be skipped, never fabricated — today all five spell, so the
-    /// menu is Default plus five rows.
-    fn claude_flag_efforts() -> Vec<EffortOption> {
-        [
-            None,
-            Some(ReasoningEffort::Low),
-            Some(ReasoningEffort::Medium),
-            Some(ReasoningEffort::High),
-            Some(ReasoningEffort::Xhigh),
-            Some(ReasoningEffort::Max),
-        ]
-        .into_iter()
-        .map(|effort| EffortOption { effort, detail: effort_detail(effort).to_owned() })
-        .collect()
     }
 
     /// The session's project display name, for the empty state. Synced by
