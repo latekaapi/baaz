@@ -2128,6 +2128,16 @@ impl Harness {
         if !crate::provider_status::note_usage_refresh() {
             return;
         }
+        // A remembered pay-as-you-go older than the re-verify window is
+        // re-probed here too, not only at boot: a long-running window must
+        // not keep telling the person every turn bills when that answer
+        // was a one-off read (B7).
+        if matches!(self.tier, Some(crate::tier::Tier::PayAsYouGo))
+            && !self.tier_probing
+            && crate::tier::cached_at(crate::tier::now_secs()).is_none()
+        {
+            self.probe_tier(false, cx);
+        }
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
         let mut views: Vec<Entity<SessionView>> =
             self.session_cache.iter().map(|(_, view)| view.clone()).collect();

@@ -324,6 +324,19 @@ pub struct Cached {
     /// files older builds wrote.
     #[serde(default)]
     pub last_human_plan: Option<String>,
+    /// When this answer was taken, in whole seconds since the epoch. A
+    /// remembered pay-as-you-go older than ten minutes re-verifies instead
+    /// of being trusted; absent in files older builds wrote, which read as
+    /// needing re-verification for pay-as-you-go.
+    #[serde(default)]
+    pub probed_at_secs: Option<u64>,
+}
+
+/// Forget the remembered tier and plan name: a deliberate sign-out means
+/// the next login may be another account, which must never inherit this
+/// one's plan name through `lastHumanPlan`.
+pub fn forget() {
+    let _ = std::fs::remove_file(cache_path());
 }
 
 /// `~/Library/Application Support/baaz/tier.json`.
@@ -345,17 +358,51 @@ pub fn auth_mtime() -> Option<u64> {
 /// first's answer instead of driving a second TUI at the same workspace.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 
+/// How long a remembered pay-as-you-go is trusted before the next boot or
+/// menu refresh re-verifies it instead. A false pay-as-you-go tells the
+/// owner every turn is billed, so it gets the short bound; a remembered
+/// subscription keeps [`CACHE_TTL`].
+pub const PAYG_REVERIFY_AFTER: Duration = Duration::from_secs(600);
+
+/// A pay-as-you-go answer's age past which it re-verifies rather than being
+/// trusted. `None` (a file from before the stamp existed) reads as stale:
+/// re-probe rather than trust indefinitely.
+pub fn payg_answer_stale(probed_at_secs: Option<u64>, now_secs: u64) -> bool {
+    match probed_at_secs {
+        Some(taken) => now_secs.saturating_sub(taken) > PAYG_REVERIFY_AFTER.as_secs(),
+        None => true,
+    }
+}
+
+/// This machine's wall clock in whole seconds since the epoch.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
 /// The cached tier, when it was probed against the `auth.json` that is on disk
 /// now and inside [`CACHE_TTL`]. A stale entry — a login or a logout since,
 /// or an answer older than the hour — reads as `None`, which is what makes
-/// the caller re-probe.
+/// the caller re-probe. A remembered pay-as-you-go older than ten minutes
+/// reads as `None` sooner ([`payg_answer_stale`]); a remembered subscription
+/// keeps today's behaviour.
 pub fn cached() -> Option<Tier> {
-    let modified = std::fs::metadata(cache_path()).ok()?.modified().ok()?;
-    if modified.elapsed().ok()? > CACHE_TTL {
-        return None;
-    }
+    cached_at(now_secs())
+}
+
+/// [`cached`] with an explicit clock, so tests drive the age without waiting.
+pub fn cached_at(now: u64) -> Option<Tier> {
     let cached: Cached = crate::store::read_json(&cache_path());
     if cached.auth_mtime != auth_mtime() {
+        return None;
+    }
+    if matches!(cached.tier, Some(Tier::PayAsYouGo)) && payg_answer_stale(cached.probed_at_secs, now) {
+        return None;
+    }
+    let modified = std::fs::metadata(cache_path()).ok()?.modified().ok()?;
+    if modified.elapsed().ok()? > CACHE_TTL {
         return None;
     }
     let Cached { tier, last_human_plan, .. } = cached;
@@ -376,16 +423,18 @@ pub fn cached() -> Option<Tier> {
 ///
 /// A numeric wire plan is resolved before it is persisted — to the last
 /// human name for this login, else the generic label — and that name is kept
-/// alongside, so what is stored never shows an id. A failed probe never
-/// erases the name a previous reading established.
+/// alongside, so what is stored never shows an id. A reading that names no
+/// plan (pay-as-you-go, an unrecognised card, a numeric wire id) never
+/// erases the name a previous reading established, even across a credential
+/// refresh that changes the mtime key under it.
 pub fn remember(tier: &Tier) {
-    let mtime = auth_mtime();
+    remember_at(tier, auth_mtime(), now_secs());
+}
+
+/// [`remember`] with explicit stamps, so tests drive the mtime and the clock.
+pub fn remember_at(tier: &Tier, mtime: Option<u64>, now: u64) {
     let prev: Cached = crate::store::read_json(&cache_path());
-    let prev_known = if prev.auth_mtime == mtime {
-        prev.last_human_plan.filter(|name| is_human_plan_name(name))
-    } else {
-        None
-    };
+    let prev_known = prev.last_human_plan.filter(|name| is_human_plan_name(name));
     let own = match tier {
         Tier::Subscription { plan, .. } if is_human_plan_name(plan) => Some(plan.clone()),
         _ => None,
@@ -397,7 +446,8 @@ pub fn remember(tier: &Tier) {
             *plan = last_human_plan.clone().unwrap_or_else(|| GENERIC_PLAN_LABEL.to_owned());
         }
     }
-    let cached = Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan };
+    let cached =
+        Cached { auth_mtime: mtime, tier: Some(tier), last_human_plan, probed_at_secs: Some(now) };
     if let Ok(text) = serde_json::to_vec_pretty(&cached) {
         let _ = crate::store::write_atomic(&cache_path(), &text);
     }
@@ -928,6 +978,7 @@ pub fn tier_from_read_current(
 ///
 /// Every error is a `String` that is safe to show: it names what went wrong,
 /// never what the terminal said.
+#[cfg(test)]
 pub fn probe_primary(
     read: Option<&serde_json::Value>,
     auth_mtime_secs: Option<u64>,
@@ -937,6 +988,88 @@ pub fn probe_primary(
         return Ok(tier);
     }
     fallback()
+}
+
+/// How many extra PTY probes a provisional answer may cost: the first answer
+/// plus up to two more, each pair [`PAYG_CONFIRM_INTERVAL`] apart.
+pub const PAYG_CONFIRM_EXTRA_ATTEMPTS: usize = 2;
+/// How far apart confirmation probes run. On the background path only —
+/// tests inject their own wait.
+pub const PAYG_CONFIRM_INTERVAL: Duration = Duration::from_secs(15);
+/// How recently the credential may have been refreshed for a card answer to
+/// count as provisional: a token refresh lands a new `auth.json` mtime, and
+/// the card plausibly shows its transient wording while muse re-checks the
+/// new login.
+pub const AUTH_FRESH_WINDOW_SECS: u64 = 60;
+
+/// Whether `auth_mtime_secs` is within [`AUTH_FRESH_WINDOW_SECS`] of `now` —
+/// a refresh just happened. `None` (no credential) is never fresh.
+pub fn is_auth_fresh(auth_mtime_secs: Option<u64>, now_secs: u64) -> bool {
+    match auth_mtime_secs {
+        Some(mtime) => now_secs >= mtime && now_secs - mtime <= AUTH_FRESH_WINDOW_SECS,
+        None => false,
+    }
+}
+
+/// [`probe_primary`] with a provisional pay-as-you-go: the card's
+/// pay-as-you-go answer is never trusted from a single probe, and neither is
+/// any card answer probed within [`AUTH_FRESH_WINDOW_SECS`] of a credential
+/// refresh. A provisional answer re-probes on the caller's thread — the app
+/// calls this on the background path, where it keeps the existing
+/// probing/Checking state and never the pay-as-you-go banner — up to
+/// [`PAYG_CONFIRM_EXTRA_ATTEMPTS`] more times, [`PAYG_CONFIRM_INTERVAL`]
+/// apart (`sleep`, injected so tests never wait).
+///
+/// A subscription is still accepted at once, and so is anything the wire
+/// says: a current `usage/read` observation answers before any probe runs,
+/// which is what lets it replace a remembered pay-as-you-go. Pay-as-you-go
+/// is accepted only when two consecutive probes agree; anything else —
+/// a subscription, an unrecognised card, a failed probe, or probes that
+/// never agree — settles without it, so an unconfirmed pay-as-you-go is
+/// never surfaced and never remembered.
+///
+/// Every error is a `String` that is safe to show: it names what went wrong,
+/// never what the terminal said.
+pub fn probe_primary_confirmed(
+    read: Option<&serde_json::Value>,
+    auth_mtime_secs: Option<u64>,
+    now_secs: u64,
+    mut fallback: impl FnMut() -> Result<Tier, String>,
+    sleep: impl Fn(),
+) -> Result<Tier, String> {
+    if let Some(tier) = read.and_then(|value| tier_from_read_current(value, auth_mtime_secs)) {
+        return Ok(tier);
+    }
+    let fresh = is_auth_fresh(auth_mtime_secs, now_secs);
+    let first = fallback()?;
+    if matches!(first, Tier::Unavailable(_)) {
+        return Ok(first);
+    }
+    if matches!(first, Tier::Subscription { .. }) && !fresh {
+        return Ok(first);
+    }
+    let mut prev_payg = matches!(first, Tier::PayAsYouGo);
+    for _ in 0..PAYG_CONFIRM_EXTRA_ATTEMPTS {
+        sleep();
+        // A failed probe propagates: the caller settles it as unknown, never
+        // as pay-as-you-go.
+        let next = fallback()?;
+        if matches!(next, Tier::Subscription { .. }) {
+            return Ok(next);
+        }
+        if matches!(next, Tier::PayAsYouGo) {
+            if prev_payg {
+                return Ok(Tier::PayAsYouGo);
+            }
+            prev_payg = true;
+        } else {
+            // An unrecognised card fails safe, breaking the consecutive run.
+            return Ok(next);
+        }
+    }
+    // Unreachable: every later answer either agrees, subscribes, or fails
+    // safe — but a provisional answer must never escape unconfirmed.
+    Ok(Tier::Unavailable("the /upgrade card did not give the same answer twice".to_owned()))
 }
 
 /// Drive the TUI and read the `/upgrade` card. Blocking for up to
@@ -2086,6 +2219,7 @@ mod tests {
                 usage_unavailable: false,
             }),
             last_human_plan: Some("Muse Code Power Usage".into()),
+            probed_at_secs: Some(mtime),
         };
         crate::store::write_atomic(&cache_path(), &serde_json::to_vec_pretty(&prev).expect("seed"))
             .expect("seed tier.json");
@@ -2207,5 +2341,229 @@ mod tests {
         drop(pty);
         // Gone, not a zombie: the drop SIGKILLed and reaped it.
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+    }
+
+    /// A scripted PTY fallback: `answers` in order, counting calls, so the
+    /// confirmation loop is driven with explicit timestamps and no live
+    /// connection, no pseudo-terminal, and no waits.
+    fn scripted_probe(
+        answers: Vec<Result<Tier, String>>,
+        calls: &std::cell::Cell<usize>,
+    ) -> impl FnMut() -> Result<Tier, String> + '_ {
+        let mut answers = answers.into_iter();
+        move || {
+            calls.set(calls.get() + 1);
+            answers.next().expect("more PTY probes than scripted answers")
+        }
+    }
+
+    /// One subscription answer for the confirmation tests.
+    fn test_subscription() -> Tier {
+        Tier::Subscription {
+            plan: "Muse Code High Usage".into(),
+            current_pct: Some(2),
+            weekly_pct: Some(2),
+            resets: vec![],
+            usage_unavailable: false,
+        }
+    }
+
+    /// A one-off pay-as-you-go followed by a subscription resolves to the
+    /// subscription: the provisional answer is never surfaced and never
+    /// remembered.
+    #[test]
+    fn one_off_payg_then_subscription_resolves_to_subscription() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let mtime = 1_786_000_000u64;
+        let now = mtime + 3600;
+        let calls = std::cell::Cell::new(0);
+        let sleeps = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            None,
+            Some(mtime),
+            now,
+            scripted_probe(vec![Ok(Tier::PayAsYouGo), Ok(test_subscription())], &calls),
+            || sleeps.set(sleeps.get() + 1),
+        )
+        .expect("the subscription answers");
+        assert!(matches!(tier, Tier::Subscription { .. }), "got {tier:?}");
+        assert_eq!(calls.get(), 2, "the provisional answer re-probes once");
+        assert_eq!(sleeps.get(), 1, "confirmation probes run apart, on the background path");
+        // Remembering the decision persists the subscription, never the
+        // provisional pay-as-you-go.
+        remember_at(&tier, auth_mtime(), now_secs());
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert!(matches!(back.tier, Some(Tier::Subscription { .. })), "got {:?}", back.tier);
+    }
+
+    /// Two consecutive pay-as-you-go answers confirm pay-as-you-go.
+    #[test]
+    fn two_consecutive_payg_answers_confirm_payg() {
+        let mtime = 1_786_000_000u64;
+        let calls = std::cell::Cell::new(0);
+        let sleeps = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            None,
+            Some(mtime),
+            mtime + 3600,
+            scripted_probe(vec![Ok(Tier::PayAsYouGo), Ok(Tier::PayAsYouGo)], &calls),
+            || sleeps.set(sleeps.get() + 1),
+        )
+        .expect("two agreeing probes are an answer");
+        assert_eq!(tier, Tier::PayAsYouGo);
+        assert_eq!(calls.get(), 2, "confirmation costs one re-probe");
+        assert_eq!(sleeps.get(), 1);
+    }
+
+    /// A provisional pay-as-you-go whose re-probe fails settles as unknown,
+    /// never as pay-as-you-go.
+    #[test]
+    fn a_failed_reprobe_never_surfaces_payg() {
+        let mtime = 1_786_000_000u64;
+        let calls = std::cell::Cell::new(0);
+        let result = probe_primary_confirmed(
+            None,
+            Some(mtime),
+            mtime + 3600,
+            scripted_probe(
+                vec![Ok(Tier::PayAsYouGo), Err("the /upgrade card did not answer in time".into())],
+                &calls,
+            ),
+            || {},
+        );
+        assert!(result.is_err(), "got {result:?}");
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// A card answer probed within a minute of a credential refresh is
+    /// provisional even when it names a subscription; an older credential's
+    /// subscription is still accepted at once.
+    #[test]
+    fn a_just_refreshed_credential_makes_a_subscription_provisional() {
+        let mtime = 1_786_000_000u64;
+        // Long after the refresh: one probe is the answer.
+        let calls = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            None,
+            Some(mtime),
+            mtime + 3600,
+            scripted_probe(vec![Ok(test_subscription())], &calls),
+            || panic!("no re-probe past a refresh"),
+        )
+        .expect("a settled credential's subscription answers at once");
+        assert!(matches!(tier, Tier::Subscription { .. }));
+        assert_eq!(calls.get(), 1);
+        // Seconds after the refresh: the same answer needs one agreeing read.
+        let calls = std::cell::Cell::new(0);
+        let sleeps = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            None,
+            Some(mtime),
+            mtime + 10,
+            scripted_probe(vec![Ok(test_subscription()), Ok(test_subscription())], &calls),
+            || sleeps.set(sleeps.get() + 1),
+        )
+        .expect("two agreeing probes are an answer");
+        assert!(matches!(tier, Tier::Subscription { .. }));
+        assert_eq!(calls.get(), 2, "a refresh just happened: re-probe once");
+        assert_eq!(sleeps.get(), 1);
+        assert!(is_auth_fresh(Some(mtime), mtime + 10));
+        assert!(!is_auth_fresh(Some(mtime), mtime + 3600));
+        assert!(!is_auth_fresh(None, mtime + 10));
+    }
+
+    /// A remembered pay-as-you-go older than ten minutes re-verifies on the
+    /// next boot; a remembered subscription keeps today's behaviour.
+    #[test]
+    fn a_stale_remembered_payg_reverifies_while_a_subscription_stays_trusted() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let mtime = auth_mtime();
+        let taken = now_secs();
+        remember_at(&Tier::PayAsYouGo, mtime, taken);
+        assert_eq!(cached_at(taken + 30), Some(Tier::PayAsYouGo), "a fresh pay-as-you-go is still trusted");
+        assert_eq!(cached_at(taken + 601), None, "older than ten minutes: the next boot re-probes");
+        assert!(payg_answer_stale(None, taken), "a file from before the stamp reads as stale");
+        remember_at(&test_subscription(), mtime, taken);
+        assert!(
+            matches!(cached_at(taken + 601), Some(Tier::Subscription { .. })),
+            "a remembered subscription keeps today's behaviour"
+        );
+    }
+
+    /// A current wire observation replaces a remembered pay-as-you-go
+    /// without any PTY probe — on `usage/read` and on `usage/changed`.
+    #[test]
+    fn a_current_wire_observation_overrides_a_remembered_payg_without_probing() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        // The cache does not satisfy a stale pay-as-you-go in the first
+        // place: the next boot re-verifies instead of trusting it.
+        remember_at(&Tier::PayAsYouGo, auth_mtime(), now_secs().saturating_sub(3600));
+        assert_eq!(
+            cached_at(now_secs()),
+            None,
+            "a pay-as-you-go remembered over ten minutes ago re-verifies"
+        );
+        // ...and the re-verification answers from the wire when it can.
+        let mtime = 1_786_000_000u64;
+        let read = test_read((mtime + 60) * 1000);
+        let calls = std::cell::Cell::new(0);
+        let tier = probe_primary_confirmed(
+            Some(&read),
+            Some(mtime),
+            mtime + 3600,
+            scripted_probe(vec![Ok(Tier::PayAsYouGo)], &calls),
+            || panic!("the wire answers first: no PTY probe runs"),
+        )
+        .expect("a current observation is an answer");
+        assert!(matches!(tier, Tier::Subscription { .. }), "got {tier:?}");
+        assert_eq!(calls.get(), 0);
+        let changed = serde_json::json!({
+            "observedAtMs": (mtime + 60) * 1000,
+            "tier": "Muse Code High Usage",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": {
+                "resetsAtMs": 1_786_003_020_000u64,
+                "usedPercent": 4,
+                "windowDurationMins": 300,
+            },
+        });
+        assert!(
+            tier_from_changed_current(&changed, Some(mtime)).is_some(),
+            "a current usage/changed replaces a remembered pay-as-you-go"
+        );
+    }
+
+    /// Remembering pay-as-you-go across a credential refresh keeps the last
+    /// human plan name instead of writing it away.
+    #[test]
+    fn remembering_payg_across_a_refresh_keeps_the_last_human_plan() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let mtime = auth_mtime();
+        let taken = now_secs();
+        remember_at(&test_subscription(), mtime, taken);
+        // A refresh installs a new auth.json: the next remember lands under
+        // a different mtime key.
+        let refreshed = mtime.map(|m| m.saturating_add(120)).or(Some(taken));
+        assert_ne!(refreshed, mtime);
+        remember_at(&Tier::PayAsYouGo, refreshed, taken + 120);
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.tier, Some(Tier::PayAsYouGo));
+        assert_eq!(
+            back.last_human_plan.as_deref(),
+            Some("Muse Code High Usage"),
+            "a pay-as-you-go reading names no plan, so it must not erase the established one"
+        );
+    }
+
+    /// B7 review: a deliberate sign-out forgets the plan, so another account
+    /// signing in next never inherits this one's name.
+    #[test]
+    fn sign_out_forgets_the_last_human_plan() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        remember_at(&test_subscription(), auth_mtime(), now_secs());
+        forget();
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.last_human_plan, None);
+        assert_eq!(back.tier, None);
     }
 }
