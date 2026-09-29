@@ -387,10 +387,16 @@ impl SessionView {
         // the elapsed readout jump back to 0. A turn that is running before
         // and after this batch keeps its original instant and ticker.
         let running_before = self.running.as_ref().map(|running| (running.turn_id.clone(), running.started));
+        // Removed turns re-started later in this same batch (the X1b shift
+        // above) are the turn continuing, not ending: only removals with
+        // no restart behind them refresh the row, after the batch below.
+        let mut removed: Vec<String> = Vec::new();
+        let mut started: Vec<String> = Vec::new();
         for delta in landed {
             match delta {
                 Delta::TurnStarted { turn } => match turn {
                     Turn::Assistant { id, .. } => {
+                        started.push(id.clone());
                         // A start for a turn this view already saw complete
                         // is a re-delivered start (a replayed batch, a
                         // re-attach), not new work: it folds like any
@@ -409,7 +415,8 @@ impl SessionView {
                             self.start_ticker(cx);
                         }
                     }
-                    Turn::User { .. } => {
+                    Turn::User { id, .. } => {
+                        started.push(id.clone());
                         // The echo replaces the optimistic bubble over in
                         // `reconcile_optimistic`, but the turn has not
                         // spoken yet: `submitting` stays true — the view
@@ -433,6 +440,11 @@ impl SessionView {
                     if !meta.model.is_empty() {
                         self.history_model = Some(meta.model.clone());
                     }
+                    // Only the running turn's finish stands the lane down: a
+                    // late finish for an earlier turn must not clear a turn
+                    // still in flight. (The row that read Working forever
+                    // was a parked view nobody listened to — B3b fixes that
+                    // in the subscriptions, not here.)
                     if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {
                         self.clear_running();
                     }
@@ -453,6 +465,11 @@ impl SessionView {
                         self.clear_running();
                     }
                     self.submitting = false;
+                    // The turn's cards leave with it: remembered below so
+                    // the row re-reads once the batch lands. Re-started in
+                    // this same batch (the X1b shift) is the turn
+                    // continuing — no refresh for that.
+                    removed.push(turn_id.clone());
                 }
                 // An approval block that leaves `Pending` is the server's
                 // resolution: the only thing that ever settles the card
@@ -476,6 +493,16 @@ impl SessionView {
                 }
                 _ => {}
             }
+        }
+        // A removal the batch never restarts ended its turn: the row
+        // re-reads running and pending words on this, the way a finish or
+        // a card does above — previously no event fired here and a parked
+        // row froze (B3b). Once per batch, after the fold holds the
+        // batch's world, so the row never reads a mid-batch transient.
+        if removed.iter().any(|turn_id| !started.contains(turn_id)) {
+            cx.emit(super::SessionEvent::ProviderApprovalsChanged {
+                session_id: self.session_id.clone(),
+            });
         }
         if let (Some((turn_id, started)), Some(running)) = (running_before, self.running.as_mut()) {
             if running.turn_id == turn_id {

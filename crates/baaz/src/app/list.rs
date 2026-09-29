@@ -363,14 +363,34 @@ impl Harness {
         }, cx);
     }
 
+    /// The live view for a session: the open one, or a parked one the MRU
+    /// still holds. A parked provider lane keeps its child and drain task,
+    /// so its fold stays current — the row re-reads it the same way it
+    /// re-reads the open view (B3b). Never renders the parked transcript:
+    /// only the row's live facts come back. Takes the fields, not `self`,
+    /// so the caller keeps its mutable row borrow (disjoint fields).
+    fn live_view_for(
+        active: &Option<Entity<SessionView>>,
+        cache: &[(String, Entity<SessionView>)],
+        session_id: &str,
+        cx: &gpui::App,
+    ) -> Option<Entity<SessionView>> {
+        if let Some(view) = active.clone() {
+            if view.read(cx).session_id == session_id {
+                return Some(view);
+            }
+        }
+        cache.iter().find(|(id, _)| id == session_id).map(|(_, view)| view.clone())
+    }
+
     /// Keep one row's live facts current without waiting for `session/list`.
     ///
     /// A started turn reads running with its start (and stands down any
     /// recorded failure — the new turn supersedes it); an approval or
-    /// question event re-reads the open view's pending words, which the
-    /// wire never carries as text; anything else re-reads the open view's
+    /// question event re-reads the live view's pending words, which the
+    /// wire never carries as text; anything else re-reads the live view's
     /// running bit, so a completed turn stands the row down even before the
-    /// list reply lands. The open view is authoritative for its own
+    /// list reply lands. The live view is authoritative for its own
     /// attention: once it holds no pending words, stale wire flags clear
     /// rather than pinning the row on `Needs approval` until the next
     /// listing. Side sessions never touch rows — hidden title/byline
@@ -410,30 +430,31 @@ impl Harness {
                 changed = true;
             }
         }
-        if let Some(view) = self.active.clone() {
-            if view.read(cx).session_id == session_id {
-                let (approval, question) = view.read(cx).row_pending();
-                if entry.approval_command != approval {
-                    entry.approval_command = approval;
+        // The live view just applied this event (the route applies before
+        // it syncs): a parked provider lane's fold is as current as the
+        // open view's, so its row re-reads it the same way (B3b).
+        if let Some(view) = Self::live_view_for(&self.active, &self.session_cache, session_id, cx) {
+            let (approval, question) = view.read(cx).row_pending();
+            if entry.approval_command != approval {
+                entry.approval_command = approval;
+                changed = true;
+            }
+            if entry.pending_question != question {
+                entry.pending_question = question;
+                changed = true;
+            }
+            if !started {
+                let running = view.read(cx).busy();
+                if entry.running != running {
+                    entry.running = running;
                     changed = true;
                 }
-                if entry.pending_question != question {
-                    entry.pending_question = question;
-                    changed = true;
-                }
-                if !started {
-                    let running = view.read(cx).busy();
-                    if entry.running != running {
-                        entry.running = running;
-                        changed = true;
-                    }
-                }
-                // The view just spoke: no pending words means no pending
-                // attention, whatever the last listing said.
-                if entry.approval_command.is_none() && entry.pending_question.is_none() && !entry.attention.is_empty() {
-                    entry.attention.clear();
-                    changed = true;
-                }
+            }
+            // The view just spoke: no pending words means no pending
+            // attention, whatever the last listing said.
+            if entry.approval_command.is_none() && entry.pending_question.is_none() && !entry.attention.is_empty() {
+                entry.attention.clear();
+                changed = true;
             }
         }
         if changed {
