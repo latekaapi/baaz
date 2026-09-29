@@ -168,6 +168,23 @@ pub struct SessionEntry {
     pub last_error: Option<String>,
 }
 
+/// The row's time: content activity, never the server's resume-stamped clock.
+/// muse bumps `session/list`'s `updated_at` on `session/resume` — the leased
+/// touch that regenerates the view sidecar — which dragged a merely-opened
+/// row to the top reading "now". `last_activity_at` (muse 1.3.0) moves only
+/// on content and never precedes `created_at`, so the row sorts and reads by
+/// it; with no content record yet it falls back to `created_at`, which a
+/// resume cannot advance either. `updated_at` stays deliberately unread.
+fn activity_time(session: &muse_client::schema::Session) -> DateTime<Local> {
+    session
+        .last_activity_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse_time)
+        .unwrap_or_else(|| parse_time(&session.created_at))
+}
+
 impl SessionEntry {
     /// Join one `session/list` row with what the index and the store know.
     ///
@@ -255,7 +272,7 @@ impl SessionEntry {
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
-            updated: parse_time(&session.updated_at),
+            updated: activity_time(session),
             running: matches!(session.status, muse_client::schema::SessionStatus::Running),
             // A destination's wire count includes its hidden pack
             // exchange; the row matches the transcript (§8.4).
@@ -2188,6 +2205,143 @@ mod tests {
         assert_eq!(entry.branch.as_deref(), Some("feature-x"));
         assert_eq!(entry.label, UNNAMED);
         assert!(entry.needs_title);
+    }
+
+    /// Newest-first ids, the order `visible_sessions` and both groupings draw.
+    fn order_newest_first(rows: &[SessionEntry]) -> Vec<String> {
+        let mut rows: Vec<&SessionEntry> = rows.iter().collect();
+        rows.sort_by_key(|e| std::cmp::Reverse(e.updated));
+        rows.into_iter().map(|e| e.id.clone()).collect()
+    }
+
+    /// B8: a Muse row's time is content activity, never the server clock.
+    /// muse stamps `updated_at` on `session/resume` (the leased touch that
+    /// regenerates the view sidecar); `last_activity_at` moves only on
+    /// content. The row sorts and reads by the activity — and by creation
+    /// while no content record exists, which a resume cannot advance either.
+    #[test]
+    fn muse_rows_sort_and_read_by_content_activity() {
+        let projects = crate::projects::Projects::default();
+        // Activity older than the server stamp: the row reads the activity.
+        let mut resumed = wire_session();
+        resumed.session_id = "resumed".into();
+        resumed.created_at = "2026-09-10T10:00:00Z".into();
+        resumed.last_activity_at = Some("2026-09-11T10:00:00Z".into());
+        resumed.updated_at = "2026-09-13T10:00:00Z".into();
+        resumed.turn_count = 3;
+        let row = SessionEntry::join(&resumed, None, None, &projects);
+        assert_eq!(row.updated.timestamp(), parse_time("2026-09-11T10:00:00Z").timestamp());
+        // No content record yet: the row reads creation, not the resume stamp.
+        let mut fresh = wire_session();
+        fresh.session_id = "fresh".into();
+        fresh.created_at = "2026-09-10T10:00:00Z".into();
+        fresh.updated_at = "2026-09-13T10:00:00Z".into();
+        let row = SessionEntry::join(&fresh, None, None, &projects);
+        assert_eq!(row.updated.timestamp(), parse_time("2026-09-10T10:00:00Z").timestamp());
+    }
+
+    /// B8: a refresh where only `updated_at` moved (a resume, no new turn)
+    /// changes nothing on screen: same times, same order — and the reply
+    /// compares unchanged, so no regroup, retitle or search rebuild runs.
+    #[test]
+    fn a_resume_only_refresh_keeps_position_and_time() {
+        let projects = crate::projects::Projects::default();
+        let mut older = wire_session();
+        older.session_id = "older".into();
+        older.created_at = "2026-09-10T10:00:00Z".into();
+        older.last_activity_at = Some("2026-09-11T10:00:00Z".into());
+        older.updated_at = "2026-09-11T10:00:00Z".into();
+        older.turn_count = 3;
+        let mut newer = wire_session();
+        newer.session_id = "newer".into();
+        newer.created_at = "2026-09-10T12:00:00Z".into();
+        newer.last_activity_at = Some("2026-09-12T10:00:00Z".into());
+        newer.updated_at = "2026-09-12T10:00:00Z".into();
+        newer.turn_count = 5;
+        let before: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        assert_eq!(order_newest_first(&before), vec!["newer".to_owned(), "older".to_owned()]);
+        // The resume: the server stamps `updated_at` "now"; no content moved.
+        older.updated_at = "2026-09-13T10:00:00Z".into();
+        let after: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        assert_eq!(
+            order_newest_first(&after),
+            vec!["newer".to_owned(), "older".to_owned()],
+            "a resume alone never moves the row"
+        );
+        let time = |rows: &[SessionEntry], id: &str| {
+            rows.iter().find(|e| e.id == id).expect("row").updated.timestamp()
+        };
+        assert_eq!(time(&after, "older"), time(&before, "older"), "a resume alone never restamps the row");
+        assert!(list_apply_unchanged(&before, &after), "a resume-only reply applies as unchanged");
+    }
+
+    /// B8: a new turn moves the row. Only the activity field advances here
+    /// (the server stamp held fixed) to prove the row follows the activity
+    /// field, not the server clock.
+    #[test]
+    fn a_new_turn_moves_the_row() {
+        let projects = crate::projects::Projects::default();
+        let mut older = wire_session();
+        older.session_id = "older".into();
+        older.created_at = "2026-09-10T10:00:00Z".into();
+        older.last_activity_at = Some("2026-09-11T10:00:00Z".into());
+        older.updated_at = "2026-09-11T10:00:00Z".into();
+        older.turn_count = 3;
+        let mut newer = wire_session();
+        newer.session_id = "newer".into();
+        newer.created_at = "2026-09-10T12:00:00Z".into();
+        newer.last_activity_at = Some("2026-09-12T10:00:00Z".into());
+        newer.updated_at = "2026-09-12T10:00:00Z".into();
+        newer.turn_count = 5;
+        let before: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        assert_eq!(order_newest_first(&before), vec!["newer".to_owned(), "older".to_owned()]);
+        // A turn settles on "older": content (and the count) move.
+        older.last_activity_at = Some("2026-09-13T10:00:00Z".into());
+        older.turn_count = 4;
+        let after: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        assert_eq!(order_newest_first(&after), vec!["older".to_owned(), "newer".to_owned()]);
+        assert_eq!(
+            after.iter().find(|e| e.id == "older").expect("row").updated.timestamp(),
+            parse_time("2026-09-13T10:00:00Z").timestamp()
+        );
+        assert!(!list_apply_unchanged(&before, &after), "a turn is a real change and applies");
+    }
+
+    /// B8: the activity time needs no local memory — it rides the wire, so
+    /// rejoining the same rows from scratch after a restart reproduces the
+    /// same times in the same order, even past a resume that stamped
+    /// `updated_at` "now" in between.
+    #[test]
+    fn activity_time_survives_a_restart_past_a_resume() {
+        let projects = crate::projects::Projects::default();
+        let mut older = wire_session();
+        older.session_id = "older".into();
+        older.created_at = "2026-09-10T10:00:00Z".into();
+        older.last_activity_at = Some("2026-09-11T10:00:00Z".into());
+        older.updated_at = "2026-09-11T10:00:00Z".into();
+        older.turn_count = 3;
+        let mut newer = wire_session();
+        newer.session_id = "newer".into();
+        newer.created_at = "2026-09-10T12:00:00Z".into();
+        newer.last_activity_at = Some("2026-09-12T10:00:00Z".into());
+        newer.updated_at = "2026-09-12T10:00:00Z".into();
+        newer.turn_count = 5;
+        let before: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        // Restart: every local row dropped; meanwhile a resume stamped
+        // "older"'s `updated_at`. Rejoin from the wire alone.
+        older.updated_at = "2026-09-13T10:00:00Z".into();
+        let rejoined: Vec<SessionEntry> =
+            [&older, &newer].iter().map(|s| SessionEntry::join(s, None, None, &projects)).collect();
+        assert_eq!(order_newest_first(&rejoined), order_newest_first(&before));
+        for entry in &before {
+            let again = rejoined.iter().find(|e| e.id == entry.id).expect("row");
+            assert_eq!(again.updated.timestamp(), entry.updated.timestamp(), "restart keeps {}", entry.id);
+        }
     }
 
     /// The cached join is the plain join, row for row, while reading each
