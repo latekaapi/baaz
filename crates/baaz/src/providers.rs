@@ -283,22 +283,25 @@ pub(crate) type ProviderFactory = Arc<dyn Fn(ProviderId) -> Result<Provider, Pro
 /// The production factory: resolve the CLI, hold its adapter behind the
 /// gate, and shake hands. The session itself opens later, with
 /// `Command::OpenSession` on the same background turn.
-pub(crate) fn default_provider_factory() -> ProviderFactory {
-    Arc::new(open_provider)
+pub(crate) fn default_provider_factory(socket: PathBuf) -> ProviderFactory {
+    Arc::new(move |id| open_provider(id, &socket))
 }
 
-/// This window's terminal socket — what the relay's bridge is pointed at.
-/// The same path the app's [`TerminalService`](crate::terminal::TerminalService)
-/// serves (or would, when a second window owns the name — then the bridge
-/// answers that the terminal is unavailable rather than failing).
-pub(crate) fn terminal_socket_path() -> PathBuf {
-    crate::terminal::service::socket_path_for(&crate::store::support_dir(), std::process::id())
+/// This window's terminal socket — what the relay's bridge is pointed at:
+/// the service's actual [`socket_path`](crate::terminal::TerminalService::socket_path),
+/// threaded through from the Harness (or would-be, when a second window owns
+/// the name — then the bridge answers that the terminal is unavailable rather
+/// than failing). Never recomputed here: recomputing from the support dir and
+/// pid drifts from the bound fallback path and from test Harnesses' isolated
+/// sockets.
+pub(crate) fn terminal_socket_path(socket: &Path) -> PathBuf {
+    socket.to_path_buf()
 }
 
 /// Resolve, wrap, and connect one provider lane's child. `Err` when the
 /// binary is missing or the handshake fails — the caller surfaces it with
 /// the provider's name and opens nothing, never a silent muse fallback.
-fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
+fn open_provider(id: ProviderId, socket: &Path) -> Result<Provider, ProviderError> {
     let program = resolve_program(id).ok_or_else(|| ProviderError::Unavailable {
         reason: match binary_name(id) {
             Some(binary) => format!(
@@ -320,13 +323,7 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
             // operator's own connectors stay out via `--strict-mcp-config`
             // unless the switch below opted in.
             let adapter = provider_claude_code::ClaudeCodeAdapter::new(&program);
-            adapter.set_terminal_relay(provider_claude_code::TerminalRelay {
-                bridge: crate::terminal::relay::bridge_path(),
-                socket: terminal_socket_path(),
-                config_dir: crate::terminal::relay::claude_config_dir(
-                    &crate::store::support_dir(),
-                ),
-            });
+            adapter.set_terminal_relay(claude_terminal_relay(socket));
             adapter.set_use_own_mcp(use_own_mcp.claude_code);
             Provider::new(adapter)
         }
@@ -336,10 +333,7 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
             // owner's `~/.codex/config.toml` is never touched — with the
             // inherit-nothing disables unless the switch opted in.
             let adapter = provider_codex::CodexAdapter::new(&program);
-            adapter.set_terminal_relay(provider_codex::TerminalRelay {
-                bridge: crate::terminal::relay::bridge_path(),
-                socket: terminal_socket_path(),
-            });
+            adapter.set_terminal_relay(codex_terminal_relay(socket));
             adapter.set_use_own_mcp(use_own_mcp.codex);
             Provider::new(adapter)
         }
@@ -351,6 +345,26 @@ fn open_provider(id: ProviderId) -> Result<Provider, ProviderError> {
     };
     provider.connect(&crate::conn::connect_info())?;
     Ok(provider)
+}
+
+/// The Claude Code relay for this window's socket: the bridge beside this
+/// binary, pointed at the socket the service actually bound, with per-session
+/// configs under the support dir.
+pub(crate) fn claude_terminal_relay(socket: &Path) -> provider_claude_code::TerminalRelay {
+    provider_claude_code::TerminalRelay {
+        bridge: crate::terminal::relay::bridge_path(),
+        socket: terminal_socket_path(socket),
+        config_dir: crate::terminal::relay::claude_config_dir(&crate::store::support_dir()),
+    }
+}
+
+/// The Codex relay for this window's socket: the bridge as a per-session MCP
+/// server, pointed at the socket the service actually bound.
+pub(crate) fn codex_terminal_relay(socket: &Path) -> provider_codex::TerminalRelay {
+    provider_codex::TerminalRelay {
+        bridge: crate::terminal::relay::bridge_path(),
+        socket: terminal_socket_path(socket),
+    }
 }
 
 // ------------------------------------------------- the supplied model lists
@@ -996,6 +1010,17 @@ mod tests {
         assert_eq!(ProviderId::all().len(), 3);
         let ids: Vec<&str> = ProviderId::all().iter().map(|p| p.as_str()).collect();
         assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
+    }
+
+    /// The terminal relays carry the threaded socket through: whatever the
+    /// Harness's service actually bound (a fallback or an isolated test
+    /// socket) is what the bridge is pointed at — never a recompute.
+    #[test]
+    fn terminal_relays_carry_the_threaded_socket() {
+        let socket = PathBuf::from("/tmp/bh-1-2/run/terminal-1000000.sock");
+        assert_eq!(terminal_socket_path(&socket), socket);
+        assert_eq!(claude_terminal_relay(&socket).socket, socket);
+        assert_eq!(codex_terminal_relay(&socket).socket, socket);
     }
 
     #[test]
