@@ -388,7 +388,7 @@ impl SessionView {
         }
         if let Some(model) = current {
             if let Some(levels) = Self::resolve_claude_row(model, &self.claude_efforts) {
-                return Self::claude_row_options(model, levels);
+                return Self::claude_row_options(model, &levels);
             }
         }
         EffortOptions::AvailableWithNote {
@@ -408,30 +408,41 @@ impl SessionView {
         EffortOptions::Available(Self::claude_level_options(levels))
     }
 
-    /// Resolve an off-catalog Claude Code model id to its catalog row's
-    /// levels: both sides normalize through
-    /// `provider_claude_code::frame::normalize_model_id` (case, `[...]`
-    /// context, `-YYYYMMDD` date, leading `claude-`), so an alias still
-    /// finds its row; then the family (the first `-` segment) matches, so
-    /// a resolved `claude-opus-5[1m]` finds the `opus[1m]` row. Exact
-    /// normalized equality wins over family, catalog order decides ties.
-    fn resolve_claude_row<'a>(
+    /// Resolve an off-catalog Claude Code model id to catalog levels: both
+    /// sides normalize through `provider_claude_code::frame::normalize_model_id`
+    /// (case, `[...]` context, `-YYYYMMDD` date, leading `claude-`). Rows that
+    /// normalize to the same id win; failing that, rows of the same family
+    /// (the first `-` segment), so a resolved `claude-opus-5[1m]` finds the
+    /// `opus[1m]` row. When several rows match, only the levels every one of
+    /// them supports are offered — never one picked by map order, which two
+    /// same-family models (`opus`, `opus-4`) would make a coin toss.
+    pub(super) fn resolve_claude_row(
         model: &str,
-        efforts: &'a std::collections::HashMap<String, Vec<String>>,
-    ) -> Option<&'a Vec<String>> {
-        let want = provider_claude_code::frame::normalize_model_id(model);
-        let want_family = want.split('-').next().unwrap_or(&want);
-        let mut family_match = None;
-        for (key, levels) in efforts {
-            let have = provider_claude_code::frame::normalize_model_id(key);
-            if have == want {
-                return Some(levels);
-            }
-            if family_match.is_none() && have.split('-').next().unwrap_or(&have) == want_family {
-                family_match = Some(levels);
-            }
-        }
-        family_match
+        efforts: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<Vec<String>> {
+        use provider_claude_code::frame::normalize_model_id;
+        let want = normalize_model_id(model);
+        let family = |id: &str| id.split('-').next().unwrap_or(id).to_owned();
+        let pick = |matches: std::collections::HashMap<String, Vec<String>>| match matches.len() {
+            0 => None,
+            1 => matches.into_values().next(),
+            _ => Some(Self::claude_intersection_levels(&matches)),
+        };
+        let exact: std::collections::HashMap<String, Vec<String>> = efforts
+            .iter()
+            .filter(|(key, _)| normalize_model_id(key) == want)
+            .map(|(key, levels)| (key.clone(), levels.clone()))
+            .collect();
+        pick(exact).or_else(|| {
+            let want_family = family(&want);
+            pick(
+                efforts
+                    .iter()
+                    .filter(|(key, _)| family(&normalize_model_id(key)) == want_family)
+                    .map(|(key, levels)| (key.clone(), levels.clone()))
+                    .collect(),
+            )
+        })
     }
 
     /// The levels every catalog row supports, in launch-flag order: rows
