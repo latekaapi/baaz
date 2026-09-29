@@ -248,7 +248,8 @@ enum BrowserWait {
     /// webview may not exist yet — the agent can open a URL before the
     /// person ever opened the pane — so the navigation waits for the
     /// harness's registration, not just the load.
-    Open { url: String, navigated: bool },
+    /// `before` is the pane's (url, title) just before this call navigated.
+    Open { url: String, navigated: bool, before: Option<(String, String)> },
     /// `browser_read/links/click/type`: the script goes out once (`sent`),
     /// then the drain matches the answer by request id.
     Eval { request_id: u64, sent: bool, js: String, render: BrowserRender },
@@ -1134,7 +1135,7 @@ impl TerminalService {
                 if let Some(hook) = self.shared.browser_open.lock().expect("browser open hook").as_ref() {
                     hook(cx, session.to_owned());
                 }
-                pend(reply, BrowserWait::Open { url, navigated: false });
+                pend(reply, BrowserWait::Open { url, navigated: false, before: None });
             }
             "browser_read" | "browser_links" | "browser_click" | "browser_type" => {
                 let Some((js, render)) = self.browser_script(tool, params) else {
@@ -1225,7 +1226,7 @@ impl TerminalService {
         let mut done: Vec<usize> = Vec::new();
         for (index, item) in pending.iter_mut().enumerate() {
             match &mut item.wait {
-                BrowserWait::Open { url, navigated } => {
+                BrowserWait::Open { url, navigated, before } => {
                     // Re-resolve every pass: the lane's thread id may have
                     // landed after this call queued under its request id.
                     let key = self.resolve_session(&item.session);
@@ -1242,6 +1243,10 @@ impl TerminalService {
                         continue;
                     };
                     if !*navigated {
+                        // What the pane showed before this call: the old
+                        // page's title survives until the new one lands, so
+                        // only a change from here counts as this load.
+                        *before = Some((view.read(cx).url().to_string(), view.read(cx).title().to_string()));
                         let url = url.clone();
                         view.update(cx, |state, _| state.navigate(&url));
                         *navigated = true;
@@ -1263,7 +1268,11 @@ impl TerminalService {
                     // requested URL exactly never completes.
                     let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
                     let waited = timeout.saturating_sub(item.deadline.saturating_duration_since(Instant::now()));
-                    let settled = !title.is_empty() || waited >= OPEN_TITLE_GRACE.min(timeout / 2);
+                    // A title counts only once it differs from the page this
+                    // call navigated away from; a page whose title matches
+                    // the old one (or has none) answers after the grace.
+                    let fresh_title = !title.is_empty() && before.as_ref().is_none_or(|(_, old)| *old != title);
+                    let settled = fresh_title || waited >= OPEN_TITLE_GRACE.min(timeout / 2);
                     if settled {
                         send(&item.reply, &item.id, true, json!({"url": current, "title": title}));
                         done.push(index);
@@ -2780,6 +2789,44 @@ mod tests {
             out.get("title").and_then(Value::as_str).is_some_and(|title| !title.is_empty()),
             "the open still names the title: {out}"
         );
+    }
+
+    /// The old page's title survives the navigation until the new one lands
+    /// (the fake keeps one title across pages, the worst case): the open must
+    /// not answer on that stale title a pass after navigating, only once the
+    /// title changes or the grace runs out.
+    #[gpui::test]
+    fn browser_open_never_settles_on_the_previous_pages_title(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-stale");
+        fx.service.set_browser_timeout(Duration::from_secs(4));
+        assert!(!cx.update(|cx| state.read(cx).title().is_empty()), "the pane starts on a titled page");
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let line = serde_json::to_string(&json!({
+            "id": id, "session": "sb-stale", "tool": "browser_open",
+            "params": {"url": "https://example.org/next"},
+        }))
+        .expect("request serializes");
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(10))).expect("read timeout");
+        stream.write_all(line.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        let mut reader = BufReader::new(stream);
+        let started = Instant::now();
+        let mut reply = None;
+        while reply.is_none() && started.elapsed() < Duration::from_secs(8) {
+            cx.update(|cx| fx.service.drain(cx));
+            cx.run_until_parked();
+            reply = try_recv(&mut reader, id);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let reply = reply.expect("the open answers once the grace runs out");
+        assert!(
+            started.elapsed() >= Duration::from_millis(1500),
+            "answered after {:?} on the old page's unchanged title",
+            started.elapsed()
+        );
+        assert_eq!(result(&reply).get("url"), Some(&json!("https://example.org/next")));
     }
 
     /// A redirect to another host answers with the final URL: opening
