@@ -112,6 +112,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
     KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
     KeymapEntry { action: "ToggleRightPane", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Toggle right pane" },
+    KeymapEntry { action: "FocusAddress", keystroke: "cmd-l", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Focus address bar" },
     KeymapEntry { action: "TerminalSigint", keystroke: "ctrl-c", context: Some(crate::app::TERMINAL_CONTEXT), category: "terminal", label: "Interrupt terminal program" },
     KeymapEntry { action: "NoAction", keystroke: "enter", context: Some("BaazTerminal && !menu"), category: "terminal", label: "Terminal takes the key" },
     KeymapEntry { action: "NoAction", keystroke: "up", context: Some("BaazTerminal && !menu"), category: "terminal", label: "Terminal takes the key" },
@@ -187,6 +188,7 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
             crate::app::ToggleRightPane,
             context,
         )),
+        "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
         "TerminalSigint" => Some(gpui::KeyBinding::new(keystroke, crate::app::TerminalSigint, context)),
         "SkillsUp" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsUp, context)),
         "SkillsDown" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsDown, context)),
@@ -1149,6 +1151,30 @@ mod tests {
             defaults,
             "the explicit flag ignores the file too"
         );
+    }
+
+    /// ⌘L focuses the address bar from anywhere at root level: the table
+    /// carries the row with the pane grouping and label (removing it
+    /// leaves only the webview's own context binding, which never fires
+    /// while the native page holds the keyboard), and it builds a binding
+    /// for that same action.
+    #[test]
+    fn cmd_l_focuses_the_address_bar_from_the_root() {
+        let row = KEYMAP
+            .iter()
+            .find(|row| row.action == "FocusAddress")
+            .expect("the keymap carries a FocusAddress row");
+        assert_eq!(row.keystroke, "cmd-l");
+        assert_eq!(row.context, Some(aui::keys::ROOT_CONTEXT));
+        assert_eq!(row.category, "pane");
+        assert_eq!(row.label, "Focus address bar");
+        let bindings = build_bindings();
+        let built = bindings
+            .iter()
+            .find(|binding| action_name(binding) == "FocusAddress")
+            .expect("FocusAddress builds a binding");
+        assert_eq!(key_id(built), "cmd-l");
+        assert_eq!(context_text(built), Some(aui::keys::ROOT_CONTEXT.to_string()));
     }
 
     /// A truncated file boots with exactly the defaults and warns once for
