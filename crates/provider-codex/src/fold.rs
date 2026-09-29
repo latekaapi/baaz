@@ -1592,10 +1592,8 @@ impl CodexFold {
     fn remember_item(&mut self, notification: &Notification) -> Vec<Delta> {
         if let Some(item) = notification.item() {
             let changes = item.changes();
-            if item.kind() == "fileChange" && !changes.is_empty() {
-                if self.file_changes.len() < 64 {
-                    self.file_changes.insert(item.id().to_owned(), changes.to_owned());
-                }
+            if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
+                self.file_changes.insert(item.id().to_owned(), changes.to_owned());
             }
         }
         Vec::new()
@@ -3465,7 +3463,7 @@ mod tests {
         fold.record_decision("mcp-elicitation-0", "cancel");
         let deltas = fold.apply(&browser_call_completed("tool call failed"));
         assert!(
-            matches!(settled_state(&deltas, "mcp-elicitation-0"), Some(ApprovalState::Denied { .. })),
+            matches!(settled_state(&deltas, "mcp-elicitation-0"), Some(ApprovalState::Denied)),
             "the cancel press still settles denied after 200 ordinary approvals: {deltas:?}"
         );
     }

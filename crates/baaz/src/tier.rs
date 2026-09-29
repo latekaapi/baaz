@@ -798,6 +798,7 @@ fn restore_known_plan(tier: &mut Tier, raw_tier: &str, auth_mtime_secs: Option<u
 /// `None` is **not** [`Tier::Unavailable`]: it is "not known yet", and the
 /// caller falls through to the pty fallback ([`probe`]) rather than settling
 /// for unknown.
+#[cfg(test)]
 pub fn tier_from_read_value(value: &serde_json::Value) -> Option<Tier> {
     let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
     tier_from_read_result(&result)
@@ -805,6 +806,7 @@ pub fn tier_from_read_value(value: &serde_json::Value) -> Option<Tier> {
 
 /// [`tier_from_read_value`] without the JSON: `Some` builds the subscription,
 /// `None` (the `{}` case) falls through to the fallback.
+#[cfg(test)]
 pub fn tier_from_read_result(result: &UsageReadResult) -> Option<Tier> {
     result.usage.as_ref().map(tier_from_usage)
 }
@@ -812,6 +814,7 @@ pub fn tier_from_read_result(result: &UsageReadResult) -> Option<Tier> {
 /// One `usage/changed` notification's params → the tier it names, or `None`
 /// when the params do not decode. A malformed frame never clears a known
 /// tier: the caller keeps what it had.
+#[cfg(test)]
 pub fn tier_from_changed(params: &serde_json::Value) -> Option<Tier> {
     serde_json::from_value::<SubscriptionUsage>(params.clone()).ok().map(|usage| tier_from_usage(&usage))
 }

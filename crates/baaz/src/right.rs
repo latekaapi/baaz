@@ -1089,6 +1089,7 @@ pub(crate) fn walk_root_expanded_cached(
 /// `nodes` reaches `cap` and reports it in `truncated`. A directory over
 /// the cap contributes its first `cap` entries in the sorted order of the
 /// bounded read, and the pane's truncation note still applies.
+#[allow(clippy::too_many_arguments)] // one recursion's state, threaded by hand
 fn walk_level_cached(
     root: &Path,
     dir: &Path,
