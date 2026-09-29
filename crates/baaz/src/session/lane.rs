@@ -440,12 +440,14 @@ impl SessionView {
                     if !meta.model.is_empty() {
                         self.history_model = Some(meta.model.clone());
                     }
-                    // Any finished turn stands the lane down: no turn is in
-                    // flight afterwards, whatever id the running turn
-                    // carries — a cancelled turn (Codex "Deny and stop")
-                    // can finish under another id, and matching alone left
-                    // the row reading Working forever (B3b).
-                    self.clear_running();
+                    // Only the running turn's finish stands the lane down: a
+                    // late finish for an earlier turn must not clear a turn
+                    // still in flight. (The row that read Working forever
+                    // was a parked view nobody listened to — B3b fixes that
+                    // in the subscriptions, not here.)
+                    if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {
+                        self.clear_running();
+                    }
                     self.submitting = false;
                     // The lane's terminal: the application records the
                     // byline, the ledger row and the record bump, the way
