@@ -104,6 +104,14 @@ const HEADER_PX: f32 = 44.0;
 /// draws at a 38 px minimum above the native page.
 const BROWSER_NAV_PX: f32 = 38.0;
 
+/// The window's content box in window coordinates. `Window::content_mask`
+/// is only valid while painting (a debug assertion aborts a debug build when
+/// it is read from a mouse handler); the viewport is valid at any time and,
+/// outside paint, is exactly what the mask falls back to.
+fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
+    Bounds { origin: Point::default(), size: window.viewport_size() }
+}
+
 /// The browser pane's rectangle in window coordinates, derived from the
 /// window's content box: the pane hangs off the content's right edge,
 /// under the header, `right_width` wide. Pure so tests can drive it.
@@ -525,7 +533,7 @@ impl Harness {
         // laid-out rects never intersect and an open dock leaves the page
         // live. Both rects derive from the window's content box, so a
         // future full-width dock intersects and hides the page again.
-        let content = window.content_mask().bounds;
+        let content = window_content_bounds(window);
         let pane = self
             .layout
             .right_open
@@ -605,7 +613,7 @@ impl Harness {
             self.browser.states.get(&key).cloned()
         };
         let Some(state) = state else { return };
-        let content = window.content_mask().bounds;
+        let content = window_content_bounds(window);
         // The live page sits under the webview's nav row: a press on the
         // row itself is outside the page and takes the keyboard back too.
         let pane = browser_page_bounds(content, gpui::px(self.right_resize.width));
