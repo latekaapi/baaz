@@ -30,12 +30,16 @@ impl Harness {
     /// Find out what this login is entitled to (see `docs/06-billing.md`).
     ///
     /// The cache answers the ordinary boot; a probe only runs when `auth.json`
-    /// has changed since the cached answer was taken, or when `force` says the
+    /// has changed since the cached answer was taken, when a remembered
+    /// pay-as-you-go is older than ten minutes, or when `force` says the
     /// person asked. The probe asks `usage/read` first and falls through to
     /// the `/upgrade` screen scrape on a cold host or any read failure — the
-    /// scrape stays the only oracle for pay-as-you-go. **A probe that fails
-    /// never stops the app**: it becomes [`Tier::Unavailable`], which draws a
-    /// quiet banner and blocks nothing.
+    /// scrape stays the only oracle for pay-as-you-go. A pay-as-you-go card
+    /// answer is provisional until a second probe agrees, with the waits on
+    /// the background path; meanwhile the banner keeps the existing
+    /// probing/Checking state, never the pay-as-you-go banner. **A probe that
+    /// fails never stops the app**: it becomes [`Tier::Unavailable`], which
+    /// draws a quiet banner and blocks nothing.
     pub(crate) fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
         // `--tier` fakes the probe for a screenshot, and nothing else.
         if let Some(faked) = self.args.tier.clone() {
@@ -62,11 +66,19 @@ impl Harness {
         self.wire_call(
             cx,
             move || {
-                // The wire read stays at the edge: `probe_primary` decides
-                // from the already-read observation, which is what makes the
-                // decision reachable from a test without a live connection.
+                // The wire read stays at the edge: `probe_primary_confirmed`
+                // decides from the already-read observation, which is what
+                // makes the decision reachable from a test without a live
+                // connection. A provisional pay-as-you-go re-probes here, on
+                // the background path, while the banner keeps Checking.
                 let read = client.as_ref().and_then(|client| tier::read_usage_value(client));
-                tier::probe_primary(read.as_ref(), tier::auth_mtime(), || tier::probe(&program))
+                tier::probe_primary_confirmed(
+                    read.as_ref(),
+                    tier::auth_mtime(),
+                    tier::now_secs(),
+                    || tier::probe(&program),
+                    || std::thread::sleep(tier::PAYG_CONFIRM_INTERVAL),
+                )
             },
             move |this, result, cx| {
                 this.tier_probing = false;
