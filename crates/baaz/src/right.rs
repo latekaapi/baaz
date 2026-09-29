@@ -57,24 +57,51 @@ pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 /// 1 MB note must not turn into ten thousand elements.
 const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
-/// Render-path I/O probe: incremented by [`run_git`] and [`walk_root_capped`],
-/// the two blocking reads, and by nothing else. [`render`] must never move it;
-/// the purity test renders every kind twice and asserts it stays put.
+/// Render-path I/O probe: incremented by [`run_git`] and by every real
+/// `read_dir` in the file walk, and by nothing else. [`render`] must never
+/// move it; the purity test renders every kind twice and asserts it stays
+/// put. A directory served from [`DirListCache`] moves [`cache_hit_count`]
+/// instead, so the two apart prove a refresh skipped the filesystem.
 #[cfg(test)]
 static RENDER_IO_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// How many blocking reads [`run_git`] and [`walk_root_capped`] have done
-/// since process start (or the last [`reset_io_count`]).
+/// Directory listings served from [`DirListCache`] without a `read_dir`.
+#[cfg(test)]
+static DIR_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+
+/// Directory entries collected from `read_dir` before sorting, bounded by
+/// the walk cap: the test hook that proves a huge directory is read bounded.
+#[cfg(test)]
+static WALK_COLLECTED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many blocking reads [`run_git`] and the file walk have done since
+/// process start (or the last [`reset_io_count`]).
 #[cfg(test)]
 pub(crate) fn io_count() -> usize {
     RENDER_IO_COUNT.load(Ordering::Relaxed)
 }
 
-/// Zero [`io_count`]; the purity test drives [`render`] between the reset and
-/// the assert.
+/// How many directory listings came from [`DirListCache`] since process
+/// start (or the last [`reset_io_count`]).
+#[cfg(test)]
+pub(crate) fn cache_hit_count() -> usize {
+    DIR_CACHE_HITS.load(Ordering::Relaxed)
+}
+
+/// How many directory entries the walk collected since process start (or
+/// the last [`reset_io_count`]).
+#[cfg(test)]
+pub(crate) fn walk_collected_count() -> usize {
+    WALK_COLLECTED.load(Ordering::Relaxed)
+}
+
+/// Zero [`io_count`], [`cache_hit_count`] and [`walk_collected_count`]; the
+/// purity test drives [`render`] between the reset and the assert.
 #[cfg(test)]
 pub(crate) fn reset_io_count() {
-    RENDER_IO_COUNT.store(0, Ordering::Relaxed)
+    RENDER_IO_COUNT.store(0, Ordering::Relaxed);
+    DIR_CACHE_HITS.store(0, Ordering::Relaxed);
+    WALK_COLLECTED.store(0, Ordering::Relaxed);
 }
 
 /// Count one blocking read toward [`io_count`] in test builds; nothing in
@@ -82,6 +109,20 @@ pub(crate) fn reset_io_count() {
 fn note_io() {
     #[cfg(test)]
     RENDER_IO_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one cache-served directory toward [`cache_hit_count`] in test
+/// builds; nothing in production.
+fn note_cache_hit() {
+    #[cfg(test)]
+    DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one collected directory entry toward [`walk_collected_count`] in
+/// test builds; nothing in production.
+fn note_collected() {
+    #[cfg(test)]
+    WALK_COLLECTED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// One cached read: what was read, for which root, and when.
@@ -137,8 +178,48 @@ pub(crate) struct FilePreview {
     pub language: String,
     /// The file's bytes, when small enough.
     pub size: u64,
+    /// The file's mtime when the preview was (re)loaded: `None` when the
+    /// file was already gone. The refresh path compares it (with [`Self::size`])
+    /// against a fresh stat so an open preview follows edits on disk.
+    pub mtime: Option<std::time::SystemTime>,
     /// What the pane draws.
     pub content: PreviewContent,
+}
+
+/// One directory's cached listing: the sorted entries the walk replays while
+/// the directory's mtime stands still, so a refresh re-reads only what
+/// changed. Entries are already cut to the walk cap (see [`FILE_WALK_CAP`]).
+#[derive(Clone, Debug)]
+struct CachedDir {
+    /// The directory's mtime when it was read; `None` when it was unreadable.
+    mtime: Option<std::time::SystemTime>,
+    /// The cap the entries were cut to: a walk with another cap re-reads.
+    cap: usize,
+    /// `(name, is_dir)` pairs in name order, at most `cap` long.
+    entries: Vec<(String, bool)>,
+    /// Whether the directory held more than `cap` entries when read.
+    dir_truncated: bool,
+}
+
+/// The file walk's per-directory listing cache: one stamped entry per
+/// absolute directory path. It lives in [`RightCache`] so it survives
+/// between refreshes, and it is dropped whenever the root changes.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DirListCache {
+    /// The root the entries were read for; a walk for another root clears.
+    root: Option<PathBuf>,
+    /// Absolute directory path to its stamped listing.
+    dirs: HashMap<PathBuf, CachedDir>,
+}
+
+impl DirListCache {
+    /// Ready this cache for a walk of `root`, dropping everything read for
+    /// another root.
+    fn for_root(&mut self, root: &Path) {
+        if self.root.as_ref() != Some(&root.to_path_buf()) {
+            *self = DirListCache { root: Some(root.to_path_buf()), dirs: HashMap::new() };
+        }
+    }
 }
 
 #[derive(Default)]
@@ -158,6 +239,9 @@ pub(crate) struct RightCache {
     pub selected: HashMap<PathBuf, String>,
     /// The open preview per root, if the pane is previewing a file.
     pub previews: HashMap<PathBuf, FilePreview>,
+    /// The walk's per-directory listing cache: stamped per directory mtime,
+    /// surviving between refreshes, dropped when the root changes.
+    dir_lists: DirListCache,
     /// The pane's scroll handles, per root: the tree and the preview share
     /// one handle, so Escape/back returns to the tree where it was.
     files_scroll: RefCell<HashMap<PathBuf, ScrollHandle>>,
@@ -216,12 +300,36 @@ impl RightCache {
     }
 
     /// Land one [`read_snapshot`]: every slot takes the snapshot's root and
-    /// the landing instant.
+    /// the landing instant. A snapshot for another root drops the directory
+    /// listing cache: its stamped entries belong to the old tree.
     pub(crate) fn apply_snapshot(&mut self, snapshot: RightSnapshot, at: Instant) {
+        if self.files.as_ref().is_some_and(|slot| slot.root != snapshot.root) {
+            self.dir_lists = DirListCache::default();
+        }
         let root = snapshot.root.clone();
         self.git = Some(Stamped { root: root.clone(), at, value: snapshot.git });
         self.diffs = Some(Stamped { root: root.clone(), at, value: snapshot.diffs });
         self.files = Some(Stamped { root, at, value: (snapshot.files, snapshot.files_truncated) });
+    }
+
+    /// The directory listing cache, readied for `root`: everything read for
+    /// another root is dropped. The refresh path walks through this, so an
+    /// unchanged directory is not re-read.
+    pub(crate) fn dir_cache_for_root(&mut self, root: &Path) -> &mut DirListCache {
+        self.dir_lists.for_root(root);
+        &mut self.dir_lists
+    }
+
+    /// Move the directory listing cache out for a background refresh: the
+    /// background task owns it while the pane stays drawable.
+    pub(crate) fn take_dir_cache(&mut self) -> DirListCache {
+        std::mem::take(&mut self.dir_lists)
+    }
+
+    /// Land a background refresh's directory listing cache. A snapshot for
+    /// another root landing after this still drops it in [`apply_snapshot`].
+    pub(crate) fn restore_dir_cache(&mut self, cache: DirListCache) {
+        self.dir_lists = cache;
     }
 }
 
@@ -254,10 +362,27 @@ pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
 
 /// [`read_snapshot`] with the session's expansion state: open directories
 /// walk one level deeper each, so a toggle survives the re-read that draws
-/// it. Blocking, like [`read_snapshot`].
+/// it. Blocking, like [`read_snapshot`]. Test builds only: production
+/// refreshes go through [`read_snapshot_for_cached`].
+#[cfg(test)]
 pub(crate) fn read_snapshot_for(root: &Path, expanded: &HashSet<String>) -> RightSnapshot {
+    let mut cache = DirListCache::default();
+    read_snapshot_for_cached(root, expanded, &mut cache)
+}
+
+/// [`read_snapshot_for`] through the [`RightCache`] directory listing cache:
+/// directories whose mtime stands still are replayed, never re-read. The
+/// refresh path calls this off the render path and lands the listing (and
+/// the cache, owned by the caller) with [`RightCache::apply_snapshot`].
+/// Blocking, like [`read_snapshot`].
+pub(crate) fn read_snapshot_for_cached(
+    root: &Path,
+    expanded: &HashSet<String>,
+    dir_cache: &mut DirListCache,
+) -> RightSnapshot {
+    dir_cache.for_root(root);
     if crate::clock::deterministic() {
-        let (files, files_truncated) = walk_root_expanded(root, FILE_WALK_CAP, expanded);
+        let (files, files_truncated) = walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
         return RightSnapshot {
             root: root.to_path_buf(),
             git: Some(fixture_git_status()),
@@ -274,7 +399,7 @@ pub(crate) fn read_snapshot_for(root: &Path, expanded: &HashSet<String>) -> Righ
         }
         _ => ParsedDiffs { diffs: Vec::new(), truncated: false },
     };
-    let (files, files_truncated) = walk_root_expanded(root, FILE_WALK_CAP, expanded);
+    let (files, files_truncated) = walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
     RightSnapshot { root: root.to_path_buf(), git, diffs, files, files_truncated }
 }
 
@@ -932,62 +1057,146 @@ fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
 /// shows its children under it. Ids are root-relative paths (`sub`,
 /// `sub/nested`); names stay the last segment. Directories absent from
 /// `expanded` arrive closed. Returns the nodes and whether `cap` cut the
-/// listing short.
+/// listing short. Test builds only: production walks go through
+/// [`walk_root_expanded_cached`].
+#[cfg(test)]
 fn walk_root_expanded(root: &Path, cap: usize, expanded: &HashSet<String>) -> (Vec<FileNode>, bool) {
-    note_io();
+    let mut cache = DirListCache::default();
+    walk_root_expanded_cached(root, cap, expanded, &mut cache)
+}
+
+/// [`walk_root_expanded`] through `dir_cache`: a directory whose mtime is
+/// unchanged since its last read replays its cached entries instead of a
+/// `read_dir` (counted as a cache hit, not a read). A changed directory is
+/// re-read, bounded to `cap + 1` entries so a huge folder never fills a Vec
+/// that is sorted and truncated afterwards.
+pub(crate) fn walk_root_expanded_cached(
+    root: &Path,
+    cap: usize,
+    expanded: &HashSet<String>,
+    dir_cache: &mut DirListCache,
+) -> (Vec<FileNode>, bool) {
+    dir_cache.for_root(root);
     let mut nodes = Vec::new();
     let mut truncated = false;
-    walk_level(root, root, 0, cap, expanded, &mut nodes, &mut truncated);
+    walk_level_cached(root, root, 0, cap, expanded, dir_cache, &mut nodes, &mut truncated);
     (nodes, truncated)
 }
 
 /// One level of `dir` appended to `nodes`: sorted by name, skipping
 /// [`SKIP_DIRS`] by name at every level — whatever the entry is on disk,
 /// so a worktree's file-shaped `.git` never lists. Stops appending once
-/// `nodes` reaches `cap` and reports it in `truncated`.
-fn walk_level(
+/// `nodes` reaches `cap` and reports it in `truncated`. A directory over
+/// the cap contributes its first `cap` entries in the sorted order of the
+/// bounded read, and the pane's truncation note still applies.
+fn walk_level_cached(
     root: &Path,
     dir: &Path,
     depth: usize,
     cap: usize,
     expanded: &HashSet<String>,
+    dir_cache: &mut DirListCache,
     nodes: &mut Vec<FileNode>,
     truncated: &mut bool,
 ) {
-    let mut entries = match std::fs::read_dir(dir) {
-        Ok(dir) => dir.filter_map(Result::ok).collect::<Vec<_>>(),
+    if nodes.len() >= cap {
+        *truncated = true;
+        return;
+    }
+    // The stamp is one cheap `stat`: only a changed directory pays for a
+    // `read_dir` below. The stat itself never moves the I/O counter, so a
+    // fully cached refresh reads nothing countable.
+    let mtime = std::fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+    if let Some(hit) = dir_cache.dirs.get(dir) {
+        if hit.mtime == mtime && hit.cap == cap {
+            note_cache_hit();
+            let entries = hit.entries.clone();
+            let dir_truncated = hit.dir_truncated;
+            append_cached_entries(root, dir, depth, cap, expanded, dir_cache, &entries, dir_truncated, nodes, truncated);
+            return;
+        }
+    }
+    note_io();
+    // Bounded: at most `cap + 1` entries are ever collected — the `+ 1` is
+    // the probe that tells a full directory from a truncated one. A
+    // directory under the cap reads in full, so its order is exactly what
+    // the old sort-and-truncate showed.
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    let mut dir_truncated = false;
+    match std::fs::read_dir(dir) {
+        Ok(read) => {
+            for entry in read.filter_map(Result::ok) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                if entries.len() <= cap {
+                    let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
+                    entries.push((name, is_dir));
+                    note_collected();
+                } else {
+                    dir_truncated = true;
+                    break;
+                }
+            }
+        }
         Err(_) => return,
-    };
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if entries.len() > cap {
+        entries.truncate(cap);
+        dir_truncated = true;
+    }
+    dir_cache.dirs.insert(
+        dir.to_path_buf(),
+        CachedDir { mtime, cap, entries: entries.clone(), dir_truncated },
+    );
+    append_cached_entries(root, dir, depth, cap, expanded, dir_cache, &entries, dir_truncated, nodes, truncated);
+}
+
+/// Append one directory's `(name, is_dir)` entries to `nodes`, recursing
+/// into open directories. Shared by fresh reads and cache replays so both
+/// draw the same rows.
+#[allow(clippy::too_many_arguments)]
+fn append_cached_entries(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    cap: usize,
+    expanded: &HashSet<String>,
+    dir_cache: &mut DirListCache,
+    entries: &[(String, bool)],
+    dir_truncated: bool,
+    nodes: &mut Vec<FileNode>,
+    truncated: &mut bool,
+) {
+    if dir_truncated {
+        *truncated = true;
+    }
+    for (name, is_dir) in entries {
         if nodes.len() >= cap {
             *truncated = true;
             return;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if SKIP_DIRS.contains(&name.as_str()) {
-            continue;
-        }
         let id = dir
             .strip_prefix(root)
             .ok()
-            .map(|relative| relative.join(&name))
+            .map(|relative| relative.join(name))
             .and_then(|relative| relative.to_str().map(str::to_string))
             .unwrap_or_else(|| name.clone());
-        let is_dir = entry.file_type().as_ref().is_ok_and(|kind| kind.is_dir());
-        if is_dir {
+        if *is_dir {
             let open = expanded.contains(&id);
-            nodes.push(FileNode::dir(id.clone(), name, open).depth(depth));
+            nodes.push(FileNode::dir(id.clone(), name.clone(), open).depth(depth));
             if open {
-                walk_level(root, &dir.join(entry.file_name()), depth + 1, cap, expanded, nodes, truncated);
+                walk_level_cached(root, &dir.join(name), depth + 1, cap, expanded, dir_cache, nodes, truncated);
                 if nodes.len() >= cap {
                     *truncated = true;
                     return;
                 }
             }
         } else {
-            let kind = file_type_for(&name);
-            nodes.push(FileNode::file(id, name, kind).depth(depth));
+            let kind = file_type_for(name);
+            nodes.push(FileNode::file(id, name.clone(), kind).depth(depth));
         }
     }
 }
@@ -1100,6 +1309,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
                 name,
                 language: preview_language(id),
                 size: 0,
+                mtime: None,
                 content: PreviewContent::Card { meta: "The file is gone — it may have been moved or deleted.".into() },
             },
         );
@@ -1112,6 +1322,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
     }
     cache.selected.insert(root.to_path_buf(), id.to_string());
     let size = meta.len();
+    let mtime = meta.modified().ok();
     if size > PREVIEW_MAX_BYTES {
         cache.previews.insert(
             root.to_path_buf(),
@@ -1120,6 +1331,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
                 name,
                 language: preview_language(id),
                 size,
+                mtime,
                 content: PreviewContent::Card {
                     meta: format!("{} — too large to preview", friendly_size(size)),
                 },
@@ -1134,6 +1346,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
             name,
             language: preview_language(id),
             size,
+            mtime,
             content: PreviewContent::Loading,
         },
     );
@@ -1171,8 +1384,97 @@ pub(crate) fn complete_file_preview(
     };
     cache.previews.insert(
         root.to_path_buf(),
-        FilePreview { path: id.to_string(), name, language, size: current.size, content },
+        FilePreview {
+            path: id.to_string(),
+            name,
+            language,
+            size: current.size,
+            mtime: current.mtime,
+            content,
+        },
     );
+    true
+}
+
+/// What the background refresh learned about the open preview: re-read it.
+/// `bytes` is `None` when the file is gone, is a directory now, is too
+/// large, or could not be read — [`apply_preview_reload`] lets
+/// [`begin_file_preview`] decide the card in those cases.
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewReload {
+    /// The tree id to re-read, matching the preview's path.
+    pub id: String,
+    /// The file's fresh bytes, when it is small enough to preview.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// Decide off the render path whether the open preview changed on disk:
+/// `Some` when its mtime or size moved (or it vanished), `None` when it is
+/// unchanged — or still landing its first read, which the refresh must not
+/// disturb. Blocking on one stat plus at most one capped read: the refresh
+/// path runs it on its background task.
+pub(crate) fn preview_reload_for(root: &Path, preview: &FilePreview) -> Option<PreviewReload> {
+    if preview.content == PreviewContent::Loading {
+        return None;
+    }
+    let path = root.join(&preview.path);
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(_) => {
+            // Gone now: reload only while the preview still shows bytes from
+            // when it existed (`mtime` set) — never loop a gone card.
+            return if preview.mtime.is_some() {
+                Some(PreviewReload { id: preview.path.clone(), bytes: None })
+            } else {
+                None
+            };
+        }
+    };
+    if meta.is_dir() {
+        return if preview.mtime.is_some() {
+            Some(PreviewReload { id: preview.path.clone(), bytes: None })
+        } else {
+            None
+        };
+    }
+    let size = meta.len();
+    let mtime = meta.modified().ok();
+    if mtime == preview.mtime && size == preview.size {
+        return None;
+    }
+    let bytes = if size > PREVIEW_MAX_BYTES { None } else { std::fs::read(&path).ok() };
+    Some(PreviewReload { id: preview.path.clone(), bytes })
+}
+
+/// The preview's shown text, if it shows any: the code for text files, the
+/// source for markdown — `None` for loading and card previews. The refresh
+/// tests read through this instead of destructuring [`PreviewContent`].
+#[cfg(test)]
+pub(crate) fn preview_text_shown(preview: &FilePreview) -> Option<&str> {
+    match &preview.content {
+        PreviewContent::Text { code, .. } => Some(code),
+        PreviewContent::Markdown { text } => Some(text),
+        _ => None,
+    }
+}
+
+/// Land a [`preview_reload_for`] decision: re-run the preview load for its
+/// id through [`begin_file_preview`]/[`complete_file_preview`], so a
+/// changed file shows its new bytes and a deleted one shows the existing
+/// not-found card instead of stale text. The stale-landing guard still
+/// holds: a preview that moved on (or closed) is left alone. Returns whether
+/// a preview was updated.
+pub(crate) fn apply_preview_reload(cache: &mut RightCache, root: &Path, reload: PreviewReload) -> bool {
+    let Some(current) = cache.preview_for(root) else {
+        return false;
+    };
+    if current.path != reload.id || current.content == PreviewContent::Loading {
+        return false;
+    }
+    if begin_file_preview(cache, root, &reload.id) {
+        complete_file_preview(cache, root, &reload.id, reload.bytes);
+    }
+    // `begin` returning false already landed the gone/too-large card itself.
     true
 }
 
@@ -1815,6 +2117,122 @@ mod tests {
         let (nodes, truncated) = walk_root_capped(&root, 3);
         assert_eq!(nodes.len(), 3);
         assert!(truncated);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// H1: a huge directory is read bounded — never sorted-and-truncated
+    /// from an unbounded Vec. 2000 entries collect at most `cap + 1` (the
+    /// `+ 1` probe) while the listing still truncates at the cap.
+    #[test]
+    fn a_huge_directory_is_read_bounded() {
+        let root = temp_root("walk-bounded");
+        for index in 0..2000 {
+            std::fs::write(root.join(format!("f{index:04}.txt")), "x").unwrap();
+        }
+        let mut cache = RightCache::default();
+        reset_io_count();
+        let (nodes, truncated) =
+            walk_root_expanded_cached(&root, FILE_WALK_CAP, &HashSet::new(), cache.dir_cache_for_root(&root));
+        assert!(truncated, "2000 entries over a 300 cap must truncate");
+        assert_eq!(nodes.len(), FILE_WALK_CAP);
+        assert!(
+            walk_collected_count() <= FILE_WALK_CAP + 1,
+            "the read must stay bounded, collected {}",
+            walk_collected_count()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// H1: two refreshes of a root with an expanded 2000-file directory read
+    /// that directory once, then not at all — until a new file moves its
+    /// mtime, which re-reads just that directory.
+    #[test]
+    fn unchanged_expanded_directories_are_not_reread() {
+        let root = temp_root("walk-dir-cache");
+        std::fs::create_dir_all(root.join("big")).unwrap();
+        for index in 0..2000 {
+            std::fs::write(root.join("big").join(format!("f{index:04}.txt")), "x").unwrap();
+        }
+        let mut expanded = HashSet::new();
+        expanded.insert("big".to_string());
+        let mut cache = RightCache::default();
+        reset_io_count();
+        let (nodes, truncated) =
+            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        assert!(truncated);
+        assert_eq!(nodes.len(), FILE_WALK_CAP);
+        let first_reads = io_count();
+        assert!(first_reads > 0, "the first refresh must read");
+        let first_hits = cache_hit_count();
+        // Nothing changed: the second refresh replays both directories.
+        let (again, _) =
+            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        assert_eq!(again.len(), nodes.len());
+        assert_eq!(
+            io_count(),
+            first_reads,
+            "an unchanged tree must not re-read any directory (would re-read on the old wholesale walk)"
+        );
+        assert!(cache_hit_count() > first_hits, "both directories must replay from the cache");
+        // A new file moves only `big`'s mtime: only `big` is re-read.
+        std::fs::write(root.join("big").join("f2000.txt"), "x").unwrap();
+        let (later, truncated) =
+            walk_root_expanded_cached(&root, FILE_WALK_CAP, &expanded, cache.dir_cache_for_root(&root));
+        assert!(truncated);
+        assert_eq!(later.len(), FILE_WALK_CAP);
+        assert!(io_count() > first_reads, "a changed directory must be re-read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// H1: the preview follows the file. A rewrite (here a longer one, so
+    /// the size stamp moves even on a coarse-mtime filesystem) reloads on
+    /// the next refresh; an unchanged file reloads nothing; a deleted file
+    /// lands the existing not-found card instead of stale text.
+    #[test]
+    fn a_previewed_file_rewritten_on_disk_reloads_on_refresh() {
+        let root = temp_root("preview-follows");
+        std::fs::write(root.join("doc.txt"), "version one\n").unwrap();
+        let mut cache = RightCache::default();
+        assert!(begin_file_preview(&mut cache, &root, "doc.txt"));
+        let bytes = std::fs::read(root.join("doc.txt")).ok();
+        assert!(complete_file_preview(&mut cache, &root, "doc.txt", bytes));
+        let preview = cache.preview_for(&root).expect("a preview must be open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Text { code, .. } if code.contains("version one")),
+            "unexpected content: {:?}",
+            preview.content
+        );
+        // Unchanged: no reload.
+        assert!(preview_reload_for(&root, &preview).is_none(), "an unchanged file must not reload");
+        // Rewritten: the next refresh reloads and lands the new bytes.
+        std::fs::write(root.join("doc.txt"), "version two, rewritten at length\n").unwrap();
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        let reload = preview_reload_for(&root, &preview).expect("a rewritten file must reload");
+        assert_eq!(reload.id, "doc.txt");
+        assert!(apply_preview_reload(&mut cache, &root, reload));
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Text { code, .. } if code.contains("version two")),
+            "the preview must show the new bytes, got: {:?}",
+            preview.content
+        );
+        // Settled again: no further reload.
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        assert!(preview_reload_for(&root, &preview).is_none());
+        // Deleted: the existing not-found card, not the stale text.
+        std::fs::remove_file(root.join("doc.txt")).unwrap();
+        let preview = cache.preview_for(&root).expect("the preview stays open");
+        let reload = preview_reload_for(&root, &preview).expect("a deleted file must reload");
+        assert!(apply_preview_reload(&mut cache, &root, reload));
+        let preview = cache.preview_for(&root).expect("a preview must be open");
+        assert!(
+            matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("gone")),
+            "a deleted file must show the not-found card, got: {:?}",
+            preview.content
+        );
+        // The gone card never loops: nothing more to reload.
+        let preview = cache.preview_for(&root).expect("a preview must be open");
+        assert!(preview_reload_for(&root, &preview).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
