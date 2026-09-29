@@ -89,7 +89,8 @@ pub const READ_MAX: usize = 32_768;
 /// At most this many early/late browser answers wait in the stash.
 const EVAL_STASH_MAX: usize = 64;
 
-/// How long `browser_open` waits for a page title after the URL matches.
+/// How long `browser_open` waits for a page title after its navigation
+/// before answering with whatever the page has (often a title-less page).
 const OPEN_TITLE_GRACE: Duration = Duration::from_secs(3);
 /// `terminal_run`'s default `timeout_ms`.
 pub const RUN_DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -184,6 +185,11 @@ struct Shared {
     /// pane, which the harness defers like [`ActivityHook`] (same
     /// re-entrancy rule — `drain` runs inside a Harness update).
     browser_open: Mutex<Option<BrowserOpenHook>>,
+    /// Spawn-time request ids a provider lane outgrew: Codex answers
+    /// `OpenSession` with a server-minted thread id, while its bridge keeps
+    /// calling with `--session <request_id>`. Maps request id → thread id so
+    /// those calls still reach the lane's tabs and browser.
+    session_aliases: Mutex<HashMap<String, String>>,
 }
 
 /// What the harness does when the agent runs something: open the dock (not
@@ -237,10 +243,11 @@ struct PendingBrowser {
 /// What a [`PendingBrowser`] is waiting for.
 enum BrowserWait {
     /// `browser_open`: navigate once the session's webview exists, then
-    /// answer once it shows the URL. The webview may not exist yet — the
-    /// agent can open a URL before the person ever opened the pane — so
-    /// the navigation waits for the harness's registration, not just the
-    /// load.
+    /// answer once the page settles — with its FINAL url and title, never
+    /// the requested URL, which WebKit normalises and redirects. The
+    /// webview may not exist yet — the agent can open a URL before the
+    /// person ever opened the pane — so the navigation waits for the
+    /// harness's registration, not just the load.
     Open { url: String, navigated: bool },
     /// `browser_read/links/click/type`: the script goes out once (`sent`),
     /// then the drain matches the answer by request id.
@@ -309,6 +316,7 @@ impl TerminalService {
             next_request: AtomicU64::new(1),
             browser_timeout: Mutex::new(BROWSER_TIMEOUT),
             browser_open: Mutex::new(None),
+            session_aliases: Mutex::new(HashMap::new()),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
         // A leftover file from a crashed run binds fine once removed; a
@@ -370,6 +378,35 @@ impl TerminalService {
         self.shared.browsers.lock().expect("browser registry").insert(session.to_owned(), state);
     }
 
+    /// Remember that `from` (a provider open's spawn-time request id) is now
+    /// served as `to` (the lane's thread id): later tool calls naming `from`
+    /// resolve to `to`. Called on the UI thread when the lane's thread id
+    /// lands. Idempotent; `from == to` stores nothing.
+    pub fn alias_session(&self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        self.shared
+            .session_aliases
+            .lock()
+            .expect("session aliases")
+            .insert(from.to_owned(), to.to_owned());
+    }
+
+    /// The lane id `session` now answers as: one alias chain, cycle-guarded.
+    /// Unaliased ids answer as themselves, so this is safe to call blindly.
+    fn resolve_session(&self, session: &str) -> String {
+        let aliases = self.shared.session_aliases.lock().expect("session aliases");
+        let mut current = session.to_owned();
+        for _ in 0..8 {
+            match aliases.get(&current) {
+                Some(next) if next != &current => current = next.clone(),
+                _ => break,
+            }
+        }
+        current
+    }
+
     /// What the harness runs on the UI thread when the agent opens a URL
     /// (open the Browser pane for that session). Test hooks observe it
     /// instead. Same re-entrancy rule as
@@ -408,7 +445,13 @@ impl TerminalService {
     }
 
     fn execute(&self, job: Job, cx: &mut App) {
-        let root = match self.shared.sessions.lock().expect("session registry").get(&job.session) {
+        // A provider lane outgrows its spawn-time request id (Codex serves
+        // the server-minted thread id from then on): route the call under
+        // the id the lane answers as now. Terminal tools key tabs by project
+        // root so either id would find the same tabs; resolving keeps the
+        // recorded origin on the lane's current id, like the browser tools.
+        let session = self.resolve_session(&job.session);
+        let root = match self.shared.sessions.lock().expect("session registry").get(&session) {
             Some(root) => root.clone(),
             None => {
                 send(&job.reply, &job.id, false, json!({"error": format!("unknown session: no session the app opened is named {}", job.session)}));
@@ -419,19 +462,19 @@ impl TerminalService {
         // answer at once, while `wait: exit` queues and answers later from
         // `poll_runs` — its reply channel rides the pending run, not this.
         if job.tool == "terminal_run" {
-            self.run(&root, Some(job.session.clone()), &job.params, &job.id, job.reply, cx);
+            self.run(&root, Some(session.clone()), &job.params, &job.id, job.reply, cx);
             return;
         }
         // `browser_*` likewise sends its own replies: refusals answer at
         // once, while navigations and evaluations queue for
         // `poll_browser` — their reply channels ride the pending item.
         if BROWSER_TOOL_NAMES.contains(&job.tool.as_str()) {
-            self.browser_tool(&job.session, &job.tool, &job.params, &job.id, job.reply, cx);
+            self.browser_tool(&session, &job.tool, &job.params, &job.id, job.reply, cx);
             return;
         }
         let outcome: Result<Value, String> = match job.tool.as_str() {
             "terminal_list" => self.list(&root, cx),
-            "terminal_open" => self.open(&root, Some(job.session.clone()), &job.params, cx),
+            "terminal_open" => self.open(&root, Some(session.clone()), &job.params, cx),
             "terminal_read" => self.read(&root, &job.params, cx),
             "terminal_screen" => self.screen(&root, &job.params, cx),
             "terminal_send" => self.send(&root, &job.params, cx),
@@ -1052,6 +1095,11 @@ impl TerminalService {
         reply: mpsc::Sender<String>,
         cx: &mut App,
     ) {
+        // `execute` already resolved once; resolve again so a lane whose
+        // thread id landed between queueing and this drain still reaches its
+        // browser — and so the pane hook below sees the lane's current id.
+        let session = self.resolve_session(session);
+        let session = session.as_str();
         let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
         let pend = |reply: mpsc::Sender<String>, wait: BrowserWait| {
             self.shared.pending_browser.lock().expect("pending browser").push(PendingBrowser {
@@ -1178,14 +1226,17 @@ impl TerminalService {
         for (index, item) in pending.iter_mut().enumerate() {
             match &mut item.wait {
                 BrowserWait::Open { url, navigated } => {
+                    // Re-resolve every pass: the lane's thread id may have
+                    // landed after this call queued under its request id.
+                    let key = self.resolve_session(&item.session);
                     let view =
-                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                        self.shared.browsers.lock().expect("browser registry").get(&key).cloned();
                     let Some(view) = view else {
                         // No webview yet: the pane has not created one for
                         // this session. Wait for the registration (or the
                         // deadline) rather than failing the open.
                         if Instant::now() >= item.deadline {
-                            send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                            send(&item.reply, &item.id, false, json!({"error": open_timeout(url)}));
                             done.push(index);
                         }
                         continue;
@@ -1194,37 +1245,49 @@ impl TerminalService {
                         let url = url.clone();
                         view.update(cx, |state, _| state.navigate(&url));
                         *navigated = true;
+                        // The navigation only starts the load: judge it on a
+                        // later pass, once the page reported back (normalised
+                        // URL, redirect, title) — never on this pass's
+                        // pre-navigation title.
+                        continue;
                     }
                     let current = view.read(cx).url().to_string();
                     let title = view.read(cx).title().to_string();
                     // The URL flips the moment navigation starts; the title only
                     // once the page is in (seen live: `"title": ""` every time).
                     // Answer when the title arrives, or after a short grace for a
-                    // page that has none.
+                    // page that has none — with the page's FINAL url, never the
+                    // requested one: WebKit normalises (`https://example.com`
+                    // → `https://example.com/`) and follows redirects
+                    // (wikipedia.org → www.wikipedia.org), so requiring the
+                    // requested URL exactly never completes.
                     let timeout = *self.shared.browser_timeout.lock().expect("browser timeout");
                     let waited = timeout.saturating_sub(item.deadline.saturating_duration_since(Instant::now()));
                     let settled = !title.is_empty() || waited >= OPEN_TITLE_GRACE.min(timeout / 2);
-                    if current == *url && settled {
+                    if settled {
                         send(&item.reply, &item.id, true, json!({"url": current, "title": title}));
                         done.push(index);
                     } else if Instant::now() >= item.deadline {
-                        send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
+                        send(&item.reply, &item.id, false, json!({"error": open_timeout(url)}));
                         done.push(index);
                     }
                 }
                 BrowserWait::Eval { request_id, sent, js, render } => {
                     let request_id = *request_id;
                     let render = *render;
+                    // Re-resolved every pass, like the open above: the lane's
+                    // thread id may have landed after this call queued.
+                    let key = self.resolve_session(&item.session);
                     // An answer that arrived with another evaluation's batch.
                     if let Some(answer) =
-                        self.shared.eval_stash.lock().expect("eval stash").remove(&(item.session.clone(), request_id))
+                        self.shared.eval_stash.lock().expect("eval stash").remove(&(key.clone(), request_id))
                     {
                         answer_browser_eval(&item.reply, &item.id, render, answer);
                         done.push(index);
                         continue;
                     }
                     let view =
-                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                        self.shared.browsers.lock().expect("browser registry").get(&key).cloned();
                     let Some(view) = view else {
                         send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
                         done.push(index);
@@ -1248,7 +1311,7 @@ impl TerminalService {
                             if stash.len() >= EVAL_STASH_MAX {
                                 stash.clear();
                             }
-                            stash.insert((item.session.clone(), id), answer);
+                            stash.insert((key.clone(), id), answer);
                         }
                     }
                     if let Some(answer) = ours {
@@ -1260,8 +1323,9 @@ impl TerminalService {
                     }
                 }
                 BrowserWait::Shot { captured } => {
+                    let key = self.resolve_session(&item.session);
                     let view =
-                        self.shared.browsers.lock().expect("browser registry").get(&item.session).cloned();
+                        self.shared.browsers.lock().expect("browser registry").get(&key).cloned();
                     let Some(view) = view else {
                         send(&item.reply, &item.id, false, json!({"error": BROWSER_NO_ANSWER}));
                         done.push(index);
@@ -1286,6 +1350,13 @@ impl TerminalService {
             pending.remove(index);
         }
     }
+}
+
+/// What a `browser_open` for `url` reports when the page never settled:
+/// the shared [`BROWSER_NO_ANSWER`] plus the URL and the note that the page
+/// may still be loading — the deadline only stops waiting, never the load.
+fn open_timeout(url: &str) -> String {
+    format!("{BROWSER_NO_ANSWER} for {url} (the page may still be loading)")
 }
 
 /// Whether `browser_open` takes `url`: `http`, `https`, `file`, or
@@ -2647,5 +2718,135 @@ mod tests {
         fx.service.set_browser_timeout(Duration::from_millis(150));
         let message = err_text(&bcall(cx, &fx, "sb-shot", "browser_screenshot", json!({})));
         assert_eq!(message, BROWSER_NO_ANSWER, "the timeout names itself");
+    }
+
+    /// One `browser_open` where the test plays WebKit: after the service
+    /// navigates to `request`, the page reports `reported` (the normalised /
+    /// redirected URL) before the reply arrives. Drains like [`bcall`].
+    fn bopen_with_report(
+        cx: &mut gpui::TestAppContext,
+        fx: &Fixture,
+        state: &Entity<WebviewState>,
+        session: &str,
+        request: &str,
+        reported: &str,
+    ) -> Value {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let line = serde_json::to_string(&json!({
+            "id": id, "session": session, "tool": "browser_open",
+            "params": {"url": request},
+        }))
+        .expect("request serializes");
+        let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+        stream.set_read_timeout(Some(Duration::from_millis(10))).expect("read timeout");
+        stream.write_all(line.as_bytes()).expect("request writes");
+        stream.write_all(b"\n").expect("request ends");
+        stream.flush().expect("request flushes");
+        let mut reader = BufReader::new(stream);
+        let mut reported_yet = false;
+        for _ in 0..300 {
+            cx.update(|cx| fx.service.drain(cx));
+            // The service navigates on its first drain; WebKit then reports
+            // the normalised URL, which is what the state carries after.
+            if !reported_yet && cx.update(|cx| state.read(cx).url().to_string()) == request {
+                cx.update(|cx| state.update(cx, |state, _| state.navigate(reported)));
+                reported_yet = true;
+            }
+            cx.dispatcher.advance_clock(Duration::from_millis(60));
+            cx.run_until_parked();
+            if let Some(reply) = try_recv(&mut reader, id) {
+                return reply;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("browser_open: no reply after draining");
+    }
+
+    /// WebKit normalises `https://example.com` to `https://example.com/`:
+    /// the open answers the FINAL url, not the requested one.
+    #[gpui::test]
+    fn browser_open_answers_the_normalised_url(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-norm");
+        let out = result(&bopen_with_report(
+            cx,
+            &fx,
+            &state,
+            "sb-norm",
+            "https://example.com",
+            "https://example.com/",
+        ));
+        assert_eq!(out.get("url"), Some(&json!("https://example.com/")), "the final URL answers: {out}");
+        assert!(
+            out.get("title").and_then(Value::as_str).is_some_and(|title| !title.is_empty()),
+            "the open still names the title: {out}"
+        );
+    }
+
+    /// A redirect to another host answers with the final URL: opening
+    /// `https://wikipedia.org` lands on `https://www.wikipedia.org/`.
+    #[gpui::test]
+    fn browser_open_answers_the_redirected_url(cx: &mut gpui::TestAppContext) {
+        let (fx, state) = browser_fixture(cx, "sb-redirect");
+        let out = result(&bopen_with_report(
+            cx,
+            &fx,
+            &state,
+            "sb-redirect",
+            "https://wikipedia.org",
+            "https://www.wikipedia.org/",
+        ));
+        assert_eq!(
+            out.get("url"),
+            Some(&json!("https://www.wikipedia.org/")),
+            "the redirect target answers: {out}"
+        );
+    }
+
+    /// A Codex bridge calls with `--session <request_id>` after its lane
+    /// moved to the thread id: the aliased call reaches the browser
+    /// registered under the thread id, the pane hook sees the resolved id
+    /// (which is what flips the visible pane for the active lane), and a
+    /// follow-up `browser_read` under the request id reads that page.
+    #[gpui::test]
+    fn browser_calls_through_a_codex_request_id_alias(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "cmd-9");
+        fx.service.register_session("thread-9", fx.root.clone());
+        let state = cx.new(|cx| WebviewState::new(Box::new(FakeWebBackend::new()), cx));
+        fx.service.register_browser("thread-9", state.clone());
+        fx.service.alias_session("cmd-9", "thread-9");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            fx.service.set_browser_open_hook(move |_, session: String| {
+                seen.lock().expect("hook log").push(session);
+            });
+        }
+        let out = result(&bcall(cx, &fx, "cmd-9", "browser_open", json!({"url": "https://example.com"})));
+        assert_eq!(out.get("url"), Some(&json!("https://example.com")), "the open answers: {out}");
+        assert_eq!(
+            &*seen.lock().expect("hook log"),
+            &["thread-9".to_owned()],
+            "the pane hook sees the lane's current id"
+        );
+        let resolved = fx.service.resolve_session("cmd-9");
+        assert_eq!(resolved, "thread-9");
+        assert!(
+            crate::right::agent_open_flips_visible_pane(Some("thread-9"), &resolved),
+            "the resolved id flips the visible pane for the active lane"
+        );
+        let read = result(&bcall(cx, &fx, "cmd-9", "browser_read", json!({})));
+        assert_eq!(read.get("url"), Some(&json!("https://example.com")), "the read reaches the page: {read}");
+    }
+
+    /// A `browser_open` with no page behind the session still times out —
+    /// and the error names the URL and says the page may still be loading.
+    #[gpui::test]
+    fn browser_open_without_a_page_times_out_naming_the_url(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "sb-stuck");
+        fx.service.set_browser_timeout(Duration::from_millis(150));
+        let message =
+            err_text(&bcall(cx, &fx, "sb-stuck", "browser_open", json!({"url": "https://example.com/page"})));
+        assert!(message.contains("https://example.com/page"), "the timeout names the URL: {message}");
+        assert!(message.contains("may still be loading"), "the load may yet land: {message}");
     }
 }
