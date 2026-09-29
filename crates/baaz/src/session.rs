@@ -1400,12 +1400,27 @@ impl SessionView {
     /// beside the fold, not inside it, so the lane's newest pending
     /// headline stands in when the fold holds nothing — without this a
     /// Codex approval mid-turn read `Working` on the row.
+    /// Whether `turn_id` names a turn that already ended: finished on the
+    /// lane, or re-delivered after finishing. What [`Self::row_pending`]
+    /// reads so a turn that is over settles its cards for row purposes.
+    fn turn_over(&self, turn_id: &str) -> bool {
+        self.completed_turns.contains(turn_id)
+    }
+
     pub fn row_pending(&self) -> (Option<String>, Option<String>) {
         use aui_protocol::ApprovalState;
         let mut approval: Option<String> = None;
         let mut question: Option<String> = None;
         if let Some(session) = self.fold.session(&self.session_id) {
             for turn in session.turns.iter() {
+                // A turn that is over settles its cards for row purposes:
+                // the fold moves a card off Pending only on a server echo,
+                // and a cancelled turn (Codex "Deny and stop") can end with
+                // no echo — its card would read Pending forever, pinning
+                // the row on "Needs approval" (B3b).
+                if self.turn_over(turn.id()) {
+                    continue;
+                }
                 for block in turn.blocks() {
                     match block {
                         Block::Approval { command, state: ApprovalState::Pending, .. } => {
