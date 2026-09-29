@@ -978,6 +978,7 @@ pub fn tier_from_read_current(
 ///
 /// Every error is a `String` that is safe to show: it names what went wrong,
 /// never what the terminal said.
+#[cfg(test)]
 pub fn probe_primary(
     read: Option<&serde_json::Value>,
     auth_mtime_secs: Option<u64>,
