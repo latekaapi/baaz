@@ -332,6 +332,13 @@ pub struct Cached {
     pub probed_at_secs: Option<u64>,
 }
 
+/// Forget the remembered tier and plan name: a deliberate sign-out means
+/// the next login may be another account, which must never inherit this
+/// one's plan name through `lastHumanPlan`.
+pub fn forget() {
+    let _ = std::fs::remove_file(cache_path());
+}
+
 /// `~/Library/Application Support/baaz/tier.json`.
 pub fn cache_path() -> PathBuf {
     crate::store::support_dir().join("tier.json")
@@ -2545,5 +2552,17 @@ mod tests {
             Some("Muse Code High Usage"),
             "a pay-as-you-go reading names no plan, so it must not erase the established one"
         );
+    }
+
+    /// B7 review: a deliberate sign-out forgets the plan, so another account
+    /// signing in next never inherits this one's name.
+    #[test]
+    fn sign_out_forgets_the_last_human_plan() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        remember_at(&test_subscription(), auth_mtime(), now_secs());
+        forget();
+        let back: Cached = crate::store::read_json(&cache_path());
+        assert_eq!(back.last_human_plan, None);
+        assert_eq!(back.tier, None);
     }
 }

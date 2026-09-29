@@ -467,6 +467,8 @@ impl Harness {
                     cx.notify();
                 }
                 None => {
+                    crate::tier::forget();
+                    this.tier = None;
                     this.active = None;
                     this.sessions.clear();
                     this.invalidate_list();
