@@ -1691,6 +1691,33 @@ mod tests {
         });
     }
 
+    /// H3: two catalog rows of one family (`opus[1m]`, `opus-4`) and a
+    /// resolved id that matches neither exactly. The menu is the levels
+    /// both support — the same answer every run, never one row picked by
+    /// map order.
+    #[test]
+    fn a_same_family_collision_offers_only_the_shared_levels() {
+        let levels = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        let efforts: std::collections::HashMap<String, Vec<String>> = [
+            ("opus[1m]".to_string(), levels(&["low", "medium", "high", "xhigh", "max"])),
+            ("opus-4".to_string(), levels(&["low", "medium", "high"])),
+            ("sonnet".to_string(), levels(&["low", "medium"])),
+        ]
+        .into_iter()
+        .collect();
+        for _ in 0..16 {
+            assert_eq!(
+                SessionView::resolve_claude_row("claude-opus-5[1m]", &efforts),
+                Some(levels(&["low", "medium", "high"])),
+                "the shared levels of both opus rows, whatever the map order"
+            );
+        }
+        let one: std::collections::HashMap<String, Vec<String>> =
+            [("opus[1m]".to_string(), levels(&["low", "high"]))].into_iter().collect();
+        assert_eq!(SessionView::resolve_claude_row("claude-opus-5[1m]", &one), Some(levels(&["low", "high"])));
+        assert_eq!(SessionView::resolve_claude_row("claude-haiku-4-5", &efforts), None, "no haiku row: no match");
+    }
+
     /// H3, claude-code: the session runs `claude-opus-5[1m]` — the
     /// resolved full id the stream reports after a turn, which the catalog
     /// never lists as a value. It resolves to the `opus[1m]` row, so the
