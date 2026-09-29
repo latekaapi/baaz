@@ -30,8 +30,8 @@ impl SessionView {
 
     /// `plus`: toggle the composer's `+` menu.
     pub(crate) fn step_plus(&mut self, cx: &mut Context<Self>) {
-        self.plus_open = !self.plus_open;
-        cx.notify();
+        // The click's own path, so a scripted open closes any open menu too.
+        self.toggle_plus_menu(cx);
     }
 
     /// `drop`: raise the drop overlay.
