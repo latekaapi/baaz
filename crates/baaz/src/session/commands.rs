@@ -715,7 +715,7 @@ impl SessionView {
         {
             // A fold that names no levels anywhere is the supplied offline
             // fallback, not the child's answer: it leaves the map alone so
-            // the menu keeps listing the launch flag's levels.
+            // the menu keeps offering only Default until the levels land.
             self.claude_efforts =
                 rows.iter().map(|row| (row.id.clone(), row.efforts.clone())).collect();
         }
@@ -1280,7 +1280,10 @@ mod tests {
     /// provider-claude-code's `ListModels` maps the `initialize` answer:
     /// `value` into the id, `displayName` into the label, the description
     /// plus the resolved id into the detail, each row's own
-    /// `supportedEffortLevels` into `efforts`.
+    /// `supportedEffortLevels` into `efforts`. Values mirror the real
+    /// answer (`fixtures/claude-code/permission.jsonl`, `models[]`), with
+    /// one deliberate deviation: Fable carries a subset of levels, so the
+    /// off-catalog intersection differs from the union.
     fn claude_fixture_catalog() -> Vec<provider::ModelSummary> {
         vec![
             provider::ModelSummary {
@@ -1299,10 +1302,25 @@ mod tests {
                 ),
             },
             provider::ModelSummary {
+                id: "opus[1m]".into(),
+                label: "Opus (1M context)".into(),
+                active: false,
+                efforts: vec!["low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                hidden: false,
+                is_default: false,
+                description: Some(
+                    "Opus 5 with 1M context · Best for everyday, complex tasks (claude-opus-5[1m])"
+                        .into(),
+                ),
+            },
+            provider::ModelSummary {
                 id: "claude-fable-5-1[1m]".into(),
                 label: "Fable".into(),
                 active: false,
-                efforts: vec!["low", "medium", "high", "xhigh", "max"]
+                efforts: vec!["medium", "high", "xhigh", "max"]
                     .into_iter()
                     .map(str::to_owned)
                     .collect(),
@@ -1618,10 +1636,16 @@ mod tests {
             view.update(cx, |view, _| {
                 let ids: Vec<&str> =
                     view.models.iter().map(|m| m.model_id.as_str()).collect();
-                assert_eq!(ids, ["default", "claude-fable-5-1[1m]", "sonnet", "haiku"]);
+                assert_eq!(
+                    ids,
+                    ["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"]
+                );
                 let labels: Vec<&str> =
                     view.models.iter().map(|m| m.display_label.as_str()).collect();
-                assert_eq!(labels, ["Default (recommended)", "Fable", "Sonnet", "Haiku"]);
+                assert_eq!(
+                    labels,
+                    ["Default (recommended)", "Opus (1M context)", "Fable", "Sonnet", "Haiku"]
+                );
                 let fable = view
                     .models
                     .iter()
@@ -1643,6 +1667,15 @@ mod tests {
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
                 assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max"]);
             });
+            // Fable's row names a subset: the menu lists only those.
+            view.update(cx, |view, cx| view.set_model("claude-fable-5-1[1m]", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("fable names effort levels");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(ids, ["default", "Medium", "High", "Xhigh", "Max"]);
+            });
             // Haiku's row names none: the menu says why instead of listing
             // the launch flag's levels.
             view.update(cx, |view, cx| view.set_model("haiku", cx));
@@ -1658,11 +1691,84 @@ mod tests {
         });
     }
 
-    /// Y1b, claude-code: the session runs `claude-opus-9[1m]`, which the
-    /// catalog omits. The effort menu offers the catalog's union with the
-    /// muted note — the same kind Codex carries — never "unavailable".
+    /// H3: two catalog rows of one family (`opus[1m]`, `opus-4`) and a
+    /// resolved id that matches neither exactly. The menu is the levels
+    /// both support — the same answer every run, never one row picked by
+    /// map order.
+    #[test]
+    fn a_same_family_collision_offers_only_the_shared_levels() {
+        let levels = |names: &[&str]| names.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        let efforts: std::collections::HashMap<String, Vec<String>> = [
+            ("opus[1m]".to_string(), levels(&["low", "medium", "high", "xhigh", "max"])),
+            ("opus-4".to_string(), levels(&["low", "medium", "high"])),
+            ("sonnet".to_string(), levels(&["low", "medium"])),
+        ]
+        .into_iter()
+        .collect();
+        for _ in 0..16 {
+            assert_eq!(
+                SessionView::resolve_claude_row("claude-opus-5[1m]", &efforts),
+                Some(levels(&["low", "medium", "high"])),
+                "the shared levels of both opus rows, whatever the map order"
+            );
+        }
+        let one: std::collections::HashMap<String, Vec<String>> =
+            [("opus[1m]".to_string(), levels(&["low", "high"]))].into_iter().collect();
+        assert_eq!(SessionView::resolve_claude_row("claude-opus-5[1m]", &one), Some(levels(&["low", "high"])));
+        assert_eq!(SessionView::resolve_claude_row("claude-haiku-4-5", &efforts), None, "no haiku row: no match");
+    }
+
+    /// H3, claude-code: the session runs `claude-opus-5[1m]` — the
+    /// resolved full id the stream reports after a turn, which the catalog
+    /// never lists as a value. It resolves to the `opus[1m]` row, so the
+    /// menu lists that row's levels with no off-catalog note.
     #[gpui::test]
-    fn claude_code_off_catalog_model_offers_the_union_with_a_note(cx: &mut gpui::TestAppContext) {
+    fn claude_code_resolved_id_resolves_to_its_catalog_row(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::{EffortOptions, effort_row_id};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "claude-code", "s-claude-resolved");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+            });
+            // The stream's resolved id, never a catalog value.
+            view.update(cx, |view, cx| view.set_model("claude-opus-5[1m]", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Available(options) = view.effort_options() else {
+                    panic!("the resolved id finds its catalog row");
+                };
+                let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
+                assert_eq!(
+                    ids,
+                    ["default", "Low", "Medium", "High", "Xhigh", "Max"],
+                    "the opus row's levels: {ids:?}"
+                );
+            });
+            // A dated full id resolves through its family too — here to
+            // Haiku, whose row names no levels, so the menu says why.
+            view.update(cx, |view, cx| view.set_model("claude-haiku-4-5-20251001", cx));
+            view.update(cx, |view, _| {
+                let EffortOptions::Unavailable(reason) = view.effort_options() else {
+                    panic!("the dated id finds Haiku's level-less row");
+                };
+                assert!(
+                    reason.contains("claude-haiku-4-5-20251001"),
+                    "the reason names the model: {reason:?}"
+                );
+            });
+        });
+    }
+
+    /// H3, claude-code: the session runs `claude-quantum-9`, which no
+    /// catalog row matches even after normalising. The effort menu offers
+    /// the levels every row supports (the intersection — Fable's subset
+    /// drops Low) with the muted note, never the union, never
+    /// "unavailable".
+    #[gpui::test]
+    fn claude_code_unmatched_model_offers_the_intersection_with_a_note(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use crate::overlays::{EffortOptions, effort_row_id};
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
@@ -1671,57 +1777,62 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
             });
-            // The session runs a model the catalog omits.
-            view.update(cx, |view, cx| view.set_model("claude-opus-9[1m]", cx));
+            // The session runs a model no catalog row matches.
+            view.update(cx, |view, cx| view.set_model("claude-quantum-9", cx));
             view.update(cx, |view, _| {
                 let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
                 else {
-                    panic!("an off-catalog model still gets an effort list");
+                    panic!("an unmatched model still gets an effort list");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
                 assert_eq!(
                     ids,
-                    ["default", "Low", "Medium", "High", "Xhigh", "Max"],
-                    "the union of levels the catalog reports: {ids:?}"
+                    ["default", "Medium", "High", "Xhigh", "Max"],
+                    "the intersection of levels the catalog reports: {ids:?}"
                 );
                 assert_eq!(note, "Not in Claude Code's model list — Claude Code validates the level");
             });
-            // The open menu counts the union, note included in no extra row.
+            // The open menu counts the intersection, note in no extra row.
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             let rows = view.read(cx).menu_rows(cx);
-            assert_eq!(rows, 6, "Default plus the five union levels");
+            assert_eq!(rows, 5, "Default plus the four intersection levels");
         });
     }
 
-    /// W4c, claude-code: the effort menu lists Default plus the five levels
-    /// the `--effort` launch flag accepts — the installed CLI's own list,
-    /// not a guess — and picking one moves the chip at once.
+    /// H3 (was W4c), claude-code: before any catalog folds the effort menu
+    /// offers only Default, with the note saying the levels load when the
+    /// session starts — never the `--effort` launch flag's levels as if a
+    /// model validated them. The flag list stays argv validation only.
     #[gpui::test]
-    fn claude_code_effort_menu_lists_the_launch_flag_levels(cx: &mut gpui::TestAppContext) {
+    fn claude_code_pre_catalog_menu_offers_only_default(cx: &mut gpui::TestAppContext) {
         use crate::overlays::{EffortOptions, effort_label, effort_row_id};
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "claude-code", "s-effort");
         vc.update(|window, cx| {
             view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
-                    panic!("claude-code offers its --effort levels");
+                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+                else {
+                    panic!("pre-catalog offers only Default");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
-                assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max"]);
+                assert_eq!(ids, ["default"], "no hardcoded flag levels: {ids:?}");
+                assert!(
+                    note.contains("when the session starts"),
+                    "the note says when the levels arrive: {note:?}"
+                );
                 assert_eq!(
                     provider_claude_code::argv::CLAUDE_EFFORT_LEVELS,
                     ["low", "medium", "high", "xhigh", "max"],
-                    "the menu spells what the flag accepts"
+                    "the flag list itself is unchanged for argv validation"
                 );
             });
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             let rows = view.read(cx).menu_rows(cx);
-            assert_eq!(rows, 6, "Default plus five levels");
+            assert_eq!(rows, 1, "Default alone");
             view.update(cx, |view, cx| view.confirm_menu(window, cx));
-            view.update(cx, |view, cx| {
-                view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx);
-                assert_eq!(effort_label(view.effort), "High", "the chip follows the pick");
+            view.update(cx, |view, _| {
+                assert_eq!(effort_label(view.effort), "Default", "the chip stays on Default");
             });
         });
     }
