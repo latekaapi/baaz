@@ -1884,6 +1884,38 @@ mod tests {
         restore_state(state);
     }
 
+    /// B6: the project menu opens through its own path, not `open_menu`,
+    /// and still closes an open `+` menu.
+    #[gpui::test]
+    fn opening_the_project_menu_closes_the_plus_menu(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("project-plus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, view) = harness_with_lane(vc, &state.2);
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_project_menu(None, true, cx)));
+        let (plus, menu) = open_menu_count(vc, &baaz, &view);
+        assert!(!plus, "the project menu closed the `+` menu");
+        assert!(menu, "the project menu still opened");
+        restore_state(state);
+    }
+
+    /// B6: the scripted `plus` step takes the click's path, so it too
+    /// closes an open header menu instead of stacking on it.
+    #[gpui::test]
+    fn the_scripted_plus_step_closes_the_header_menu(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("step-plus-header");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, view) = harness_with_lane(vc, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx)));
+        let (plus, menu) = open_menu_count(vc, &baaz, &view);
+        assert!(plus && !menu, "exactly the `+` menu stays open (plus={plus}, menu={menu})");
+        restore_state(state);
+    }
+
     /// B6: opening `+` while the header `…` menu is open leaves exactly
     /// one menu open — the plus toggle drops the overlay menu first.
     /// Without the drop both stood open, stacked.

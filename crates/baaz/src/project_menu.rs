@@ -62,6 +62,10 @@ impl Harness {
             .menu
             .as_ref()
             .is_some_and(|m| m.kind == MenuKind::Project && m.project == project && m.project_header == from_header);
+        // One menu at a time, as `open_menu`: the view-local `+` menu closes.
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| view.close_plus_menu(cx));
+        }
         self.overlays.update(cx, |overlays, _| {
             overlays.menu = if already { None } else { Some(Menu::project(project, from_header)) };
         });
