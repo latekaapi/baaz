@@ -3282,8 +3282,20 @@ impl Harness {
                 }
             });
         }
+        // One subscription per live view: the view being activated plus
+        // every parked view the MRU still holds. A parked provider lane
+        // keeps its child and drain task, so its turn and approval events
+        // still fire — with only the active view subscribed they reached
+        // no one and the parked row froze (B3b). Rebuilt from the live
+        // views on every activation, so a dropped view's subscription
+        // leaves with it and a re-activated view is never subscribed
+        // twice. Parked transcripts never re-render through these: the
+        // row-affecting arms read the parked fold without touching its UI.
         self.subscriptions.clear();
         self.subscriptions.push(cx.subscribe(&view, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        for (_, cached) in &self.session_cache {
+            self.subscriptions.push(cx.subscribe(cached, |this, view, event, cx| this.on_session_event(view, event, cx)));
+        }
         let titles: HashMap<String, String> =
             self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
         let tier_banner = self.tier_banner();
@@ -7586,6 +7598,516 @@ mod tests {
             assert_eq!(row.label, "Shiny generated", "the auto-title names the provider row");
         });
         lane_restore(state);
+    }
+
+    /// B3b: a factory minting a distinct session per open, around a quiet
+    /// adapter that answers the open-time pulls and admits decisions. The
+    /// scripted double mints one fixed id, so a second open would replace
+    /// the first instead of parking it.
+    fn parking_factory() -> crate::providers::ProviderFactory {
+        use provider::ProviderAdapter as _;
+        struct Quiet {
+            rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
+            connected: bool,
+            next: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        }
+        impl provider::ProviderAdapter for Quiet {
+            fn id(&self) -> provider::ProviderId {
+                aui_protocol::Provider::Codex
+            }
+            fn connect(&mut self, _client: &provider::ConnectInfo) -> Result<provider::Handshake, provider::ProviderError> {
+                self.connected = true;
+                Ok(provider::Handshake {
+                    provider: aui_protocol::Provider::Codex,
+                    agent_name: "quiet".into(),
+                    agent_version: "0.0.0".into(),
+                })
+            }
+            fn capabilities(&self) -> provider::CapabilitySet {
+                use provider::{Capability, CapabilityState};
+                let native = CapabilityState::Native;
+                let off = || CapabilityState::Unavailable {
+                    reason: "the quiet double opens sessions only".into(),
+                };
+                provider::CapabilitySet::new([
+                    (Capability::SessionLifecycle, native.clone()),
+                    (Capability::ForkSession, off()),
+                    (Capability::CompactSession, off()),
+                    (Capability::SessionConfig, off()),
+                    (Capability::SessionShell, off()),
+                    (Capability::SubmitTurn, native.clone()),
+                    (Capability::SteerTurn, off()),
+                    (Capability::TurnControl, off()),
+                    (Capability::ModelCatalog, native.clone()),
+                    (Capability::Approvals, native.clone()),
+                    (Capability::Questions, off()),
+                    (Capability::Transcript, off()),
+                    (Capability::Account, off()),
+                    (Capability::ClientTools, off()),
+                    (Capability::ReasoningTraces, off()),
+                    (Capability::SubagentTurns, off()),
+                ])
+            }
+            fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+                if !self.connected {
+                    return Err(provider::ProviderError::Unavailable { reason: "not connected".into() });
+                }
+                match command {
+                    provider::Command::OpenSession { .. } => {
+                        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(provider::Ack::Session { session_id: format!("s-park-{n}"), title: None })
+                    }
+                    provider::Command::ListModels { .. } => {
+                        Ok(provider::Ack::ModelCatalog { models: Vec::new(), provider: "quiet".into() })
+                    }
+                    provider::Command::ListPending { .. } => {
+                        Ok(provider::Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+                    }
+                    provider::Command::DecideApproval { .. } => Ok(provider::Ack::Accepted),
+                    other => Err(provider::ProviderError::unsupported(
+                        other.capability(),
+                        "the quiet double opens sessions only",
+                    )),
+                }
+            }
+            fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
+                self.rx.clone()
+            }
+            fn shutdown(&mut self) {}
+        }
+        let next = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        std::sync::Arc::new(move |_: ProviderId| {
+            let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
+            let mut adapter = Quiet { rx, connected: false, next: next.clone() };
+            adapter.connect(&conn::connect_info())?;
+            Ok(provider::Provider::new(adapter))
+        })
+    }
+
+    /// B3b: a parked session finishing its turn flips its row from Working
+    /// to Settled without being activated. Before the fix the second open
+    /// cleared the first view's subscription, so the finish reached no one:
+    /// the `subscriptions` count below stays flat and the row keeps reading
+    /// Working.
+    #[gpui::test]
+    fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3b-park-turn");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        assert!(first.starts_with("s-park-"), "the quiet double mints the id");
+        // One settled turn behind it, one in flight: the row reads Working.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_sessions.get_mut(&first).expect("the first record").turns = 1;
+                harness.merge_provider_rows();
+                let row =
+                    harness.sessions.iter_mut().find(|entry| entry.id == first).expect("the first row");
+                row.running = true;
+                row.turn_started = Some(crate::clock::now_local());
+                cx.notify();
+            });
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the first row");
+            assert_eq!(
+                row.row_status(crate::clock::now_local()).kind,
+                aui::nav::RowStatusKind::Working,
+                "setup: the row reads Working before the switch"
+            );
+        });
+        let subs_before = vc.update(|_, cx| baaz.read(cx).subscriptions.len());
+        // Switching away parks the first view; its subscription must stay.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let second =
+                harness.active.clone().expect("the second lane opened").read(cx).session_id.clone();
+            assert_ne!(second, first, "the second open is another session");
+            assert!(
+                harness.session_cache.iter().any(|(id, _)| id == &first),
+                "the first view parks instead of closing"
+            );
+            assert_eq!(
+                harness.subscriptions.len(),
+                subs_before + 1,
+                "both live views stay subscribed"
+            );
+        });
+        // The parked turn finishes: no activation, just the lane event.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness
+                    .session_cache
+                    .iter()
+                    .find(|(id, _)| id == &first)
+                    .map(|(_, view)| view.clone())
+                    .expect("the parked view");
+                view.update(cx, |_, cx| {
+                    cx.emit(SessionEvent::ProviderTurnFinished {
+                        session_id: first.clone(),
+                        turn_id: "t-parked-1".into(),
+                        meta: aui_protocol::TurnMeta::default(),
+                    });
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the first row");
+            assert!(!row.running, "the parked finish stands the row down");
+            assert_eq!(
+                row.row_status(crate::clock::now_local()).kind,
+                aui::nav::RowStatusKind::Settled,
+                "Working becomes Settled without activating"
+            );
+        });
+        lane_restore(state);
+    }
+
+    /// B3b: a parked session whose pending approval was answered with "Deny
+    /// and stop" (cancel) and whose turn then ends with no item echo no
+    /// longer reads Needs approval. Before the fix the parked events
+    /// reached no one, so the row below keeps the stale Needs approval.
+    #[gpui::test]
+    fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3b-park-approval");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = parking_factory();
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        });
+        // A pending MCP elicitation tap: the row reads Needs approval while
+        // the session is open — the active behaviour, unchanged by this fix.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_sessions.get_mut(&first).expect("the record").turns = 1;
+                harness.merge_provider_rows();
+                let view = harness.active.clone().expect("the lane opened");
+                view.update(cx, |view, cx| {
+                    view.inject_external_approval(
+                        crate::providers::ExternalApproval {
+                            id: "mcp-elicitation-0".into(),
+                            session_id: view.session_id.clone(),
+                            provider: crate::providers::ProviderId::Codex,
+                            kind: crate::providers::ExternalApprovalKind::CodexMcpElicitation,
+                            headline: "Allow the baaz MCP server to run tool \"terminal_run\"?".into(),
+                            reason: "Allow the baaz MCP server to run tool \"terminal_run\"?".into(),
+                            dont_ask_again: None,
+                            stage_token: None,
+                            decision_sent: None,
+                        },
+                        cx,
+                    );
+                    cx.emit(SessionEvent::ProviderApprovalsChanged { session_id: view.session_id.clone() });
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the row");
+            assert_eq!(
+                row.row_status(crate::clock::now_local()).kind,
+                aui::nav::RowStatusKind::NeedsApproval,
+                "setup: the open session reads Needs approval"
+            );
+        });
+        // Switching away parks the session with its pending tap.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert!(
+                baaz.read(cx).session_cache.iter().any(|(id, _)| id == &first),
+                "the approval session parks instead of closing"
+            );
+        });
+        // "Deny and stop": the Cancel press travels, and the server ends
+        // the turn with no item echo for the card.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness
+                    .session_cache
+                    .iter()
+                    .find(|(id, _)| id == &first)
+                    .map(|(_, view)| view.clone())
+                    .expect("the parked view");
+                view.update(cx, |view, cx| {
+                    view.decide_external_approval(
+                        "mcp-elicitation-0".to_owned(),
+                        crate::providers::ApprovalChoice::Cancel,
+                        None,
+                        cx,
+                    );
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let view = harness
+                .session_cache
+                .iter()
+                .find(|(id, _)| id == &first)
+                .map(|(_, view)| view.clone())
+                .expect("the parked view");
+            assert_eq!(
+                view.read(cx).row_pending(),
+                (None, None),
+                "the answered tap leaves nothing pending on the parked view"
+            );
+        });
+        // The cancelled turn ends: the parked row must let go of the ask.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness
+                    .session_cache
+                    .iter()
+                    .find(|(id, _)| id == &first)
+                    .map(|(_, view)| view.clone())
+                    .expect("the parked view");
+                view.update(cx, |_, cx| {
+                    cx.emit(SessionEvent::ProviderTurnFinished {
+                        session_id: first.clone(),
+                        turn_id: "t-parked-1".into(),
+                        meta: aui_protocol::TurnMeta::default(),
+                    });
+                });
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the row");
+            assert_eq!(
+                row.row_status(crate::clock::now_local()).kind,
+                aui::nav::RowStatusKind::Settled,
+                "the answered, ended turn no longer reads Needs approval"
+            );
+        });
+        lane_restore(state);
+    }
+
+    /// B3b lane-level: a provider view over a scripted child, with the
+    /// sender half of its lane channel held back for the test to drive.
+    fn b3b_lane_view(
+        vc: &mut gpui::VisualTestContext,
+        session_id: &str,
+    ) -> (Entity<SessionView>, futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>) {
+        use provider::ProviderAdapter as _;
+        let mut adapter = provider::scripted::ScriptedProvider::new();
+        adapter.connect(&conn::connect_info()).expect("a scripted provider connects");
+        let provider = provider::Provider::new(adapter);
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let session_id = session_id.to_owned();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "codex".to_owned(),
+                workspace: "/tmp/b3b-lane".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| SessionView::new_on_provider(session_id, provider, rx, host, window, cx))
+        });
+        (view, tx)
+    }
+
+    /// B3b: a turn finishing under another id still stands the lane down.
+    /// The cancel path can end the turn under a different id than the
+    /// running one; before the fix only a matching id cleared running, so
+    /// `busy` below stayed true. Both turns are known to the fold — a
+    /// finish for an unknown turn never lands there at all.
+    #[gpui::test]
+    fn a_turn_finished_under_another_id_still_stands_the_lane_down(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = b3b_lane_view(vc, "s-b3b-1");
+        let start = |id: &str| aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::Assistant {
+                id: id.into(),
+                blocks: Vec::new(),
+                meta: aui_protocol::TurnMeta::default(),
+                timestamp: None,
+            },
+        };
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-1".into()),
+                deltas: vec![start("a-1"), start("a-2")],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| assert!(view.read(cx).busy(), "the open turn reads busy"));
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-1".into()),
+                deltas: vec![aui_protocol::Delta::TurnFinished {
+                    turn_id: "a-1".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| assert!(!view.read(cx).busy(), "any finished turn stands the lane down"));
+    }
+
+    /// B3b: a finished turn's still-Pending card settles for row purposes.
+    /// The fold moves a card off Pending only on a server echo, and a
+    /// cancelled turn can end with no echo; before the fix `row_pending`
+    /// below kept returning the dead card's command.
+    #[gpui::test]
+    fn a_finished_turns_pending_card_settles_for_row_purposes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = b3b_lane_view(vc, "s-b3b-2");
+        let open = vec![
+            aui_protocol::Delta::TurnStarted {
+                turn: aui_protocol::Turn::Assistant {
+                    id: "a-2".into(),
+                    blocks: Vec::new(),
+                    meta: aui_protocol::TurnMeta::default(),
+                    timestamp: None,
+                },
+            },
+            aui_protocol::Delta::BlockAdded {
+                turn_id: "a-2".into(),
+                block: aui_protocol::Block::approval(
+                    "ap-1",
+                    "Bash",
+                    "rm -rf /tmp/probe",
+                    "the agent wants it",
+                    "/tmp/b3b-lane",
+                    Vec::new(),
+                    aui_protocol::ApprovalScope::ThisCommand,
+                    aui_protocol::ApprovalState::Pending,
+                    None,
+                ),
+            },
+        ];
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas { session_id: Some("s-b3b-2".into()), deltas: open })
+                .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).row_pending(),
+                (Some("rm -rf /tmp/probe".to_owned()), None),
+                "the waiting card stands on the row while its turn runs"
+            );
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-2".into()),
+                deltas: vec![aui_protocol::Delta::TurnFinished {
+                    turn_id: "a-2".into(),
+                    meta: aui_protocol::TurnMeta::default(),
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).row_pending(),
+                (None, None),
+                "a turn that is over settles its cards for the row"
+            );
+        });
+    }
+
+    /// B3b: a removed turn refreshes the row. Before the fix `TurnRemoved`
+    /// emitted nothing, so the refresh below never arrived.
+    #[gpui::test]
+    fn a_removed_turn_refreshes_the_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, tx) = b3b_lane_view(vc, "s-b3b-3");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let seen_in = seen.clone();
+        let _sub = vc.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &SessionEvent, _| {
+                if matches!(event, SessionEvent::ProviderApprovalsChanged { .. }) {
+                    seen_in.borrow_mut().push("approvals".to_owned());
+                }
+            })
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-3".into()),
+                deltas: vec![aui_protocol::Delta::TurnStarted {
+                    turn: aui_protocol::Turn::User {
+                        id: "u-1".into(),
+                        text: "hello".into(),
+                        attachments: Vec::new(),
+                        mentions: Vec::new(),
+                        timestamp: None,
+                    },
+                }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        assert!(seen.borrow().is_empty(), "an echo alone refreshes nothing");
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-b3b-3".into()),
+                deltas: vec![aui_protocol::Delta::TurnRemoved { turn_id: "u-1".into() }],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            ["approvals".to_owned()],
+            "the removed turn refreshes the row once"
+        );
     }
 
     /// The W5 delete arm: forgetting a provider session drops its record,
