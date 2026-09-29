@@ -1206,7 +1206,12 @@ impl SessionView {
     /// history (a reopen names the model it ran on), then the catalog's
     /// default row — then empty, so no `--model` flag is implied: the
     /// chip's display seed lives in [`Self::model`], never here. The muse
-    /// fallback is the provider id, exactly as it always was.
+    /// lane reads the live fold and session first, then the same catalog
+    /// the picker lists (active row, the session's own history, default
+    /// row): a reopened session whose fold names no model still resolves
+    /// its model instead of wearing the provider id. Only with nothing
+    /// known at all does it fall back to the provider id, exactly as it
+    /// always did.
     pub(crate) fn model_id(&self) -> String {
         if let Some(pending) = self.pending_model.as_deref() {
             return pending.to_owned();
@@ -1221,39 +1226,54 @@ impl SessionView {
         if let Some(id) = self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()) {
             return id;
         }
-        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+        if crate::providers::uses_legacy_pump(self.provider_kind()) {
+            // A reopened muse session's fold names no model, but its
+            // `model/list` catalog still flags the effective row — and the
+            // session's own past still outranks the catalog's default.
             if let Some(id) =
                 self.models.iter().find(|m| m.is_active).map(|m| m.model_id.clone())
             {
                 return id;
             }
-            // The session's own past wins over any generic default: a
-            // reopened session names the model its history ran on.
             if let Some(model) = self.history_model.clone() {
                 return model;
             }
-            // The catalog's default row (V1): a fresh session whose
-            // catalog names no active row yet still chips a model.
             if let Some(id) =
                 self.models.iter().find(|m| m.is_default).map(|m| m.model_id.clone())
             {
                 return id;
             }
-            return String::new();
+            return self.provider_id.clone();
         }
-        self.provider_id.clone()
+        if let Some(id) = self.models.iter().find(|m| m.is_active).map(|m| m.model_id.clone()) {
+            return id;
+        }
+        // The session's own past wins over any generic default: a
+        // reopened session names the model its history ran on.
+        if let Some(model) = self.history_model.clone() {
+            return model;
+        }
+        // The catalog's default row (V1): a fresh session whose
+        // catalog names no active row yet still chips a model.
+        if let Some(id) = self.models.iter().find(|m| m.is_default).map(|m| m.model_id.clone())
+        {
+            return id;
+        }
+        String::new()
     }
 
-    /// What the composer model chip reads. The muse lane shows the id,
-    /// exactly as it always did. A provider lane shows the effective
-    /// model's human name from the live catalog — never the provider's
-    /// wire id (`claude-code` is not a model); with no model known yet,
-    /// a Claude Code session chips the seed (env, `claude` settings, last
-    /// reported model, then the out-of-box default), anything else the
-    /// provider's human label.
+    /// What the composer model chip reads. The muse lane shows the
+    /// session model's display label from the `model/list` catalog when a
+    /// row names it, else the model id humanised — never the bare provider
+    /// id (`muse` is a lane, not a model). A provider lane shows the
+    /// effective model's human name from the live catalog — never the
+    /// provider's wire id (`claude-code` is not a model); with no model
+    /// known yet, a Claude Code session chips the seed (env, `claude`
+    /// settings, last reported model, then the out-of-box default),
+    /// anything else the provider's human label.
     pub fn model(&self) -> SharedString {
         if crate::providers::uses_legacy_pump(self.provider_kind()) {
-            return SharedString::from(self.model_id());
+            return SharedString::from(self.muse_model_label());
         }
         let id = self.model_id();
         if id.is_empty() {
@@ -1294,6 +1314,39 @@ impl SessionView {
                 }
             });
         SharedString::from(label)
+    }
+
+    /// What the muse lane's composer chip reads: the catalog's display
+    /// label when a row names the session's model, else the model id
+    /// humanised for display — never the bare provider id.
+    fn muse_model_label(&self) -> String {
+        let id = self.model_id();
+        if let Some(label) =
+            self.models.iter().find(|m| m.model_id == id).map(|m| m.display_label.clone())
+        {
+            return label;
+        }
+        Self::humanise_muse_model_id(&id)
+    }
+
+    /// A muse model id made fit for the chip: `muse-everyday` reads
+    /// `Muse Everyday`. Words split on `-`/`_`, each capitalised; anything
+    /// else passes through unchanged. The provider id itself humanises to
+    /// its human label (`muse` → `Muse`), so a session with no model known
+    /// yet still never wears the wire id.
+    fn humanise_muse_model_id(id: &str) -> String {
+        let words: Vec<String> = id
+            .split(['-', '_'])
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect();
+        if words.is_empty() { id.to_owned() } else { words.join(" ") }
     }
 
     /// The context meter's state, from `session/contextUsage` joined with the
@@ -2781,6 +2834,81 @@ mod tests {
             let view = view.read(cx);
             assert!(view.client.is_none(), "the refused reconnect hands over no child");
             assert!(!view.refresh_pending, "the refused reconnect arms no approval pull");
+        });
+    }
+
+    /// B9: a reopened muse session chips its model, never the bare
+    /// provider id. The fold names no model on a reopen, so the chip reads
+    /// the session's own past through the `model/list` catalog: a known
+    /// model id shows the row's display label, an unknown id shows the id
+    /// humanised, and with nothing known yet the chip still never wears
+    /// the lowercase wire id.
+    #[gpui::test]
+    fn muse_chip_names_the_model_never_the_provider_id(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = SessionHost {
+                provider_id: "muse".to_owned(),
+                workspace: "/tmp/b9-muse-chip".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| SessionView::new("s-b9".to_owned(), None, host, window, cx))
+        });
+        let row = |id: &str, label: &str| ModelCatalogEntry {
+            context_limit: None,
+            cost: None,
+            description: None,
+            display_label: label.to_owned(),
+            is_active: false,
+            is_default: false,
+            model_id: id.to_owned(),
+            output_limit: None,
+            profile_id: None,
+            provider_id: "muse".to_owned(),
+            release_date: None,
+        };
+        // A reopened session: the fold names no model, the session's own
+        // past names a catalog row — the chip reads the row's label.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models = vec![row("muse-everyday", "Muse Everyday")];
+                view.history_model = Some("muse-everyday".to_owned());
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).model().to_string(),
+                "Muse Everyday",
+                "a known muse model chips its catalog label"
+            );
+        });
+        // A model the catalog omits chips humanised — never the provider.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.history_model = Some("muse-quantum-2".to_owned());
+            });
+        });
+        vc.update(|_, cx| {
+            let chip = view.read(cx).model().to_string();
+            assert_eq!(chip, "Muse Quantum 2", "an unknown muse model chips humanised");
+            assert_ne!(chip, "muse", "the chip never wears the bare provider id");
+        });
+        // Nothing known yet: the chip still never wears the wire id.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models = Vec::new();
+                view.history_model = None;
+            });
+        });
+        vc.update(|_, cx| {
+            let chip = view.read(cx).model().to_string();
+            assert_eq!(chip, "Muse", "with no model known the chip names the human label");
+            assert_ne!(chip, "muse", "the chip never wears the bare provider id");
         });
     }
 }
