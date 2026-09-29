@@ -111,13 +111,7 @@ impl Harness {
     pub(crate) fn tier_banner(&self) -> Option<TierBanner> {
         match self.tier.as_ref()? {
             Tier::Subscription { .. } => None,
-            Tier::PayAsYouGo => Some(TierBanner {
-                text: "This login is on pay-as-you-go: every turn bills API usage. \
-                       Sign out and back in after subscribing, or send anyway."
-                    .to_owned(),
-                blocking: tier_blocks(&Tier::PayAsYouGo, self.send_anyway),
-                checking: false,
-            }),
+            Tier::PayAsYouGo => Some(payg_banner(self.send_anyway, self.tier_probing)),
             Tier::Unavailable(_) => Some(TierBanner {
                 text: "Muse did not say which plan this login is on, so Baaz cannot tell \
                        whether turns bill API usage."
@@ -155,6 +149,18 @@ impl Harness {
     }
 }
 
+/// The pay-as-you-go banner. While a re-verify is in flight the answer is
+/// provisional (B7), so it reads "Checking…" and never blocks a send.
+fn payg_banner(send_anyway: bool, probing: bool) -> TierBanner {
+    TierBanner {
+        text: "This login is on pay-as-you-go: every turn bills API usage. \
+               Sign out and back in after subscribing, or send anyway."
+            .to_owned(),
+        blocking: tier_blocks(&Tier::PayAsYouGo, send_anyway) && !probing,
+        checking: probing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +186,15 @@ mod tests {
         assert!(!tier_blocks(&Tier::PayAsYouGo, true), "Send anyway lifts it for this run");
         assert!(!tier_blocks(&subscription(), false));
         assert!(!tier_blocks(&Tier::Unavailable("scripted".into()), false));
+    }
+
+    /// B7: a re-verify of a remembered pay-as-you-go runs with that tier
+    /// still in place; the banner then reads "Checking…" and blocks nothing.
+    #[test]
+    fn a_reverifying_pay_as_you_go_banner_checks_and_never_blocks() {
+        let checking = payg_banner(false, true);
+        assert!(checking.checking && !checking.blocking, "provisional while probing");
+        let settled = payg_banner(false, false);
+        assert!(settled.blocking && !settled.checking, "a confirmed answer blocks until Send anyway");
     }
 }
