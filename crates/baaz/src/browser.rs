@@ -872,7 +872,6 @@ mod tests {
     /// the keyboard comes back, inside it the page keeps typing.
     #[gpui::test]
     fn outside_click_hands_the_fake_pages_keyboard_back(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
         let outside = gpui::point(gpui::px(100.0), gpui::px(100.0));
         let state = focused_state(cx);
         assert!(state.update(cx, |state, _| state.holds_keyboard()));
