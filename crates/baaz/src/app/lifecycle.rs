@@ -212,6 +212,12 @@ struct FixtureSession {
     /// RFC3339 last activity.
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    /// Content-activity recency, spelled as the server sends it
+    /// (`lastActivityAt`): what the row sorts and reads by — a resume
+    /// stamps `updatedAt` but never this. Absent in older captures, where
+    /// the row falls back to creation time.
+    #[serde(rename = "lastActivityAt", default)]
+    last_activity_at: Option<String>,
     /// Completed turns.
     #[serde(rename = "turnCount", default)]
     turn_count: u64,
@@ -269,7 +275,7 @@ fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, projects: &Proj
         created_at: row.updated_at.clone(),
         first_user_prompt: None,
         forked_from: None,
-        last_activity_at: None,
+        last_activity_at: row.last_activity_at.clone(),
         model_id: None,
         name: None,
         path: String::new(),
