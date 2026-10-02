@@ -4432,6 +4432,10 @@ impl Harness {
         // ride on the pending handoff, so landing applies them before the
         // destination's first render — no frame shows the empty
         // destination waiting for the pack's acknowledgement.
+        // The current step's elapsed counter ticks off this refresh: once
+        // a second while the run is in flight, re-armed only while live —
+        // settled runs own no timer.
+        self.arm_handoff_tick(source.clone(), epoch, cx);
         let prefix = view.update(cx, |view, _| view.handoff_snapshot_turns());
         self.pending_handoff =
             Some(crate::handoff::PendingHandoff { source_session: source, epoch, prefix });
@@ -7861,7 +7865,7 @@ mod tests {
     }
 
     /// B3fix: landing stands the summary wait down, and anything arriving
-    /// late lands on nothing — the card never sticks on "Summarising…"
+    /// late lands on nothing — the summary step never sticks on Current
     /// and the pack stays extractive. Driven through the app: the real
     /// watchdog handler while waiting, land itself, the real ack, then a
     /// late side-session harvest and the watchdog again after activation.
@@ -7881,8 +7885,15 @@ mod tests {
                 if let aui_protocol::Block::Handoff { carried, .. } = run.card() {
                     assert_eq!(
                         carried[0].detail.as_deref(),
-                        Some("Summarising…"),
-                        "the card waits on the summary"
+                        Some("extractive summary"),
+                        "the wait lives on the summary step now, never the carried row"
+                    );
+                    assert!(
+                        matches!(
+                            run.steps()[1].state,
+                            aui::transcript::HandoffStepState::Current
+                        ),
+                        "the summary step reads Current while waiting"
                     );
                 } else {
                     panic!("not a handoff card");
