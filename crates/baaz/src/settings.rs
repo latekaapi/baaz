@@ -905,7 +905,19 @@ impl Harness {
                 cx,
             ),
         ];
-        v_flex().w_full().gap(px(scale::SP_4)).child(self.settings_group("Model housekeeping", rows, cx)).into_any_element()
+        let transcript = vec![self.settings_switch_row(
+            "fold_finished_turns",
+            "Fold finished turns",
+            "When a turn ends, its tool calls and in-between notes fold into one \"Worked for …\" row above the answer.",
+            self.layout.fold_finished_turns,
+            cx,
+        )];
+        v_flex()
+            .w_full()
+            .gap(px(scale::SP_4))
+            .child(self.settings_group("Model housekeeping", rows, cx))
+            .child(self.settings_group("Transcript", transcript, cx))
+            .into_any_element()
     }
 
     /// Sidebar: chevron, current-project bar, branch name — plus the note

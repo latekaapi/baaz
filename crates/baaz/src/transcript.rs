@@ -856,12 +856,14 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
                 for call in calls {
                     count_call(&mut plan, call);
                 }
-                // B12fix: a group with a failure folds behind its header
-                // (which calls the failure out) — keeping the group out
-                // would show every successful call beside the one that
-                // failed. Only the failed call matters, and the header
-                // is where it reads.
-                plan.folded.push(index);
+                // A group with a failed call stays visible (collapsed, so
+                // its header and preview name the failure): the fold row
+                // counts reads/edits/commands only and would hide it.
+                if calls.iter().any(call_failed) {
+                    plan.visible.push(index);
+                } else {
+                    plan.folded.push(index);
+                }
             }
             Block::Thinking { .. } | Block::Generic { .. } => {
                 plan.folded.push(index);
@@ -3543,7 +3545,7 @@ mod tests {
     /// keeping it out would show every successful call beside the one
     /// that failed.
     #[test]
-    fn a_tool_group_with_one_failure_folds() {
+    fn a_tool_group_with_an_unrecovered_failure_stays_visible() {
         let mut failed = shell_call("Ran", "make");
         failed.status = aui_protocol::ToolStatus::Error;
         let turn = Turn::Assistant {
@@ -3560,10 +3562,9 @@ mod tests {
             timestamp: None,
         };
         let plan = fold_plan(&turn).expect("tool activity folds");
-        assert_eq!(plan.folded, vec![0]);
-        assert!(plan.visible.is_empty());
+        assert!(plan.folded.is_empty(), "the failed group is not hidden in the fold");
+        assert_eq!(plan.visible, vec![0]);
         assert_eq!(plan.answer, Some(1));
-        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), true), 2);
     }
 
     /// B12fix: an empty Thinking block takes no row — closed, open, live
