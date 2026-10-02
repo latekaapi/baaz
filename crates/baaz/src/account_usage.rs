@@ -9,6 +9,8 @@
 //! connection and tier when signed in, regardless of the `muse` binary
 //! lookup.
 
+use std::collections::HashSet;
+
 use aui::screens::{UsageRowData, UsageRowState, UsageWindow};
 use aui_icons::Provider as AuiProvider;
 
@@ -38,12 +40,33 @@ pub fn usage_rows(
     muse: Option<MuseFeed>,
     now: i64,
 ) -> Vec<UsageRowData> {
+    let refreshing: HashSet<ProviderId> =
+        crate::provider_status::usage_refreshing().into_iter().collect();
+    usage_rows_with(statuses, muse, now, &refreshing)
+}
+
+/// [`usage_rows`] with an explicit refreshing set, so tests drive the
+/// in-flight reads without touching the live service.
+fn usage_rows_with(
+    statuses: &[ProviderStatus],
+    muse: Option<MuseFeed>,
+    now: i64,
+    refreshing: &HashSet<ProviderId>,
+) -> Vec<UsageRowData> {
     let mut rows = Vec::new();
     for id in ProviderId::all() {
         let Some(status) = statuses.iter().find(|status| status.provider == id) else {
             continue;
         };
         if !status.enabled {
+            continue;
+        }
+        // An asynchronous read is in flight for this provider (the Muse
+        // wire re-read, the Codex probe): its row reads "Refreshing…" in
+        // place until the read lands and repaints it. Display-only rows,
+        // so no new interactive element and no new label to carry.
+        if refreshing.contains(&id) {
+            rows.push(refreshing_row(status));
             continue;
         }
         if id == ProviderId::Muse {
@@ -59,6 +82,21 @@ pub fn usage_rows(
         rows.push(connected_row(status, now));
     }
     rows
+}
+
+/// A provider's row while its usage read is in flight: the in-place
+/// "Refreshing…" line, keeping the plan beside it when one is known.
+fn refreshing_row(status: &ProviderStatus) -> UsageRowData {
+    let mut row = UsageRowData::new(
+        status.provider.icon(),
+        UsageRowState::Unavailable("Refreshing…".into()),
+    );
+    if let Some(plan) =
+        status.usage.as_ref().and_then(|snapshot| snapshot.plan.clone()).or_else(|| auth_plan(status))
+    {
+        row = row.plan(plan);
+    }
+    row
 }
 
 /// The Muse row while the app is signed in: a live usage read with an
@@ -442,6 +480,26 @@ mod tests {
         let rows = usage_rows(&[muse, claude], None, 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, AuiProvider::Muse);
+    }
+
+    #[test]
+    fn a_refreshing_provider_reads_in_place_until_its_read_lands() {
+        // While the menu's asynchronous read runs, the row reads
+        // "Refreshing…" in place (keeping its plan); once the read
+        // clears, the same row reads the landed result. Driven through
+        // the explicit set, so no test touches the live service.
+        let mut codex = status(ProviderId::Codex);
+        codex.usage = Some(snapshot("codex", 1700000000));
+        let refreshing: HashSet<ProviderId> = [ProviderId::Codex].into_iter().collect();
+        let rows = usage_rows_with(&[codex.clone()], None, 1700000000, &refreshing);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(unavailable_text(&rows[0]), "Refreshing…");
+        assert_eq!(rows[0].plan.as_deref(), Some("prolite"));
+        let rows = usage_rows_with(&[codex], None, 1700000000, &HashSet::new());
+        match &rows[0].state {
+            UsageRowState::Windows(windows, _) => assert_eq!(windows.len(), 1),
+            other => panic!("expected the landed windows, got {other:?}"),
+        }
     }
 
     #[test]

@@ -2116,16 +2116,22 @@ impl Harness {
     /// A failure lands the inline open-failure state (see
     /// [`Self::fail_provider_open`]) — and opens nothing, never a silent
     /// muse fallback. A failed provider SWITCH still dialogs (Y2b).
-    /// Refresh the account menu's usage cards from what the app already
-    /// knows: a peek at every open provider lane plus Muse's tier — no
-    /// probe, no spend, no blocking (a busy lane simply keeps its last
-    /// reading). Throttled to one refresh per minute and skipped entirely
-    /// in deterministic mode, where the scripted statuses are the cards.
+    /// Refresh the account menu's usage cards: every provider readable
+    /// without a model turn is requested. Open lanes peek synchronously
+    /// (a busy lane simply keeps its last reading); Muse re-reads the
+    /// free wire and Codex runs its read-only probe off-thread, their
+    /// rows reading "Refreshing…" in place until each lands. Each
+    /// provider is throttled on its own one-minute clock, and skipped
+    /// entirely in deterministic mode, where the scripted statuses are
+    /// the cards.
     pub(crate) fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
         if crate::provider_status::deterministic() {
             return;
         }
-        if !crate::provider_status::note_usage_refresh() {
+        let targets =
+            crate::provider_status::usage_refresh_targets(&crate::provider_status::live_statuses());
+        let due = crate::provider_status::note_usage_refresh_for(&targets);
+        if due.is_empty() {
             return;
         }
         // A remembered pay-as-you-go older than the re-verify window is
@@ -2138,6 +2144,12 @@ impl Harness {
         {
             self.probe_tier(false, cx);
         }
+        // Muse's quiet re-read, on the menu's terms only: the tier never
+        // answered, failed, went dark, or is older than about five
+        // minutes. The wire only — never the pty scrape on every open.
+        let muse_async = due.contains(&ProviderId::Muse)
+            && self.client.is_some()
+            && crate::tier::muse_menu_refresh_due(self.tier.as_ref());
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
         let mut views: Vec<Entity<SessionView>> =
             self.session_cache.iter().map(|(_, view)| view.clone()).collect();
@@ -2146,17 +2158,65 @@ impl Harness {
         }
         for view in &views {
             let seen = view.read(cx);
+            let id = seen.provider_kind();
+            if !due.contains(&id) {
+                continue;
+            }
             if let Some(report) = seen.lane_usage() {
-                lanes.push((seen.provider_kind(), report));
+                lanes.push((id, report));
             }
         }
-        let muse = self.tier.as_ref().map(|tier| {
-            (
-                Some(tier.footer_label()),
-                tier.weekly_fraction().map(|fraction| fraction as f64),
-            )
-        });
+        // The in-memory tier snapshot rides the synchronous record unless
+        // the wire re-read below is about to replace it.
+        let muse = if due.contains(&ProviderId::Muse) && !muse_async {
+            self.tier.as_ref().map(|tier| {
+                (
+                    Some(tier.footer_label()),
+                    tier.weekly_fraction().map(|fraction| fraction as f64),
+                )
+            })
+        } else {
+            None
+        };
         crate::provider_status::record_refreshed_usage(&lanes, muse);
+        // The asynchronous reads: their rows read "Refreshing…" until
+        // each completion clears its provider and repaints the menu.
+        let mut async_ids = Vec::new();
+        if muse_async {
+            async_ids.push(ProviderId::Muse);
+        }
+        if due.contains(&ProviderId::Codex) {
+            async_ids.push(ProviderId::Codex);
+        }
+        if async_ids.is_empty() {
+            return;
+        }
+        crate::provider_status::mark_usage_refreshing(&async_ids);
+        cx.notify();
+        if muse_async {
+            self.refresh_muse_usage(cx);
+        }
+        if async_ids.contains(&ProviderId::Codex) {
+            self.wire_call(
+                cx,
+                || {
+                    let mut probed = crate::provider_status::Service::with_probes(
+                        crate::provider_status::Probes::real(),
+                    );
+                    probed.probe_one(ProviderId::Codex);
+                    probed.status(ProviderId::Codex).usage
+                },
+                |_this, usage, cx| {
+                    // A reading replaces the held one; a probe that read
+                    // nothing keeps it — either way the row settles.
+                    if let Some(snapshot) = usage {
+                        crate::provider_status::record_probed_snapshot(snapshot);
+                    }
+                    crate::provider_status::clear_usage_refreshing(&[ProviderId::Codex]);
+                    cx.notify();
+                },
+            );
+        }
     }
 
     pub(crate) fn open_on_provider(

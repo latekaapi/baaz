@@ -138,14 +138,51 @@ impl Harness {
     /// it — and so does a frame stamped before the installed credential: the
     /// wire carries no account identity, and a notification for a login that
     /// is no longer installed must not move the tier. Cached through
-    /// [`tier::remember`] exactly as a probe answer is.
+    /// [`tier::remember`] exactly as a probe answer is, and persisted
+    /// beside it as the Muse usage snapshot, so the account menu shows
+    /// the newest reading with its true age.
     pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
         if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()) {
             tier::remember(&tier);
+            crate::provider_status::record_muse_snapshot(
+                Some(tier.footer_label()),
+                tier.weekly_fraction().map(f64::from),
+            );
             self.tier = Some(tier);
             self.push_tier(cx);
         }
         cx.notify();
+    }
+
+    /// A quiet Muse usage re-read for the account menu: the wire only
+    /// ([`tier::read_usage_value`]), never the pty scrape, never a toast.
+    /// A current observation replaces the tier and the stored Muse
+    /// snapshot; anything else — a cold host, a stale frame, a failed
+    /// read — keeps what the menu had. The caller marks Muse refreshing;
+    /// this clears it and repaints either way, so the "Refreshing…" row
+    /// always settles.
+    pub(crate) fn refresh_muse_usage(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        self.wire_call(
+            cx,
+            move || {
+                let value = client.as_ref().and_then(tier::read_usage_value);
+                value.and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
+            },
+            move |this, tier, cx| {
+                if let Some(tier) = tier {
+                    tier::remember(&tier);
+                    crate::provider_status::record_muse_snapshot(
+                        Some(tier.footer_label()),
+                        tier.weekly_fraction().map(f64::from),
+                    );
+                    this.tier = Some(tier);
+                    this.push_tier(cx);
+                }
+                crate::provider_status::clear_usage_refreshing(&[crate::providers::ProviderId::Muse]);
+                cx.notify();
+            },
+        );
     }
 }
 
