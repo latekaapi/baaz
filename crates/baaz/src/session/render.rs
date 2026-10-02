@@ -3024,6 +3024,245 @@ mod tests {
         assert!(dividers[1].contains("Claude Code to Codex"), "B→C second, got: {}", dividers[1]);
     }
 
+    /// A pack turn that ends failed reports its reason — and only its own
+    /// reply counts: the acknowledgement answering it, or a later turn
+    /// failing, is never the handoff's failure.
+    #[gpui::test]
+    fn a_pack_turn_that_fails_reports_its_reason(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-f", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        let display = "Handed off from Claude Code: the goal";
+        let reason = "model `gpt-6-astra` does not exist or you lack access";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session("dest-f", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                // turn/started, then the pack's terminal failure.
+                view.fold.apply_deltas(
+                    "dest-f",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::BlockAdded {
+                            turn_id: "a-pack".to_owned(),
+                            block: aui_protocol::Block::Error {
+                                title: "Model error".to_owned(),
+                                detail: reason.to_owned(),
+                                retryable: false,
+                            },
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), display.to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            Some(reason.to_owned()),
+            "the failed pack turn reports the turn's reason"
+        );
+        // The muse lane folds the short display form, not the full pack:
+        // the same failure still reports.
+        let view_display = handoff_destination(vc, "dest-fd", "muse");
+        vc.update(|_, cx| {
+            view_display.update(cx, |view, _| {
+                view.fold.ensure_session("dest-fd", aui_protocol::Provider::Muse, "m", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "dest-fd",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", display) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![aui_protocol::Block::Error {
+                                    title: "Model error".to_owned(),
+                                    detail: reason.to_owned(),
+                                    retryable: false,
+                                }],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                    ],
+                );
+            });
+            view_display.update(cx, |view, cx| {
+                view.note_handoff_pack(pack.to_owned(), display.to_owned(), cx)
+            });
+        });
+        assert_eq!(
+            vc.update(|_, cx| view_display.read(cx).pack_turn_failed_reason()),
+            Some(reason.to_owned()),
+            "the display form matches too"
+        );
+    }
+
+    /// A pack turn the model acknowledged answers cleanly: no failure to
+    /// report, and a later turn failing stays that turn's business.
+    #[gpui::test]
+    fn an_answered_pack_turn_reports_no_failure(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-ok", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session("dest-ok", aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.fold.apply_deltas(
+                    "dest-ok",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: handoff_reply("a-pack", "Got it — ready to continue…"),
+                        },
+                        // A later turn failing is not the handoff failing.
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u2", "Keep going") },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a2".to_owned(),
+                                blocks: vec![aui_protocol::Block::Error {
+                                    title: "Model error".to_owned(),
+                                    detail: "overloaded".to_owned(),
+                                    retryable: true,
+                                }],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            None,
+            "an answered pack turn reports nothing, whatever later turns do"
+        );
+    }
+
+    /// An error card the pack reply answers past is a recoverable card
+    /// inside a successful reply, not a failed pack turn: only a reply
+    /// whose last word is the error counts.
+    #[gpui::test]
+    fn an_error_card_inside_a_completed_reply_reports_no_failure(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-recoverable", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session(
+                    "dest-recoverable",
+                    aui_protocol::Provider::Codex,
+                    "gpt-5",
+                    "/tmp/ws",
+                );
+                view.fold.apply_deltas(
+                    "dest-recoverable",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![
+                                    aui_protocol::Block::Text {
+                                        text: "Got it — picking up the ferry routes.".to_owned(),
+                                        streaming: false,
+                                    },
+                                    aui_protocol::Block::Error {
+                                        title: "Tool error".to_owned(),
+                                        detail: "the shell helper stumbled, retrying".to_owned(),
+                                        retryable: true,
+                                    },
+                                    aui_protocol::Block::Text {
+                                        text: "Recovered — ready to continue.".to_owned(),
+                                        streaming: false,
+                                    },
+                                ],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::TurnFinished {
+                            turn_id: "a-pack".to_owned(),
+                            meta: Default::default(),
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            None,
+            "a reply that answers past its error card completed; it did not fail"
+        );
+    }
+
+    /// A pack reply that ends on its error — even past partial answering
+    /// text — is a terminal failure: the turn never completed around it.
+    #[gpui::test]
+    fn a_pack_reply_ending_on_its_error_reports_its_reason(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-terminal", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        let reason = "model `gpt-6-astra` does not exist or you lack access";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session(
+                    "dest-terminal",
+                    aui_protocol::Provider::Codex,
+                    "gpt-5",
+                    "/tmp/ws",
+                );
+                view.fold.apply_deltas(
+                    "dest-terminal",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![
+                                    aui_protocol::Block::Text {
+                                        text: "Starting on the ferry".to_owned(),
+                                        streaming: false,
+                                    },
+                                    aui_protocol::Block::Error {
+                                        title: "Model error".to_owned(),
+                                        detail: reason.to_owned(),
+                                        retryable: false,
+                                    },
+                                ],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::TurnFinished {
+                            turn_id: "a-pack".to_owned(),
+                            meta: Default::default(),
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            Some(reason.to_owned()),
+            "a reply ending on its error failed, even past partial text"
+        );
+    }
+
     /// B6: opening the `+` menu closes any overlay menu first, so the two
     /// never stack. Without the close the old toggle left both open.
     #[gpui::test]
