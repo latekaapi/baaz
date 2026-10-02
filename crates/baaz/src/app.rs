@@ -5166,4 +5166,97 @@ mod tests {
         assert_eq!(current.keystroke, "cmd-n", "Clear restores the default");
         restore_shortcut_state(state);
     }
+
+    /// B5: a `session/list` reply that still says idle never stands a live
+    /// turn down. The reply's wholesale replace clears the open row's
+    /// running bit; the merge tail lays every live view back over its row,
+    /// so the row keeps `Working` instead of flipping to `Settled` until
+    /// the turn's next event.
+    #[gpui::test]
+    fn list_reply_after_a_live_turn_keeps_the_row_working(cx: &mut gpui::TestAppContext) {
+        use chrono::Local;
+        let state = hermetic_state("list-live-row");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        fn idle_row(id: &str) -> crate::sidebar::SessionEntry {
+            crate::sidebar::SessionEntry {
+                id: id.to_owned(),
+                label: "x".into(),
+                updated: Local::now(),
+                running: false,
+                turns: 1,
+                hidden: false,
+                pinned: false,
+                archived: false,
+                description: String::new(),
+                replayed: false,
+                provider: None,
+                named: false,
+                needs_title: false,
+                side_marker: false,
+                title_pending: false,
+                last_ask: None,
+                branch: None,
+                terminals_running: 0,
+                local: false,
+                provisional: false,
+                workspace: None,
+                project: None,
+                project_name: None,
+                attention: Vec::new(),
+                approval_command: None,
+                pending_question: None,
+                turn_started: None,
+                last_error: None,
+            }
+        }
+        // The live turn, the way `turn/started` leaves it: the view holds
+        // the turn and the row reads running from it.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions.push(idle_row("s-1"));
+                let view = h.active.clone().expect("a session is open");
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        muse_client::MuseEvent::Notification {
+                            method: "turn/started".to_owned(),
+                            params: serde_json::json!({"turnId": "t-1"}),
+                            cursor: None,
+                            session_id: Some("s-1".to_owned()),
+                        },
+                        cx,
+                    );
+                });
+                h.sync_row_live("s-1", true, cx);
+            })
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).sessions.iter().any(|e| e.id == "s-1" && e.running)),
+            "the started turn arms the row"
+        );
+        // The list reply still says idle: the wholesale replace stands the
+        // row down, then the merge tail lays the live view back over it —
+        // exactly the order `load_sessions` applies.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let wire = vec![idle_row("s-1")];
+                h.sessions = crate::sidebar::merge_session_list(wire, &h.sessions);
+                h.merge_provider_rows();
+                h.sync_all_live_rows(cx);
+            })
+        });
+        let (running, kind) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let entry = h.sessions.iter().find(|e| e.id == "s-1").expect("the row survives the merge");
+            let status = entry.row_status(Local::now());
+            (entry.running, status.kind)
+        });
+        assert!(running, "the live view re-arms the row after the list reply");
+        assert_eq!(kind, aui::nav::RowStatusKind::Working, "a busy view never reads Settled");
+        restore_state(state);
+    }
 }

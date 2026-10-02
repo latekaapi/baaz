@@ -8,7 +8,10 @@
 //! (the completed text renders whole). When a turn ends with buffered deltas
 //! still open — the interrupted path, where `item/completed` never arrives
 //! for the streamed message — `turn/completed` flushes them so the streamed
-//! text survives. `item/started` is likewise carried, not rendered.
+//! text survives. `item/started` is carried, not rendered — except a
+//! `commandExecution` start, which opens the command's running shell card
+//! so the wait reads as running, never hung; the completion updates that
+//! same card in place.
 //!
 //! Why `item/completed` stays primary:
 //!
@@ -283,6 +286,52 @@ fn parse_tool_gate(server_name: &str, message: &str) -> Option<(String, String)>
 /// double-quoted), and the card titles the inner command — the wrapper
 /// is how it ran, not what was asked. Unwraps one layer only; anything
 /// else renders verbatim, and the full wrapper stays in the fixture.
+/// One `commandExecution` item as its shell card, shared by the running
+/// card `item/started` opens and the update its completion lands in
+/// place: the same status, verb, exit and body either way, so a command
+/// never renders as two different cards. `live` reads running — the pill
+/// and the elapsed belong to the open execution, never the finished one.
+fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
+    // Every `CommandExecutionStatus` in the schema, named: the wire status
+    // is a plain string, so a future CLI version can send a fifth value
+    // no arm names — that unknown fails closed to `Error`, never back to
+    // a spinner that never stops.
+    let status = match (item.status(), item.exit_code()) {
+        ("inProgress", _) => ToolStatus::Running,
+        ("completed", Some(0)) => ToolStatus::Success,
+        ("completed", _) => ToolStatus::Error,
+        ("failed", _) => ToolStatus::Error,
+        ("declined", _) => ToolStatus::Cancelled,
+        (_unknown, _) => ToolStatus::Error,
+    };
+    // A still-open execution reads pending; only a finished one reads
+    // done, and a declined one reads denied.
+    let verb = match status {
+        ToolStatus::Running => "Run",
+        ToolStatus::Cancelled => "Denied",
+        _ => "Ran",
+    };
+    let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
+    let block = Block::ToolCall {
+        id: item.id().to_owned(),
+        kind: ToolKind::Shell,
+        verb: verb.into(),
+        target: display_command(item.command()),
+        status,
+        duration_ms: None,
+        body: ToolBody::Shell {
+            output_lines: item
+                .aggregated_output()
+                .map(|output| output.lines().map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            exit_code,
+            live: matches!(status, ToolStatus::Running),
+        },
+        diff_stat: None,
+    };
+    (block, status, exit_code)
+}
+
 fn display_command(command: &str) -> String {
     let Some(arg) = shell_wrapper_arg(command) else { return command.to_owned() };
     // The wrapper takes exactly one argument: anything that is not one
@@ -669,6 +718,17 @@ struct CodexApprovalSite {
     card: Block,
 }
 
+/// Where a live `commandExecution` card lives: `item/started` cards it as
+/// running, and the completion updates that same card in place — one card
+/// per command, running in between.
+#[derive(Clone, Debug)]
+struct CommandSite {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for the in-place update.
+    block_index: usize,
+}
+
 /// A pending MCP tool-call elicitation's card, keyed by the gated call's
 /// `(turn, server, tool)` triple: the elicitation names no item id, so
 /// its `mcpToolCall` item cannot address the card directly, and the
@@ -831,6 +891,11 @@ pub struct CodexFold {
     /// reads this back to face its card with the paths and a bounded
     /// diff preview. Dropped when the item completes.
     file_changes: HashMap<String, Vec<FileChangeEntry>>,
+    /// Wire item id → the live `commandExecution` card `item/started`
+    /// opened, so the completion updates it in place instead of adding a
+    /// second card. Dropped when the item completes; bounded like
+    /// `file_changes`, and past the bound completions push as before.
+    running_commands: HashMap<String, CommandSite>,
     /// `(turn, server, tool)` → the pending MCP tool-call elicitation
     /// gating that call (its card's approval id). The elicitation names
     /// no item id, so this is the join its `mcpToolCall` item settles
@@ -1589,12 +1654,35 @@ impl CodexFold {
     /// Carry one started item's `fileChange` changes by item id, so the
     /// `item/fileChange/requestApproval` that follows can face its card
     /// with the paths and the diff. Carried, never rendered: no deltas.
+    /// A started `commandExecution` is more than memory: it opens the
+    /// command's running shell card (live pill, elapsed) right away, and
+    /// the completion updates that same card in place — one card per
+    /// command, running in between. A start for an already-carded item
+    /// (a re-delivered start) cards nothing twice.
     fn remember_item(&mut self, notification: &Notification) -> Vec<Delta> {
-        if let Some(item) = notification.item() {
-            let changes = item.changes();
-            if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
-                self.file_changes.insert(item.id().to_owned(), changes.to_owned());
+        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else {
+            return Vec::new();
+        };
+        if item.kind() == "commandExecution" {
+            if self.running_commands.contains_key(item.id()) {
+                return Vec::new();
             }
+            let mut deltas = Vec::new();
+            self.ensure_assistant(turn_id, &mut deltas);
+            let (block, _, _) = command_execution_block(item);
+            if self.running_commands.len() < 64 {
+                let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+                self.running_commands.insert(
+                    item.id().to_owned(),
+                    CommandSite { turn_id: turn_id.to_owned(), block_index },
+                );
+            }
+            self.push_block(turn_id, block, &mut deltas);
+            return deltas;
+        }
+        let changes = item.changes();
+        if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
+            self.file_changes.insert(item.id().to_owned(), changes.to_owned());
         }
         Vec::new()
     }
@@ -1664,53 +1752,33 @@ impl CodexFold {
             }
             "commandExecution" => {
                 self.ensure_assistant(turn_id, &mut deltas);
-                // Every `CommandExecutionStatus` in the schema, named: the
-                // wire status is a plain string, so a future CLI version can
-                // send a fifth value no arm names — that unknown fails closed
-                // to `Error`, never back to a spinner that never stops.
-                let status = match (item.status(), item.exit_code()) {
-                    ("inProgress", _) => ToolStatus::Running,
-                    ("completed", Some(0)) => ToolStatus::Success,
-                    ("completed", _) => ToolStatus::Error,
-                    ("failed", _) => ToolStatus::Error,
-                    ("declined", _) => ToolStatus::Cancelled,
-                    (_unknown, _) => ToolStatus::Error,
-                };
-                // A still-open execution reads pending; only a finished one
-                // reads done, and a declined one reads denied.
-                let verb = match status {
-                    ToolStatus::Running => "Run",
-                    ToolStatus::Cancelled => "Denied",
-                    _ => "Ran",
-                };
-                let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
-                self.push_block(
-                    turn_id,
-                    Block::ToolCall {
-                        id: item.id().to_owned(),
-                        kind: ToolKind::Shell,
-                        verb: verb.into(),
-                        target: display_command(item.command()),
-                        status,
-                        duration_ms: None,
-                        body: ToolBody::Shell {
-                            output_lines: item
-                                .aggregated_output()
-                                .map(|output| {
-                                    output.lines().map(str::to_owned).collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default(),
-                            exit_code,
-                            live: false,
-                        },
-                        diff_stat: None,
-                    },
-                    &mut deltas,
-                );
+                let (block, status, exit_code) = command_execution_block(item);
+                // A completion for a card `item/started` already opened
+                // updates it in place — one card per command, running in
+                // between — while a completion with no start behind it
+                // (history, a missed start) pushes as before and opens the
+                // site for any later frame of the same item.
+                if let Some(site) = self.running_commands.remove(item.id()) {
+                    deltas.push(Delta::BlockUpdated {
+                        turn_id: site.turn_id,
+                        block_index: site.block_index,
+                        block,
+                    });
+                } else {
+                    if self.running_commands.len() < 64 {
+                        let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+                        self.running_commands.insert(
+                            item.id().to_owned(),
+                            CommandSite { turn_id: turn_id.to_owned(), block_index },
+                        );
+                    }
+                    self.push_block(turn_id, block, &mut deltas);
+                }
                 // A terminal completion settles the approval that gated this
                 // item: allowed when it ran (even when it then failed), and
                 // denied when it completed declined without running.
                 if !matches!(status, ToolStatus::Running) {
+                    self.running_commands.remove(item.id());
                     let state = match status {
                         ToolStatus::Cancelled => ApprovalState::Denied,
                         _ => ApprovalState::AllowedOnce {
@@ -3196,17 +3264,18 @@ mod tests {
             )),
             "an open execution settles nothing"
         );
-        // Finished: done verb, settled card.
+        // Finished: the open card updates in place to done (never a
+        // second card for the same command), and the approval settles.
         deltas.extend(fold.apply(&completed("exec-1", "completed")));
         assert!(
             deltas.iter().any(|delta| matches!(
                 delta,
-                Delta::BlockAdded {
+                Delta::BlockUpdated {
                     block: Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Success, .. },
                     ..
                 } if verb == "Ran"
             )),
-            "done reads done"
+            "done updates the running card in place"
         );
         assert!(
             deltas.iter().any(|delta| matches!(
@@ -3236,6 +3305,85 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the decline settles the card to denied"
+        );
+    }
+
+    /// B5: a `commandExecution` `item/started` opens the command's
+    /// running shell card (live pill) right away, and the completion
+    /// updates that same card in place — one card per command, running
+    /// in between. A re-delivered start cards nothing twice.
+    #[test]
+    fn started_command_cards_running_then_completes_in_place() {
+        fn started(item: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "th", "turnId": "t-9",
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "inProgress"},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic start decodes")
+        }
+        fn completed(item: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th", "turnId": "t-9",
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "completed", "exitCode": 0, "aggregatedOutput": "ok\n"},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic completion decodes")
+        }
+        fn shell_cards(deltas: &[Delta]) -> Vec<(String, ToolStatus, bool)> {
+            deltas
+                .iter()
+                .filter_map(|delta| match delta {
+                    Delta::BlockAdded {
+                        block:
+                            Block::ToolCall {
+                                kind: ToolKind::Shell,
+                                verb,
+                                status,
+                                body: ToolBody::Shell { live, .. },
+                                ..
+                            },
+                        ..
+                    } => Some((verb.clone(), *status, *live)),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut fold = CodexFold::new();
+        let mut deltas = fold.apply(&started("exec-9"));
+        assert_eq!(
+            shell_cards(&deltas),
+            [("Run".to_owned(), ToolStatus::Running, true)],
+            "the start opens one live running card: {deltas:?}"
+        );
+        // A re-delivered start cards nothing twice.
+        deltas.extend(fold.apply(&started("exec-9")));
+        assert_eq!(shell_cards(&deltas).len(), 1, "one command, one card: {deltas:?}");
+        // The completion updates that card in place — no second card.
+        deltas.extend(fold.apply(&completed("exec-9")));
+        assert_eq!(shell_cards(&deltas).len(), 1, "the finish adds no card: {deltas:?}");
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Shell,
+                            verb,
+                            status: ToolStatus::Success,
+                            body: ToolBody::Shell { live: false, .. },
+                            ..
+                        },
+                    ..
+                } if verb == "Ran"
+            )),
+            "the finish updates the running card to done: {deltas:?}"
         );
     }
 

@@ -918,7 +918,9 @@ impl Folded {
     /// the turn's terminal is the server's word that no more work runs in
     /// it — so a still-running call becomes done on a completed turn and
     /// cancelled on a cancelled or failed one, and an approval still
-    /// "approving" reads as allowed once the turn is over.
+    /// "approving" settles allowed on a completed turn and failed-marked
+    /// (nonzero exit) on any other terminal — never `Approving` forever
+    /// when the turn fails or is cancelled.
     fn settle_open_blocks(&mut self, key: TurnKey, terminal: &str) -> Vec<Delta> {
         let Some(at_turn) = self.turn_at(key) else { return Vec::new() };
         let settled_status = if terminal == "completed" { ToolStatus::Success } else { ToolStatus::Cancelled };
@@ -945,10 +947,14 @@ impl Folded {
                     *state = if terminal == "completed" { ActivityState::Done } else { ActivityState::Failed };
                     true
                 }
-                Block::Approval { state: state @ ApprovalState::Approving, .. } if terminal == "completed" => {
+                Block::Approval { state: state @ ApprovalState::Approving, .. } => {
                     // The exit code never reached the wire; the turn's own
-                    // terminal is the only outcome there is.
-                    *state = ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 };
+                    // terminal is the only outcome there is — allowed when
+                    // the turn completed, failed-marked otherwise.
+                    *state = ApprovalState::AllowedOnce {
+                        exit_code: i32::from(terminal != "completed"),
+                        duration_ms: 0,
+                    };
                     true
                 }
                 _ => false,
@@ -1097,7 +1103,40 @@ impl Folded {
             _ => self.assistant_item(&item, terminal),
         };
         deltas.extend(self.fill_policy_reason(&item));
+        deltas.extend(self.settle_approved_item(&item, terminal));
         deltas
+    }
+
+    /// Settle the approval that gated one item, per tool rather than per
+    /// turn: an approved card leaves `Approving` when its own command
+    /// starts (a non-terminal revision settles it allowed) and records
+    /// the outcome when it finishes — a failed command settles allowed
+    /// with a nonzero exit, never stuck `Approving`. Only `Approving`
+    /// cards move (plus refreshing an already-settled card when the
+    /// terminal revision proves the run failed): denied, auto-resolved
+    /// and pending cards are untouched.
+    fn settle_approved_item(&mut self, item: &msp::Item, terminal: bool) -> Vec<Delta> {
+        let Some(approval_id) = item.approval_id.as_deref() else { return Vec::new() };
+        let Some(slot) = self.slots.approval(approval_id) else { return Vec::new() };
+        let Some(mut block) =
+            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned()
+        else {
+            return Vec::new();
+        };
+        let Block::Approval { state, .. } = &mut block else { return Vec::new() };
+        let failed = terminal && item.status != msp::ItemStatus::Completed;
+        match state {
+            ApprovalState::Approving => {
+                *state =
+                    ApprovalState::AllowedOnce { exit_code: i32::from(failed), duration_ms: 0 };
+                self.update_block(slot, block)
+            }
+            ApprovalState::AllowedOnce { exit_code, .. } if failed && *exit_code == 0 => {
+                *state = ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 };
+                self.update_block(slot, block)
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn user_message(&mut self, item: &msp::Item, seen: bool) -> Vec<Delta> {
@@ -4153,5 +4192,184 @@ mod tests {
             user_item_event(&mut fold, "item/updated", "m-1", 3, "c-1", Some("EVIDENCE"), Some("EVIDENCE"));
         assert!(deltas.is_empty(), "an identical display text is also a no-op");
         assert_eq!(user_turn_text(&fold, "m-1"), "EVIDENCE");
+    }
+
+    fn approval_cursor() -> Value {
+        serde_json::json!({
+            "first": {"id": "e1", "sequence": 1},
+            "last": {"id": "e1", "sequence": 1},
+            "stream": {"id": "run", "kind": "run"},
+        })
+    }
+
+    fn notify(fold: &mut MuseFold, method: &str, params: Value) -> Vec<Delta> {
+        fold.apply(MuseEvent::Notification {
+            method: method.to_owned(),
+            params,
+            cursor: None,
+            session_id: Some("s".to_owned()),
+        })
+    }
+
+    /// One user-approved shell approval, resolved by the person: the card
+    /// reads `Approving` afterwards.
+    fn approve_shell(fold: &mut MuseFold) -> Vec<Delta> {
+        let mut deltas = notify(
+            fold,
+            "approval/requested",
+            serde_json::json!({
+                "approvalId": "ap-1",
+                "availableChoices": [],
+                "currentRequirementId": {"approvalId": "ap-1", "sourceIndex": 0},
+                "itemId": "i-gated",
+                "judgeEscalated": false,
+                "protectedWrite": false,
+                "rawArgs": "{}",
+                "sessionId": "s",
+                "sourceRange": approval_cursor(),
+                "subject": {"kind": "shell", "command": "ls /tmp"},
+                "taskId": "task-1",
+                "toolCallId": "shell_c-1",
+                "toolName": "shell",
+                "turnId": "t-1",
+                "viewCursor": "c1",
+            }),
+        );
+        deltas.extend(notify(
+            fold,
+            "approval/resolved",
+            serde_json::json!({
+                "approvalId": "ap-1",
+                "decision": "approved",
+                "itemId": "i-gated",
+                "policyResult": "allow",
+                "resolvedBy": "user",
+                "sessionId": "s",
+                "sourceRange": approval_cursor(),
+                "stageEvidence": [],
+                "turnId": "t-1",
+                "viewCursor": "c2",
+            }),
+        ));
+        deltas
+    }
+
+    fn gated_tool_item(status: &str, revision: u32) -> Value {
+        serde_json::json!({
+            "item": {
+                "itemId": "i-1",
+                "turnId": "t-1",
+                "kind": "toolCall",
+                "status": status,
+                "revision": revision,
+                "tool": "shell",
+                "approvalId": "ap-1",
+            }
+        })
+    }
+
+    fn approval_states(deltas: &[Delta]) -> Vec<ApprovalState> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::Approval { state, .. }, .. } => {
+                    Some(state.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// B5: an approved card settles when its own tool completes, mid-turn
+    /// — not at `turn/completed`. The completion carries the gated tool's
+    /// `approvalId`, which joins it straight to its card.
+    #[test]
+    fn an_approved_card_settles_on_its_tool_completion_mid_turn() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        let deltas = approve_shell(&mut fold);
+        assert!(
+            approval_states(&deltas).iter().any(|state| *state == ApprovalState::Approving),
+            "the person's allow reads Approving"
+        );
+        // The tool starts, then completes, all before the turn ends.
+        let running = notify(&mut fold, "item/started", gated_tool_item("inProgress", 1));
+        assert!(
+            approval_states(&running).iter().any(|state| matches!(
+                state,
+                ApprovalState::AllowedOnce { exit_code: 0, .. }
+            )),
+            "the start already leaves Approving: {running:?}"
+        );
+        let done = notify(&mut fold, "item/completed", gated_tool_item("completed", 2));
+        assert!(
+            approval_states(&done).iter().any(|state| matches!(
+                state,
+                ApprovalState::AllowedOnce { exit_code: 0, .. }
+            )),
+            "the completion settles it allowed mid-turn: {done:?}"
+        );
+        assert!(
+            !approval_states(&done).iter().any(|state| *state == ApprovalState::Approving),
+            "nothing still Approving after the tool finished"
+        );
+    }
+
+    /// B5: an approved command that fails shows failed — the terminal
+    /// revision records a nonzero exit on the card, and a failed turn end
+    /// never leaves it `Approving` either.
+    #[test]
+    fn an_approved_then_failed_command_ends_failed() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        approve_shell(&mut fold);
+        let done = notify(&mut fold, "item/completed", gated_tool_item("failed", 1));
+        assert!(
+            approval_states(&done).iter().any(|state| matches!(
+                state,
+                ApprovalState::AllowedOnce { exit_code: 1, .. }
+            )),
+            "the failed completion marks the card failed: {done:?}"
+        );
+        // The turn then fails too: the card stays failed, never Approving.
+        let finished = notify(
+            &mut fold,
+            "turn/completed",
+            serde_json::json!({"turnId": "t-1", "terminal": "failed"}),
+        );
+        let states = approval_states(&finished);
+        assert!(
+            !states.iter().any(|state| *state == ApprovalState::Approving),
+            "a failed turn end settles nothing back to Approving: {states:?}"
+        );
+        let session = fold.session("s").expect("session");
+        let failed = session.turns.iter().flat_map(|turn| turn.blocks()).any(|block| {
+            matches!(
+                block,
+                Block::Approval { state: ApprovalState::AllowedOnce { exit_code: 1, .. }, .. }
+            )
+        });
+        assert!(failed, "the card ends failed-marked");
+    }
+
+    /// B5: the turn-end fallback covers an approval whose tool never
+    /// reported: a failed turn marks it failed, a completed turn allows it.
+    #[test]
+    fn a_failed_turn_end_marks_a_still_approving_card_failed() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        approve_shell(&mut fold);
+        let finished = notify(
+            &mut fold,
+            "turn/completed",
+            serde_json::json!({"turnId": "t-1", "terminal": "failed"}),
+        );
+        assert!(
+            approval_states(&finished).iter().any(|state| matches!(
+                state,
+                ApprovalState::AllowedOnce { exit_code: 1, .. }
+            )),
+            "the failed turn end marks the card failed: {finished:?}"
+        );
     }
 }
