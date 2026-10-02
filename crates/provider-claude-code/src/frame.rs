@@ -233,6 +233,10 @@ pub enum Frame {
         /// sub-agent (`Agent`/`Task`): the parent `tool_use` id whose card
         /// nests these blocks. Empty on the main thread.
         parent_tool_use_id: String,
+        /// B12: the line's `timestamp` (RFC3339) as Unix milliseconds, for
+        /// thinking durations on replay. `None` on lines without one
+        /// (every live stream line) — unknown, never the epoch.
+        at_ms: Option<u64>,
     },
     /// A `user` frame: tool results (plus the sibling `tool_use_result`
     /// payload, kept raw — its shape varies by tool).
@@ -591,7 +595,93 @@ fn decode_assistant(value: &Value) -> Frame {
             .and_then(Value::as_str)
             .map(str::to_owned),
         usage: assistant_usage(message),
+        at_ms: timestamp_ms(value),
     }
+}
+
+/// B12: Unix milliseconds from a line's `timestamp` (RFC3339), for
+/// thinking durations on replay. `None` when absent or unparseable —
+/// unknown, never the epoch. Parsed by hand (no date dependency on this
+/// lane): `YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]`.
+pub fn timestamp_ms(value: &Value) -> Option<u64> {
+    value.get("timestamp").and_then(Value::as_str).and_then(parse_rfc3339_ms)
+}
+
+/// Days from civil date (Howard Hinnant's algorithm), for
+/// [`parse_rfc3339_ms`]: days since 1970-01-01.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+/// Two ASCII digits as a number, for [`parse_rfc3339_ms`].
+fn two_digits(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() == 2 && bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        Some(((bytes[0] - b'0') * 10 + (bytes[1] - b'0')) as i64)
+    } else {
+        None
+    }
+}
+
+fn parse_rfc3339_ms(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' {
+        return None;
+    }
+    let year = text[0..4].parse::<i64>().ok()?;
+    let month = two_digits(&bytes[5..7])?;
+    let day = two_digits(&bytes[8..10])?;
+    let hour = two_digits(&bytes[11..13])?;
+    let minute = two_digits(&bytes[14..16])?;
+    let second = two_digits(&bytes[17..19])?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    // Byte 19 is the zone when there is no fraction (`...:00Z`), or the
+    // fraction's dot when there is one (`...:14.384Z`).
+    let mut rest = &bytes[19..];
+    // Optional fractional seconds.
+    let mut millis = 0i64;
+    if rest.first() == Some(&b'.') {
+        let digits: Vec<u8> = rest[1..].iter().copied().take_while(u8::is_ascii_digit).collect();
+        if digits.is_empty() || digits.len() > 9 {
+            return None;
+        }
+        let mut nanos = 0i64;
+        for digit in digits.iter() {
+            nanos = nanos * 10 + i64::from(digit - b'0');
+        }
+        for _ in digits.len()..9 {
+            nanos *= 10;
+        }
+        millis = nanos.div_euclid(1_000_000);
+        rest = &rest[1 + digits.len()..];
+    }
+    // Zone: `Z` or `±HH:MM`.
+    let offset_seconds = if rest == b"Z" {
+        0
+    } else if rest.len() == 6 && (rest[0] == b'+' || rest[0] == b'-') && rest[3] == b':' {
+        let hours = two_digits(&rest[1..3])?;
+        let minutes = two_digits(&rest[4..6])?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        let sign = if rest[0] == b'+' { 1 } else { -1 };
+        sign * (hours * 3600 + minutes * 60)
+    } else {
+        return None;
+    };
+    let days = days_from_civil(year, month, day);
+    let stamp = days * 86_400 + hour * 3600 + minute * 60 + second - offset_seconds;
+    u64::try_from(stamp * 1000 + millis).ok()
 }
 
 fn decode_user(value: &Value) -> Frame {
@@ -642,6 +732,20 @@ fn decode_user(value: &Value) -> Frame {
         }
     }
     let parent_tool_use_id = parent_str(value);
+    // B12: a skill body the CLI replays as a `user` line (`isMeta: true`,
+    // the SKILL.md text keyed by its tool use): never the person's bubble
+    // and never a turn boundary — the `Skill` tool's own "Loaded skill"
+    // row already says it. It folds to an empty result, which the fold
+    // drops without a bubble or a split. A line that also carries tool
+    // results keeps its results: suppression never eats data.
+    if value.get("isMeta").and_then(Value::as_bool).unwrap_or(false) && results.is_empty() {
+        return Frame::UserResult {
+            session_id: session_id.clone(),
+            results: Vec::new(),
+            raw_detail,
+            parent_tool_use_id,
+        };
+    }
     if results.is_empty() {
         // No tool result: this is the `--replay-user-messages` echo of the
         // submitted prompt (or an empty frame) — the person's bubble.

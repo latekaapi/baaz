@@ -210,7 +210,12 @@ impl SessionView {
             + usize::from(self.handoff_divider.is_some())
             - usize::from(self.handoff_pack_hidden.is_some())
             - usize::from(self.handoff_pack_reply_hidden.is_some());
-        if expected != self.cached_turns.len() || self.follow {
+        // B12: a settle flips the last turn from live rows to the fold
+        // without adding a turn, so a busy flip rebuilds the row mapping
+        // too — otherwise the settled mapping would draw on live rows.
+        let busy = self.busy();
+        if expected != self.cached_turns.len() || self.follow || busy != self.synced_busy {
+            self.synced_busy = busy;
             self.refresh_render_cache();
         }
     }
@@ -403,6 +408,31 @@ impl SessionView {
                 });
                 Some(Rc::new(move |name: String, window: &mut Window, cx: &mut gpui::App| {
                     open(&name, window, cx)
+                }))
+            },
+            // B12: the fold switch's per-frame backing (default on), and
+            // the two pane intents: full text and the turn diff chip, out
+            // as window-level events like the skill tap above.
+            fold_finished_turns: self.fold_finished_turns,
+            open_full_text: {
+                let open = cx.listener(|_: &mut Self, (title, text): &(String, String), _, cx| {
+                    cx.emit(crate::session::SessionEvent::OpenFullText {
+                        title: title.clone(),
+                        text: text.clone(),
+                    });
+                });
+                Some(Rc::new(
+                    move |title: String, text: String, window: &mut Window, cx: &mut gpui::App| {
+                        open(&(title, text), window, cx)
+                    },
+                ))
+            },
+            open_turn_diff: {
+                let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
+                    cx.emit(crate::session::SessionEvent::OpenTurnChanges { turn_id: id.clone() });
+                });
+                Some(Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
+                    open(&id, window, cx)
                 }))
             },
             // The handoff card's two intents ("Open the new session",
@@ -785,7 +815,7 @@ impl SessionView {
     /// The fold owns the fetch handle (`outputRef`); this view owns the
     /// result. Called when the fold changes (length drift or `follow`), never
     /// per frame, so steady-state frames share one `Rc`.
-    pub(super) fn refresh_render_cache(&mut self) {
+    pub(crate) fn refresh_render_cache(&mut self) {
         if self.fold.session(&self.session_id).is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
@@ -843,8 +873,14 @@ impl SessionView {
         // `transcript_list`.
         let mut rows = Vec::with_capacity(self.rows.len() + 1);
         let mut row_counts = Vec::with_capacity(self.cached_turns.len() + 1);
+        let last_turn = self.cached_turns.len().saturating_sub(1);
+        // B12: rows go through the shared slot mapping, with the same
+        // settled rule the list renderer draws with below — replayed
+        // history draws settled, and only the live tail draws live rows.
+        let live_tail = self.busy() && !crate::clock::deterministic();
         for (turn_ix, turn) in self.cached_turns.iter().enumerate() {
-            let n = transcript::turn_rows(turn);
+            let settled = turn_ix != last_turn || !live_tail;
+            let n = transcript::turn_mapped_rows(turn, settled, &self.toggled, self.fold_finished_turns);
             rows.extend((0..n).map(|row| (turn_ix, row)));
             row_counts.push((turn.id().to_owned(), n));
         }
@@ -884,12 +920,15 @@ impl SessionView {
     }
 
     /// Flip one card's fold override (C8: group headers and per-call cards
-    /// share this, keyed stably).
+    /// share this, keyed stably). B12 fold headers and live-run rows share
+    /// it too, so a toggle rebuilds the row mapping at once — counts and
+    /// clicks never disagree for a frame.
     pub(super) fn toggle_fold(&mut self, key: String, cx: &mut Context<Self>) {
         let toggled = Rc::make_mut(&mut self.toggled);
         if !toggled.remove(&key) {
             toggled.insert(key);
         }
+        self.refresh_render_cache();
         cx.notify();
     }
 

@@ -4145,8 +4145,39 @@ impl Harness {
                 self.open_skills(cx);
                 self.select_skill(name, cx);
             }
+            // B12: a transcript card's "Open full text": the card's whole
+            // text in the Files pane's read-only doc view.
+            SessionEvent::OpenFullText { title, text } => {
+                self.open_text_doc_for(title.clone(), text.clone(), cx);
+            }
+            // B12: a turn fold's `+N −M` chip: Changes for the session.
+            // Per-turn checkpoints do not exist yet, so the chip opens the
+            // session-scoped surface rather than pretending a scope. The
+            // id is kept for that filter — read here so the shape stays.
+            SessionEvent::OpenTurnChanges { turn_id } => {
+                let _ = turn_id.as_str();
+                self.show_right(crate::layout::RightKind::Git, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// B12 `transcript:fold`: flip "Fold finished turns" on the active
+    /// session (default on). The persisted Settings → General switch
+    /// belongs to the settings store; this verb is the probe and palette
+    /// path to the same backing. Not yet registered: the one-line
+    /// `WINDOW_VERBS` entry lives in `steps.rs`, outside this task's
+    /// file scope, so the registration is named in the report instead.
+    #[allow(dead_code)]
+    pub(crate) fn step_transcript_fold(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.active.as_ref().cloned() {
+            view.update(cx, |view, cx| {
+                view.fold_finished_turns = !view.fold_finished_turns;
+                view.refresh_render_cache();
+                cx.notify();
+            });
+        }
+        let _ = window;
     }
 
     /// A failed command that the application, rather than a session, issued.
