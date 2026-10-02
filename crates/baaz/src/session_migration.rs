@@ -670,6 +670,12 @@ pub struct MigrationReport {
 /// the report with its reason (user-visible) and on stderr (logged), with
 /// both copies left in place.
 pub fn execute_plan(state_dir: &Path, moves: &[PlannedMove]) -> MigrationReport {
+    // One executor at a time: the prompt's confirm and a lazy move before a
+    // resume both run in the background, and the journal is a
+    // read-modify-write file. Serialising them keeps journal entries and the
+    // staging sweep from racing each other.
+    static EXECUTOR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _executing = EXECUTOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     clean_stale_staging(state_dir, moves);
     let mut report = MigrationReport::default();
     for planned in pending_moves(state_dir, moves.to_vec()) {
@@ -974,11 +980,16 @@ impl BaazHarness {
     pub(crate) fn confirm_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         let state = crate::store::support_dir();
         let plan = self.migration_cached_plan();
+        // A click that beats the background plan (cold start) plans now, in
+        // the same background task, instead of moving nothing.
+        let owner = owner_home();
+        let registry = self.provider_sessions.clone();
         self.close_dialog(cx);
         cx.spawn(async move |this, cx| {
             let report = cx
                 .background_executor()
                 .spawn(async move {
+                    let plan = if plan.is_empty() { plan_migration(&owner, &state, &registry) } else { plan };
                     let pending = pending_moves(&state, plan);
                     execute_plan(&state, &pending)
                 })
