@@ -436,6 +436,21 @@ pub fn display_diff(diff: &Diff, cap: usize) -> Diff {
 /// Blank targets are skipped and repeats keep their first position, so the
 /// Changes pane's "This session" section lists each file once, in the order
 /// the session touched it.
+/// B8c: the [`session_edited_paths`] cache key the Changes pane holds on the
+/// session view: (turn count, last turn's block count). O(1) — no block scan —
+/// so the shell render skips the O(all blocks) walk on frames that do not
+/// show Changes, and on steady frames where the key stands still.
+pub fn edited_paths_cache_key(turns: &[Turn]) -> (usize, usize) {
+    let last_blocks = turns
+        .last()
+        .map(|turn| match turn {
+            Turn::Assistant { blocks, .. } => blocks.len(),
+            Turn::User { .. } => 0,
+        })
+        .unwrap_or(0);
+    (turns.len(), last_blocks)
+}
+
 pub fn session_edited_paths(turns: &[Turn]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ordered = Vec::new();
@@ -2999,6 +3014,27 @@ mod tests {
         ];
         assert_eq!(session_edited_paths(&turns), vec!["src/b.rs".to_owned(), "src/a.rs".to_owned()]);
         assert!(session_edited_paths(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_edits_cache_key_is_turns_then_last_blocks() {
+        // B8c: the Changes pane caches the edit list on (turn count, last
+        // turn's block count) — O(1), no block scan.
+        assert_eq!(edited_paths_cache_key(&[]), (0, 0));
+        let one = vec![assistant(vec![text_block()], 0)];
+        assert_eq!(edited_paths_cache_key(&one), (1, 1));
+        let two = vec![assistant(vec![text_block()], 0), assistant(vec![text_block(), text_block()], 0)];
+        assert_eq!(edited_paths_cache_key(&two), (2, 2));
+        // A user turn last carries no blocks.
+        let user = Turn::User {
+            id: "u-1".to_owned(),
+            text: "hi".to_owned(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            timestamp: None,
+        };
+        let mixed = vec![assistant(vec![text_block(), text_block(), text_block()], 0), user];
+        assert_eq!(edited_paths_cache_key(&mixed), (2, 0));
     }
 
     /// X2: an opened big diff draws the first 40 rows of the first hunk
