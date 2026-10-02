@@ -214,13 +214,15 @@ fn codex_command_ask_waits_then_runs() {
         "the run settles the card to allowed"
     );
     assert!(
-        deltas.iter().any(|delta| matches!(
-            delta,
-            Delta::BlockAdded {
-                block: Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Success, .. },
-                ..
-            } if verb == "Ran"
-        )),
+        // The running card is added when the command starts and updated in
+        // place when it finishes, so the success may arrive as either.
+        deltas.iter().any(|delta| match delta {
+            Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => matches!(
+                block,
+                Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Success, .. } if verb == "Ran"
+            ),
+            _ => false,
+        }),
         "the finished execution reads done"
     );
 }
@@ -231,13 +233,13 @@ fn codex_approved_command_completes() {
     let lines = fixture("codex", "approval.jsonl");
     let deltas = codex_deltas(&lines);
     assert!(
-        deltas.iter().any(|delta| matches!(
-            delta,
-            Delta::BlockAdded {
-                block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
-                ..
-            }
-        )),
+        deltas.iter().any(|delta| match delta {
+            Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => matches!(
+                block,
+                Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. }
+            ),
+            _ => false,
+        }),
         "the approved command ran"
     );
 }

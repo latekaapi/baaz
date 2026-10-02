@@ -4302,12 +4302,13 @@ mod tests {
             "the start already leaves Approving: {running:?}"
         );
         let done = notify(&mut fold, "item/completed", gated_tool_item("completed", 2));
+        // Settled at the start already; the completion re-emits only on a
+        // change (a failure), so the latest card state across both reads
+        // allowed, mid-turn.
+        let latest = approval_states(&running).into_iter().chain(approval_states(&done)).last();
         assert!(
-            approval_states(&done).iter().any(|state| matches!(
-                state,
-                ApprovalState::AllowedOnce { exit_code: 0, .. }
-            )),
-            "the completion settles it allowed mid-turn: {done:?}"
+            matches!(latest, Some(ApprovalState::AllowedOnce { exit_code: 0, .. })),
+            "the card reads allowed mid-turn: {latest:?}"
         );
         assert!(
             !approval_states(&done).iter().any(|state| *state == ApprovalState::Approving),
