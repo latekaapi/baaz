@@ -1016,6 +1016,9 @@ impl Harness {
         let secondary = match (danger, action) {
             (true, _) => Some("Cancel"),
             (false, DialogAction::Dismiss) => None,
+            // The migration prompt's opt-out: one click, never asked again
+            // (the Providers row stays while moves remain).
+            (false, DialogAction::MigrateSessions) => Some("Not now"),
             (false, _) => Some("Dismiss"),
         };
         let primary = cx.listener(move |this: &mut Self, _: &(), window, cx| {
@@ -1042,6 +1045,12 @@ impl Harness {
             // the dialog, so closing any other way already dropped it.
             if action == DialogAction::CloseTerminalTab {
                 this.confirm_close_terminal_tab(cx);
+                return;
+            }
+            // The migration prompt's Move: the full dry-run plan through
+            // the journaling executor. Nothing moved without this click.
+            if action == DialogAction::MigrateSessions {
+                this.confirm_session_migration(cx);
                 return;
             }
             this.close_dialog(cx);
@@ -1074,10 +1083,21 @@ impl Harness {
                 DialogAction::CloseTerminalTab => {}
                 // Confirmed through the early return above, like Archive.
                 DialogAction::ProviderSignOut => {}
+                // Confirmed through the early return above, like Archive.
+                DialogAction::MigrateSessions => {}
             }
             cx.notify();
         });
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
+        // The migration prompt's secondary is Never-ask-again ("Not now"):
+        // the scrim and Escape beside it only close, so an accidental
+        // dismissal re-asks next launch instead of stranding sessions.
+        let close = cx.listener(move |this: &mut Self, _: &(), _, cx| {
+            if action == DialogAction::MigrateSessions {
+                this.dismiss_session_migration(cx);
+            } else {
+                this.close_dialog(cx);
+            }
+        });
         // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
         // gets its own rather than sharing the secondary button's.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_dialog(cx));

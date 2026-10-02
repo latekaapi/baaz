@@ -525,6 +525,76 @@ impl Harness {
             .into_any_element()
     }
 
+    /// The B4M migration row under the cards, or `None` when nothing
+    /// waits: the "Move N …" title, the dry-run count with an expandable
+    /// path list, and the Move button through the same journaling
+    /// executor the one-time prompt uses. Reads only the cached plan —
+    /// never the owner-home walk (see `MigrationCache::plan_for_render`).
+    /// Both buttons carry accessibility labels, like every Settings
+    /// switch.
+    fn migration_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let empty: &[crate::session_migration::PlannedMove] = &[];
+        let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
+        if plan.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let (n_claude, n_codex) = crate::session_migration::counts(&plan);
+        let title = crate::session_migration::prompt_title(n_claude, n_codex);
+        let paths_label = if self.migration_paths_expanded { "Hide paths" } else { "Show paths" };
+        let paths_toggle_label = format!("{paths_label} ({} files)", plan.len());
+        let go = cx.listener(|this: &mut Self, _: &(), _, cx| this.confirm_session_migration(cx));
+        let toggle = cx.listener(|this: &mut Self, _: &(), _, cx| this.toggle_migration_paths(cx));
+        let mut text = v_flex().flex_1().min_w(px(0.0)).child(
+            gpui::div().text_color(p.ink).ui(scale::FS_13).semibold().child(SharedString::from(title)),
+        ).child(
+            gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
+                "Baaz's own sessions still live in the owner's homes. Moving keeps resume working; \
+                 nothing is deleted. Codex for Mac may keep listing moved threads until archived there.",
+            ),
+        );
+        if self.migration_paths_expanded {
+            let mut list = v_flex().gap(px(scale::SP_1)).pt(px(scale::SP_1));
+            for path in crate::session_migration::row_paths(&plan) {
+                list = list.child(
+                    gpui::div()
+                        .text_color(p.ink_3)
+                        .ui(scale::FS_12)
+                        .child(SharedString::from(path)),
+                );
+            }
+            text = text.child(list);
+        }
+        Some(
+            h_flex()
+                .w_full()
+                .items_start()
+                .gap(px(scale::SP_3))
+                .p(px(scale::SP_3))
+                .rounded(px(scale::R_SM))
+                .border_1()
+                .border_color(p.line_strong)
+                .child(text)
+                .child(
+                    v_flex()
+                        .gap(px(scale::SP_2))
+                        .child(
+                            button("migration-move", "Move")
+                                .primary()
+                                .accessibility_label("Move sessions into Baaz")
+                                .on_click(move |_, window, cx| go(&(), window, cx)),
+                        )
+                        .child(
+                            button("migration-paths", paths_toggle_label.clone())
+                                .ghost()
+                                .accessibility_label(paths_toggle_label)
+                                .on_click(move |_, window, cx| toggle(&(), window, cx)),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// One provider intent from a card: switch, re-check, sign in/out,
     /// install, docs.
     pub(crate) fn handle_provider_intent(
@@ -775,6 +845,17 @@ impl Harness {
                     .overflow_y_scroll()
                     .child(cards),
             )
+            .child({
+                // B4M's durable surface: while Baaz-owned sessions still
+                // wait in the owner's homes, the page carries the same
+                // Move the one-time prompt offers — dry-run count,
+                // expandable paths, nothing moving without the click.
+                let mut below = v_flex().gap(px(scale::SP_3));
+                if let Some(row) = self.migration_row(cx) {
+                    below = below.child(row);
+                }
+                below
+            })
             .child(
                 button("providers-setup", "Set up providers…")
                     .ghost()

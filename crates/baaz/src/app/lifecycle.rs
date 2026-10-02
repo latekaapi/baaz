@@ -2780,6 +2780,17 @@ impl Harness {
         // answers `OpenSession` but no resume — the reopen still goes
         // through `ResumeSession` so the failure is the honest one.
         if self.client.is_none() || disabled {
+            // B4M's lazy move for this offline branch only: it never
+            // reaches the background `work` below, so it moves here,
+            // synchronously — in tests and captures the owner-side set is
+            // tiny or absent. The connected path moves inside `work`, off
+            // the UI thread.
+            crate::session_migration::ensure_session_moved(
+                &crate::session_migration::owner_home(),
+                &crate::store::support_dir(),
+                &record.provider,
+                &record.session_id,
+            );
             use provider::ProviderAdapter as _;
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
@@ -2844,28 +2855,53 @@ impl Harness {
         // because `work` below borrows the record into the background.
         let retry_reopen = ProviderOpenRetry::Reopen(Box::new(record.clone()));
         let retry_id = record.session_id.clone();
-        let work = move || -> Result<ProviderOpen, provider::ProviderError> {
-            let provider = factory(provider_id)?;
-            #[cfg(not(test))]
-            let (provider, events) = conn::gate(provider);
-            let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())?;
-            // Tests drain after the resume, synchronously on the test
-            // executor: the replayed deltas are buffered before the lane
-            // starts, with no forwarding thread.
-            #[cfg(test)]
-            let (provider, events) = conn::gate_sync(provider);
-            Ok(ProviderOpen {
-                provider_id,
-                provider,
-                events,
-                session_id,
-                project: record.project.clone(),
-                workspace: record.workspace.clone().unwrap_or(workspace),
-                title: record.title.clone(),
-                epoch,
-            })
+        let work = move || -> (Result<ProviderOpen, provider::ProviderError>, usize) {
+            // B4M's lazy move, on the background executor: a session that
+            // was never moved still has its transcript/rollout in the
+            // owner's home, where the Baaz-homed child cannot resume it —
+            // so the plan walk and any copy run here, ordered before the
+            // resume below, through the same executor the prompt uses.
+            // Sessions with nothing owner-side move nothing.
+            let moved = crate::session_migration::ensure_session_moved(
+                &crate::session_migration::owner_home(),
+                &crate::store::support_dir(),
+                &record.provider,
+                &record.session_id,
+            );
+            if moved > 0 {
+                crate::baaz_log!("provider reopen: lazy-moved {moved} file(s) for {}", record.session_id);
+            }
+            let result = (|| -> Result<ProviderOpen, provider::ProviderError> {
+                let provider = factory(provider_id)?;
+                #[cfg(not(test))]
+                let (provider, events) = conn::gate(provider);
+                let session_id = crate::provider_sessions::send_resume(&provider, &record, &new_command_id())?;
+                // Tests drain after the resume, synchronously on the test
+                // executor: the replayed deltas are buffered before the lane
+                // starts, with no forwarding thread.
+                #[cfg(test)]
+                let (provider, events) = conn::gate_sync(provider);
+                Ok(ProviderOpen {
+                    provider_id,
+                    provider,
+                    events,
+                    session_id,
+                    project: record.project.clone(),
+                    workspace: record.workspace.clone().unwrap_or(workspace),
+                    title: record.title.clone(),
+                    epoch,
+                })
+            })();
+            (result, moved)
         };
-        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+        self.wire_call_in(cx, work, move |this, outcome, window, cx| {
+            let (result, moved) = outcome;
+            // The move changed what waits: refresh the cached plan off the
+            // UI thread so the Providers row follows the lazy move.
+            if moved > 0 {
+                this.invalidate_migration_cache(cx);
+            }
+            match result {
             Ok(open) => {
                 // The bridge was spawned under the stored id; if the resume
                 // answered another, the agent's tools must still reach this
@@ -2892,6 +2928,7 @@ impl Harness {
                     window,
                     cx,
                 );
+            }
             }
         });
     }
