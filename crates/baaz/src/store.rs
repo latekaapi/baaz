@@ -26,6 +26,14 @@ pub fn support_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("BAAZ_STATE_DIR") {
         return PathBuf::from(dir);
     }
+    // A test that forgot to point the store somewhere disposable must never
+    // write the person's real state: `cargo test` once rewrote their
+    // `projects.json`. Unit tests fall back to a per-process temp dir.
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join(format!("baaz-test-state-{}", std::process::id()));
+    }
+    #[allow(unreachable_code)]
     default_support_dir()
 }
 
@@ -317,5 +325,23 @@ mod tests {
         assert!(probe.is_err(), "the probe must really panic while holding the lock");
         // The next acquisition recovers instead of dying with PoisonError.
         let _guard = super::test_env_lock();
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    /// Without `BAAZ_STATE_DIR`, a test build's store is a temp dir, never
+    /// `~/Library/Application Support/baaz`.
+    #[test]
+    fn an_unset_state_dir_never_resolves_to_the_real_support_dir_in_tests() {
+        let _guard = super::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::remove_var("BAAZ_STATE_DIR");
+        let dir = super::support_dir();
+        if let Some(value) = old {
+            std::env::set_var("BAAZ_STATE_DIR", value);
+        }
+        assert_ne!(dir, super::default_support_dir());
+        assert!(dir.starts_with(std::env::temp_dir()), "{dir:?}");
     }
 }
