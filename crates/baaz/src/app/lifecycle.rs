@@ -6090,6 +6090,7 @@ mod tests {
                 harness.pending_handoff = Some(crate::handoff::PendingHandoff {
                     source_session: "s-source".to_owned(),
                     epoch: harness.switch_epoch,
+                    prefix: Vec::new(),
                 });
                 let params =
                     harness.new_session_params(Some(project.as_str()), cx).expect("params");
