@@ -373,7 +373,7 @@ def main():
         # set they always should, so this is cheap; when they do not, the screen
         # is genuinely still animating and reporting that beats baselining an
         # arbitrary frame.
-        import filecmp, tempfile
+        import filecmp
         tmp, prev = tempfile.mkdtemp(), None
         for attempt in range(SETTLE_TRIES):
             shot = os.path.join(tmp, f"s{attempt}.png")
