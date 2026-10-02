@@ -1421,6 +1421,7 @@ pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
 /// clears any preview; a missing, oversized or unreadable path opens the
 /// card straight away. Returns whether the caller must read the file off
 /// the render path and land it with [`complete_file_preview`].
+#[cfg(test)]
 pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) -> bool {
     begin_file_preview_highlight(cache, root, id, None)
 }
