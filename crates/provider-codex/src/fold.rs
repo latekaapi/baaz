@@ -588,6 +588,18 @@ pub struct AccountSnapshot {
     pub secondary_minutes: Option<u64>,
     /// Unix time the secondary window resets, when reported.
     pub secondary_resets_at: Option<u64>,
+    /// Unix time the latest push or read arrived on the wire. Stamped when
+    /// the fold observes it, so the store persists the reading with its
+    /// true age instead of the next turn's time.
+    pub observed_at: Option<i64>,
+}
+
+/// Unix seconds now. Best-effort: zero when the clock is unavailable.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl AccountSnapshot {
@@ -595,7 +607,7 @@ impl AccountSnapshot {
     /// window at all still counts as "a reading was seen". Accepts either
     /// the push params (`{rateLimits: …}`) or the bare limits object the
     /// `account/rateLimits/read` answer carries — same object, either
-    /// wrapping.
+    /// wrapping. Stamps when the reading arrived on the wire.
     pub fn observe(&mut self, params: &Value) {
         let limits = params.get("rateLimits").unwrap_or(params);
         let primary = limits.get("primary");
@@ -637,6 +649,13 @@ impl AccountSnapshot {
         {
             self.secondary_resets_at = Some(resets);
         }
+        self.observed_at = Some(now_secs());
+    }
+
+    /// Pin the wire-arrival stamp (tests drive the clock through this).
+    #[cfg(test)]
+    pub fn set_observed_at(&mut self, at: i64) {
+        self.observed_at = Some(at);
     }
 
     /// The structured usage reading for the seam: the plan plus one window
@@ -669,7 +688,11 @@ impl AccountSnapshot {
                 window_minutes: self.secondary_minutes,
             });
         }
-        Some(provider::UsageReport { plan: self.plan.clone(), windows })
+        Some(provider::UsageReport {
+            plan: self.plan.clone(),
+            windows,
+            observed_at: self.observed_at,
+        })
     }
 
     /// Whether any push has been seen at all.

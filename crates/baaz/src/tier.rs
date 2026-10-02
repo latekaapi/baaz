@@ -261,6 +261,18 @@ impl Tier {
     /// `0..=1`, or `None` when the probe said nothing usable. This is the only
     /// place the weekly number is drawn — [`Self::footer_label`] above it
     /// names the plan and stops there (D5).
+    /// The fraction the usage snapshot records: the weekly window when the
+    /// card has it, otherwise the current (5-hour) window — a read with only
+    /// the current window still has numbers and must not read as unavailable.
+    pub fn usage_fraction(&self) -> Option<f32> {
+        match self {
+            Tier::Subscription { weekly_pct: Some(pct), .. } | Tier::Subscription { current_pct: Some(pct), .. } => {
+                Some((*pct as f32 / 100.0).clamp(0.0, 1.0))
+            }
+            _ => None,
+        }
+    }
+
     pub fn weekly_fraction(&self) -> Option<f32> {
         match self {
             Tier::Subscription { weekly_pct: Some(pct), .. } => Some((*pct as f32 / 100.0).clamp(0.0, 1.0)),
@@ -364,6 +376,18 @@ const CACHE_TTL: Duration = Duration::from_secs(3600);
 /// subscription keeps [`CACHE_TTL`].
 pub const PAYG_REVERIFY_AFTER: Duration = Duration::from_secs(600);
 
+/// How long a remembered `usage_unavailable` card is trusted before the
+/// next boot or menu refresh re-reads it instead. The card said the
+/// server is not reporting numbers right now — a transient state, often
+/// already gone after the next turn — so it gets the short bound; a
+/// remembered subscription with numbers keeps [`CACHE_TTL`].
+pub const UNAVAILABLE_REVERIFY_AFTER: Duration = Duration::from_secs(300);
+
+/// How long a remembered Muse usage answer is trusted before the account
+/// menu re-reads it instead: about five minutes past its probe. The menu
+/// calls this through [`muse_menu_refresh_due`].
+pub const USAGE_REVERIFY_AFTER: Duration = Duration::from_secs(300);
+
 /// A pay-as-you-go answer's age past which it re-verifies rather than being
 /// trusted. `None` (a file from before the stamp existed) reads as stale:
 /// re-probe rather than trust indefinitely.
@@ -371,6 +395,40 @@ pub fn payg_answer_stale(probed_at_secs: Option<u64>, now_secs: u64) -> bool {
     match probed_at_secs {
         Some(taken) => now_secs.saturating_sub(taken) > PAYG_REVERIFY_AFTER.as_secs(),
         None => true,
+    }
+}
+
+/// A `usage_unavailable` answer's age past which it expires rather than
+/// being trusted. `None` (a file from before the stamp existed) reads as
+/// stale: re-read rather than trust indefinitely.
+pub fn unavailable_answer_stale(probed_at_secs: Option<u64>, now_secs: u64) -> bool {
+    match probed_at_secs {
+        Some(taken) => now_secs.saturating_sub(taken) > UNAVAILABLE_REVERIFY_AFTER.as_secs(),
+        None => true,
+    }
+}
+
+/// Whether the account menu should re-read Muse's usage on open: the
+/// tier never answered, the probe failed, the card carries
+/// `usage_unavailable` or no numbers at all, or its answer is older
+/// than about five minutes. A fresh answer with numbers is left alone.
+pub fn muse_menu_refresh_due(tier: Option<&Tier>) -> bool {
+    let Some(tier) = tier else {
+        return true;
+    };
+    match tier {
+        Tier::PayAsYouGo => false,
+        Tier::Unavailable(_) => true,
+        Tier::Subscription { current_pct, weekly_pct, usage_unavailable, .. } => {
+            if *usage_unavailable || (current_pct.is_none() && weekly_pct.is_none()) {
+                return true;
+            }
+            let cached: Cached = crate::store::read_json(&cache_path());
+            match cached.probed_at_secs {
+                Some(taken) => now_secs().saturating_sub(taken) > USAGE_REVERIFY_AFTER.as_secs(),
+                None => true,
+            }
+        }
     }
 }
 
@@ -386,7 +444,9 @@ pub fn now_secs() -> u64 {
 /// now and inside [`CACHE_TTL`]. A stale entry — a login or a logout since,
 /// or an answer older than the hour — reads as `None`, which is what makes
 /// the caller re-probe. A remembered pay-as-you-go older than ten minutes
-/// reads as `None` sooner ([`payg_answer_stale`]); a remembered subscription
+/// reads as `None` sooner ([`payg_answer_stale`]), and a remembered
+/// `usage_unavailable` older than about five minutes does too
+/// ([`unavailable_answer_stale`]); a remembered subscription with numbers
 /// keeps today's behaviour.
 pub fn cached() -> Option<Tier> {
     cached_at(now_secs())
@@ -399,6 +459,11 @@ pub fn cached_at(now: u64) -> Option<Tier> {
         return None;
     }
     if matches!(cached.tier, Some(Tier::PayAsYouGo)) && payg_answer_stale(cached.probed_at_secs, now) {
+        return None;
+    }
+    if matches!(cached.tier, Some(Tier::Subscription { usage_unavailable: true, .. }))
+        && unavailable_answer_stale(cached.probed_at_secs, now)
+    {
         return None;
     }
     let modified = std::fs::metadata(cache_path()).ok()?.modified().ok()?;
@@ -962,6 +1027,43 @@ pub fn tier_from_read_current(
     let mut tier = tier_from_usage(usage);
     restore_known_plan(&mut tier, &usage.tier, auth_mtime_secs);
     Some(tier)
+}
+
+/// A `usage/read` result value's wire-observation time in whole seconds:
+/// the host's arrival stamp, so the stored Muse snapshot carries its true
+/// age rather than the re-read's. `None` when the value holds no
+/// observation (the `{}` cold host, a failed read).
+pub fn observed_secs_from_read_value(value: &serde_json::Value) -> Option<i64> {
+    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
+    result.usage.map(|usage| (usage.observed_at_ms / 1000) as i64)
+}
+
+/// A `usage/changed` notification's wire-observation time in whole seconds
+/// (see [`observed_secs_from_read_value`]).
+pub fn observed_secs_from_changed_params(params: &serde_json::Value) -> Option<i64> {
+    let usage: SubscriptionUsage = serde_json::from_value(params.clone()).ok()?;
+    Some((usage.observed_at_ms / 1000) as i64)
+}
+
+/// Whether the tier carries usable numbers for the Muse usage snapshot: a
+/// subscription with at least one window. Anything else — pay-as-you-go,
+/// an unknown probe, an unavailable card — must never be stored over the
+/// last good numbers; the caller keeps those and notes "unavailable now".
+pub fn tier_has_numbers(tier: &Tier) -> bool {
+    match tier {
+        Tier::Subscription { current_pct, weekly_pct, usage_unavailable: false, .. } => {
+            current_pct.is_some() || weekly_pct.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// When the remembered tier answer was taken, in whole seconds: the age a
+/// menu-open snapshot re-recorded from the in-memory tier keeps, instead
+/// of the menu-open's own time.
+pub fn cached_probed_at() -> Option<u64> {
+    let cached: Cached = crate::store::read_json(&cache_path());
+    cached.probed_at_secs
 }
 
 /// Decide the primary oracle's answer from an already-read `usage/read`
@@ -2472,6 +2574,51 @@ mod tests {
         assert!(!is_auth_fresh(None, mtime + 10));
     }
 
+    /// A remembered `usage_unavailable` expires after about five minutes,
+    /// and a successful wire read always replaces it with numbers.
+    #[test]
+    fn an_unavailable_answer_expires_while_a_wire_read_replaces_it() {
+        let _sandbox = crate::provider_status::TestSandbox::hold();
+        let mtime = auth_mtime();
+        let taken = now_secs();
+        let mut dark = test_subscription();
+        let Tier::Subscription { usage_unavailable, current_pct, weekly_pct, .. } = &mut dark else {
+            unreachable!();
+        };
+        *usage_unavailable = true;
+        *current_pct = None;
+        *weekly_pct = None;
+        remember_at(&dark, mtime, taken);
+        assert!(
+            matches!(cached_at(taken + 240), Some(Tier::Subscription { .. })),
+            "a four-minute-old unavailable is still trusted"
+        );
+        assert_eq!(cached_at(taken + 361), None, "past about five minutes it expires");
+        assert!(unavailable_answer_stale(None, taken), "a file from before the stamp reads as stale");
+        // ...and the re-read answers from the wire when it can: a current
+        // observation builds numbers, replacing the dark card outright.
+        // A fixed mtime here (like the pay-as-you-go override test):
+        // `auth_mtime` reads the real config dir, which the sandbox does
+        // not cover, so only a fixed stamp is a current observation.
+        let mtime = 1_786_000_000u64;
+        let changed = serde_json::json!({
+            "observedAtMs": (mtime + 60) * 1000,
+            "tier": "Muse Code High Usage",
+            "weekly": { "resetsAtMs": 1_786_012_200_000u64, "usedPercent": 9 },
+            "window": {
+                "resetsAtMs": 1_786_003_020_000u64,
+                "usedPercent": 4,
+                "windowDurationMins": 300,
+            },
+        });
+        let tier = tier_from_changed_current(&changed, Some(mtime)).expect("a current wire read builds");
+        let Tier::Subscription { current_pct, weekly_pct, usage_unavailable, .. } = &tier else {
+            panic!("expected a subscription, got {tier:?}");
+        };
+        assert_eq!((*current_pct, *weekly_pct), (Some(4), Some(9)));
+        assert!(!*usage_unavailable, "numbers replace the dark card");
+    }
+
     /// A remembered pay-as-you-go older than ten minutes re-verifies on the
     /// next boot; a remembered subscription keeps today's behaviour.
     #[test]
@@ -2566,4 +2713,23 @@ mod tests {
         assert_eq!(back.last_human_plan, None);
         assert_eq!(back.tier, None);
     }
+
+#[cfg(test)]
+mod usage_fraction_tests {
+    use super::*;
+
+    #[test]
+    fn a_current_window_only_read_still_has_a_usage_fraction() {
+        let tier = Tier::Subscription {
+            plan: "Power Usage".into(),
+            current_pct: Some(40),
+            weekly_pct: None,
+            resets: Vec::new(),
+            usage_unavailable: false,
+        };
+        assert_eq!(tier.weekly_fraction(), None);
+        assert_eq!(tier.usage_fraction(), Some(0.4));
+    }
+}
+
 }
