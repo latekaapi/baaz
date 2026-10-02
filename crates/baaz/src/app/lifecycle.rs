@@ -2167,12 +2167,15 @@ impl Harness {
             }
         }
         // The in-memory tier snapshot rides the synchronous record unless
-        // the wire re-read below is about to replace it.
+        // the wire re-read below is about to replace it. It carries the
+        // remembered answer's own probe time, so re-recording it never
+        // re-stamps its age (an unchanged reading writes nothing at all).
         let muse = if due.contains(&ProviderId::Muse) && !muse_async {
             self.tier.as_ref().map(|tier| {
                 (
                     Some(tier.footer_label()),
                     tier.weekly_fraction().map(|fraction| fraction as f64),
+                    crate::tier::cached_probed_at().map(|at| at as i64),
                 )
             })
         } else {
@@ -2200,11 +2203,18 @@ impl Harness {
             self.wire_call(
                 cx,
                 || {
-                    let mut probed = crate::provider_status::Service::with_probes(
-                        crate::provider_status::Probes::real(),
-                    );
-                    probed.probe_one(ProviderId::Codex);
-                    probed.status(ProviderId::Codex).usage
+                    // A panic on the background path must never stick the
+                    // row on "Refreshing…": the completion below still runs
+                    // and clears it (and the 20 s guard bounds a hang).
+                    std::panic::catch_unwind(|| {
+                        let mut probed = crate::provider_status::Service::with_probes(
+                            crate::provider_status::Probes::real(),
+                        );
+                        probed.probe_one(ProviderId::Codex);
+                        probed.status(ProviderId::Codex).usage
+                    })
+                    .ok()
+                    .flatten()
                 },
                 |_this, usage, cx| {
                     // A reading replaces the held one; a probe that read

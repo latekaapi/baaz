@@ -331,11 +331,18 @@ impl SessionView {
 
     /// The lane's latest usage reading, if any. A peek only — no wire
     /// call — and `None` while the lane is busy, so the account menu's
-    /// refresh never blocks the UI thread on a streaming turn. The
-    /// caller pairs it with [`SessionView::provider_kind`].
+    /// refresh never blocks the UI thread on a streaming turn. A busy
+    /// lane marks its reading pending (see
+    /// [`crate::provider_status::mark_usage_pending`]): the reading stays
+    /// in the lane's fold and the next TurnFinished or menu open persists
+    /// it instead of dropping it silently. The caller pairs it with
+    /// [`SessionView::provider_kind`].
     pub(crate) fn lane_usage(&self) -> Option<provider::UsageReport> {
         let provider = self.lane_provider()?;
-        let guard = provider.try_lock().ok()?;
+        let Ok(guard) = provider.try_lock() else {
+            crate::provider_status::mark_usage_pending(self.provider_kind());
+            return None;
+        };
         guard.read_usage()
     }
 
@@ -1170,6 +1177,7 @@ mod tests {
         catalog_provider: String,
         fail_submit: bool,
         fail_interrupt: bool,
+        usage: Option<provider::UsageReport>,
     }
 
     /// Shared handle to what the double saw, held past the view.
@@ -1179,6 +1187,12 @@ mod tests {
     }
 
     impl RecordingHandle {
+        /// Serve a usage reading from `read_usage`, the way a live fold
+        /// does after the wire speaks.
+        fn set_usage(&self, report: provider::UsageReport) {
+            self.inner.state.lock().expect("recording mutex").usage = Some(report);
+        }
+
         fn received(&self) -> Vec<provider::Command> {
             self.inner.state.lock().expect("recording mutex").received.clone()
         }
@@ -1253,6 +1267,7 @@ mod tests {
                     catalog_provider: "recording".to_owned(),
                     fail_submit: false,
                     fail_interrupt: false,
+                    usage: None,
                 }),
                 tx,
                 rx,
@@ -1424,6 +1439,10 @@ mod tests {
 
         fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
             self.inner.rx.clone()
+        }
+
+        fn read_usage(&self) -> Option<provider::UsageReport> {
+            self.inner.state.lock().expect("recording mutex").usage.clone()
         }
 
         fn shutdown(&mut self) {}
@@ -1625,6 +1644,95 @@ mod tests {
         vc.update(|_, cx| {
             assert!(!view.read(cx).busy(), "the finished turn drops the stop button");
         });
+    }
+
+    /// One settled turn ends on the lane channel: the start the bridge
+    /// forwarded when the turn opened, then its finish. The start matters:
+    /// a finish for a turn the fold never saw folds to nothing, so the
+    /// hook under test never runs.
+    fn finished_turn(turn_id: &str) -> provider::ProviderEvent {
+        provider::ProviderEvent::Deltas {
+            session_id: Some("s-1".to_owned()),
+            deltas: vec![
+                aui_protocol::Delta::TurnStarted {
+                    turn: aui_protocol::Turn::Assistant {
+                        id: turn_id.to_owned(),
+                        blocks: Vec::new(),
+                        meta: aui_protocol::TurnMeta::default(),
+                        timestamp: None,
+                    },
+                },
+                aui_protocol::Delta::TurnFinished {
+                    turn_id: turn_id.to_owned(),
+                    meta: aui_protocol::TurnMeta::default(),
+                },
+            ],
+        }
+    }
+
+    #[gpui::test]
+    fn a_busy_lanes_reading_waits_for_the_next_finished_turn(cx: &mut gpui::TestAppContext) {
+        // The `try_lock` peek fails while the lane is busy: the reading
+        // is marked pending instead of dropped, and the next TurnFinished
+        // persists it — with its wire-arrival age, never the turn's time.
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let sandbox = crate::provider_status::TestSandbox::hold();
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        handle.set_usage(provider::UsageReport {
+            plan: Some("prolite".into()),
+            windows: vec![provider::UsageWindow {
+                label: "Weekly".into(),
+                used_fraction: 0.19,
+                resets_at: Some(1790588038),
+                window_minutes: Some(10080),
+            }],
+            observed_at: Some(1_700_000_000),
+        });
+        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        {
+            let _held = lane.lock().expect("lane provider");
+            tx.unbounded_send(finished_turn("a-1")).expect("the lane channel is open");
+            vc.run_until_parked();
+            assert!(
+                crate::provider_status::usage_pending()
+                    .contains(&crate::providers::ProviderId::Codex),
+                "a failed peek marks the lane pending instead of dropping the reading"
+            );
+        }
+        tx.unbounded_send(finished_turn("a-2")).expect("the lane channel is open");
+        vc.run_until_parked();
+        assert!(
+            !crate::provider_status::usage_pending()
+                .contains(&crate::providers::ProviderId::Codex),
+            "the next finished turn clears the pending mark"
+        );
+        let stored = crate::provider_status::live_statuses()
+            .into_iter()
+            .find(|status| status.provider == crate::providers::ProviderId::Codex)
+            .and_then(|status| status.usage)
+            .expect("the next finished turn persisted the reading");
+        assert_eq!(stored.as_of, 1_700_000_000, "the reading keeps its wire-arrival age");
+        assert!((stored.windows[0].used_fraction - 0.19).abs() < 1e-9);
+        // The same reading finishing again neither re-stamps nor rewrites.
+        tx.unbounded_send(finished_turn("a-3")).expect("the lane channel is open");
+        vc.run_until_parked();
+        let restated = crate::provider_status::live_statuses()
+            .into_iter()
+            .find(|status| status.provider == crate::providers::ProviderId::Codex)
+            .and_then(|status| status.usage)
+            .expect("the reading still stands");
+        assert_eq!(restated.as_of, 1_700_000_000, "an unchanged reading never re-stamps the age");
+        // Let the background cache write land inside the sandbox, so no
+        // late write outlives the temp dir.
+        let cache = sandbox.state_dir().join("provider-status.json");
+        let mut waited = 0;
+        while !cache.is_file() && waited < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(cache.is_file(), "the turn reading reached the cache file");
     }
 
     #[gpui::test]

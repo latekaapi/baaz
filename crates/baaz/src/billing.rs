@@ -144,10 +144,18 @@ impl Harness {
     pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
         if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()) {
             tier::remember(&tier);
-            crate::provider_status::record_muse_snapshot(
-                Some(tier.footer_label()),
-                tier.weekly_fraction().map(f64::from),
-            );
+            // The snapshot carries the notification's own arrival time,
+            // and a tier with no numbers never wipes the last good one:
+            // the rows keep it with "unavailable now" beside it.
+            if tier::tier_has_numbers(&tier) {
+                crate::provider_status::record_muse_snapshot_at(
+                    Some(tier.footer_label()),
+                    tier.weekly_fraction().map(f64::from),
+                    tier::observed_secs_from_changed_params(params),
+                );
+            } else {
+                crate::provider_status::note_muse_unavailable_now();
+            }
             self.tier = Some(tier);
             self.push_tier(cx);
         }
@@ -166,18 +174,36 @@ impl Harness {
         self.wire_call(
             cx,
             move || {
-                let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
-                value.and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
+                // A panic on the background path must never stick the row
+                // on "Refreshing…": the completion below still runs and
+                // clears it (and the 20 s guard bounds a hang).
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
+                    let observed_at =
+                        value.as_ref().and_then(tier::observed_secs_from_read_value);
+                    value
+                        .and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
+                        .map(|tier| (tier, observed_at))
+                }));
+                outcome.ok().flatten()
             },
-            move |this, tier, cx| {
-                if let Some(tier) = tier {
-                    tier::remember(&tier);
-                    crate::provider_status::record_muse_snapshot(
-                        Some(tier.footer_label()),
-                        tier.weekly_fraction().map(f64::from),
-                    );
-                    this.tier = Some(tier);
-                    this.push_tier(cx);
+            move |this, result, cx| {
+                match result {
+                    Some((tier, observed_at)) if tier::tier_has_numbers(&tier) => {
+                        tier::remember(&tier);
+                        crate::provider_status::record_muse_snapshot_at(
+                            Some(tier.footer_label()),
+                            tier.weekly_fraction().map(f64::from),
+                            observed_at,
+                        );
+                        this.tier = Some(tier);
+                        this.push_tier(cx);
+                    }
+                    // A cold host, a stale frame, a failed read, or a tier
+                    // with no numbers: keep what the menu had (and, when a
+                    // good snapshot stands, say "unavailable now" beside
+                    // it) — either way the row settles.
+                    _ => crate::provider_status::note_muse_unavailable_now(),
                 }
                 crate::provider_status::clear_usage_refreshing(&[crate::providers::ProviderId::Muse]);
                 cx.notify();

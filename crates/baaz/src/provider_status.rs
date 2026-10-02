@@ -532,6 +532,10 @@ pub struct Service {
     last_probe: HashMap<ProviderId, Instant>,
     probes: Probes,
     muse_auth: Option<MuseAccount>,
+    /// The last Muse read carried no numbers while a good snapshot stands:
+    /// the rows keep the old numbers and their age, with an "unavailable
+    /// now" note beside them, instead of wiping to an empty snapshot.
+    muse_unavailable_now: bool,
 }
 
 impl Service {
@@ -541,7 +545,20 @@ impl Service {
             .into_iter()
             .map(|id| (id, ProviderStatus::checking(id)))
             .collect();
-        Self { statuses, last_probe: HashMap::new(), probes, muse_auth: None }
+        Self {
+            statuses,
+            last_probe: HashMap::new(),
+            probes,
+            muse_auth: None,
+            muse_unavailable_now: false,
+        }
+    }
+
+    /// Whether the last Muse read found no numbers while a good snapshot
+    /// stands: the rows keep the old numbers with an "unavailable now"
+    /// note beside them.
+    pub fn muse_unavailable_now(&self) -> bool {
+        self.muse_unavailable_now
     }
 
     /// Feed the service the existing muse connection's account state. No
@@ -688,20 +705,35 @@ impl Service {
         due
     }
 
-    /// Store a usage snapshot a probe or a live session yielded.
-    pub fn record_usage(&mut self, snapshot: UsageSnapshot) {
+    /// Store a usage snapshot a probe or a live session yielded. True when
+    /// the stored reading changed: an identical snapshot is kept as-is, so
+    /// the caller can skip its cache write.
+    pub fn record_usage(&mut self, snapshot: UsageSnapshot) -> bool {
         let id = ProviderId::parse(&snapshot.provider);
-        if let Some(status) = self.statuses.get_mut(&id) {
-            status.set_usage(snapshot);
+        let Some(status) = self.statuses.get_mut(&id) else {
+            return false;
+        };
+        if status.usage.as_ref() == Some(&snapshot) {
+            return false;
         }
+        status.set_usage(snapshot);
+        true
     }
 
     /// Store a live lane's structured usage reading (see
     /// [`provider::UsageReport`]): what `read_usage` on an open Codex or
     /// Claude Code session last observed. The report's labels already
     /// name each window from its length, so they ride through verbatim.
-    pub fn record_lane_usage(&mut self, id: ProviderId, report: &provider::UsageReport) {
-        self.record_usage(UsageSnapshot {
+    ///
+    /// The reading persists with its wire-arrival time
+    /// ([`provider::UsageReport::observed_at`]), never the persisting
+    /// turn's: an hours-old reading re-seen at the next turn keeps its age.
+    /// True when the stored reading changed — an unchanged reading (same
+    /// values and observation time) is kept as-is, so the caller skips its
+    /// cache write instead of re-stamping the age or writing every turn.
+    pub fn record_lane_usage(&mut self, id: ProviderId, report: &provider::UsageReport) -> bool {
+        let observed_at = report.observed_at;
+        let candidate = UsageSnapshot {
             provider: id.as_str().into(),
             plan: report.plan.clone(),
             windows: report
@@ -713,34 +745,89 @@ impl Service {
                     resets_at: window.resets_at,
                 })
                 .collect(),
-            as_of: now_secs(),
-        });
+            as_of: observed_at.unwrap_or_else(now_secs),
+        };
+        let Some(status) = self.statuses.get_mut(&id) else {
+            return false;
+        };
+        if let Some(held) = status.usage.as_ref() {
+            if held.plan == candidate.plan && held.windows == candidate.windows {
+                // Same values: without a new observation time there is
+                // nothing to persist; with one the age moves to it.
+                match observed_at {
+                    None => return false,
+                    Some(at) if held.as_of == at => return false,
+                    _ => {}
+                }
+            }
+        }
+        status.set_usage(candidate);
+        true
     }
 
     /// Store Muse's usage in the neutral shape: what its tier probe
     /// reports today. The weekly fraction is the Weekly window; the plan
-    /// is the tier's own label.
+    /// is the tier's own label. The reading persists with its wire-read
+    /// time (`observed_at`), never the persisting moment's.
+    ///
+    /// An empty read (no fraction) never replaces a good snapshot: the
+    /// last numbers and their age stand, flagged through
+    /// [`Self::muse_unavailable_now`] so the row reads "unavailable now"
+    /// beside them. True when the stored reading changed, so the caller
+    /// skips its cache write for an unchanged or a kept reading.
     pub fn record_muse_usage(
         &mut self,
         plan: Option<String>,
         used_fraction: Option<f64>,
         resets_at: Option<i64>,
-    ) {
-        let windows = used_fraction
-            .map(|used| {
-                vec![UsageWindow {
-                    label: "Weekly".into(),
-                    used_fraction: used.clamp(0.0, 1.0),
-                    resets_at,
-                }]
-            })
-            .unwrap_or_default();
-        self.record_usage(UsageSnapshot {
+        observed_at: Option<i64>,
+    ) -> bool {
+        let Some(used) = used_fraction else {
+            // No numbers: keep the last good snapshot and its age, and say
+            // so — but only when there is one to keep. With nothing held
+            // the empty snapshot lands as before (the row reads its
+            // no-reading reason), which still counts as a change.
+            if self
+                .statuses
+                .get(&ProviderId::Muse)
+                .and_then(|status| status.usage.as_ref())
+                .is_some_and(|held| !held.windows.is_empty())
+            {
+                self.muse_unavailable_now = true;
+                return false;
+            }
+            return self.record_usage(UsageSnapshot {
+                provider: ProviderId::Muse.as_str().into(),
+                plan,
+                windows: Vec::new(),
+                as_of: observed_at.unwrap_or_else(now_secs),
+            });
+        };
+        self.muse_unavailable_now = false;
+        let candidate = UsageSnapshot {
             provider: ProviderId::Muse.as_str().into(),
             plan,
-            windows,
-            as_of: now_secs(),
-        });
+            windows: vec![UsageWindow {
+                label: "Weekly".into(),
+                used_fraction: used.clamp(0.0, 1.0),
+                resets_at,
+            }],
+            as_of: observed_at.unwrap_or_else(now_secs),
+        };
+        let Some(status) = self.statuses.get_mut(&ProviderId::Muse) else {
+            return false;
+        };
+        if let Some(held) = status.usage.as_ref() {
+            if held.plan == candidate.plan && held.windows == candidate.windows {
+                match observed_at {
+                    None => return false,
+                    Some(at) if held.as_of == at => return false,
+                    _ => {}
+                }
+            }
+        }
+        status.set_usage(candidate);
+        true
     }
 }
 
@@ -1037,6 +1124,10 @@ static MUSE_LIVE: OnceLock<Mutex<Option<MuseAccount>>> = OnceLock::new();
 /// cheap but not free, and the probes behind a re-check are not cheap at
 /// all.
 pub const USAGE_REFRESH_THROTTLE: Duration = Duration::from_secs(60);
+/// How long a "Refreshing…" row waits for its read before settling on its
+/// own: a hung probe or a completion that never runs (a panic on the
+/// background path, a dropped entity) must never stick the row forever.
+pub const USAGE_REFRESH_GUARD: Duration = Duration::from_secs(20);
 
 /// The window-activation edge plus the service behind it: the same
 /// service boot probes, so focus refreshes reuse its per-provider
@@ -1054,6 +1145,10 @@ struct LiveService {
     /// wire re-read, the Codex probe): their menu rows read "Refreshing…"
     /// until the read lands.
     usage_refreshing: HashSet<ProviderId>,
+    /// Lanes whose `try_lock` peek failed while a turn finished: the
+    /// reading is still in the lane's fold, and the next TurnFinished or
+    /// menu open persists it.
+    usage_pending: HashSet<ProviderId>,
 }
 
 static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
@@ -1072,10 +1167,23 @@ fn live_service() -> MutexGuard<'static, LiveService> {
             service: seeded_live_service(),
             last_usage_refresh: HashMap::new(),
             usage_refreshing: HashSet::new(),
+            usage_pending: HashSet::new(),
         })
     })
     .lock()
     .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Write statuses to the cache off the caller's thread: the TurnFinished
+/// hook and the menu-open refresh both run on the UI thread, and the file
+/// write never blocks them. Best-effort like every store write.
+fn save_cache_in_background(statuses: Vec<ProviderStatus>) {
+    std::thread::spawn(move || write_cache(&statuses));
+}
+
+/// Every status the live service holds, for an off-thread cache write.
+fn all_statuses(service: &Service) -> Vec<ProviderStatus> {
+    ProviderId::all().iter().map(|id| service.status(*id)).collect()
 }
 
 /// Seed the live service with `statuses`: what boot renders from before
@@ -1159,10 +1267,27 @@ pub fn usage_refresh_targets(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
 }
 
 /// Mark `ids` as asynchronously refreshing: their menu rows read
-/// "Refreshing…" until their read lands and clears them.
+/// "Refreshing…" until their read lands and clears them. A guard clears
+/// them after [`USAGE_REFRESH_GUARD`] even when the completion never runs
+/// (a hung probe, a panic on the background path), so the row always
+/// settles.
 pub fn mark_usage_refreshing(ids: &[ProviderId]) {
-    let mut live = live_service();
-    live.usage_refreshing.extend(ids.iter().copied());
+    {
+        let mut live = live_service();
+        live.usage_refreshing.extend(ids.iter().copied());
+    }
+    clear_usage_refreshing_after(ids, USAGE_REFRESH_GUARD);
+}
+
+/// Clear `ids` from the refreshing set after `delay`, whatever their reads
+/// did: the guard behind [`mark_usage_refreshing`]. A landed read clears
+/// sooner through [`clear_usage_refreshing`); this only bounds the wait.
+pub fn clear_usage_refreshing_after(ids: &[ProviderId], delay: Duration) {
+    let ids = ids.to_vec();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        clear_usage_refreshing(&ids);
+    });
 }
 
 /// Clear `ids` from the refreshing set: their menu rows read the landed
@@ -1180,50 +1305,143 @@ pub fn usage_refreshing() -> Vec<ProviderId> {
     live_service().usage_refreshing.iter().copied().collect()
 }
 
+/// Mark a lane's usage as still to persist: its `try_lock` peek failed
+/// while a turn finished, so the reading stays in the lane's fold until
+/// the next TurnFinished or menu open retries it. A successful persist
+/// through [`record_observed_usage`] or [`record_refreshed_usage`] clears
+/// it.
+pub fn mark_usage_pending(id: ProviderId) {
+    live_service().usage_pending.insert(id);
+}
+
+/// The lanes with a reading still to persist (see [`mark_usage_pending`]).
+pub fn usage_pending() -> Vec<ProviderId> {
+    live_service().usage_pending.iter().copied().collect()
+}
+
+/// Whether the last Muse read found no numbers while a good snapshot
+/// stands (see [`Service::muse_unavailable_now`]).
+pub fn muse_unavailable_now() -> bool {
+    live_service().service.muse_unavailable_now()
+}
+
+/// Note a Muse read that carried no numbers: when a good snapshot stands
+/// it is kept with its age and the rows read "unavailable now" beside it.
+pub fn note_muse_unavailable_now() {
+    let mut live = live_service();
+    if live
+        .service
+        .status(ProviderId::Muse)
+        .usage
+        .as_ref()
+        .is_some_and(|held| !held.windows.is_empty())
+    {
+        live.service.muse_unavailable_now = true;
+    }
+}
+
 /// Persist one lane's usage reading the moment it arrives (a finished
 /// turn): the single store the rows render from, written to the cache,
 /// so the reading survives the view closing and restarts, and the menu
-/// shows it with its true age.
+/// shows it with its true age. An unchanged reading changes nothing and
+/// writes nothing; the file write runs off the UI thread.
 pub fn record_observed_usage(id: ProviderId, report: &provider::UsageReport) {
-    let mut live = live_service();
-    live.service.record_lane_usage(id, report);
-    live.service.save_cache();
+    let statuses = {
+        let mut live = live_service();
+        live.usage_pending.remove(&id);
+        if !live.service.record_lane_usage(id, report) {
+            return;
+        }
+        all_statuses(&live.service)
+    };
+    save_cache_in_background(statuses);
+}
+
+/// Persist the Muse snapshot beside a tier answer: the weekly fraction
+/// under the tier's own label, so the menu shows the newest reading
+/// with its true age rather than the last menu-open peek. The reading
+/// carries its wire-read time (`observed_at`); an empty read keeps the
+/// last good numbers and their age (see
+/// [`Service::record_muse_usage`]). Unchanged readings write nothing; the
+/// file write runs off the UI thread.
+pub fn record_muse_snapshot_at(
+    plan: Option<String>,
+    used_fraction: Option<f64>,
+    observed_at: Option<i64>,
+) {
+    if used_fraction.is_none() {
+        note_muse_unavailable_now();
+    }
+    let statuses = {
+        let mut live = live_service();
+        if !live.service.record_muse_usage(plan, used_fraction, None, observed_at) {
+            return;
+        }
+        all_statuses(&live.service)
+    };
+    save_cache_in_background(statuses);
 }
 
 /// Persist the Muse snapshot beside a tier answer: the weekly fraction
 /// under the tier's own label, so the menu shows the newest reading
 /// with its true age rather than the last menu-open peek.
 pub fn record_muse_snapshot(plan: Option<String>, used_fraction: Option<f64>) {
-    let mut live = live_service();
-    live.service.record_muse_usage(plan, used_fraction, None);
-    live.service.save_cache();
+    record_muse_snapshot_at(plan, used_fraction, None);
 }
 
 /// Persist a background probe's usage reading (today the Codex
 /// app-server probe's): only the usage is taken, never the probe's
-/// headline or switch — those stay the live service's own.
+/// headline or switch — those stay the live service's own. An unchanged
+/// reading writes nothing; the file write runs off the UI thread.
 pub fn record_probed_snapshot(snapshot: UsageSnapshot) {
-    let mut live = live_service();
-    live.service.record_usage(snapshot);
-    live.service.save_cache();
+    let statuses = {
+        let mut live = live_service();
+        if !live.service.record_usage(snapshot) {
+            return;
+        }
+        all_statuses(&live.service)
+    };
+    save_cache_in_background(statuses);
 }
 
 /// Store lane and Muse readings the account menu just refreshed: one
 /// snapshot per provider, in the single store the rows render from. The
 /// store is written to the cache, so a Claude Code reading survives
-/// restarts: boot reloads it and the row shows its age.
+/// restarts: boot reloads it and the row shows its age. Unchanged
+/// readings write nothing; the file write runs off the UI thread.
 pub fn record_refreshed_usage(
     lanes: &[(ProviderId, provider::UsageReport)],
-    muse: Option<(Option<String>, Option<f64>)>,
+    muse: Option<(Option<String>, Option<f64>, Option<i64>)>,
 ) {
-    let mut live = live_service();
-    for (id, report) in lanes {
-        live.service.record_lane_usage(*id, report);
-    }
-    if let Some((plan, used_fraction)) = muse {
-        live.service.record_muse_usage(plan, used_fraction, None);
-    }
-    live.service.save_cache();
+    let statuses = {
+        let mut live = live_service();
+        let mut changed = false;
+        for (id, report) in lanes {
+            if live.service.record_lane_usage(*id, report) {
+                changed = true;
+            }
+            live.usage_pending.remove(id);
+        }
+        if let Some((plan, used_fraction, observed_at)) = muse {
+            if used_fraction.is_none()
+                && live
+                    .service
+                    .status(ProviderId::Muse)
+                    .usage
+                    .as_ref()
+                    .is_some_and(|held| !held.windows.is_empty())
+            {
+                live.service.muse_unavailable_now = true;
+            } else if live.service.record_muse_usage(plan, used_fraction, None, observed_at) {
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        all_statuses(&live.service)
+    };
+    save_cache_in_background(statuses);
 }
 
 /// Remember the existing muse connection's account state: the Muse auth
@@ -1781,7 +1999,7 @@ mod tests {
         let _env = sandbox();
         let mut service = Service::with_probes(Probes::never());
         assert!(service.status(ProviderId::Codex).usage.is_none());
-        service.record_lane_usage(
+        assert!(service.record_lane_usage(
             ProviderId::Codex,
             &provider::UsageReport {
                 plan: Some("prolite".into()),
@@ -1791,8 +2009,9 @@ mod tests {
                     resets_at: Some(1790588038),
                     window_minutes: Some(10080),
                 }],
+                observed_at: None,
             },
-        );
+        ));
         let snapshot = service.status(ProviderId::Codex).usage.expect("a reading was stored");
         assert_eq!(snapshot.plan.as_deref(), Some("prolite"));
         assert_eq!(snapshot.windows.len(), 1);
@@ -1800,7 +2019,7 @@ mod tests {
         assert!((snapshot.windows[0].used_fraction - 0.85).abs() < 1e-9);
         // Muse's weekly fraction is the Weekly window under the tier's
         // own plan label.
-        service.record_muse_usage(Some("High Usage".into()), Some(0.02), None);
+        assert!(service.record_muse_usage(Some("High Usage".into()), Some(0.02), None, None));
         let muse = service.status(ProviderId::Muse).usage.expect("muse stored");
         assert_eq!(muse.plan.as_deref(), Some("High Usage"));
         assert_eq!(muse.windows.len(), 1);
@@ -1824,12 +2043,20 @@ mod tests {
                         resets_at: None,
                         window_minutes: Some(10080),
                     }],
+                    observed_at: None,
                 },
             )],
             None,
         );
         let after = now_secs();
-        assert!(env.state_dir().join("provider-status.json").is_file());
+        // The cache write runs off this thread: wait for it, bounded.
+        let cache = env.state_dir().join("provider-status.json");
+        let mut waited = 0;
+        while !cache.is_file() && waited < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(cache.is_file(), "the background write landed the cache");
         let cached: Vec<ProviderStatus> = read_cache();
         let claude =
             cached.iter().find(|status| status.provider == ProviderId::ClaudeCode).expect("cached");
@@ -1881,7 +2108,7 @@ mod tests {
             }),
         });
         let before = now_secs();
-        service.record_lane_usage(
+        assert!(service.record_lane_usage(
             ProviderId::ClaudeCode,
             &provider::UsageReport {
                 plan: Some("Max".into()),
@@ -1891,8 +2118,9 @@ mod tests {
                     resets_at: None,
                     window_minutes: Some(10080),
                 }],
+                observed_at: None,
             },
-        );
+        ));
         service.save_cache();
         let stored = service.status(ProviderId::ClaudeCode).usage.expect("the turn reading was stored");
         assert!((before..=now_secs()).contains(&stored.as_of), "the reading carries its landing time");
@@ -1960,6 +2188,95 @@ mod tests {
         assert_eq!(
             service.due_for_refresh(now + Duration::from_secs(16)),
             vec![ProviderId::Muse]
+        );
+    }
+
+    #[test]
+    fn an_observed_reading_keeps_its_age_and_an_unchanged_one_writes_nothing() {
+        // A reading observed at T and persisted later keeps age T — the
+        // persisting turn never re-stamps it "just now" — and persisting
+        // the same reading again changes nothing (the caller skips its
+        // write from the false return).
+        let _env = sandbox();
+        let mut service = Service::with_probes(Probes::never());
+        let report = || provider::UsageReport {
+            plan: None,
+            windows: vec![provider::UsageWindow {
+                label: "Weekly".into(),
+                used_fraction: 0.42,
+                resets_at: None,
+                window_minutes: Some(10080),
+            }],
+            observed_at: Some(1_700_000_000),
+        };
+        assert!(service.record_lane_usage(ProviderId::ClaudeCode, &report()));
+        assert_eq!(
+            service.status(ProviderId::ClaudeCode).usage.as_ref().expect("stored").as_of,
+            1_700_000_000,
+            "the reading keeps its observation time"
+        );
+        assert!(
+            !service.record_lane_usage(ProviderId::ClaudeCode, &report()),
+            "an unchanged reading reports no change, so no write follows"
+        );
+        assert_eq!(
+            service.status(ProviderId::ClaudeCode).usage.as_ref().expect("stored").as_of,
+            1_700_000_000,
+            "re-persisting never re-stamps the age"
+        );
+        // A newer observation of the same values moves the age to it.
+        let mut newer = report();
+        newer.observed_at = Some(1_700_000_100);
+        assert!(service.record_lane_usage(ProviderId::ClaudeCode, &newer));
+        assert_eq!(
+            service.status(ProviderId::ClaudeCode).usage.as_ref().expect("stored").as_of,
+            1_700_000_100
+        );
+    }
+
+    #[test]
+    fn an_empty_muse_read_keeps_the_good_numbers_and_notes_it() {
+        // An unavailable/no-numbers Muse read never wipes the last good
+        // snapshot: the numbers and their age stand, flagged so the row
+        // reads "unavailable now" beside them. A good read clears the
+        // flag again.
+        let _env = sandbox();
+        let mut service = Service::with_probes(Probes::never());
+        assert!(service.record_muse_usage(Some("High Usage".into()), Some(0.02), None, Some(1_700_000_000)));
+        assert!(!service.muse_unavailable_now());
+        assert!(!service.record_muse_usage(Some("High Usage".into()), None, None, Some(1_700_000_100)));
+        let held = service.status(ProviderId::Muse).usage.expect("the good snapshot stands");
+        assert_eq!(held.windows.len(), 1, "the numbers are kept, not wiped");
+        assert!((held.windows[0].used_fraction - 0.02).abs() < 1e-9);
+        assert_eq!(held.as_of, 1_700_000_000, "their age is kept too");
+        assert!(service.muse_unavailable_now(), "the row is told to say unavailable now");
+        assert!(service.record_muse_usage(Some("High Usage".into()), Some(0.03), None, Some(1_700_000_200)));
+        assert!(!service.muse_unavailable_now(), "a good read clears the note");
+        let fresh = service.status(ProviderId::Muse).usage.expect("the good read lands");
+        assert!((fresh.windows[0].used_fraction - 0.03).abs() < 1e-9);
+        assert_eq!(fresh.as_of, 1_700_000_200);
+    }
+
+    #[test]
+    fn a_stuck_refreshing_row_settles_through_the_guard() {
+        // A "Refreshing…" mark with a completion that never runs still
+        // clears: the guard behind `mark_usage_refreshing` bounds the wait
+        // (20 s in production; a short delay proves the mechanism here).
+        let _env = sandbox();
+        mark_usage_refreshing(&[ProviderId::Codex]);
+        assert!(usage_refreshing().contains(&ProviderId::Codex), "the row reads Refreshing…");
+        clear_usage_refreshing(&[ProviderId::Codex]);
+        assert!(!usage_refreshing().contains(&ProviderId::Codex), "a landed read clears it");
+        mark_usage_refreshing(&[ProviderId::Codex]);
+        clear_usage_refreshing_after(&[ProviderId::Codex], Duration::from_millis(50));
+        let mut waited = 0;
+        while usage_refreshing().contains(&ProviderId::Codex) && waited < 100 {
+            std::thread::sleep(Duration::from_millis(50));
+            waited += 1;
+        }
+        assert!(
+            !usage_refreshing().contains(&ProviderId::Codex),
+            "the guard clears a never-completing read"
         );
     }
 
