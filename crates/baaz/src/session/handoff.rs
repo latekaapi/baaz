@@ -112,11 +112,14 @@ impl SessionView {
 
     /// The pack turn's terminal on this destination: when the first user
     /// turn matching the submitted pack is followed by an assistant turn
-    /// carrying a failure card, that card's reason. The match takes
-    /// either pack text — lanes echo the full pack, muse folds the short
-    /// display form its wire echoed. Only the pack's own reply counts: a
-    /// later turn failing is that turn's business, never the handoff's.
-    /// `None` while the pack turn is still running or answered cleanly.
+    /// whose last word is a failure card, that card's reason. The match
+    /// takes either pack text — lanes echo the full pack, muse folds the
+    /// short display form its wire echoed. Only the pack's own reply
+    /// counts: a later turn failing is that turn's business, never the
+    /// handoff's. And only a terminal error counts: an error card with
+    /// answering text behind it is a recoverable card inside a reply
+    /// that otherwise completed, not a failed turn. `None` while the
+    /// pack turn is still running or answered cleanly.
     pub(crate) fn pack_turn_failed_reason(&self) -> Option<String> {
         let (full, display) = match (&self.handoff_pack_full, &self.handoff_pack_display) {
             (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
@@ -137,16 +140,7 @@ impl SessionView {
             // turn behind it.
             for following in turns.by_ref() {
                 if let Turn::Assistant { blocks, .. } = following {
-                    for block in blocks {
-                        if let Block::Error { title, detail, .. } = block {
-                            let reason = detail.trim();
-                            if reason.is_empty() {
-                                return Some(title.clone());
-                            }
-                            return Some(reason.to_owned());
-                        }
-                    }
-                    return None;
+                    return pack_reply_failure(blocks);
                 }
             }
             return None;
@@ -349,4 +343,29 @@ impl SessionView {
         }
         cx.emit(SessionEvent::HandoffRequested { provider: picked, headless: true });
     }
+}
+
+/// A pack reply's terminal failure, if it has one: the reason of its
+/// last error card, but only when no answering text comes behind it.
+/// A reply that ends on an error never reached its model — its turn
+/// settled failed. A reply that answers past the error card completed
+/// around it: a recoverable card inside a successful reply, never the
+/// handoff's failure. Blank text does not count as answering.
+fn pack_reply_failure(blocks: &[Block]) -> Option<String> {
+    let mut failure: Option<(String, String)> = None;
+    for block in blocks {
+        match block {
+            Block::Error { title, detail, .. } => {
+                failure = Some((title.clone(), detail.clone()));
+            }
+            Block::Text { text, .. } if !text.trim().is_empty() => {
+                failure = None;
+            }
+            _ => {}
+        }
+    }
+    failure.map(|(title, detail)| {
+        let reason = detail.trim();
+        if reason.is_empty() { title } else { reason.to_owned() }
+    })
 }

@@ -248,8 +248,9 @@ pub fn display_text(pack: &ContextPack, from: ProviderId) -> String {
 /// keeping the extractive one: 8 s. The side-session turn is already
 /// paid for, so a reply that lands later is dropped, never retried. The
 /// wait never delays the destination either way: it opens at once with
-/// the extractive pack, and a summary that arrives in time upgrades the
-/// pack before the acknowledgement snapshots it.
+/// the extractive pack. Landing stands the wait down, so a summary that
+/// arrives later never reaches the destination model — the submitted
+/// pack is already the extractive one.
 pub const SUMMARY_TIMEOUT_SECS: u64 = 8;
 
 /// Below this many characters of summary input (the goal plus the pack's
@@ -289,7 +290,7 @@ pub fn should_model_summary(switch_on: bool, signed_in: bool, pack: &ContextPack
     if pack_covers_every_turn(pack) {
         return false;
     }
-    summary_input(pack).len() >= SUMMARY_MIN_CHARS
+    summary_input(pack).chars().count() >= SUMMARY_MIN_CHARS
 }
 
 /// The summary side session's input: the goal plus the pack's recent
@@ -503,9 +504,10 @@ pub struct HandoffRun {
     pub pack: Option<ContextPack>,
     /// A model-written summary is in flight for the checkpointed pack:
     /// the card's summary line reads "Summarising…" until the side
-    /// session answers or the watchdog keeps the extractive text. The
-    /// destination opens beside the wait, never after it. Cancel works
-    /// throughout (the hidden side session is simply abandoned).
+    /// session answers, the watchdog keeps the extractive text, or the
+    /// destination lands (which stands the wait down: the submitted pack
+    /// is already the extractive one). Every transition out of the wait
+    /// clears this, so a settled card never reads "Summarising…".
     pub summarising: bool,
     /// The fresh destination session, once it exists.
     pub destination_session: Option<String>,
@@ -608,50 +610,57 @@ impl HandoffRun {
         }
     }
 
-    /// The side session answered: the harvested text replaces the pack's
-    /// extractive summary, the kind flips to model, and the wait ends. A
-    /// no-op unless the run is still waiting (a cancelled or superseded
-    /// run keeps whatever it holds). The destination opens beside the
-    /// summary wait, so a summary that beats the acknowledgement still
-    /// upgrades the pack it snapshots.
+    /// The side session answered. The wait always ends, in every state —
+    /// a late answer after acknowledge, activation, failure or cancel
+    /// stands the card down without touching the pack. Only a run still
+    /// Checkpointed takes the upgrade: the harvested text replaces the
+    /// pack's extractive summary and the kind flips to model. Past
+    /// landing the pack is already submitted, so a later summary is
+    /// extractive by record and the destination model never sees it.
     pub fn apply_model_summary(&mut self, summary: String) {
-        if !matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared) || !self.summarising
-        {
+        if !self.summarising {
             return;
         }
-        if let Some(pack) = self.pack.as_mut() {
-            pack.summary = summary;
-            pack.summary_kind = SummaryKind::Model;
-            pack.tokens = estimate_tokens(&pack_text(pack, self.from));
+        if matches!(self.state, HandoffState::Checkpointed) {
+            if let Some(pack) = self.pack.as_mut() {
+                pack.summary = summary;
+                pack.summary_kind = SummaryKind::Model;
+                pack.tokens = estimate_tokens(&pack_text(pack, self.from));
+            }
         }
         self.summarising = false;
     }
 
     /// The summary will not arrive (timeout, wire error, empty reply):
-    /// the pack keeps its extractive summary and the wait ends. The
-    /// destination already opened beside the wait, so this only stands
-    /// the card's "Summarising…" down.
+    /// the pack keeps its extractive summary and the wait ends. Clears
+    /// in every state, so a watchdog firing after acknowledge still
+    /// stands a stuck card down.
     pub fn note_summary_fallback(&mut self) {
-        if matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared) {
-            self.summarising = false;
-        }
+        self.summarising = false;
     }
 
-    /// The destination session exists and the pack is submitted.
+    /// The destination session exists and the pack is submitted — with
+    /// the extractive pack, whatever the summary side session is doing.
+    /// Landing stands a still-waiting summary down: the submitted pack
+    /// is already fixed, so a later answer is dropped, never applied.
     pub fn note_prepared(&mut self, destination_session: String) {
         if matches!(self.state, HandoffState::Checkpointed) {
             self.destination_session = Some(destination_session);
             self.state = HandoffState::Prepared;
+            self.summarising = false;
         }
     }
 
     /// The destination's first `TurnStarted` (or submit ack) under `epoch`.
     /// A stale epoch is ignored — returns `false` and changes nothing.
+    /// Acknowledging also stands a stuck summary wait down, so the card
+    /// never keeps reading "Summarising…" past this point.
     pub fn acknowledge(&mut self, epoch: u64) -> bool {
         if epoch != self.epoch {
             return false;
         }
         if matches!(self.state, HandoffState::Prepared) {
+            self.summarising = false;
             self.state = HandoffState::Acknowledged;
             return true;
         }
@@ -659,29 +668,38 @@ impl HandoffRun {
     }
 
     /// The fresh session runs on the destination; the source retires.
+    /// Stands a stuck summary wait down, like every transition out of
+    /// the waiting states.
     pub fn activate(&mut self) {
         if matches!(self.state, HandoffState::Acknowledged) {
+            self.summarising = false;
             self.state = HandoffState::Activated;
         }
     }
 
     /// A step failed: the source stays usable, the card names the reason.
+    /// Stands a stuck summary wait down, so the Failed card names the
+    /// extractive summary it carries.
     pub fn fail(&mut self, reason: String) {
         if !matches!(self.state, HandoffState::Activated | HandoffState::Cancelled) {
+            self.summarising = false;
             self.reason = Some(reason.clone());
             self.state = HandoffState::Failed { reason };
         }
     }
 
-    /// The destination's pack turn ended failed: the handoff fails with
-    /// the turn's reason, whether the run is still opening (Prepared,
-    /// Acknowledged) or already Active — a pack that never reached any
-    /// model is never a silent Active. A no-op once cancelled; an
-    /// already-failed run keeps its first reason.
+    /// The destination's pack turn reached its terminal failed state
+    /// before the handoff activated: the handoff fails with the turn's
+    /// reason instead of going silently Active. A no-op once the move
+    /// left Prepared — cancelled, failed, acknowledged or already
+    /// active: after activation the destination owns its turns, and a
+    /// later failure there never unlinks the chain. An already-failed
+    /// run keeps its first reason.
     pub fn fail_pack_turn(&mut self, reason: String) {
-        if matches!(self.state, HandoffState::Cancelled | HandoffState::Failed { .. }) {
+        if !matches!(self.state, HandoffState::Prepared) {
             return;
         }
+        self.summarising = false;
         self.reason = Some(reason.clone());
         self.state = HandoffState::Failed { reason };
     }
@@ -716,13 +734,18 @@ impl HandoffRun {
 
     /// The card block for the current state. While a model-written
     /// summary is in flight the summary line reads "Summarising…";
-    /// otherwise it names the kind the pack carries.
+    /// otherwise it names the kind the pack carries. Settled states
+    /// never read "Summarising…": every transition out of the wait
+    /// clears the flag, and the state gate below holds even a stuck
+    /// one down.
     pub fn card(&self) -> Block {
         let (mut carried, lost, tokens) = match &self.pack {
             Some(pack) => (carried_items(pack), lost_items(), Some(pack.tokens)),
             None => (Vec::new(), lost_items(), None),
         };
-        if self.summarising {
+        if self.summarising
+            && matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared)
+        {
             if let Some(first) = carried.first_mut() {
                 first.detail = Some("Summarising…".to_owned());
             }
@@ -1205,55 +1228,83 @@ mod tests {
             "the watchdog is a backstop, not the open gate: {SUMMARY_TIMEOUT_SECS} s"
         );
         // The machine reaches Prepared while a summary is still in flight:
-        // nothing in the run gates the destination open on the summary.
-        let mut run = run();
-        run.note_quiescing();
-        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
-        run.note_summary_pending();
-        run.note_prepared("dst".to_owned());
+        // nothing in the run gates the destination open on the summary —
+        // and landing stands the wait down, since the submitted pack is
+        // already the extractive one.
+        let mut landed = run();
+        landed.note_quiescing();
+        landed.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        landed.note_summary_pending();
+        landed.note_prepared("dst".to_owned());
         assert!(
-            matches!(run.state, HandoffState::Prepared),
-            "Prepared while summarising — the open never waits, state is {:?}",
-            run.state
+            matches!(landed.state, HandoffState::Prepared),
+            "landing marks Prepared, state is {:?}",
+            landed.state
         );
-        // And a summary that beats the acknowledgement still upgrades the
-        // pack the destination snapshots.
-        run.apply_model_summary("Did X. Decided Y.".to_owned());
-        assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(SummaryKind::Model));
-        assert!(!run.summarising);
+        assert!(!landed.summarising, "landing stands the summary wait down");
+        // A summary arriving after landing never upgrades the pack the
+        // destination already submitted: the kind stays extractive.
+        landed.apply_model_summary("Did X. Decided Y.".to_owned());
+        assert_eq!(landed.pack.as_ref().map(|pack| pack.summary_kind), Some(SummaryKind::Extractive));
+        assert!(!landed.summarising);
+        // …while one that beats the landing still upgrades it.
+        let mut early = run();
+        early.note_quiescing();
+        early.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        early.note_summary_pending();
+        early.apply_model_summary("Did X. Decided Y.".to_owned());
+        assert_eq!(
+            early.pack.as_ref().map(|pack| pack.summary_kind),
+            Some(SummaryKind::Model)
+        );
+        assert!(!early.summarising);
     }
 
     #[test]
     fn a_pack_turn_that_fails_fails_the_handoff() {
-        for activate_first in [false, true] {
-            let mut run = run();
-            run.note_quiescing();
-            run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
-            run.note_prepared("dst".to_owned());
-            assert!(run.acknowledge(7));
-            if activate_first {
-                run.activate();
-                assert!(matches!(run.state, HandoffState::Activated));
-            }
-            // turn/started, then turn/completed{status: failed} on the
-            // destination: the pack never reached any model.
-            run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
-            assert!(
-                matches!(run.state, HandoffState::Failed { .. }),
-                "a failed pack turn fails the handoff (activated first: {activate_first}), state is {:?}",
-                run.state
-            );
-            assert_eq!(
-                run.reason.as_deref(),
-                Some("model `gpt-6-astra` does not exist or you lack access")
-            );
-            let card = run.card();
-            if let Block::Handoff { state: HandoffState::Failed { reason }, .. } = card {
-                assert!(reason.contains("gpt-6-astra"), "the card names the reason: {reason}");
-            } else {
-                panic!("the card reads Failed, got {:?}", card);
-            }
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_prepared("dst".to_owned());
+        // turn/started, then turn/completed{status: failed} on the
+        // destination before the ack: the pack never reached any model.
+        run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
+        assert!(
+            matches!(run.state, HandoffState::Failed { .. }),
+            "a failed pack turn fails the handoff, state is {:?}",
+            run.state
+        );
+        assert_eq!(
+            run.reason.as_deref(),
+            Some("model `gpt-6-astra` does not exist or you lack access")
+        );
+        let card = run.card();
+        if let Block::Handoff { state: HandoffState::Failed { reason }, .. } = card {
+            assert!(reason.contains("gpt-6-astra"), "the card names the reason: {reason}");
+        } else {
+            panic!("the card reads Failed, got {:?}", card);
         }
+    }
+
+    #[test]
+    fn a_pack_turn_failure_after_activation_never_unlinks_the_chain() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_prepared("dst".to_owned());
+        assert!(run.acknowledge(7));
+        run.activate();
+        assert!(matches!(run.state, HandoffState::Activated));
+        // A pack turn settling failed after activation is the
+        // destination's business, never the handoff's: the move stays
+        // Active and keeps no failure reason.
+        run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
+        assert!(
+            matches!(run.state, HandoffState::Activated),
+            "an active handoff stays active, state is {:?}",
+            run.state
+        );
+        assert_eq!(run.reason, None);
     }
 
     #[test]
@@ -1309,6 +1360,124 @@ mod tests {
         // the excerpt itself, whole rather than cut mid-turn.
         assert!(input.starts_with("Goal: prompt-marker-0"));
         assert!(!input.contains("### user\nprompt-marker-0"));
+    }
+
+    #[test]
+    fn every_transition_out_of_the_wait_stands_the_card_down() {
+        // Acknowledge clears a stuck wait.
+        let mut settled = run();
+        settled.note_quiescing();
+        settled.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        settled.note_summary_pending();
+        settled.note_prepared("dst".to_owned());
+        // Landing itself already stood the wait down; re-arm the flag the
+        // way a missed stand-down would leave it, then acknowledge.
+        settled.summarising = true;
+        assert!(settled.acknowledge(7));
+        assert!(!settled.summarising, "acknowledge clears the summary wait");
+        // Activate clears a stuck wait.
+        settled.summarising = true;
+        settled.activate();
+        assert!(!settled.summarising, "activate clears the summary wait");
+        assert!(matches!(settled.state, HandoffState::Activated));
+        let card = settled.card();
+        if let Block::Handoff { carried, .. } = card {
+            assert_ne!(
+                carried[0].detail.as_deref(),
+                Some("Summarising…"),
+                "a settled card never reads Summarising…"
+            );
+        } else {
+            panic!("not a handoff card");
+        }
+        // Fail clears a stuck wait.
+        let mut failed = run();
+        failed.note_quiescing();
+        failed.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        failed.note_summary_pending();
+        failed.summarising = true;
+        failed.fail("the child would not start".to_owned());
+        assert!(!failed.summarising, "fail clears the summary wait");
+        let card = failed.card();
+        if let Block::Handoff { carried, .. } = card {
+            assert_ne!(
+                carried[0].detail.as_deref(),
+                Some("Summarising…"),
+                "a failed card never reads Summarising…"
+            );
+        } else {
+            panic!("not a handoff card");
+        }
+    }
+
+    #[test]
+    fn a_late_harvest_after_ack_keeps_the_extractive_pack() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        run.note_prepared("dst".to_owned());
+        assert!(run.acknowledge(7));
+        run.activate();
+        // The wait was stood down at landing; a side-session answer
+        // landing now must not upgrade the submitted pack.
+        run.summarising = true;
+        run.apply_model_summary("late model text".to_owned());
+        assert!(!run.summarising, "a late harvest still stands the wait down");
+        let pack = run.pack.as_ref().expect("checkpointed pack");
+        assert_eq!(pack.summary_kind, SummaryKind::Extractive, "a late answer changes nothing");
+        let card = run.card();
+        if let Block::Handoff { carried, .. } = card {
+            assert_eq!(carried[0].detail.as_deref(), Some("extractive summary"));
+        } else {
+            panic!("not a handoff card");
+        }
+    }
+
+    #[test]
+    fn a_watchdog_after_activation_stands_a_stuck_wait_down() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        run.note_prepared("dst".to_owned());
+        assert!(run.acknowledge(7));
+        run.activate();
+        run.summarising = true;
+        run.note_summary_fallback();
+        assert!(!run.summarising, "a late watchdog still stands the wait down");
+        let pack = run.pack.as_ref().expect("checkpointed pack");
+        assert_eq!(pack.summary_kind, SummaryKind::Extractive);
+    }
+
+    #[test]
+    fn the_summary_threshold_counts_characters_not_bytes() {
+        // "é" is two bytes but one character: 1_500 of them are 3_000
+        // bytes but only ~1_500 characters — under the 2_000-character
+        // threshold, so no side session starts.
+        let pack = ContextPack {
+            goal: "Fix it".to_owned(),
+            summary: "Did it.".to_owned(),
+            summary_kind: SummaryKind::Extractive,
+            recent: vec![("user".to_owned(), "é".repeat(1500))],
+            todos: Vec::new(),
+            files: Vec::new(),
+            workspace: "/tmp/proj".to_owned(),
+            tokens: 10,
+            source_turns: 50,
+        };
+        assert!(!pack_covers_every_turn(&pack));
+        let input = summary_input(&pack);
+        assert!(input.len() >= SUMMARY_MIN_CHARS, "bytes alone would qualify: {}", input.len());
+        assert!(
+            input.chars().count() < SUMMARY_MIN_CHARS,
+            "characters do not: {}",
+            input.chars().count()
+        );
+        assert!(
+            !should_model_summary(true, true, &pack),
+            "the threshold counts characters, not bytes"
+        );
     }
 
     #[test]
