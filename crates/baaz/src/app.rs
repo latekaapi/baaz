@@ -198,8 +198,14 @@ actions!(
         SkillsFind,
         /// Leave the Skills page (Escape).
         SkillsClose,
+        /// Focus the Settings Shortcuts search field (⌘F on the page).
+        SettingsFind,
     ]
 );
+
+/// The key context the Settings page wears, so ⌘F reaches the Shortcuts
+/// search field instead of the composer's (B11).
+pub(crate) const SETTINGS_CONTEXT: &str = "HarnessSettings";
 
 /// The key context the sidebar's inline rename field wears, so Enter commits
 /// the name instead of reaching the composer's send.
@@ -877,6 +883,11 @@ pub struct Harness {
     /// The session whose row is being renamed in place, and the field doing it.
     pub(crate) renaming: Option<String>,
     pub(crate) rename: Entity<TextareaState>,
+    /// The Settings page state: open flag, section, last-visited and
+    /// restore record (`Route::Settings`, B11).
+    pub(crate) settings_page: crate::settings::SettingsPageState,
+    /// The Settings Shortcuts search field (⌘F on the page).
+    pub(crate) settings_search: Entity<TextareaState>,
     /// The Skills page state: open flag, catalog, filter, search and
     /// selection (docs/15-skills.md §4).
     pub(crate) skills: crate::skills_page::SkillsPage,
@@ -1235,6 +1246,8 @@ impl Harness {
             search_epoch: 0,
             renaming: None,
             rename: rename.clone(),
+            settings_page: crate::settings::SettingsPageState::default(),
+            settings_search: cx.new(|cx| composer_state_rows("Search shortcuts", 1, 1, window, cx)),
             skills: crate::skills_page::SkillsPage::default(),
             skills_query: skills_query.clone(),
             skills_new_name: skills_new_name.clone(),
@@ -3938,12 +3951,25 @@ impl Render for Harness {
             // bounds the shell offers and any resize re-renders through the
             // bounds key.
             // No `.cached(...)` while assistive tech is on — see `render_centre`.
-            let sidebar: AnyElement = if window.is_a11y_active() {
+            // B11: while Settings is open the left column shows the
+            // section list instead of the session sidebar, and the
+            // centre+right merge into the settings surface (right pane
+            // and terminal hidden, not closed — their state is untouched
+            // and restored on exit).
+            let settings_open = self.settings_page.open;
+            let right_open = self.layout.right_open && !settings_open;
+            let sidebar: AnyElement = if settings_open {
+                self.render_settings_nav(cx)
+            } else if window.is_a11y_active() {
                 self.sidebar_pane.clone().into_any_element()
             } else {
                 self.sidebar_pane.clone().cached(StyleRefinement::default().size_full()).into_any_element()
             };
-            let centre = self.render_centre(window, cx);
+            let centre = if settings_open {
+                self.render_settings_content(window, cx)
+            } else {
+                self.render_centre(window, cx)
+            };
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
             let kind = layout::right_kind(&self.layout);
@@ -3961,13 +3987,12 @@ impl Render for Harness {
             // before. Gated on pane-open-on-Browser: activation, boot
             // and every other kind never create a webview as a render
             // side effect — creation happens only where the pane shows.
-            // B7: the toggle prewarms the webview ahead of the animation
-            // (see `prewarm_browser_if_needed`); while closing, the
-            // existing webview is passed through without creating, so
-            // the last page snapshot slides out instead of the
-            // "Opening the page" placeholder.
+            // B7: the toggle prewarms the webview ahead of the animation;
+            // while closing (or while Settings hides the pane) the existing
+            // webview passes through without creating, so the last page
+            // snapshot slides out instead of the "Opening the page" placeholder.
             let browser = if kind == layout::RightKind::Browser {
-                if self.layout.right_open {
+                if right_open {
                     Some(self.ensure_browser_person(window, cx))
                 } else {
                     self.existing_browser(cx)
@@ -3975,8 +4000,7 @@ impl Render for Harness {
             } else {
                 None
             };
-            let right =
-                right::render(kind, &self.right_cache, right_project, browser.as_ref(), self.layout.right_open, cx);
+            let right = right::render(kind, &self.right_cache, right_project, browser.as_ref(), right_open, cx);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -3987,14 +4011,18 @@ impl Render for Harness {
                 // sidebar cell keeps its width — and the native-lights
                 // reservation — so the toggle and search stay where they are.
                 .header_follows_sidebar(false)
-                .right_open(self.layout.right_open)
+                .right_open(right_open)
                 .header_sidebar(
                     sidebar_header("hd-side")
                         .native_lights(true)
                         .on_toggle_sidebar(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
                         .on_search(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
                 )
-                .header_centre(self.render_centre_header(window, cx))
+                .header_centre(if settings_open {
+                    self.render_settings_centre_header(cx)
+                } else {
+                    self.render_centre_header(window, cx)
+                })
                 .header_right(
                     header_cell("hd-right").child(
                         div()
@@ -4040,8 +4068,9 @@ impl Render for Harness {
             // The right strip sits over the right divider, centred on the
             // settled edge from the RIGHT: the pane fills the window's right
             // edge, so the divider stands `width` left of it. Hidden with
-            // the pane: there is no divider to grab while it stands closed.
-            if self.layout.right_open {
+            // the pane: there is no divider to grab while it stands closed
+            // (or while Settings hides the pane without closing it).
+            if right_open {
                 let press = cx.entity().downgrade();
                 let travel = cx.entity().downgrade();
                 let release = cx.entity().downgrade();
@@ -4177,7 +4206,7 @@ impl Render for Harness {
         let overlay_now = self.overlays.read(cx).palette.is_some()
             || self.overlays.read(cx).dialog.is_some()
             || self.overlays.read(cx).menu.is_some()
-            || self.overlays.read(cx).settings.is_some();
+            || self.settings_page.open;
         let overlay_just_closed = self.overlay_was_open && !overlay_now;
         // Two triggers, and both are needed. The first frame has nothing
         // focused at all, so without the `is_none` arm the very first
@@ -4207,7 +4236,12 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-                .on_action(cx.listener(|this, _: &NewSession, window, cx| this.new_session(window, cx)))
+                .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                    // ⌘N exits Settings for the new session (no restore:
+                    // the destination owns the next route).
+                    this.exit_settings_for_navigation(cx);
+                    this.new_session(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
@@ -4345,6 +4379,12 @@ impl Harness {
         }
         if !matches!(self.auth, Auth::SignedIn(_)) {
             self.login_escape(window, cx);
+            return;
+        }
+        // The Settings page is the first thing Escape takes back:
+        // recording → search → sub-page up → close+restore (§1.3).
+        if self.settings_page.open {
+            self.settings_escape(cx);
             return;
         }
         // The Skills page is the next thing Escape takes back, from any

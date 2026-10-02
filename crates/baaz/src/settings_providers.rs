@@ -1,16 +1,15 @@
 //! Settings → Providers: one card per provider from the status service
 //! (design `docs/23-providers-connect.md` §4).
 //!
-//! The library's settings dialog only takes [`SettingsRow`]s — there is
-//! no custom-content row — so the cards cannot live inside it. The least
-//! invasive shape is: the Settings rail gains a **Providers** section
-//! (native `Note` + per-provider `Switch` rows, so enable/disable works
-//! with the dialog's own `on_switch`), and selecting that section renders
-//! a dedicated Providers page (same modal layer, one
-//! [`provider_card`](aui::screens::provider_card) per provider) instead
-//! of the stock dialog. The rail row is the Settings row that opens it.
+//! The Settings page's Providers section is a `Note` plus one Enabled
+//! switch per provider (`provider-enabled:<wire>` ids, flipping through
+//! [`Harness::flip_provider_enabled`]). The section's page — the overview
+//! plus one sub-page per provider
+//! ([`Harness::render_settings_content`](crate::app::Harness::render_settings_content))
+//! — renders one [`provider_card`](aui::screens::provider_card) per
+//! provider from the live statuses.
 //!
-//! The page ends in a "Set up providers…" row into the first-run
+//! The overview ends in a "Set up providers…" row into the first-run
 //! connect screen ([`Harness::open_connect_screen`]), which also serves
 //! a returning person — the rows refresh from the status cache.
 //!
@@ -19,15 +18,11 @@
 //! scripted [`AuthCommander`] below, and every binary run sets
 //! `BAAZ_STATE_DIR=$(mktemp -d)`.
 
-use aui::data::{button, icon_button, ButtonSize};
-use aui::overlay::{popover_layer, SettingsRow, SettingsSection};
-use aui::screens::{
-    provider_card, ProviderAction, ProviderActionDef, ProviderCardData, ProviderHeadline,
-    ProviderIntent,
-};
-use aui_icons::IconName;
+use aui::data::button;
+use aui::overlay::{SettingsRow, SettingsSection};
+use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderHeadline, ProviderIntent};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
-use gpui::{black, prelude::*, px, AnyElement, Context, SharedString, Window};
+use gpui::{prelude::*, px, AnyElement, Context, SharedString, Window};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::switch::Switch;
 
@@ -374,9 +369,11 @@ pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
 // ------------------------------------------------------------------ UI
 
 /// The Providers section: a note plus one Enabled switch per provider,
-/// reading the live statuses. The switches ride the dialog's own
-/// `on_switch` (`provider-enabled:<wire>` ids); the cards live on the
-/// Providers page ([`Harness::render_providers_page`]).
+/// reading the live statuses. The switches flip through
+/// [`Harness::flip_provider_enabled`] (`provider-enabled:<wire>` ids,
+/// routed by [`parse_enabled_row`]); the cards live on the Providers
+/// overview and sub-pages
+/// ([`Harness::render_settings_content`](crate::app::Harness::render_settings_content)).
 pub(crate) fn providers_section() -> SettingsSection {
     let statuses = crate::provider_status::live_statuses();
     let mut rows = vec![SettingsRow::Note {
@@ -478,8 +475,9 @@ impl Harness {
 
     /// The "Use my own MCP servers" row under the Claude Code / Codex
     /// card: label + detail left, the switch right, flipping through
-    /// [`Self::flip_use_own_mcp`].
-    fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
+    /// [`Self::flip_use_own_mcp`]. Shared with the Settings provider
+    /// sub-pages (B11).
+    pub(crate) fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let on = use_own_mcp_state(&self.layout, id);
         let flip = cx.listener(move |this: &mut Self, next: &bool, _, cx| {
@@ -532,7 +530,7 @@ impl Harness {
     /// never the owner-home walk (see `MigrationCache::plan_for_render`).
     /// Both buttons carry accessibility labels, like every Settings
     /// switch.
-    fn migration_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn migration_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let empty: &[crate::session_migration::PlannedMove] = &[];
         let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
         if plan.is_empty() {
@@ -766,133 +764,6 @@ impl Harness {
             session.update(cx, |session, _| session.write(&bytes));
         }
         cx.notify();
-    }
-
-    /// The Providers page: a real modal over the window — dim scrim,
-    /// bordered card, header close button — with one [`provider_card`]
-    /// per provider from the live statuses and a "Set up providers…"
-    /// row into the connect screen. Rendered when the Settings rail
-    /// stands on Providers (see [`Harness::render_settings`]).
-    pub(crate) fn render_providers_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let statuses = crate::provider_status::live_statuses();
-        let mut cards = v_flex().gap(px(scale::SP_3));
-        for status in &statuses {
-            let data = card_data(status);
-            let intent = cx.listener(
-                move |this: &mut Self, intent: &ProviderIntent, window, cx| {
-                    this.handle_provider_intent(intent.clone(), window, cx);
-                },
-            );
-            cards = cards.child(
-                provider_card(format!("providers-card-{}", status.provider.as_str()), &data)
-                    .on_intent(move |event, window, cx| intent(&event, window, cx)),
-            );
-            // Z5: the inherit-owner-servers switch rides directly under
-            // the Claude Code and Codex cards (Role=Switch with its label,
-            // like every Settings switch). Muse has none: its sessions
-            // never spawn through the scoped argv.
-            if own_mcp_providers().contains(&status.provider) {
-                cards = cards.child(self.use_own_mcp_row(status.provider, cx));
-            }
-        }
-        // The modal chrome the app's other dialogs use (`dialogs.rs`):
-        // a 1 px line border, radius and elevation shadow on the card,
-        // with a header row (title left, close button right) and a max
-        // height whose body scrolls when the window is short.
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
-        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_settings(cx));
-        let setup = cx.listener(|this: &mut Self, _: &(), _, cx| this.open_connect_screen(cx));
-        let header = h_flex().w_full().items_center().gap(px(scale::SP_3)).child(
-            gpui::div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_color(p.ink)
-                .ui(scale::FS_13)
-                .semibold()
-                .child("Providers"),
-        ).child(
-            icon_button("providers-close", IconName::X)
-                .ghost()
-                .size(ButtonSize::Sm)
-                .accessibility_label("Close providers")
-                .on_click(move |_, window, cx| close(&(), window, cx)),
-        );
-        let card = v_flex()
-            .id("providers-card")
-            .occlude()
-            .w(px(640.0))
-            .max_h(px(600.0))
-            .p(px(scale::SP_5))
-            .gap(px(scale::SP_3))
-            .bg(p.overlay)
-            .rounded(px(scale::R_SM))
-            .border_1()
-            .border_color(p.line_strong)
-            .shadow(p.shadow(3))
-            .child(header)
-            .child(
-                gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
-                    "Signed-in state, versions and switches. Signing a CLI out signs it out on this Mac.",
-                ),
-            )
-            .child(
-                v_flex()
-                    .id("providers-cards")
-                    .gap(px(scale::SP_3))
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .child(cards),
-            )
-            .child({
-                // B4M's durable surface: while Baaz-owned sessions still
-                // wait in the owner's homes, the page carries the same
-                // Move the one-time prompt offers — dry-run count,
-                // expandable paths, nothing moving without the click.
-                let mut below = v_flex().gap(px(scale::SP_3));
-                if let Some(row) = self.migration_row(cx) {
-                    below = below.child(row);
-                }
-                below
-            })
-            .child(
-                button("providers-setup", "Set up providers…")
-                    .ghost()
-                    .accessibility_label("Set up providers")
-                    .on_click(move |_, window, cx| setup(&(), window, cx)),
-            );
-        // The scrim is a sibling behind the centred card — the app's
-        // overflow-menu pattern — so card presses never bubble into a
-        // dismiss. Only the dimmed ground (release, like the palette's)
-        // and Esc close the page.
-        popover_layer(
-            gpui::div()
-                .absolute()
-                .inset_0()
-                .key_context(aui::keys::MENU_CONTEXT)
-                .track_focus(&self.focus_dialog)
-                .on_action(cx.listener(|this, _: &aui::keys::Cancel, _, cx| this.close_settings(cx)))
-                .child(
-                    gpui::div()
-                        .id("providers-scrim")
-                        .occlude()
-                        .absolute()
-                        .inset_0()
-                        .bg(black().opacity(0.25))
-                        .on_click(move |_, window, cx| dismiss(&(), window, cx)),
-                )
-                .child(
-                    gpui::div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(card.into_any_element()),
-                ),
-        )
-        .into_any_element()
     }
 }
 

@@ -105,7 +105,6 @@ impl Harness {
     pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
         self.overlays.update(cx, |overlays, _| {
             overlays.dialog = Some(dialog);
-            overlays.settings = None;
         });
         cx.notify();
     }
@@ -234,8 +233,10 @@ impl Harness {
         });
     }
 
-    /// Open the palette on one list.
+    /// Open the palette on one list. A palette jump exits Settings (no
+    /// restore: the jump owns the next route).
     pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
+        self.exit_settings_for_navigation(cx);
         let already = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.palette = if already { None } else { Some(Palette { kind, selected: 0 }) };

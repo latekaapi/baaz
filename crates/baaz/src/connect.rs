@@ -601,11 +601,10 @@ impl Harness {
     /// Reopen the connect screen over the shell (Settings → Providers →
     /// "Set up providers…"). Works for a returning person too: the rows
     /// start from the status cache at once, and [`Self::sync_provider_state`]
-    /// keeps them fresh while the screen is up. Closing Settings first
-    /// keeps the overlay slot single-owner, like [`Self::finish_connect`]
-    /// in reverse.
+    /// keeps them fresh while the screen is up. The screen owns the whole
+    /// window while it is up; the Settings page underneath keeps its
+    /// section, so closing the screen lands back on it.
     pub(crate) fn open_connect_screen(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.settings = None);
         self.muse_sheet = false;
         self.connect_statuses = initial_connect_statuses();
         self.connect_cache_mtime = cache_mtime();
