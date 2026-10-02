@@ -755,12 +755,22 @@ pub struct Harness {
     focus_root: FocusHandle,
     /// Whether an overlay stood open on the previous frame. The edge from
     /// true to false is when focus has to be parked back on the root; see
-    /// the comment at that check in `render`.
-    overlay_was_open: bool,
+    /// the comment at that check in `render`. Settings open/close and
+    /// session activation manage it directly (see `close_settings` and
+    /// `activate`), because both park focus somewhere deliberate instead.
+    pub(crate) overlay_was_open: bool,
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
     /// Set when the next frame should move the keyboard to the composer.
     pub(crate) focus_composer: bool,
+    /// The Settings surface's focus, tracked on the surface element.
+    /// Opening the page arms [`Harness::focus_settings`], and the next
+    /// frame moves the keyboard onto the surface — so keyboard nav and
+    /// ⌘F (SettingsFind) work without a click first.
+    pub(crate) settings_focus: FocusHandle,
+    /// Set when the next frame should move the keyboard onto the Settings
+    /// surface. Armed by `open_settings_page`, consumed in `on_frame`.
+    pub(crate) focus_settings: bool,
     /// What the billing probe said, or `None` while it has not said it yet
     /// (spec §3.2). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
@@ -1208,6 +1218,8 @@ impl Harness {
             focus_dialog: cx.focus_handle(),
             focus_palette: cx.focus_handle(),
             focus_composer: true,
+            settings_focus: cx.focus_handle(),
+            focus_settings: false,
             tier: None,
             tier_probing: false,
             overrides: sessions::Overrides::new(),
@@ -2054,8 +2066,14 @@ impl Harness {
     }
 
     /// The dock toggle (⌃`): flips the open state, persists it, and focuses
-    /// the dock on open so keys reach the pty.
+    /// the dock on open so keys reach the pty. While the Settings page
+    /// stands open this is ignored with no state change (B11b): the page
+    /// hides the dock without writing its state, and a toggle would
+    /// otherwise flip it invisibly.
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_page.open {
+            return;
+        }
         self.layout.terminal_open = !self.layout.terminal_open;
         if self.layout.terminal_open {
             self.ensure_terminal_tab(cx);
@@ -2085,8 +2103,14 @@ impl Harness {
 
     /// The right-pane toggle (⌘⌥B, and the header's PanelRight button):
     /// flips the open state, persists it, notifies, and re-reads the pane's
-    /// data off the render path when it ends up open.
+    /// data off the render path when it ends up open. While the Settings
+    /// page stands open this is ignored with no state change (B11b): the
+    /// page hides the pane without writing its state, and a toggle would
+    /// otherwise flip it — and its per-session record — invisibly.
     pub(crate) fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        if self.settings_page.open {
+            return;
+        }
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
         self.right_snap = false;
@@ -2113,8 +2137,12 @@ impl Harness {
     /// Calling it with the kind already showing while the pane is open
     /// closes the pane again, the way pressing a menu's own button closes it.
     /// Either way the pane's data is re-read off the render path when it ends
-    /// up open.
+    /// up open. While the Settings page stands open this is ignored with no
+    /// state change (B11b), like [`Self::toggle_right`].
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        if self.settings_page.open {
+            return;
+        }
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
         if self.layout.right_open && self.layout.right_kind == Some(kind) {
@@ -2512,6 +2540,11 @@ impl Harness {
     /// Goes through D43's [`pick`](terminal::TerminalHost::pick) with a
     /// `"new"` route, so the rule the unit tests pin is the rule this runs.
     pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Ignored while the Settings page stands open (B11b), like the
+        // dock toggle: opening the dock would flip hidden state invisibly.
+        if self.settings_page.open {
+            return;
+        }
         self.layout.terminal_open = true;
         if let Some(root) = self.current_project().map(|project| project.root.clone()) {
             let decision = self.terminal_host.read(cx).pick(cx, &root, false);
@@ -2542,6 +2575,11 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Ignored while the Settings page stands open (B11b), like the
+        // dock toggle.
+        if self.settings_page.open {
+            return;
+        }
         self.layout.terminal_open = true;
         if let Some(tab) = tab {
             if self.terminal_host.read(cx).get(&tab).is_some() {
@@ -2706,6 +2744,11 @@ impl Harness {
             .current_project()
             .map(|project| project.root.clone())
             .unwrap_or_else(|| PathBuf::from(self.workspace()));
+        // The scripted dock stays shut while the Settings page stands open
+        // (B11b): a capture aid must not flip hidden state either.
+        if self.settings_page.open {
+            return;
+        }
         self.layout.terminal_open = true;
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let nonce = aui_terminal::generate_nonce();
@@ -3922,6 +3965,15 @@ impl Harness {
                 view.update(cx, |view, cx| view.focus_composer(window, cx));
             }
         }
+        // The Settings page takes the keyboard the frame after it opens, so
+        // keyboard nav and ⌘F work without a click first. Skipped in
+        // deterministic captures, like the composer's own focus.
+        if std::mem::take(&mut self.focus_settings)
+            && self.settings_page.open
+            && !crate::clock::deterministic()
+        {
+            window.focus(&self.settings_focus, cx);
+        }
     }
 }
 
@@ -4237,9 +4289,9 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
                 .on_action(cx.listener(|this, _: &NewSession, window, cx| {
-                    // ⌘N exits Settings for the new session (no restore:
-                    // the destination owns the next route).
-                    this.exit_settings_for_navigation(cx);
+                    // ⌘N leaves Settings only when the new session actually
+                    // lands: `activate` exits for the navigation, so a ⌘N
+                    // that starts nothing keeps the page.
                     this.new_session(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
@@ -4250,7 +4302,10 @@ impl Render for Harness {
                 .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
                 .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
                 .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
-                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(0, cx)))
+                // ⌘, (and File → Settings…): the last-visited section this
+                // run, General on first open — an empty target spells that
+                // (`normalize_settings_target`). Never a toggle.
+                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings_page("", cx)))
                 .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
@@ -4273,7 +4328,11 @@ impl Render for Harness {
                 // handler itself routes to the browser only while the
                 // right pane shows it.
                 .on_action(cx.listener(|this, _: &aui_webview::FocusAddress, window, cx| {
-                    this.focus_browser_address(window, cx);
+                    // Ignored while the Settings page stands open (B11b): a
+                    // pane-kind command, like the toggles.
+                    if !this.settings_page.open {
+                        this.focus_browser_address(window, cx);
+                    }
                 }))
                 .on_action(|_: &FocusNext, window, cx| {
                     aui::keys::set_keyboard_nav(true, cx);
@@ -4815,6 +4874,183 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).layout.right_open),
             start,
             "two toggles return to the start"
+        );
+        restore_state(state);
+    }
+
+    /// B11b: while the Settings page stands open, pane/terminal toggles
+    /// and pane-kind commands are ignored with no state change — and write
+    /// nothing, neither `layout.json` state nor a per-session record.
+    #[gpui::test]
+    fn pane_toggles_while_settings_open_change_nothing(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::PaletteKind;
+        let state = hermetic_state("settings-pane-guard");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
+        let (right_open, terminal_open, overrides, pending) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone(), h.right_save_pending)
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Git, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.new_terminal(window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.open_terminal_tab(None, window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("git", cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.layout.right_open, right_open, "toggle_right changed hidden state");
+            assert_eq!(h.layout.terminal_open, terminal_open, "a dock command changed hidden state");
+            assert!(h.overrides == overrides, "a per-session pane record was written");
+            assert_eq!(h.right_save_pending, pending, "a pane write was armed");
+            assert!(h.settings_page.open, "a guarded command closed Settings");
+        });
+        // The matching palette action is ignored the same way: it neither
+        // acts nor exits the page.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                use crate::overlays::Command;
+                let rows = h.palette_rows(PaletteKind::Commands, cx);
+                let id = rows
+                    .iter()
+                    .find(|(id, _, _)| {
+                        Command::parse(id).is_some_and(|command| command.is_pane_or_terminal())
+                    })
+                    .map(|(id, _, _)| id.clone())
+                    .expect("the palette lists a pane/terminal command");
+                h.run_palette_row_for_test(PaletteKind::Commands, id, window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.layout.terminal_open, terminal_open, "the palette action flipped the dock");
+            assert!(h.settings_page.open, "the ignored palette action exited Settings");
+        });
+        restore_state(state);
+    }
+
+    /// B11b: opening the palette — and cancelling it — keeps the Settings
+    /// page exactly where it was.
+    #[gpui::test]
+    fn palette_open_and_cancel_keeps_settings(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::PaletteKind;
+        let state = hermetic_state("settings-palette-keep");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("sidebar", cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.settings_page.open, "opening the palette exited Settings");
+            assert_eq!(h.settings_page.section, "sidebar");
+        });
+        // Cancelling (Escape's path: close the topmost overlay) keeps it.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.overlays.update(cx, |overlays, _| overlays.close_topmost());
+            })
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.settings_page.open, "cancelling the palette exited Settings");
+            assert_eq!(h.settings_page.section, "sidebar");
+        });
+        restore_state(state);
+    }
+
+    /// B11b: a session switch exits Settings with no restore — and ⌘,
+    /// spelled as the empty target, reopens the last-visited section.
+    #[gpui::test]
+    fn a_session_switch_exits_settings_and_reopen_restores_last_section(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = hermetic_state("settings-switch-exit");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("sidebar", cx)));
+        assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
+        // A second session landing is the switch: build it the way the
+        // scripted chrome does, then run the real choke point.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: state.2.to_string_lossy().into_owned(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx));
+                h.activate(view, false, window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(!h.settings_page.open, "a session switch left Settings open");
+            assert_eq!(h.settings_page.saved_active, None, "a navigation exit keeps a restore record");
+        });
+        // ⌘, reopens the last-visited section (Sidebar), not General.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("", cx)));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(h.settings_page.open);
+            assert_eq!(h.settings_page.section, "sidebar", "⌘, did not reopen the last section");
+        });
+        restore_state(state);
+    }
+
+    /// B11b: opening Settings moves the keyboard onto the surface (so ⌘F
+    /// and nav work at once); closing moves it back to the composer.
+    #[gpui::test]
+    fn settings_focus_moves_in_and_back_out(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("settings-focus");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+            })
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        draw_shell(&mut *vc, &baaz);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
+        draw_shell(&mut *vc, &baaz);
+        let surface = vc.update(|_, cx| baaz.read(cx).settings_focus.clone());
+        assert_eq!(
+            vc.update(|window, cx| window.focused(cx)),
+            Some(surface),
+            "opening Settings did not move focus onto the surface"
+        );
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_settings(cx)));
+        draw_shell(&mut *vc, &baaz);
+        let composer = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("a session is open").update(cx, |view, cx| {
+                view.composer_focus_handle(cx)
+            })
+        });
+        assert_eq!(
+            vc.update(|window, cx| window.focused(cx)),
+            Some(composer),
+            "closing Settings did not refocus the composer"
         );
         restore_state(state);
     }
