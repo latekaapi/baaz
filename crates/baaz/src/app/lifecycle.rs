@@ -1398,10 +1398,26 @@ impl Harness {
             crate::baaz_log!("new: current project is unavailable; starting nothing");
             return;
         };
+        // The stored muse default rides only when the cached muse
+        // `model/list` still names it: a foreign pick kept through
+        // migration would otherwise fail the turn. An empty cache means
+        // nothing is known yet, never a reason to drop (see
+        // `projects::muse_start_model`, which logs the drop once).
+        if params.model_id.is_some() {
+            let mut catalog: Vec<String> = Vec::new();
+            if let Some(active) = self.active.clone() {
+                catalog.extend(active.read(cx).cached_muse_catalog_ids());
+            }
+            for (_, cached) in &self.session_cache {
+                catalog.extend(cached.read(cx).cached_muse_catalog_ids());
+            }
+            params.model_id = projects::muse_start_model(params.model_id, &catalog);
+        }
         let effort = current
             .as_deref()
             .and_then(|id| self.projects.find(id))
-            .and_then(|p| p.defaults.effort.as_deref())
+            .and_then(|p| p.defaults.effort_for(&self.new_provider))
+            .as_deref()
             .and_then(projects::parse_effort);
         let started_project = current.clone();
         self.load_menu_sources(std::path::PathBuf::from(self.workspace()), cx);
@@ -1786,7 +1802,8 @@ impl Harness {
         let name = self.current_project().map(|p| p.name.clone());
         let effort = self
             .current_project()
-            .and_then(|p| p.defaults.effort.as_deref())
+            .and_then(|p| p.defaults.effort_for(&self.new_provider))
+            .as_deref()
             .and_then(projects::parse_effort);
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| {
@@ -3764,14 +3781,16 @@ impl Harness {
             // scripted and transient choices stay out of the defaults.
             SessionEvent::ModelSelected { model_id } => {
                 let session_id = view.read(cx).session_id.clone();
+                let provider = view.read(cx).provider_kind();
                 self.note_project_default(&session_id, |defaults| {
-                    defaults.model_id = Some(model_id.clone());
+                    defaults.note_model(provider.as_str(), model_id);
                 });
             }
             SessionEvent::EffortSelected { effort } => {
                 let session_id = view.read(cx).session_id.clone();
+                let provider = view.read(cx).provider_kind();
                 self.note_project_default(&session_id, |defaults| {
-                    defaults.effort = effort.clone();
+                    defaults.note_effort(provider.as_str(), effort.clone());
                 });
             }
             SessionEvent::ModeSelected { mode } => {
