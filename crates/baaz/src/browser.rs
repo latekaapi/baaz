@@ -414,7 +414,23 @@ impl Harness {
     ) -> Entity<WebviewState> {
         let focus = std::mem::take(&mut self.browser_url_focus_armed);
         let key = self.browser_key(cx);
-        self.browser_for(&key, focus, window, cx)
+        // B7fix: the toggle prewarms the webview before the frame, so the
+        // creation-time focus inside `browser_for` no longer fires on a
+        // by-hand open — the state already exists by render. Honor the armed
+        // focus on the prewarmed blank page here instead. Restores never arm
+        // it, so they still leave the composer's keyboard alone, and an
+        // armed open onto a navigated page still does not steal focus.
+        let existed = if key == HOME_KEY {
+            self.browser.home.is_some()
+        } else {
+            self.browser.states.contains_key(&key)
+        };
+        let state = self.browser_for(&key, focus, window, cx);
+        if focus && existed && state.read(cx).url().to_string() == BLANK {
+            let focus_handle = state.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+        }
+        state
     }
 
     /// `browse:<url>`: navigate the active (or home) browser, idempotently —

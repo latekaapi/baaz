@@ -648,6 +648,10 @@ pub struct Harness {
     /// off-thread write; only the latest generation writes, so quick
     /// toggles coalesce into one. Never persists.
     pub(crate) right_save_epoch: u64,
+    /// Whether a cheap right-pane persist still owes its debounced disk
+    /// write (B7fix): set when the write is armed, cleared when it lands
+    /// or when [`Self::flush_right_save`] lands it early on session switch.
+    pub(crate) right_save_pending: bool,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1136,6 +1140,7 @@ impl Harness {
             right_last_key: None,
             right_snap: false,
             right_save_epoch: 0,
+            right_save_pending: false,
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -2109,11 +2114,20 @@ impl Harness {
     /// and a toggle never blocks its own animation frame on the store.
     fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
         self.right_save_epoch += 1;
+        self.right_save_pending = true;
         let epoch = self.right_save_epoch;
         let snapshot = self.overrides.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(750)).await;
-            let current = this.update(cx, |this, _| this.right_save_epoch == epoch).unwrap_or(false);
+            let current = this
+                .update(cx, |this, _| {
+                    if this.right_save_epoch != epoch {
+                        return false;
+                    }
+                    this.right_save_pending = false;
+                    true
+                })
+                .unwrap_or(false);
             if !current {
                 return;
             }
@@ -2124,6 +2138,21 @@ impl Harness {
                 .await;
         })
         .detach();
+    }
+
+    /// Land a pending cheap right-pane write synchronously (B7fix): the
+    /// outgoing session's debounced state reaches `sessions.json` before the
+    /// incoming session's state loads in [`Self::restore_right_for_session`].
+    /// A bare `sessions::write` — no `rejoin`, no search rebuild, no notify —
+    /// and a no-op when nothing is pending, so plain opens write nothing.
+    /// The in-flight debounce is cancelled: the disk already leads it.
+    fn flush_right_save(&mut self) {
+        if !self.right_save_pending {
+            return;
+        }
+        self.right_save_epoch += 1;
+        crate::sessions::write(&self.overrides);
+        self.right_save_pending = false;
     }
 
     /// Save the live pane state onto the active session (Z2): open, kind,
@@ -2178,6 +2207,10 @@ impl Harness {
     /// data refreshes. Flipping open/closed arms [`Self::right_snap`] so the
     /// next frame lands with no animation; user toggles never arm it.
     pub(crate) fn restore_right_for_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // B7fix: the outgoing session's debounced pane state lands on disk
+        // before the incoming session's loads — a switch is the durability
+        // point the toggle gesture itself must not pay for.
+        self.flush_right_save();
         let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
         if self.layout.right_open != open {
@@ -4664,6 +4697,51 @@ mod tests {
         assert!(
             !crate::sessions::path().exists(),
             "closing the pane must not synchronously write sessions.json"
+        );
+        restore_state(state);
+    }
+
+    /// B7fix: the debounced disk write eventually persists the per-session
+    /// pane state. The toggle lands it in memory at once with no synchronous
+    /// `sessions.json`; once the debounce elapses, the off-thread write
+    /// carries the same open/kind the restore path reads.
+    #[gpui::test]
+    fn debounced_right_save_eventually_persists_per_session_state(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-debounced-persist");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        assert!(
+            !crate::sessions::path().exists(),
+            "the toggle itself still writes nothing synchronously"
+        );
+        // Past the 750 ms debounce: the test clock jumps it (the harness
+        // clock is virtual — wall-clock sleeping never fires the timer),
+        // then the executors settle and the off-thread write lands.
+        vc.cx.executor().advance_clock(std::time::Duration::from_millis(850));
+        let mut disk = crate::sessions::read();
+        for _ in 0..10 {
+            if disk.get("s-1").and_then(|meta| meta.right.clone()).is_some() {
+                break;
+            }
+            vc.run_until_parked();
+            disk = crate::sessions::read();
+        }
+        assert_eq!(
+            disk.get("s-1").and_then(|meta| meta.right.clone()),
+            Some(crate::sessions::RightState {
+                open: true,
+                kind: crate::layout::RightKind::Diff,
+                files_preview: None,
+                files_selected: None,
+                files_expanded: Vec::new(),
+                browser_url: None,
+            }),
+            "the debounced write persists what the toggle stored in memory"
         );
         restore_state(state);
     }
