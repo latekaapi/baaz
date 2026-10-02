@@ -1017,6 +1017,43 @@ pub fn tier_from_read_current(
     Some(tier)
 }
 
+/// A `usage/read` result value's wire-observation time in whole seconds:
+/// the host's arrival stamp, so the stored Muse snapshot carries its true
+/// age rather than the re-read's. `None` when the value holds no
+/// observation (the `{}` cold host, a failed read).
+pub fn observed_secs_from_read_value(value: &serde_json::Value) -> Option<i64> {
+    let result: UsageReadResult = serde_json::from_value(value.clone()).ok()?;
+    result.usage.map(|usage| (usage.observed_at_ms / 1000) as i64)
+}
+
+/// A `usage/changed` notification's wire-observation time in whole seconds
+/// (see [`observed_secs_from_read_value`]).
+pub fn observed_secs_from_changed_params(params: &serde_json::Value) -> Option<i64> {
+    let usage: SubscriptionUsage = serde_json::from_value(params.clone()).ok()?;
+    Some((usage.observed_at_ms / 1000) as i64)
+}
+
+/// Whether the tier carries usable numbers for the Muse usage snapshot: a
+/// subscription with at least one window. Anything else — pay-as-you-go,
+/// an unknown probe, an unavailable card — must never be stored over the
+/// last good numbers; the caller keeps those and notes "unavailable now".
+pub fn tier_has_numbers(tier: &Tier) -> bool {
+    match tier {
+        Tier::Subscription { current_pct, weekly_pct, usage_unavailable: false, .. } => {
+            current_pct.is_some() || weekly_pct.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// When the remembered tier answer was taken, in whole seconds: the age a
+/// menu-open snapshot re-recorded from the in-memory tier keeps, instead
+/// of the menu-open's own time.
+pub fn cached_probed_at() -> Option<u64> {
+    let cached: Cached = crate::store::read_json(&cache_path());
+    cached.probed_at_secs
+}
+
 /// Decide the primary oracle's answer from an already-read `usage/read`
 /// result object.
 ///

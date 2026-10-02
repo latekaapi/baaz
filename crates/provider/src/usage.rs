@@ -31,6 +31,10 @@ pub struct UsageReport {
     pub plan: Option<String>,
     /// The windows, possibly empty.
     pub windows: Vec<UsageWindow>,
+    /// Unix time the reading arrived on the wire, when the fold stamped
+    /// one. The store persists with this time and never re-stamps an
+    /// unchanged reading, so the menu shows the reading's true age.
+    pub observed_at: Option<i64>,
 }
 
 /// Name a window length in minutes for its card: a five-hour window is
