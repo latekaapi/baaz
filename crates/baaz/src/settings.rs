@@ -88,7 +88,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
         "general" => "Model housekeeping and app defaults. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
-        "providers" => "Signing a CLI out signs it out on this Mac.",
+        "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
         _ if is_provider_subpage(section) => "Account, tools and defaults for this provider.",
