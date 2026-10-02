@@ -950,10 +950,16 @@ impl Folded {
                 Block::Approval { state: state @ ApprovalState::Approving, .. } => {
                     // The exit code never reached the wire; the turn's own
                     // terminal is the only outcome there is — allowed when
-                    // the turn completed, failed-marked otherwise.
-                    *state = ApprovalState::AllowedOnce {
-                        exit_code: i32::from(terminal != "completed"),
-                        duration_ms: 0,
+                    // the turn completed, denied when it was cancelled (a
+                    // cancelled run is stopped, never failed), failed-marked
+                    // otherwise.
+                    *state = if terminal == "cancelled" {
+                        ApprovalState::Denied
+                    } else {
+                        ApprovalState::AllowedOnce {
+                            exit_code: i32::from(terminal != "completed"),
+                            duration_ms: 0,
+                        }
                     };
                     true
                 }
@@ -1111,10 +1117,10 @@ impl Folded {
     /// turn: an approved card leaves `Approving` when its own command
     /// starts (a non-terminal revision settles it allowed) and records
     /// the outcome when it finishes — a failed command settles allowed
-    /// with a nonzero exit, never stuck `Approving`. Only `Approving`
-    /// cards move (plus refreshing an already-settled card when the
-    /// terminal revision proves the run failed): denied, auto-resolved
-    /// and pending cards are untouched.
+    /// with a nonzero exit, a cancelled one settles denied (stopped, never
+    /// failed), never stuck `Approving`. Only `Approving` cards move (plus
+    /// refreshing an already-settled card when the terminal revision proves
+    /// the run failed): denied, auto-resolved and pending cards are untouched.
     fn settle_approved_item(&mut self, item: &msp::Item, terminal: bool) -> Vec<Delta> {
         let Some(approval_id) = item.approval_id.as_deref() else { return Vec::new() };
         let Some(slot) = self.slots.approval(approval_id) else { return Vec::new() };
@@ -1124,8 +1130,13 @@ impl Folded {
             return Vec::new();
         };
         let Block::Approval { state, .. } = &mut block else { return Vec::new() };
-        let failed = terminal && item.status != msp::ItemStatus::Completed;
+        let cancelled = terminal && item.status == msp::ItemStatus::Cancelled;
+        let failed = terminal && !cancelled && item.status != msp::ItemStatus::Completed;
         match state {
+            ApprovalState::Approving if cancelled => {
+                *state = ApprovalState::Denied;
+                self.update_block(slot, block)
+            }
             ApprovalState::Approving => {
                 *state =
                     ApprovalState::AllowedOnce { exit_code: i32::from(failed), duration_ms: 0 };
@@ -4351,6 +4362,41 @@ mod tests {
             )
         });
         assert!(failed, "the card ends failed-marked");
+    }
+
+    /// B5fix2: a cancelled tool settles its approval denied — stopped,
+    /// never failed — and a cancelled turn end does the same for a card
+    /// still approving.
+    #[test]
+    fn a_cancelled_tool_settles_its_approval_denied_not_failed() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        approve_shell(&mut fold);
+        let done = notify(&mut fold, "item/completed", gated_tool_item("cancelled", 1));
+        assert!(
+            approval_states(&done).iter().any(|state| *state == ApprovalState::Denied),
+            "the cancelled completion denies the card, never fails it: {done:?}"
+        );
+        assert!(
+            !approval_states(&done).iter().any(|state| matches!(
+                state,
+                ApprovalState::AllowedOnce { exit_code: 1, .. }
+            )),
+            "no failed mark on a cancelled tool: {done:?}"
+        );
+        // A cancelled turn end denies a still-approving card the same way.
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        approve_shell(&mut fold);
+        let finished = notify(
+            &mut fold,
+            "turn/completed",
+            serde_json::json!({"turnId": "t-1", "terminal": "cancelled"}),
+        );
+        assert!(
+            approval_states(&finished).iter().any(|state| *state == ApprovalState::Denied),
+            "the cancelled turn end denies the card: {finished:?}"
+        );
     }
 
     /// B5: the turn-end fallback covers an approval whose tool never
