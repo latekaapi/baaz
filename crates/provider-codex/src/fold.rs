@@ -2610,6 +2610,26 @@ mod tests {
         assert_eq!(thinking, ["plannedtrace"], "summary plus content, joined");
     }
 
+    /// B12fix: Codex reasoning timing reaches the thinking card: the
+    /// wire's own span (`completedAtMs` past `startedAtMs`) when it timed
+    /// both ends, else the arrival clock from `item/started` — never a
+    /// frozen zero claimed as measured.
+    #[test]
+    fn reasoning_wire_timing_reaches_thinking_elapsed() {
+        let line = r#"{"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"reasoning","id":"rs_t","summary":[{"type":"summary_text","text":"planned"}],"content":[{"type":"reasoning_text","text":"trace"}],"startedAtMs":1000,"completedAtMs":6500}}}"#;
+        let frame = crate::frame::decode_line(line).expect("synthetic line decodes");
+        let mut fold = CodexFold::new();
+        let deltas = fold.apply(&frame);
+        let elapsed: Vec<u64> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Thinking { elapsed_ms, .. }, .. } => Some(*elapsed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(elapsed, [5_500], "the wire's 5.5 s span reaches the card: {elapsed:?}");
+    }
+
     /// Final shell-card state under the running-card change: `item/started`
     /// adds the card as running and the completion updates it in place
     /// (`BlockUpdated`), so the final face is the last add-or-update per

@@ -167,6 +167,13 @@ pub struct Layout {
     /// dialog's Sidebar section owns the switch, like [`Self::auto_title`].
     #[serde(rename = "handoffModelSummary", default = "default_true")]
     pub handoff_model_summary: bool,
+    /// Whether a settled assistant turn folds its work behind one header
+    /// row while the final answer stays out (B12). ON by default; off
+    /// leaves every run expanded after settle. The Settings page's
+    /// General section owns the switch, and every open view applies it
+    /// live through [`crate::settings::apply_setting`].
+    #[serde(rename = "foldFinishedTurns", default = "default_true")]
+    pub fold_finished_turns: bool,
     /// Whether the terminal dock stands open in the centre column, under
     /// the composer (D42). Closed by default: the dock is asked for, never
     /// assumed.
@@ -219,6 +226,7 @@ impl Default for Layout {
             auto_title: true,
             auto_summary: true,
             handoff_model_summary: true,
+            fold_finished_turns: true,
             terminal_open: false,
             terminal_height: None,
             right_open: false,
@@ -358,6 +366,7 @@ mod tests {
             auto_title: true,
             auto_summary: true,
             handoff_model_summary: true,
+            fold_finished_turns: false,
             terminal_open: true,
             terminal_height: Some(300.0),
             right_open: true,
@@ -373,6 +382,7 @@ mod tests {
         assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
         assert!(text.contains("\"groupBranch\":true"));
+        assert!(text.contains("\"foldFinishedTurns\":false"));
         assert!(text.contains("\"terminalOpen\":true"));
         assert!(text.contains("\"terminalHeight\":300.0"));
         assert!(text.contains("\"rightOpen\":true"));
@@ -387,6 +397,7 @@ mod tests {
         assert!(back.group_chevron);
         assert!(back.group_bar);
         assert!(back.group_branch);
+        assert!(!back.fold_finished_turns);
         assert!(back.terminal_open);
         assert_eq!(back.terminal_height, Some(300.0));
         assert!(back.right_open);
@@ -407,9 +418,11 @@ mod tests {
         assert!(Layout::default().auto_title);
         assert!(Layout::default().auto_summary);
         assert!(Layout::default().handoff_model_summary);
+        assert!(Layout::default().fold_finished_turns);
         assert!(old.auto_title);
         assert!(old.auto_summary);
         assert!(old.handoff_model_summary);
+        assert!(old.fold_finished_turns);
         // The dock starts closed at its default height, old files included.
         assert!(!Layout::default().terminal_open);
         assert_eq!(Layout::default().terminal_height, None);

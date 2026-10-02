@@ -48,6 +48,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "auto_title" => layout.auto_title = on,
         "auto_summary" => layout.auto_summary = on,
         "handoff_model_summary" => layout.handoff_model_summary = on,
+        "fold_finished_turns" => layout.fold_finished_turns = on,
         _ => return false,
     }
     true
@@ -156,7 +157,9 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
 /// Table-driven so the coverage test enumerates it.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" => Some("general"),
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" => {
+            Some("general")
+        }
         "group_chevron" | "group_bar" | "group_branch" => Some("sidebar"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
@@ -270,9 +273,9 @@ pub(crate) fn terminal_taken_keys() -> Vec<&'static str> {
 
 impl Harness {
     /// Every section's rows, built from state each frame: General (the
-    /// three model-spending switches), Sidebar (chevron/bar/branch),
-    /// Providers (enable switches), Shortcuts (live keymap). Archived has
-    /// no switches — its page lists sessions.
+    /// three model-spending switches plus the fold switch), Sidebar
+    /// (chevron/bar/branch), Providers (enable switches), Shortcuts (live
+    /// keymap). Archived has no switches — its page lists sessions.
     ///
     /// A later section is one more arm here (and one more `on_switch` id in
     /// [`Self::flip_setting`]).
@@ -305,6 +308,14 @@ impl Harness {
                             "A cheap model writes the summary the next provider reads (one short turn). Off: the first lines of the earliest replies.",
                         )),
                         on: self.layout.handoff_model_summary,
+                    },
+                    SettingsRow::Switch {
+                        id: SharedString::from("fold_finished_turns"),
+                        label: SharedString::from("Fold finished turns"),
+                        detail: Some(SharedString::from(
+                            "Settled turns fold their work behind one row; the final answer stays out. Off: every run stays expanded.",
+                        )),
+                        on: self.layout.fold_finished_turns,
                     },
                 ],
             },
@@ -526,6 +537,11 @@ impl Harness {
             return;
         }
         crate::layout::write(&self.layout);
+        // B12fix: the fold switch applies live to every open view, not
+        // just the next frame's settings rows — parked views fold too.
+        if id == "fold_finished_turns" {
+            self.apply_fold_to_views(on, cx);
+        }
         self.invalidate_list();
         cx.notify();
     }
@@ -1854,6 +1870,7 @@ mod tests {
         assert_eq!(normalize_settings_target("providers/nope", ""), "general");
         // A row id opens its home page.
         assert_eq!(normalize_settings_target("auto_title", ""), "general");
+        assert_eq!(normalize_settings_target("fold_finished_turns", ""), "general");
         assert_eq!(normalize_settings_target("group_bar", ""), "sidebar");
         assert_eq!(normalize_settings_target("provider-enabled:codex", ""), "providers");
         assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "providers");
@@ -1885,15 +1902,16 @@ mod tests {
     }
 
     /// Every former setting is reachable on exactly one page: the three
-    /// model-spending switches moved to General, the three row switches
-    /// stay on Sidebar, provider switches on Providers, shortcut rows on
-    /// Shortcuts, archived rows on Archived.
+    /// model-spending switches plus the fold switch moved to General, the
+    /// three row switches stay on Sidebar, provider switches on Providers,
+    /// shortcut rows on Shortcuts, archived rows on Archived.
     #[test]
     fn every_former_setting_has_exactly_one_home() {
         let cases = [
             ("auto_title", "general"),
             ("auto_summary", "general"),
             ("handoff_model_summary", "general"),
+            ("fold_finished_turns", "general"),
             ("group_chevron", "sidebar"),
             ("group_bar", "sidebar"),
             ("group_branch", "sidebar"),

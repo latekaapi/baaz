@@ -1983,16 +1983,23 @@ impl Folded {
         });
     }
 
+    /// B12fix: wall-clock milliseconds since `start`, saturating at `u64`.
+    fn wall_ms_since(start: Instant) -> u64 {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     /// B12: a reasoning trace's thinking elapsed: the `recordedAt` span
     /// from first sighting to this revision, or the arrival clock when
-    /// the wire carried no clock at all. A half-known pair stays zero
-    /// rather than mixing clocks — unknown, never measured.
+    /// the wire carried no clock at all. B12fix: a half-known pair (one
+    /// end timed, the other not) falls back to the wall clock rather
+    /// than a frozen zero — mixed clocks never meet, so the arrival
+    /// clock is the only honest span left.
     fn reasoning_elapsed(&self, item: &msp::Item) -> u64 {
         let Some(first) = self.reasoning_first.get(&item.item_id) else { return 0 };
         match (first.at_ms, recorded_at_ms(item)) {
             (Some(start), Some(end)) => end.saturating_sub(start),
-            (None, None) => u64::try_from(first.instant.elapsed().as_millis()).unwrap_or(u64::MAX),
-            (Some(_), None) | (None, Some(_)) => 0,
+            (None, None) => Self::wall_ms_since(first.instant),
+            (Some(_), None) | (None, Some(_)) => Self::wall_ms_since(first.instant),
         }
     }
 
