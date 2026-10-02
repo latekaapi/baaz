@@ -736,6 +736,14 @@ pub struct Harness {
     /// Whether the Settings → Providers migration row shows its dry-run
     /// path list (B4M). Pure view state: never persisted, defaults shut.
     pub(crate) migration_paths_expanded: bool,
+    /// The B4M plan cache: computed once off the UI thread by
+    /// [`crate::session_migration::Harness::refresh_migration_cache`],
+    /// read by every render. `None` until the first background compute
+    /// lands (or after an invalidate, while the recompute runs).
+    pub(crate) migration_cache: Option<crate::session_migration::MigrationCache>,
+    /// A plan recompute is in flight: renders keep the old cache (or
+    /// nothing) instead of kicking another.
+    pub(crate) migration_refresh_in_flight: bool,
     /// Which provider each terminal bridge session answers for, by the id
     /// the bridge names (`--session`). A Codex open mints its thread id
     /// after the bridge is already registered under the request id, so
@@ -1154,6 +1162,8 @@ impl Harness {
             overrides: sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
             migration_paths_expanded: false,
+            migration_cache: None,
+            migration_refresh_in_flight: false,
             terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,

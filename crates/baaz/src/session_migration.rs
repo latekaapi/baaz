@@ -57,9 +57,25 @@ pub struct PlannedMove {
 
 /// The owner's `$HOME` for migration IO: the real `HOME`, defaulting to
 /// `.` when unset. Tests pass temp dirs explicitly and never call this.
+///
+/// `BAAZ_MIGRATION_OWNER_HOME` overrides it outright: the offline probe's
+/// fixture owner home (see `scripts/uiprobe.py`'s `migrate-sessions`
+/// entry), never a real home.
 pub fn owner_home() -> PathBuf {
+    if let Some(dir) = std::env::var_os("BAAZ_MIGRATION_OWNER_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
+
+/// How many times [`plan_migration`] walked the owner homes in this
+/// process: the render path must never move it (see
+/// [`MigrationCache::plan_for_render`]), and the test below spies on
+/// exactly that.
+pub(crate) static PLAN_WALKS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Plan one registry record's moves: the owner-side files for its id that
 /// still exist and whose Baaz-side targets do not. An id whose target
@@ -114,6 +130,7 @@ pub fn plan_migration(
     state_dir: &Path,
     registry: &crate::provider_sessions::ProviderSessionStore,
 ) -> Vec<PlannedMove> {
+    PLAN_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut moves = Vec::new();
     for record in registry.values() {
         moves.extend(plan_one(owner_home, state_dir, &record.provider, &record.session_id));
@@ -162,38 +179,178 @@ pub fn move_key(planned: &PlannedMove) -> String {
     format!("{}/{}", planned.provider, planned.target.to_string_lossy())
 }
 
-/// The finished keys the journal holds. Best-effort like every store
-/// read: a missing or unparseable journal is empty, and the target-exists
-/// skip below keeps the executor idempotent regardless.
-fn read_completed(state_dir: &Path) -> HashSet<String> {
-    let text = std::fs::read_to_string(journal_path(state_dir)).unwrap_or_default();
-    let parsed: HashMap<String, Vec<String>> = serde_json::from_str(&text).unwrap_or_default();
-    parsed.get("completed").cloned().unwrap_or_default().into_iter().collect()
+/// Fully-done journal entries older than this are pruned on every run:
+/// the filesystem reconcile below re-derives "done" from the targets, so
+/// a pruned entry can never re-move anything.
+const COMPLETED_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+/// In-progress records older than this belong to a crashed run, not a live
+/// move: the executor holds one for seconds, so a day-old one is residue
+/// and releases whatever staging it seemed to guard.
+const IN_PROGRESS_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
-/// Record one finished move in the journal, atomically. Best-effort: a
-/// journal that cannot be written loses a resume hint, never a session
-/// (the target-exists skip still recognises the finished move).
-fn mark_completed(state_dir: &Path, key: &str) {
-    let mut done = read_completed(state_dir);
-    if !done.insert(key.to_owned()) {
-        return;
+/// One finished move: when it landed and how. `at` is Unix seconds.
+#[derive(Clone, Debug)]
+struct CompletedEntry {
+    at: u64,
+    outcome: &'static str,
+}
+
+/// The journal, parsed best-effort like every store read: a missing or
+/// unparseable journal is empty, and the target-exists skip keeps the
+/// executor idempotent regardless.
+///
+/// Reads both shapes: the current `{"completed": {key: {at, outcome}},
+/// "in_progress": {key: {at}}}` map and the first version's
+/// `{"completed": [key, …]}` list (whose entries are stamped with now —
+/// conservatively fresh, so they age out from this run, not from epoch).
+fn read_journal(state_dir: &Path) -> (HashMap<String, CompletedEntry>, HashMap<String, u64>) {
+    let mut done = HashMap::new();
+    let mut live = HashMap::new();
+    let text = std::fs::read_to_string(journal_path(state_dir)).unwrap_or_default();
+    if text.is_empty() {
+        return (done, live);
     }
-    let mut ordered: Vec<&String> = done.iter().collect();
-    ordered.sort();
-    let body = HashMap::from([("completed".to_owned(), ordered)]);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    if let Some(entries) = parsed.get("completed") {
+        if let Some(map) = entries.as_object() {
+            for (key, entry) in map {
+                done.insert(
+                    key.clone(),
+                    CompletedEntry {
+                        at: entry.get("at").and_then(|at| at.as_u64()).unwrap_or_else(now_secs),
+                        outcome: if entry
+                            .get("outcome")
+                            .and_then(|outcome| outcome.as_str())
+                            == Some("copied")
+                        {
+                            "copied"
+                        } else {
+                            "moved"
+                        },
+                    },
+                );
+            }
+        } else if let Some(list) = entries.as_array() {
+            // The first version's list shape: stamp with now (see above).
+            let at = now_secs();
+            for key in list.iter().filter_map(|key| key.as_str()) {
+                done.insert(key.to_owned(), CompletedEntry { at, outcome: "moved" });
+            }
+        }
+    }
+    if let Some(map) = parsed.get("in_progress").and_then(|live| live.as_object()) {
+        for (key, entry) in map {
+            if let Some(at) = entry.get("at").and_then(|at| at.as_u64()) {
+                live.insert(key.clone(), at);
+            }
+        }
+    }
+    (done, live)
+}
+
+/// Write the journal back, atomically. Best-effort: a journal that cannot
+/// be written loses resume hints, never a session (the target-exists skip
+/// still recognises every finished move).
+fn write_journal(
+    state_dir: &Path,
+    done: &HashMap<String, CompletedEntry>,
+    live: &HashMap<String, u64>,
+) {
+    let mut completed = serde_json::Map::new();
+    let mut keys: Vec<&String> = done.keys().collect();
+    keys.sort();
+    for key in keys {
+        let entry = &done[key];
+        completed.insert(
+            key.clone(),
+            serde_json::json!({"at": entry.at, "outcome": entry.outcome}),
+        );
+    }
+    let mut in_progress = serde_json::Map::new();
+    let mut live_keys: Vec<&String> = live.keys().collect();
+    live_keys.sort();
+    for key in live_keys {
+        in_progress.insert(key.clone(), serde_json::json!({"at": live[key]}));
+    }
+    let body = serde_json::json!({"completed": completed, "in_progress": in_progress});
     if let Ok(text) = serde_json::to_vec_pretty(&body) {
         let _ = crate::store::write_atomic(&journal_path(state_dir), &text);
     }
 }
 
-/// Drop the moves the journal already records: the crash-resume filter.
-/// The target-exists skip in [`plan_migration`] already handles the
-/// finished-and-journaled case; this covers a journal written for a move
-/// whose target check races it.
+/// The finished keys the journal holds.
+fn read_completed(state_dir: &Path) -> HashSet<String> {
+    read_journal(state_dir).0.into_keys().collect()
+}
+
+/// Whether `key` has a live (fresh) in-progress record: a concurrent run
+/// may be copying under it right now, so its staging is not residue.
+fn has_live_record(state_dir: &Path, key: &str) -> bool {
+    let (_, live) = read_journal(state_dir);
+    live.get(key).is_some_and(|at| now_secs().saturating_sub(*at) < IN_PROGRESS_TTL_SECS)
+}
+
+/// Mark one move in flight, then finished: the crash-resume records.
+/// Finished entries carry the landing time and how the file travelled, so
+/// the journal records final state; the in-progress record exists only
+/// while the bytes move, so staging with no live record is residue.
+fn begin_move(state_dir: &Path, key: &str) {
+    let (done, mut live) = read_journal(state_dir);
+    live.insert(key.to_owned(), now_secs());
+    write_journal(state_dir, &done, &live);
+}
+
+/// Record one finished move in the journal, atomically.
+fn mark_completed(state_dir: &Path, key: &str, outcome: &'static str) {
+    let (mut done, mut live) = read_journal(state_dir);
+    live.remove(key);
+    done.insert(key.to_owned(), CompletedEntry { at: now_secs(), outcome });
+    write_journal(state_dir, &done, &live);
+}
+
+/// Drop fully-done entries older than 30 days and in-progress records
+/// older than a day (crashed runs, never live moves). Pruning a finished
+/// entry is safe: [`pending_moves`] re-derives "done" from the targets,
+/// so a pruned entry retries nothing that already landed.
+fn prune_journal(state_dir: &Path) {
+    let (mut done, mut live) = read_journal(state_dir);
+    if done.is_empty() && live.is_empty() {
+        return;
+    }
+    let now = now_secs();
+    done.retain(|_, entry| now.saturating_sub(entry.at) < COMPLETED_TTL_SECS);
+    live.retain(|_, at| now.saturating_sub(*at) < IN_PROGRESS_TTL_SECS);
+    write_journal(state_dir, &done, &live);
+}
+
+/// Drop the moves that already landed: the crash-resume filter, reconciled
+/// against the filesystem rather than trusting the journal alone. A
+/// journaled move whose target is missing while its source is still
+/// present never landed — it is retried. The target-exists skip in
+/// [`plan_migration`] already handles the finished-and-journaled case;
+/// this covers a journal written for a move whose target check races it,
+/// and a journal entry that outlives its target.
 pub fn pending_moves(state_dir: &Path, moves: Vec<PlannedMove>) -> Vec<PlannedMove> {
+    prune_journal(state_dir);
     let done = read_completed(state_dir);
-    moves.into_iter().filter(|planned| !done.contains(&move_key(planned))).collect()
+    moves
+        .into_iter()
+        .filter(|planned| {
+            if !done.contains(&move_key(planned)) {
+                return true;
+            }
+            // Journaled but the target is gone while the source waits:
+            // the move never landed — retry it.
+            !planned.target.exists() && std::fs::symlink_metadata(&planned.source).is_ok()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- executor
@@ -219,21 +376,51 @@ fn is_cross_device(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(18) || error.kind() == std::io::ErrorKind::CrossesDevices
 }
 
+/// The cross-device staging sibling for `target`: `.<name>.baaz-migrating`
+/// beside the target, with no pid in the name — so any later run
+/// recognises another run's crash residue and sweeps it (see
+/// [`clean_stale_staging`]).
+pub(crate) fn staging_path(target: &Path) -> PathBuf {
+    let name = target.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    target.with_file_name(format!(".{name}.baaz-migrating"))
+}
+
+/// Sweep crash residue for this run's targets: a staging sibling with no
+/// live journal-in-progress record belongs to no running copy, so it goes.
+/// A live record means a concurrent run may be copying under it right now —
+/// hands off. Best-effort: an unsweepable staging fails the run's own copy
+/// below, never silently.
+fn clean_stale_staging(state_dir: &Path, moves: &[PlannedMove]) {
+    for planned in moves {
+        let staging = staging_path(&planned.target);
+        if std::fs::symlink_metadata(&staging).is_err() {
+            continue;
+        }
+        if has_live_record(state_dir, &move_key(planned)) {
+            continue;
+        }
+        eprintln!("baaz: migration: clearing stale staging {}", staging.display());
+        let _ = staging.is_dir().then(|| std::fs::remove_dir_all(&staging)).unwrap_or_else(|| {
+            std::fs::remove_file(&staging).or_else(|_| std::fs::remove_dir_all(&staging))
+        });
+    }
+}
+
 /// Copy one file or directory tree onto `target`, verifying before the
 /// caller removes the source: every byte must read back identical, or the
 /// source stays and the error propagates. Directories copy through a
-/// sibling temporary (never a partial target), then commit by rename.
+/// sibling staging entry (never a partial target), then commit by rename.
 fn copy_and_verify(source: &Path, target: &Path, is_dir: bool) -> std::io::Result<()> {
-    // A stale temporary from a crashed copy is residue, not data: clear it.
-    let staging = target.with_extension(format!("migrating{}", std::process::id()));
+    // A staging entry from a crashed copy is residue, not data: clear it.
+    let staging = staging_path(target);
     if let Some(parent) = staging.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if staging.exists() {
+    if std::fs::symlink_metadata(&staging).is_ok() {
         if staging.is_dir() {
             std::fs::remove_dir_all(&staging)?;
         } else {
-            std::fs::remove_file(&staging)?;
+            std::fs::remove_file(&staging).or_else(|_| std::fs::remove_dir_all(&staging))?;
         }
     }
     if is_dir {
@@ -246,6 +433,149 @@ fn copy_and_verify(source: &Path, target: &Path, is_dir: bool) -> std::io::Resul
         std::fs::rename(&staging, target)?;
     }
     Ok(())
+}
+
+/// Refuse a cross-device copy of anything the copier cannot carry: a tree
+/// holding a symlink or a special entry would arrive without it and then
+/// lose the original to the source remove — so the move never starts.
+/// Same-device renames carry everything intact and are unaffected.
+fn check_tree_copyable(source: &Path, is_dir: bool) -> std::io::Result<()> {
+    if !is_dir {
+        let kind = std::fs::symlink_metadata(source)?.file_type();
+        if kind.is_symlink() || (!kind.is_file() && !kind.is_dir()) {
+            return Err(refused(source));
+        }
+        return Ok(());
+    }
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() || (!kind.is_file() && !kind.is_dir()) {
+                return Err(refused(&entry.path()));
+            }
+            if kind.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The refusal error: what it holds, and that the owner moves it by hand.
+/// Surfaced through the report's errors (user-visible) and the log.
+fn refused(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "refused: {} is a symlink or special file, which the cross-device copy cannot carry; move it by hand",
+            path.display()
+        ),
+    )
+}
+
+/// One entry of a pre-remove source snapshot: what the cross-device path
+/// compares after copying, immediately before removing anything.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SnapEntry {
+    rel: PathBuf,
+    is_dir: bool,
+    size: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+fn snap_one(path: &Path, rel: PathBuf) -> std::io::Result<SnapEntry> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(SnapEntry {
+        rel,
+        is_dir: meta.file_type().is_dir(),
+        size: meta.len(),
+        mtime: meta.modified().ok(),
+    })
+}
+
+/// Sizes plus mtimes of the whole source tree (no follows: symlinks were
+/// already refused above, so any entry that is not a file or dir here is a
+/// concurrent change and fails the comparison below).
+fn snapshot_source(source: &Path, is_dir: bool) -> std::io::Result<Vec<SnapEntry>> {
+    if !is_dir {
+        return Ok(vec![snap_one(source, PathBuf::new())?]);
+    }
+    let mut out = vec![snap_one(source, PathBuf::new())?];
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(source).unwrap_or(&path).to_path_buf();
+            out.push(snap_one(&path, rel)?);
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+#[cfg(test)]
+pub(crate) static FORCE_CROSS_DEVICE_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static DIRTY_BETWEEN_COPY_AND_REMOVE_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this move must take the cross-device copy path even when a
+/// rename would succeed: the tests' injection hook for that branch.
+/// Production never sets it.
+fn force_copy_path() -> bool {
+    #[cfg(test)]
+    {
+        FORCE_CROSS_DEVICE_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// The cross-device leg of [`move_one`]: refuse uncopyable trees, copy and
+/// verify, then re-verify the source is unchanged (sizes plus mtimes)
+/// immediately before removing it. A source that changed mid-copy keeps
+/// both copies and reports: deleting it would lose the newer bytes.
+fn cross_device_move(source: &Path, target: &Path, is_dir: bool) -> std::io::Result<MoveOutcome> {
+    check_tree_copyable(source, is_dir)?;
+    let before = snapshot_source(source, is_dir)?;
+    copy_and_verify(source, target, is_dir)?;
+    #[cfg(test)]
+    if DIRTY_BETWEEN_COPY_AND_REMOVE_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        // The test hook's concurrent writer: one more byte lands between
+        // the copy and the remove, the way a racing write would.
+        if is_dir {
+            std::fs::write(source.join("race.jsonl"), "{}\n")?;
+        } else {
+            let mut body = std::fs::read(source)?;
+            body.push(b'\n');
+            std::fs::write(source, body)?;
+        }
+    }
+    let after = snapshot_source(source, is_dir)?;
+    if before != after {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "source changed during the copy of {}; kept both copies — move the newer bytes by hand",
+                source.display()
+            ),
+        ));
+    }
+    if is_dir {
+        std::fs::remove_dir_all(source)?;
+    } else {
+        std::fs::remove_file(source)?;
+    }
+    Ok(MoveOutcome::CopiedAcrossDevices)
 }
 
 /// Recursively copy a directory tree (symlinks are not followed: an entry
@@ -291,11 +621,13 @@ fn verify_file(source: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Move one source onto its target: `rename`, falling back to
-/// copy-plus-verify-plus-remove only across devices. Nothing else is ever
-/// removed — a failed or unverified copy leaves the source in place and
-/// reports the error. The target's parent directories are created; an
-/// existing target (or a missing source) is a skip, never an overwrite.
+/// Move one source onto its target: `rename`, falling back to the
+/// cross-device leg ([`cross_device_move`]: refuse uncopyable trees, copy,
+/// verify, re-verify the source unchanged, then remove) only across
+/// devices. Nothing else is ever removed — a refused, failed, unverified
+/// or changed-mid-copy source stays in place and reports the error. The
+/// target's parent directories are created; an existing target (or a
+/// missing source) is a skip, never an overwrite.
 pub fn move_one(source: &Path, target: &Path, is_dir: bool) -> std::io::Result<MoveOutcome> {
     if target.exists() || std::fs::symlink_metadata(target).is_ok() {
         return Ok(MoveOutcome::SkippedTargetExists);
@@ -306,17 +638,12 @@ pub fn move_one(source: &Path, target: &Path, is_dir: bool) -> std::io::Result<M
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    if force_copy_path() {
+        return cross_device_move(source, target, is_dir);
+    }
     match std::fs::rename(source, target) {
         Ok(()) => Ok(MoveOutcome::Moved),
-        Err(error) if is_cross_device(&error) => {
-            copy_and_verify(source, target, is_dir)?;
-            if is_dir {
-                std::fs::remove_dir_all(source)?;
-            } else {
-                std::fs::remove_file(source)?;
-            }
-            Ok(MoveOutcome::CopiedAcrossDevices)
-        }
+        Err(error) if is_cross_device(&error) => cross_device_move(source, target, is_dir),
         Err(error) => Err(error),
     }
 }
@@ -336,24 +663,44 @@ pub struct MigrationReport {
 }
 
 /// Run the plan through [`move_one`], journaling every finished move so a
-/// crash resumes where it stopped. Skips (gone sources, held targets) and
-/// failures never journal: skips need no resume, failures must retry.
+/// crash resumes where it stopped. Each run first sweeps crash-residue
+/// staging with no live journal record. Skips (gone sources, held targets)
+/// and failures (refusals, changed-mid-copy, IO) never journal as done:
+/// skips need no resume, failures must retry — and every failure lands in
+/// the report with its reason (user-visible) and on stderr (logged), with
+/// both copies left in place.
 pub fn execute_plan(state_dir: &Path, moves: &[PlannedMove]) -> MigrationReport {
+    clean_stale_staging(state_dir, moves);
     let mut report = MigrationReport::default();
     for planned in pending_moves(state_dir, moves.to_vec()) {
+        let key = move_key(&planned);
+        begin_move(state_dir, &key);
         match move_one(&planned.source, &planned.target, planned.is_dir) {
             Ok(MoveOutcome::Moved) => {
                 report.moved += 1;
-                mark_completed(state_dir, &move_key(&planned));
+                mark_completed(state_dir, &key, "moved");
             }
             Ok(MoveOutcome::CopiedAcrossDevices) => {
                 report.copied += 1;
-                mark_completed(state_dir, &move_key(&planned));
+                mark_completed(state_dir, &key, "copied");
             }
             Ok(MoveOutcome::SkippedTargetExists | MoveOutcome::SkippedSourceMissing) => {
                 report.skipped += 1;
+                // No resume hint for a skip — but drop any in-progress
+                // record this run wrote above, so it never guards residue.
+                let (done, mut live) = read_journal(state_dir);
+                if live.remove(&key).is_some() {
+                    write_journal(state_dir, &done, &live);
+                }
             }
-            Err(error) => report.errors.push(format!("{}: {error}", planned.target.display())),
+            Err(error) => {
+                eprintln!("baaz: migration: {}: {error}", planned.target.display());
+                report.errors.push(format!("{}: {error}", planned.target.display()));
+                let (done, mut live) = read_journal(state_dir);
+                if live.remove(&key).is_some() {
+                    write_journal(state_dir, &done, &live);
+                }
+            }
         }
     }
     report
@@ -490,12 +837,87 @@ use aui::overlay::DialogKind;
 use crate::app::Harness as BaazHarness;
 use crate::overlays::{Dialog, DialogAction};
 
+/// The migration plan, computed once off the UI thread and read by every
+/// render: the walk (`plan_migration`, a recursive owner-home scan per
+/// record) never runs on the render path — renders only
+/// [`MigrationCache::plan_for_render`], which never walks (see the
+/// `PLAN_WALKS` spy below).
+#[derive(Clone, Debug)]
+pub(crate) struct MigrationCache {
+    plan: Vec<PlannedMove>,
+    computed_at: std::time::Instant,
+}
+
+impl Default for MigrationCache {
+    fn default() -> Self {
+        Self { plan: Vec::new(), computed_at: std::time::Instant::now() }
+    }
+}
+
+impl MigrationCache {
+    fn fresh(plan: Vec<PlannedMove>) -> Self {
+        Self { plan, computed_at: std::time::Instant::now() }
+    }
+
+    /// The cached plan for renders: a pure slice read, no home walk.
+    pub(crate) fn plan_for_render(&self) -> &[PlannedMove] {
+        &self.plan
+    }
+
+    fn age_secs(&self) -> u64 {
+        self.computed_at.elapsed().as_secs()
+    }
+}
+
+/// A cached plan counts as fresh for ten minutes: renders read it as-is,
+/// and only a stale or missing cache kicks a background recompute.
+const CACHE_STALE_SECS: u64 = 600;
+
 impl BaazHarness {
-    /// This window's migration plan from its own registry: owner-side
-    /// files still waiting under the real `HOME`, targeting this run's
-    /// state dir (which honours `BAAZ_STATE_DIR`).
-    pub(crate) fn migration_plan(&self) -> Vec<PlannedMove> {
-        plan_migration(&owner_home(), &crate::store::support_dir(), &self.provider_sessions)
+    /// This window's cached migration plan for renders: the cache, or
+    /// nothing while the background compute is still running. Never
+    /// walks the owner homes — that happens only in
+    /// [`Self::refresh_migration_cache`], off the UI thread.
+    pub(crate) fn migration_cached_plan(&self) -> Vec<PlannedMove> {
+        self.migration_cache.as_ref().map(|cache| cache.plan.clone()).unwrap_or_default()
+    }
+
+    /// Recompute the plan off the UI thread and cache it with a timestamp:
+    /// the registry and both dirs travel into a background task, and the
+    /// cache (plus a re-render) lands when it completes. Re-entrant-safe:
+    /// a second call while one is in flight is a no-op. Renders keep
+    /// reading the old cache meanwhile — never the walker.
+    pub(crate) fn refresh_migration_cache(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.migration_refresh_in_flight {
+            return;
+        }
+        self.migration_refresh_in_flight = true;
+        let owner = owner_home();
+        let state = crate::store::support_dir();
+        let registry = self.provider_sessions.clone();
+        cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_executor()
+                .spawn(async move { plan_migration(&owner, &state, &registry) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.migration_refresh_in_flight = false;
+                this.migration_cache = Some(MigrationCache::fresh(plan));
+                // A startup offer deferred on this compute re-checks now
+                // that the plan is here; a no-op when nothing waits.
+                this.maybe_offer_session_migration(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drop the cached plan and recompute it off the UI thread: what a
+    /// finished confirm or lazy move calls, so the Providers row follows
+    /// the move without ever walking on the render path.
+    pub(crate) fn invalidate_migration_cache(&mut self, cx: &mut gpui::Context<Self>) {
+        self.migration_cache = None;
+        self.refresh_migration_cache(cx);
     }
 
     /// The one-time prompt's dialog for `plan`: the "Move N …" title, the
@@ -515,7 +937,9 @@ impl BaazHarness {
 
     /// Offer the one-time prompt when moves remain and the owner has not
     /// dismissed it: deferred from startup, never over another dialog, a
-    /// connect screen, or a deterministic capture.
+    /// connect screen, or a deterministic capture. Reads only the cache —
+    /// a missing or stale cache kicks a background recompute and offers
+    /// when it lands, so the walk never runs on the UI thread.
     pub(crate) fn maybe_offer_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         if self.show_connect || crate::clock::deterministic() {
             return;
@@ -527,39 +951,58 @@ impl BaazHarness {
         if self.overlays.read(cx).dialog.is_some() {
             return;
         }
-        let plan = self.migration_plan();
+        let fresh = self.migration_cache.as_ref().is_some_and(|cache| cache.age_secs() < CACHE_STALE_SECS);
+        if !fresh {
+            if !self.migration_refresh_in_flight {
+                self.refresh_migration_cache(cx);
+            }
+            return;
+        }
+        let plan = self.migration_cached_plan();
         if plan.is_empty() {
             return;
         }
         self.set_dialog(cx, Self::migration_dialog(&plan));
     }
 
-    /// Run the prompt's Move: the full plan through the journaling
-    /// executor, then a toast with the honest counts (moved, already
-    /// there, failed). The prompt never shows again afterwards.
+    /// Run the prompt's Move: the cached plan through the journaling
+    /// executor on the background executor, then (back on the UI thread)
+    /// a toast with the honest counts (moved, already there, failed) and
+    /// a cache refresh so the Providers row follows. The prompt never
+    /// shows again afterwards. The click returns at once — nothing walks
+    /// or copies on the UI thread.
     pub(crate) fn confirm_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         let state = crate::store::support_dir();
-        let plan = self.migration_plan();
-        let report = execute_plan(&state, &plan);
-        dismiss(&state);
+        let plan = self.migration_cached_plan();
         self.close_dialog(cx);
-        let done = report.moved + report.copied;
-        let body = if report.errors.is_empty() {
-            format!(
-                "{done} moved into Baaz, {} already there.",
-                report.skipped,
-            )
-        } else {
-            format!(
-                "{done} moved, {} failed — retry from Settings → Providers. First failure: {}",
-                report.errors.len(),
-                report.errors.first().cloned().unwrap_or_default(),
-            )
-        };
-        self.overlays.update(cx, |overlays, _| {
-            overlays.toast("Sessions moved", body);
-        });
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let report = cx
+                .background_executor()
+                .spawn(async move {
+                    let pending = pending_moves(&state, plan);
+                    execute_plan(&state, &pending)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                dismiss(&crate::store::support_dir());
+                this.invalidate_migration_cache(cx);
+                let done = report.moved + report.copied;
+                let body = if report.errors.is_empty() {
+                    format!("{done} moved into Baaz, {} already there.", report.skipped,)
+                } else {
+                    format!(
+                        "{done} moved, {} failed — retry from Settings → Providers. First failure: {}",
+                        report.errors.len(),
+                        report.errors.first().cloned().unwrap_or_default(),
+                    )
+                };
+                this.overlays.update(cx, |overlays, _| {
+                    overlays.toast("Sessions moved", body);
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The prompt's Not now: record the dismissal and close. The Providers
@@ -640,6 +1083,7 @@ mod tests {
 
     #[test]
     fn the_plan_lists_only_registered_ids() {
+        let _guard = serial();
         let homes = TempHomes::make("plan");
         homes.seed_claude("-work", "sess-1", true);
         homes.seed_claude("-work", "probe-leftover", false);
@@ -681,6 +1125,7 @@ mod tests {
 
     #[test]
     fn already_moved_items_are_skipped() {
+        let _guard = serial();
         let homes = TempHomes::make("idempotent-plan");
         homes.seed_claude("-work", "sess-1", false);
         homes.seed_codex("thread-1");
@@ -698,6 +1143,7 @@ mod tests {
 
     #[test]
     fn the_executor_moves_and_a_second_run_is_a_no_op() {
+        let _guard = serial();
         let homes = TempHomes::make("execute");
         homes.seed_claude("-work", "sess-1", true);
         homes.seed_codex("thread-1");
@@ -757,6 +1203,7 @@ mod tests {
 
     #[test]
     fn the_journal_resumes_a_crash() {
+        let _guard = serial();
         let homes = TempHomes::make("journal");
         homes.seed_claude("-work", "sess-1", false);
         homes.seed_codex("thread-1");
@@ -767,7 +1214,7 @@ mod tests {
         // written, the second move never ran.
         let first = &plan[0];
         move_one(&first.source, &first.target, first.is_dir).expect("first move");
-        mark_completed(&homes.state, &move_key(first));
+        mark_completed(&homes.state, &move_key(first), "moved");
         assert!(journal_path(&homes.state).exists(), "the journal records finished moves");
 
         // Resume skips the journaled move and runs the rest.
@@ -782,6 +1229,7 @@ mod tests {
 
     #[test]
     fn the_copy_fallback_verifies_before_removing() {
+        let _guard = serial();
         let homes = TempHomes::make("copy-verify");
         let source = homes.owner.join("file.jsonl");
         std::fs::create_dir_all(&homes.owner).expect("owner dir");
@@ -805,6 +1253,7 @@ mod tests {
 
     #[test]
     fn hostile_registry_ids_plan_nothing() {
+        let _guard = serial();
         let homes = TempHomes::make("hostile");
         std::fs::create_dir_all(homes.owner.join(".claude").join("projects")).expect("projects");
         std::fs::create_dir_all(homes.owner.join(".codex").join("sessions")).expect("sessions");
@@ -818,6 +1267,7 @@ mod tests {
 
     #[test]
     fn the_prompt_names_counts_paths_and_the_codex_note() {
+        let _guard = serial();
         let homes = TempHomes::make("prompt");
         homes.seed_claude("-work", "sess-1", false);
         homes.seed_codex("thread-1");
@@ -834,6 +1284,7 @@ mod tests {
 
     #[test]
     fn not_now_dismisses_once_and_leaves_the_plan() {
+        let _guard = serial();
         let homes = TempHomes::make("dismiss");
         assert!(!is_dismissed(&homes.state));
         dismiss(&homes.state);
@@ -848,6 +1299,7 @@ mod tests {
 
     #[test]
     fn the_lazy_move_runs_the_same_executor_for_one_session() {
+        let _guard = serial();
         let homes = TempHomes::make("lazy");
         homes.seed_claude("-work", "sess-1", true);
         homes.seed_codex("thread-1");
@@ -868,5 +1320,209 @@ mod tests {
         );
         assert_eq!(ensure_session_moved(&homes.owner, &homes.state, "muse", "sess-1"), 0);
         assert_eq!(ensure_session_moved(&homes.owner, &homes.state, "unknown", "sess-1"), 0);
+    }
+
+    /// The cross-device branch and the walk counter are process-global, and
+    /// this binary's tests run on shared threads: every test in this
+    /// module holds this lock, so a hook set here never leaks into a
+    /// rename-counting test next door (poison-tolerant: a failed test must
+    /// not wedge the rest).
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Tests run on one filesystem, so a rename would succeed — the hook
+    /// takes the cross-device copy leg instead. Production never sets it.
+    struct ForceCopy;
+    impl ForceCopy {
+        fn on() -> Self {
+            FORCE_CROSS_DEVICE_FOR_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
+            ForceCopy
+        }
+    }
+    impl Drop for ForceCopy {
+        fn drop(&mut self) {
+            FORCE_CROSS_DEVICE_FOR_TESTS.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The hook's concurrent writer: one more byte lands between the copy
+    /// and the remove, the way a racing write would.
+    struct DirtyBetween;
+    impl DirtyBetween {
+        fn on() -> Self {
+            DIRTY_BETWEEN_COPY_AND_REMOVE_FOR_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
+            DirtyBetween
+        }
+    }
+    impl Drop for DirtyBetween {
+        fn drop(&mut self) {
+            DIRTY_BETWEEN_COPY_AND_REMOVE_FOR_TESTS
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_tree_is_refused_on_the_cross_device_path() {
+        let _guard = serial();
+        let homes = TempHomes::make("refuse-symlink");
+        let source = homes.owner.join("tree");
+        std::fs::create_dir_all(&source).expect("tree");
+        std::fs::write(source.join("a.jsonl"), "{}\n").expect("file");
+        std::os::unix::fs::symlink(source.join("a.jsonl"), source.join("link.jsonl"))
+            .expect("symlink");
+        let target = homes.state.join("codex-home").join("tree");
+
+        let _force = ForceCopy::on();
+        let error = move_one(&source, &target, true).expect_err("a symlink tree never moves");
+        assert!(error.to_string().contains("refused"), "the reason names the refusal: {error}");
+        assert!(source.exists(), "the source is untouched");
+        assert!(
+            source.join("link.jsonl").exists() || std::fs::symlink_metadata(source.join("link.jsonl")).is_ok(),
+            "the symlink itself survives"
+        );
+        assert!(!target.exists(), "nothing lands at the target");
+        // Through the executor the refusal is a user-visible report entry,
+        // never a silent skip — and the journal records no done move.
+        let planned = PlannedMove {
+            provider: CODEX_PROVIDER.to_owned(),
+            session_id: "thread-1".to_owned(),
+            source: source.clone(),
+            target: target.clone(),
+            is_dir: true,
+        };
+        let report = execute_plan(&homes.state, &[planned]);
+        assert_eq!(report.moved + report.copied + report.skipped, 0, "nothing moved: {report:?}");
+        assert_eq!(report.errors.len(), 1, "one visible reason: {report:?}");
+        assert!(report.errors[0].contains("refused"), "the reason: {}", report.errors[0]);
+    }
+
+    #[test]
+    fn a_source_changed_mid_copy_keeps_both_copies() {
+        let _guard = serial();
+        let homes = TempHomes::make("changed-mid-copy");
+        let source = homes.owner.join("file.jsonl");
+        std::fs::create_dir_all(&homes.owner).expect("owner dir");
+        std::fs::write(&source, "{\"id\":1}\n").expect("source");
+        let target = homes.state.join("codex-home").join("file.jsonl");
+
+        let _force = ForceCopy::on();
+        let _dirty = DirtyBetween::on();
+        let error = move_one(&source, &target, false).expect_err("a changed source never loses bytes");
+        assert!(error.to_string().contains("kept both"), "the reason: {error}");
+        assert!(source.exists(), "the newer source stays");
+        assert!(target.exists(), "the copied target stays too");
+        assert_ne!(
+            std::fs::read(&source).expect("reads"),
+            std::fs::read(&target).expect("reads"),
+            "they genuinely differ — removing either would lose bytes"
+        );
+    }
+
+    #[test]
+    fn staging_has_no_pid_and_stale_staging_is_swept() {
+        let _guard = serial();
+        let homes = TempHomes::make("staging");
+        let target = homes.state.join("codex-home").join("sessions").join("file.jsonl");
+        let staging = staging_path(&target);
+        assert_eq!(
+            staging.file_name().expect("name").to_string_lossy(),
+            ".file.jsonl.baaz-migrating",
+            "no pid in the name, so any later run recognises the residue"
+        );
+
+        // Crash residue beside a waiting target: swept on the next run.
+        std::fs::create_dir_all(staging.parent().expect("parent")).expect("parent");
+        std::fs::write(&staging, "half a copy").expect("residue");
+        let source = homes.owner.join("file.jsonl");
+        std::fs::create_dir_all(&homes.owner).expect("owner dir");
+        std::fs::write(&source, "{}\n").expect("source");
+        let planned = PlannedMove {
+            provider: CODEX_PROVIDER.to_owned(),
+            session_id: "thread-1".to_owned(),
+            source: source.clone(),
+            target: target.clone(),
+            is_dir: false,
+        };
+        let report = execute_plan(&homes.state, &[planned]);
+        assert_eq!(report.moved, 1, "the move itself still runs: {report:?}");
+        assert!(!staging.exists(), "the residue is gone");
+        assert_eq!(std::fs::read(&target).expect("reads"), b"{}\n");
+    }
+
+    #[test]
+    fn the_journal_retries_a_move_whose_target_is_gone() {
+        let _guard = serial();
+        let homes = TempHomes::make("reconcile");
+        homes.seed_claude("-work", "sess-1", false);
+        let plan = plan_migration(&homes.owner, &homes.state, &registry_with(&["sess-1"], &[]));
+        assert_eq!(plan.len(), 1);
+        // Journaled as done — but the target never landed while the source
+        // still waits: the filesystem overrules the journal.
+        mark_completed(&homes.state, &move_key(&plan[0]), "moved");
+        let pending = pending_moves(&homes.state, plan.clone());
+        assert_eq!(pending.len(), 1, "retried, not trusted: {pending:?}");
+        let report = execute_plan(&homes.state, &pending);
+        assert_eq!(report.moved, 1, "the retry lands it: {report:?}");
+        assert!(pending_moves(&homes.state, plan).is_empty(), "then nothing pends");
+    }
+
+    #[test]
+    fn the_journal_prunes_done_entries_older_than_30_days() {
+        let _guard = serial();
+        let homes = TempHomes::make("prune");
+        let mut done = HashMap::new();
+        done.insert(
+            "codex/old".to_owned(),
+            CompletedEntry { at: now_secs().saturating_sub(31 * 24 * 60 * 60), outcome: "moved" },
+        );
+        done.insert("codex/fresh".to_owned(), CompletedEntry { at: now_secs(), outcome: "copied" });
+        write_journal(&homes.state, &done, &HashMap::new());
+
+        prune_journal(&homes.state);
+        let kept = read_completed(&homes.state);
+        assert!(!kept.contains("codex/old"), "the 31-day entry is gone: {kept:?}");
+        assert!(kept.contains("codex/fresh"), "the fresh entry stays: {kept:?}");
+        // And the first version's list shape still parses (stamped fresh).
+        std::fs::write(
+            journal_path(&homes.state),
+            "{\"completed\": [\"codex/legacy\"]}",
+        )
+        .expect("legacy journal");
+        assert!(
+            read_completed(&homes.state).contains("codex/legacy"),
+            "legacy entries are honoured, not dropped"
+        );
+    }
+
+    #[test]
+    fn the_render_path_never_walks_the_homes() {
+        // The spy is live: one planned walk moves it, the render accessor
+        // must not.
+        let _guard = serial();
+        let homes = TempHomes::make("spy");
+        homes.seed_claude("-work", "sess-1", false);
+        let registry = registry_with(&["sess-1"], &[]);
+        let before = PLAN_WALKS.load(std::sync::atomic::Ordering::Relaxed);
+        let plan = plan_migration(&homes.owner, &homes.state, &registry);
+        assert_eq!(
+            PLAN_WALKS.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1,
+            "the spy counts real walks"
+        );
+        let cache = MigrationCache::fresh(plan);
+        let at_render = PLAN_WALKS.load(std::sync::atomic::Ordering::Relaxed);
+        // What every render reads: the cached slice, twice, plus the empty
+        // default a cold window renders before the background task lands.
+        assert!(!cache.plan_for_render().is_empty());
+        assert_eq!(cache.plan_for_render().len(), 1);
+        assert!(MigrationCache::default().plan_for_render().is_empty());
+        assert_eq!(
+            PLAN_WALKS.load(std::sync::atomic::Ordering::Relaxed),
+            at_render,
+            "render reads walk nothing"
+        );
     }
 }

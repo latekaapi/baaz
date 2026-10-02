@@ -528,10 +528,13 @@ impl Harness {
     /// The B4M migration row under the cards, or `None` when nothing
     /// waits: the "Move N …" title, the dry-run count with an expandable
     /// path list, and the Move button through the same journaling
-    /// executor the one-time prompt uses. Both buttons carry
-    /// accessibility labels, like every Settings switch.
+    /// executor the one-time prompt uses. Reads only the cached plan —
+    /// never the owner-home walk (see `MigrationCache::plan_for_render`).
+    /// Both buttons carry accessibility labels, like every Settings
+    /// switch.
     fn migration_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let plan = self.migration_plan();
+        let empty: &[crate::session_migration::PlannedMove] = &[];
+        let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
         if plan.is_empty() {
             return None;
         }
