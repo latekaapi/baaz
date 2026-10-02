@@ -176,6 +176,10 @@ pub(crate) struct FilePreview {
     pub name: String,
     /// The language label for text previews, from the extension.
     pub language: String,
+    /// 1-based lines to band and scroll to (B9), end exclusive — from a
+    /// link's `#L…`/`:line` suffix. Text previews band it through the
+    /// code block; everything else ignores it.
+    pub highlight: Option<std::ops::Range<u32>>,
     /// The file's bytes, when small enough.
     pub size: u64,
     /// The file's mtime when the preview was (re)loaded: `None` when the
@@ -245,6 +249,13 @@ pub(crate) struct RightCache {
     /// The pane's scroll handles, per root: the tree and the preview share
     /// one handle, so Escape/back returns to the tree where it was.
     files_scroll: RefCell<HashMap<PathBuf, ScrollHandle>>,
+    /// The last "reveal in Files" request per root (B9): the row to scroll
+    /// into view plus its request token. The tree scrolls to `(id, token)`
+    /// once per pair, so repeating the same reveal with a new token
+    /// scrolls again after the reader scrolled away. Never persists.
+    pub reveal: HashMap<PathBuf, (String, u64)>,
+    /// The next reveal token [`Self::reveal`] hands out. Never persists.
+    reveal_seq: u64,
 }
 
 impl RightCache {
@@ -285,6 +296,14 @@ impl RightCache {
     /// preview for `root`, created on first use.
     pub(crate) fn files_scroll_for(&self, root: &Path) -> ScrollHandle {
         self.files_scroll.borrow_mut().entry(root.to_path_buf()).or_default().clone()
+    }
+
+    /// Note a "reveal in Files" request for `rel` under `root` (B9): the
+    /// tree scrolls to the row on its next frames, with a fresh token so a
+    /// repeated reveal re-scrolls even to the settled row.
+    pub(crate) fn note_reveal(&mut self, root: &Path, rel: &str) {
+        self.reveal_seq = self.reveal_seq.wrapping_add(1);
+        self.reveal.insert(root.to_path_buf(), (rel.to_string(), self.reveal_seq));
     }
 
     /// When the slot backing `kind` last landed for `root`, if it ever did.
@@ -539,7 +558,19 @@ impl Harness {
     /// file's bytes follow on a background task. Never blocks the UI
     /// thread on file content — only on one metadata call.
     pub(crate) fn begin_file_preview_for(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
-        if !begin_file_preview(&mut self.right_cache, root, id) {
+        self.begin_file_preview_for_line(root, id, None, cx);
+    }
+
+    /// [`Self::begin_file_preview_for`] with a line band (B9): a link's
+    /// `#L…`/`:line` suffix opens banded and scrolled there.
+    pub(crate) fn begin_file_preview_for_line(
+        &mut self,
+        root: &Path,
+        id: &str,
+        highlight: Option<std::ops::Range<u32>>,
+        cx: &mut Context<Self>,
+    ) {
+        if !begin_file_preview_highlight(&mut self.right_cache, root, id, highlight) {
             self.save_right_for_active(cx);
             cx.notify();
             return;
@@ -557,6 +588,57 @@ impl Harness {
             });
         })
         .detach();
+    }
+
+    /// Reveal an absolute link path in the Files pane (B9): the landing
+    /// behind [`SessionEvent::RevealPath`](crate::session::SessionEvent),
+    /// after the lifecycle's background task settled existence. `is_dir`
+    /// is `None` when nothing exists there (a quiet toast, like the old
+    /// link path); a folder selects and scrolls with no preview, a file
+    /// previews banded on `highlight`. A path outside the project falls
+    /// back to the system opener with a toast — the tree cannot show it.
+    /// Never touches the filesystem itself.
+    pub(crate) fn reveal_link_path(
+        &mut self,
+        root: &Path,
+        abs: &Path,
+        is_dir: Option<bool>,
+        highlight: Option<std::ops::Range<u32>>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = abs.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(is_dir) = is_dir else {
+            self.overlays.update(cx, |overlays, _| {
+                overlays.toast("Link", format!("No such file: {name}"));
+            });
+            cx.notify();
+            return;
+        };
+        let Ok(rel) = abs.strip_prefix(root) else {
+            cx.open_with_system(abs);
+            self.overlays.update(cx, |overlays, _| {
+                overlays.toast("Link", "Outside the project — opened in its default app.");
+            });
+            cx.notify();
+            return;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        if rel.is_empty() {
+            self.select_right(RightKind::Files, cx);
+            return;
+        }
+        if is_dir {
+            select_dir(&mut self.right_cache, root, &rel);
+            self.right_cache.note_reveal(root, &rel);
+            self.select_right(RightKind::Files, cx);
+            return;
+        }
+        if let Some(parent) = rel.rsplit_once('/').map(|(parent, _)| parent) {
+            expand_to(&mut self.right_cache, root, parent);
+        }
+        self.right_cache.note_reveal(root, &rel);
+        self.select_right(RightKind::Files, cx);
+        self.begin_file_preview_for_line(root, &rel, highlight, cx);
     }
 
     /// Close the open preview for `root`, returning to the tree with the
@@ -1300,6 +1382,33 @@ pub(crate) fn toggle_expanded(cache: &mut RightCache, root: &Path, id: &str) -> 
     }
 }
 
+/// Stand every ancestor of the root-relative `rel` — and `rel` itself —
+/// open for `root` (B9): what a folder-link reveal needs, where
+/// [`toggle_expanded`] only flips one directory. Inserting (never
+/// removing) keeps whatever the person had open.
+pub(crate) fn expand_to(cache: &mut RightCache, root: &Path, rel: &str) {
+    let open = cache.expanded.entry(root.to_path_buf()).or_default();
+    let mut prefix = String::new();
+    for part in rel.split('/').filter(|part| !part.is_empty()) {
+        if prefix.is_empty() {
+            prefix = part.to_string();
+        } else {
+            prefix.push('/');
+            prefix.push_str(part);
+        }
+        open.insert(prefix.clone());
+    }
+}
+
+/// Select the directory `rel` for `root` (B9): its ancestors stand open,
+/// the tree's selected marker moves onto it, and any open file preview
+/// closes — selecting a directory never previews it.
+pub(crate) fn select_dir(cache: &mut RightCache, root: &Path, rel: &str) {
+    expand_to(cache, root, rel);
+    cache.selected.insert(root.to_path_buf(), rel.to_string());
+    cache.previews.remove(root);
+}
+
 /// Forget the open preview for `root`, keeping the selected marker so the
 /// tree still shows which file was previewed. Returns whether one was open.
 pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
@@ -1313,6 +1422,18 @@ pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
 /// card straight away. Returns whether the caller must read the file off
 /// the render path and land it with [`complete_file_preview`].
 pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) -> bool {
+    begin_file_preview_highlight(cache, root, id, None)
+}
+
+/// [`begin_file_preview`] with a line band (B9): a link's `#L…`/`:line`
+/// suffix rides [`FilePreview::highlight`] from the loading state through
+/// the landed bytes, so the preview opens banded and scrolled there.
+pub(crate) fn begin_file_preview_highlight(
+    cache: &mut RightCache,
+    root: &Path,
+    id: &str,
+    highlight: Option<std::ops::Range<u32>>,
+) -> bool {
     let path = root.join(id);
     let name = id.rsplit('/').next().unwrap_or(id).to_string();
     let meta = std::fs::metadata(&path);
@@ -1324,6 +1445,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
                 path: id.to_string(),
                 name,
                 language: preview_language(id),
+                highlight,
                 size: 0,
                 mtime: None,
                 content: PreviewContent::Card { meta: "The file is gone — it may have been moved or deleted.".into() },
@@ -1346,6 +1468,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
                 path: id.to_string(),
                 name,
                 language: preview_language(id),
+                highlight,
                 size,
                 mtime,
                 content: PreviewContent::Card {
@@ -1361,6 +1484,7 @@ pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) 
             path: id.to_string(),
             name,
             language: preview_language(id),
+            highlight,
             size,
             mtime,
             content: PreviewContent::Loading,
@@ -1387,6 +1511,7 @@ pub(crate) fn complete_file_preview(
     }
     let name = current.name.clone();
     let language = current.language.clone();
+    let highlight = current.highlight.clone();
     let content = match bytes {
         None => PreviewContent::Card { meta: "The file could not be read.".into() },
         Some(bytes) if bytes.len() as u64 > PREVIEW_MAX_BYTES => PreviewContent::Card {
@@ -1404,6 +1529,7 @@ pub(crate) fn complete_file_preview(
             path: id.to_string(),
             name,
             language,
+            highlight,
             size: current.size,
             mtime: current.mtime,
             content,
@@ -1487,7 +1613,10 @@ pub(crate) fn apply_preview_reload(cache: &mut RightCache, root: &Path, reload: 
     if current.path != reload.id || current.content == PreviewContent::Loading {
         return false;
     }
-    if begin_file_preview(cache, root, &reload.id) {
+    // A re-read keeps the link's band: the reload carries bytes, not the
+    // highlight, so it rides back in from the preview being replaced.
+    let highlight = current.highlight.clone();
+    if begin_file_preview_highlight(cache, root, &reload.id, highlight) {
         complete_file_preview(cache, root, &reload.id, reload.bytes);
     }
     // `begin` returning false already landed the gone/too-large card itself.
@@ -1729,11 +1858,16 @@ fn files_pane_from(
     // Flush: these are panes and stacked panels, not cards floating on a
     // surface. Their own rounded border inside a column that already has
     // edges is what the owner saw as "extra borders and rounded corners".
-    let tree = file_tree("right-files", nodes.to_vec())
+    // A B9 reveal scrolls its row into view through the library's
+    // `scroll_to` (unknown ids are ignored there).
+    let mut tree = file_tree("right-files", nodes.to_vec())
         .flush()
         .header(name)
-        .footer(footer)
-        .on_action(move |action, window, cx| handler(action, window, cx));
+        .footer(footer);
+    if let Some((reveal, token)) = cache.reveal.get(root) {
+        tree = tree.scroll_to(reveal.clone()).scroll_token(*token);
+    }
+    let tree = tree.on_action(move |action, window, cx| handler(action, window, cx));
     let scroll = cache.files_scroll_for(root);
     v_flex()
         .id("right-files-pane")
@@ -1800,13 +1934,21 @@ fn file_preview_pane(
             .p(px(16.0))
             .child(format!("Loading {}…", preview.name))
             .into_any_element(),
-        PreviewContent::Text { language, code } => code_block(
-            "right-file-code",
-            preview.path.clone(),
-            code.clone(),
-        )
-        .language(language.clone())
-        .into_any_element(),
+        PreviewContent::Text { language, code } => {
+            let mut block = code_block(
+                "right-file-code",
+                preview.path.clone(),
+                code.clone(),
+            )
+            .language(language.clone());
+            // A B9 link band: highlight the linked lines and start the
+            // list there (the library starts at the highlight when no
+            // explicit scroll line rides along, so the start doubles).
+            if let Some(range) = preview.highlight.clone() {
+                block = block.highlight_lines(range.clone()).scroll_to_line(range.start);
+            }
+            block.into_any_element()
+        }
         PreviewContent::Markdown { text } => {
             let page = DocPage::new(
                 preview.name.clone(),
@@ -2717,6 +2859,66 @@ mod tests {
         assert!(log.iter().any(|line| line.contains("Stage")));
         assert!(log.iter().any(|line| line.contains("Send")));
         assert_eq!(toasts.borrow().len(), 14);
+    }
+
+    /// B9: `expand_to` stands every ancestor — and the folder itself —
+    /// open, keeping whatever was already open.
+    #[test]
+    fn expand_to_opens_every_ancestor() {
+        let root = temp_root("expand-to");
+        let mut cache = RightCache::default();
+        expand_to(&mut cache, &root, "crates/baaz/src");
+        let open = cache.expanded_for(&root);
+        assert!(open.contains("crates"), "the top ancestor opens");
+        assert!(open.contains("crates/baaz"), "the middle ancestor opens");
+        assert!(open.contains("crates/baaz/src"), "the folder itself opens");
+        // Insert-only: a second reveal keeps the first folder's state.
+        expand_to(&mut cache, &root, "docs");
+        let open = cache.expanded_for(&root);
+        assert!(open.contains("crates/baaz/src"), "the earlier folder stays open");
+        assert!(open.contains("docs"), "the new folder opens");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B9: selecting a directory moves the marker onto it and never
+    /// previews — a folder reveal shows the tree, not a file.
+    #[test]
+    fn selecting_a_directory_sets_selection_and_no_preview() {
+        let root = temp_root("select-dir");
+        std::fs::create_dir_all(root.join("crates/baaz/src")).unwrap();
+        let mut cache = RightCache::default();
+        select_dir(&mut cache, &root, "crates/baaz/src");
+        assert_eq!(cache.selected_for(&root).as_deref(), Some("crates/baaz/src"));
+        assert!(cache.preview_for(&root).is_none(), "a folder reveal previews nothing");
+        let open = cache.expanded_for(&root);
+        assert!(open.contains("crates") && open.contains("crates/baaz/src"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B9: a file preview opened with a line band keeps it from the
+    /// loading state through the landed bytes.
+    #[test]
+    fn a_file_preview_carries_its_line_band() {
+        let root = temp_root("preview-line");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut cache = RightCache::default();
+        assert!(begin_file_preview_highlight(&mut cache, &root, "src/main.rs", Some(2..3)));
+        assert_eq!(
+            cache.preview_for(&root).and_then(|preview| preview.highlight),
+            Some(2..3),
+            "the loading state already carries the band"
+        );
+        assert!(complete_file_preview(
+            &mut cache,
+            &root,
+            "src/main.rs",
+            Some(b"fn main() {}\n".to_vec())
+        ));
+        let preview = cache.preview_for(&root).expect("a preview");
+        assert_eq!(preview.highlight, Some(2..3), "the landed bytes keep the band");
+        assert_eq!(preview.language, "rust", "a .rs file previews as rust");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

@@ -303,15 +303,20 @@ impl SessionView {
                     show(&id, window, cx)
                 }))
             },
-            // Turn links and bottom-row actions (C5, C6): markdown URLs open
-            // in the browser, workspace paths reveal in Finder, and every
-            // wire action is live-only — replay answers with a toast.
+            // Turn links and bottom-row actions (C5, C6): `http(s)` URLs
+            // open in Baaz's Browser pane (B9), workspace paths reveal in
+            // the Files pane, and every wire action is live-only — replay
+            // answers with a toast. A ⌘-click stays external (system
+            // browser / default app).
             link: {
-                let link = cx.listener(|this: &mut Self, target: &LinkTarget, _, cx| {
-                    this.handle_link(target.clone(), cx);
-                });
+                let link = cx.listener(
+                    |this: &mut Self, (target, cmd): &(LinkTarget, bool), _, cx| {
+                        this.handle_link(target.clone(), *cmd, cx);
+                    },
+                );
                 Some(Rc::new(move |target: LinkTarget, window: &mut Window, cx: &mut gpui::App| {
-                    link(&target, window, cx)
+                    let cmd = window.modifiers().platform;
+                    link(&(target, cmd), window, cx)
                 }))
             },
             assistant_action: {
@@ -893,12 +898,30 @@ impl SessionView {
         cx.notify();
     }
 
-    /// A markdown link click (C5): URLs open in the browser, paths resolve
-    /// against the session workspace.
-    pub(super) fn handle_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) {
+    /// A markdown link click (C5, B9): `http(s)` URLs ride
+    /// [`SessionEvent::OpenUrl`] to the Browser pane, workspace paths ride
+    /// [`SessionEvent::RevealPath`] to the Files pane — no filesystem work
+    /// on the way there. `cmd` is the ⌘ modifier: held, a URL rides
+    /// `external: true` (the system browser) and a path keeps the old
+    /// [`Self::reveal_workspace_path`] ("open in default app"); so do
+    /// `mailto:` and other non-http schemes, which only a browser
+    /// resolves.
+    pub(super) fn handle_link(&mut self, target: LinkTarget, cmd: bool, cx: &mut Context<Self>) {
         match target {
-            LinkTarget::Url(url) => cx.open_url(&url),
-            LinkTarget::Path(path) => self.reveal_workspace_path(&path, cx),
+            LinkTarget::Url(url) => {
+                let external = cmd || !(url.starts_with("http://") || url.starts_with("https://"));
+                cx.emit(SessionEvent::OpenUrl { url, external });
+            }
+            LinkTarget::Path(path) => {
+                if cmd {
+                    self.reveal_workspace_path(&path, cx);
+                    return;
+                }
+                let highlight = parse_link_lines(&path);
+                let workspace = PathBuf::from(&self.workspace);
+                let abs = resolve_link_path(&workspace, &path);
+                cx.emit(SessionEvent::RevealPath { abs, highlight });
+            }
         }
     }
 
@@ -2163,13 +2186,62 @@ fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> 
     .collect()
 }
 
+/// The 1-based line highlight a link target carries (B9), end exclusive:
+/// `#L42` bands line 42, `#L10-L20` bands lines 10 through 20, `:42`
+/// (and `:42:3`, a `line:col` viewer hint) bands line 42. `None` when the
+/// target names no lines. Pure: the `#…` fragment never reaches
+/// [`resolve_link_path`], and a bare `:line` never reaches the path.
+pub(crate) fn parse_link_lines(raw: &str) -> Option<std::ops::Range<u32>> {
+    let no_scheme = raw.strip_prefix("file://").unwrap_or(raw);
+    if let Some((_base, frag)) = no_scheme.split_once('#') {
+        let nums = frag.strip_prefix('L').unwrap_or(frag);
+        let (first, rest) = match nums.split_once('-') {
+            Some((first, rest)) => (first, Some(rest.strip_prefix('L').unwrap_or(rest))),
+            None => (nums, None),
+        };
+        let start: u32 = first.parse().ok().filter(|line| *line >= 1)?;
+        let end: u32 = match rest {
+            Some(rest) => rest.parse().ok().filter(|line| *line >= start).unwrap_or(start),
+            None => start,
+        };
+        return Some(start..end.saturating_add(1));
+    }
+    // No fragment: up to two trailing `:digits` groups (`:line`, then an
+    // optional `:col`); stripping runs inside-out, so the last group
+    // stripped is the line.
+    let mut base = no_scheme;
+    let mut line: Option<u32> = None;
+    for _ in 0..2 {
+        let Some(ix) = base.rfind(':') else { break };
+        let tail = &base[ix + 1..];
+        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        line = tail.parse().ok().filter(|parsed| *parsed >= 1);
+        base = &base[..ix];
+    }
+    line.map(|start| start..start.saturating_add(1))
+}
+
 /// Resolve a markdown link target to a filesystem path, without touching the
-/// filesystem: strip the trailing `:line` viewer hint, take an absolute path
+/// filesystem: accept `file://`, strip the `#L…` fragment and the trailing
+/// `:line` viewer hint (see [`parse_link_lines`]), take an absolute path
 /// as is (even outside the session workspace), join a relative one onto the
 /// workspace, and normalise `..` lexically. Whether anything opens is the
 /// caller's decision: only an existing path ever does.
-pub(super) fn resolve_link_path(workspace: &Path, raw: &str) -> PathBuf {
-    let path_part = raw.split(':').next().unwrap_or(raw);
+pub(crate) fn resolve_link_path(workspace: &Path, raw: &str) -> PathBuf {
+    let no_scheme = raw.strip_prefix("file://").unwrap_or(raw);
+    let base = no_scheme.split_once('#').map(|(base, _)| base).unwrap_or(no_scheme);
+    let mut path_part = base;
+    for _ in 0..2 {
+        let Some(ix) = path_part.rfind(':') else { break };
+        if path_part[ix + 1..].is_empty()
+            || !path_part[ix + 1..].bytes().all(|byte| byte.is_ascii_digit())
+        {
+            break;
+        }
+        path_part = &path_part[..ix];
+    }
     let candidate = if Path::new(path_part).is_absolute() {
         PathBuf::from(path_part)
     } else {
@@ -2565,6 +2637,149 @@ mod tests {
             resolve_link_path(&workspace(), "/Users/someone/Projects/baaz/src/main.rs:12"),
             PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
         );
+    }
+
+    /// B9: `#L…` fragments, `:line` suffixes and `file://` all resolve to
+    /// the bare path — the viewer hint rides the event, never the path.
+    #[test]
+    fn link_suffixes_resolve_to_the_bare_path() {
+        assert_eq!(
+            resolve_link_path(&workspace(), "src/main.rs#L42"),
+            PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
+        );
+        assert_eq!(
+            resolve_link_path(&workspace(), "src/main.rs#L10-L20"),
+            PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
+        );
+        assert_eq!(
+            resolve_link_path(&workspace(), "file:///Users/someone/Projects/baaz/src/main.rs"),
+            PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
+        );
+        assert_eq!(
+            resolve_link_path(&workspace(), "file:///Users/someone/Projects/baaz/src/main.rs#L42"),
+            PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
+        );
+        assert_eq!(
+            resolve_link_path(&workspace(), "src/main.rs:42:3"),
+            PathBuf::from("/Users/someone/Projects/baaz/src/main.rs")
+        );
+    }
+
+    /// B9: the line highlight each suffix form carries (end exclusive).
+    #[test]
+    fn link_suffixes_parse_to_line_ranges() {
+        assert_eq!(parse_link_lines("src/main.rs#L42"), Some(42..43));
+        assert_eq!(parse_link_lines("src/main.rs#L10-L20"), Some(10..21));
+        assert_eq!(parse_link_lines("src/main.rs#L10-20"), Some(10..21));
+        assert_eq!(parse_link_lines("src/main.rs:42"), Some(42..43));
+        assert_eq!(parse_link_lines("src/main.rs:42:3"), Some(42..43));
+        assert_eq!(parse_link_lines("file:///x/src/main.rs#L7"), Some(7..8));
+        assert_eq!(parse_link_lines("src/main.rs"), None);
+        assert_eq!(parse_link_lines("src/main.rs#L"), None);
+        assert_eq!(parse_link_lines("src/main.rs#section"), None);
+    }
+
+    /// B9: a plain URL click emits an in-app open, never the system
+    /// browser; a ⌘-click (and a `mailto:` link) stays external.
+    #[gpui::test]
+    fn url_clicks_emit_open_url_with_cmd_staying_external(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let root = std::env::temp_dir().join(format!("baaz-link-url-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("probe dir");
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let overlays = cx.new(|_| crate::overlays::Overlays::default());
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: root.to_string_lossy().into_owned(),
+                overlays: overlays.clone(),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+        });
+        // The subscription outlives the clicks below; emitted events flush
+        // when the update that raised them ends.
+        let seen: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&seen);
+        let _sub = vc.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &crate::session::SessionEvent, _| {
+                if let crate::session::SessionEvent::OpenUrl { url, external } = event {
+                    record.borrow_mut().push((url.clone(), *external));
+                }
+            })
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.handle_link(LinkTarget::Url("https://example.com/page".to_owned()), false, cx);
+                view.handle_link(LinkTarget::Url("https://example.com/cmd".to_owned()), true, cx);
+                view.handle_link(LinkTarget::Url("mailto:ada@example.com".to_owned()), false, cx);
+            });
+        });
+        vc.update(|_, _| {
+            assert_eq!(
+                *seen.borrow(),
+                vec![
+                    ("https://example.com/page".to_owned(), false),
+                    ("https://example.com/cmd".to_owned(), true),
+                    ("mailto:ada@example.com".to_owned(), true),
+                ],
+                "a plain click opens in-app; a ⌘-click and mailto: stay external"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B9: a plain path click emits a reveal with the resolved path and
+    /// its lines; a ⌘-click never emits (it keeps "open in default app").
+    #[gpui::test]
+    fn path_clicks_emit_reveal_with_lines(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let root = std::env::temp_dir().join(format!("baaz-link-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("probe dir");
+        std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("probe file");
+        let vc = cx.add_empty_window();
+        let seen: Rc<RefCell<Vec<(PathBuf, Option<std::ops::Range<u32>>)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&seen);
+        let view = vc.update(|window, cx| {
+            let overlays = cx.new(|_| crate::overlays::Overlays::default());
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: root.to_string_lossy().into_owned(),
+                overlays: overlays.clone(),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx))
+        });
+        let _sub = vc.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &crate::session::SessionEvent, _| {
+                if let crate::session::SessionEvent::RevealPath { abs, highlight } = event {
+                    record.borrow_mut().push((abs.clone(), highlight.clone()));
+                }
+            })
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.handle_link(LinkTarget::Path("src/main.rs#L2".to_owned()), false, cx);
+                view.handle_link(LinkTarget::Path("src/main.rs".to_owned()), true, cx);
+            });
+        });
+        vc.update(|_, _| {
+            assert_eq!(
+                *seen.borrow(),
+                vec![(root.join("src").join("main.rs"), Some(2..3))],
+                "a plain click reveals with its lines; the ⌘-click emits nothing"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Item 4: the existence check behind the open decision — a file inside

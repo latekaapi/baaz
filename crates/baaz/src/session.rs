@@ -207,7 +207,7 @@ mod events;
 mod handoff;
 mod lane;
 mod questions;
-mod render;
+pub(crate) mod render;
 mod scripting;
 mod shell;
 pub(crate) mod spans;
@@ -470,6 +470,29 @@ pub enum SessionEvent {
         /// The tab to focus, when the card named one — `None` opens the
         /// dock on its active tab.
         tab: Option<String>,
+    },
+    /// A transcript or terminal link to an `http(s)` URL (B9): the
+    /// application opens the right pane on Browser and navigates there on
+    /// the next render, instead of the system browser. `external` stays
+    /// outside: a ⌘-click, or a `mailto:`/other scheme, rides
+    /// `cx.open_url` like before.
+    OpenUrl {
+        /// The link destination, verbatim.
+        url: String,
+        /// When true the application opens it externally.
+        external: bool,
+    },
+    /// A transcript link to a workspace path (B9): the application reveals
+    /// it in the Files pane — a folder selected and scrolled into view, a
+    /// file previewed with `highlight` banded — instead of the system
+    /// opener. A ⌘-click keeps the old "open in default app" path and
+    /// never emits this. No filesystem work happened on the way here;
+    /// the application checks existence off the UI thread.
+    RevealPath {
+        /// The resolved absolute path.
+        abs: PathBuf,
+        /// 1-based lines to band, end exclusive (`42..43` is line 42).
+        highlight: Option<std::ops::Range<u32>>,
     },
 }
 
