@@ -72,7 +72,12 @@ impl Harness {
 
     /// What every override edit costs once it is made: the rows rejoin, the
     /// store is written, and the search index is rebuilt around the change.
+    /// The synchronous write supersedes any pending debounced one (B7fix2):
+    /// the disk already leads it, so the armed generation is cancelled and
+    /// can never land stale state over this edit.
     fn settle_overrides(&mut self, cx: &mut Context<Self>) {
+        self.right_save_epoch += 1;
+        self.right_save_pending = false;
         self.rejoin();
         sessions::write(&self.overrides);
         self.rebuild_search_index(cx);

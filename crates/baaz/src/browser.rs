@@ -301,6 +301,7 @@ impl Harness {
         let fresh_blank = initial == BLANK;
         // Explicit boot flag, never environment sniffed in render: captures
         // and tests run the scripted page, the app runs WKWebView.
+        self.browser_builds += 1;
         let fake = self.browser.fake || cfg!(test);
         let state = cx.new(|cx| {
             if fake {
@@ -355,11 +356,10 @@ impl Harness {
     /// (B7): `toggle_right`/`show_right` call this when they land open on
     /// Browser, so the opening frame shows the page instead of paying the
     /// construction cost inside `render`. Only the scripted backend can be
-    /// prepared without a window — the real WKWebView needs one, so on a
-    /// real window the first open still creates lazily in `render` (noted
-    /// in the report); tests and captures prewarm here and never in
-    /// `render`. Never focuses: focus rides only on the person's own open
-    /// through [`Self::ensure_browser_person`].
+    /// prepared without a window — see [`Self::prewarm_browser_in`] for the
+    /// real webview, which the windowed open paths build instead. Never
+    /// focuses: focus rides only on the person's own open through
+    /// [`Self::ensure_browser_person`].
     pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
         if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
             return;
@@ -385,6 +385,7 @@ impl Harness {
             self.overrides.get(&key).and_then(|meta| meta.right.clone()).and_then(|right| right.browser_url)
         };
         let initial = initial_url(stored.as_deref()).to_owned();
+        self.browser_builds += 1;
         let state = cx.new(|cx| {
             let mut backend = FakeWebBackend::new();
             if backend.url().as_ref() != initial.as_str() {
@@ -398,6 +399,30 @@ impl Harness {
             self.browser.states.insert(key.clone(), state.clone());
         }
         self.terminal_service.register_browser(&key, state);
+    }
+
+    /// Build the real webview outside `render` (B7fix2): the open action's
+    /// own construction, with the window in hand — the shipped app's
+    /// WKWebView, the scripted page in tests and captures. Callers are the
+    /// click/key handlers that land open on Browser, the deferred warmup
+    /// behind [`crate::app::Harness::defer_browser_prewarm`], and the first
+    /// signed-in frame. Never more than one webview per session (an
+    /// existing one is reused), never focused: focus rides only on the
+    /// person's own open through [`Self::ensure_browser_person`].
+    pub(crate) fn prewarm_browser_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+            return;
+        }
+        let key = self.browser_key(cx);
+        let exists = if key == HOME_KEY {
+            self.browser.home.is_some()
+        } else {
+            self.browser.states.contains_key(&key)
+        };
+        if exists {
+            return;
+        }
+        let _ = self.browser_for(&key, false, window, cx);
     }
 
     /// The webview the pane shows this frame, creating it on first use.

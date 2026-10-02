@@ -4253,6 +4253,21 @@ impl Harness {
         }
     }
 
+    /// Carry the source's pane state onto a handoff destination that holds
+    /// none (B7fix2): through the cheap debounced persist — never the
+    /// session-list settle, so the landing rejoins no rows and rebuilds no
+    /// search index. The restore that follows flushes the armed write, so
+    /// the carried state still reaches `sessions.json` synchronously.
+    fn carry_right_state_for_handoff(
+        &mut self,
+        dest: &str,
+        state: crate::sessions::RightState,
+        cx: &mut Context<Self>,
+    ) {
+        self.store_right_state_cheap(dest, state, cx);
+        self.restore_right_for_session(dest, cx);
+    }
+
     /// The fresh session landed: when it is a handoff's destination under
     /// the current epoch, mark Prepared, leave the origin marker, and
     /// submit the pack as its first turn. Anything else (an ordinary open,
@@ -4300,8 +4315,7 @@ impl Harness {
         if let Some(state) = carried {
             let existing = self.overrides.get(&dest).and_then(|meta| meta.right.clone());
             if existing.is_none() {
-                self.set_override(&dest, |meta| meta.right = Some(state), cx);
-                self.restore_right_for_session(&dest, cx);
+                self.carry_right_state_for_handoff(&dest, state, cx);
             }
         }
         let Some(pack) = pack else {
@@ -5139,6 +5153,52 @@ mod tests {
         vc.update(|window, cx| {
             cx.new(|cx| Harness::new(lane_args(dir), crate::shot::CaptureToken::default(), window, cx))
         })
+    }
+
+    /// B7fix2: the handoff destination inherits pane state through the
+    /// cheap save — no row rejoin, no search-index rebuild, no sync
+    /// settle write. The restore that follows flushes the armed write, so
+    /// the carried state still reaches the disk at once.
+    #[gpui::test]
+    fn handoff_destination_pane_state_skips_the_list_settle(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("handoff-carry-cheap");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let carried = crate::sessions::RightState {
+            open: true,
+            kind: crate::layout::RightKind::Diff,
+            ..Default::default()
+        };
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.overrides.insert(
+                    "source-1".to_owned(),
+                    crate::sessions::SessionMeta {
+                        right: Some(carried.clone()),
+                        ..Default::default()
+                    },
+                );
+                Harness::reset_search_rebuild_count();
+                harness.carry_right_state_for_handoff("dest-1", carried.clone(), cx);
+                assert_eq!(
+                    harness.overrides.get("dest-1").and_then(|meta| meta.right.clone()),
+                    Some(carried.clone()),
+                    "the destination inherits the source's pane state"
+                );
+                assert_eq!(
+                    Harness::search_rebuild_count(),
+                    0,
+                    "the handoff carry never settles the session list"
+                );
+            });
+        });
+        assert_eq!(
+            crate::sessions::read().get("dest-1").and_then(|meta| meta.right.clone()),
+            Some(carried),
+            "the restore flushes the carried state to disk at once"
+        );
+        lane_restore(state);
     }
 
     #[gpui::test]
