@@ -267,6 +267,26 @@ pub fn note_handoff(
     }
 }
 
+/// Undo [`note_handoff`]: a Failed or Cancelled handoff unlinks the two
+/// sessions, so the source lists on its own again and the destination
+/// stands alone. Only the link fields leave — titles, projects and row
+/// state the hop carried stay where they landed. Missing records are
+/// skipped, never created.
+pub fn clear_handoff(store: &mut ProviderSessionStore, source: &str, dest: &str) {
+    if let Some(record) = store.get_mut(source) {
+        if record.handoff_to.as_deref() == Some(dest) {
+            record.handoff_to = None;
+        }
+    }
+    if let Some(record) = store.get_mut(dest) {
+        if record.handoff_from.as_deref() == Some(source) {
+            record.handoff_from = None;
+            record.handoff_from_provider = None;
+            record.handoff_title = None;
+        }
+    }
+}
+
 /// The `ResumeSession` command that reopens `record`: a full resume, not a
 /// metadata peek — the adapter replays the transcript's deltas (Claude Code
 /// replays its `~/.claude` jsonl, Codex its thread), which the lane folds
@@ -433,6 +453,32 @@ mod tests {
             Some("Fix the header second line"),
             "the session keeps its own first words"
         );
+    }
+
+    /// A Failed or Cancelled handoff unlinks both halves, and only the
+    /// halves it linked: another chain's links are never touched.
+    #[test]
+    fn a_rolled_back_handoff_unlinks_only_its_own_halves() {
+        let mut store = ProviderSessionStore::new();
+        open_sample(&mut store);
+        upsert_open(&mut store, "codex", "s-2", None, None, None);
+        upsert_open(&mut store, "codex", "s-3", None, None, None);
+        note_handoff(&mut store, "s-1", "claude-code", "s-2");
+        note_handoff(&mut store, "s-2", "codex", "s-3");
+        store.get_mut("s-2").expect("dest").handoff_title = Some("Chain".into());
+        clear_handoff(&mut store, "s-1", "s-2");
+        assert!(store["s-1"].handoff_to.is_none(), "the source lists on its own again");
+        assert!(store["s-2"].handoff_from.is_none(), "the destination stands alone");
+        assert!(store["s-2"].handoff_from_provider.is_none());
+        assert!(store["s-2"].handoff_title.is_none(), "the carried chain title leaves with the link");
+        assert_eq!(
+            store["s-2"].handoff_to.as_deref(),
+            Some("s-3"),
+            "the next hop's link is untouched"
+        );
+        // Clearing a pair that was never linked changes nothing.
+        clear_handoff(&mut store, "s-1", "s-3");
+        assert_eq!(store["s-2"].handoff_to.as_deref(), Some("s-3"));
     }
 
     /// Y2a: a handoff pack is never a destination's own words — neither

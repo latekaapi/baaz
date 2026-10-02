@@ -92,27 +92,6 @@ impl SessionView {
         cx.notify();
     }
 
-    /// The destination's quiet origin divider, set before the pack is
-    /// submitted so it sits at the top: "Handed off from \<From> to \<To>".
-    /// View-side, never folded: client-authored blocks are not persisted, so
-    /// a fold-written marker would vanish on reopen and double the divider
-    /// once the prefix loads. The back-link to the source session is wired
-    /// in [`Self::fold_intents`] from [`Self::handoff_origin`].
-    pub(crate) fn note_handoff_origin(&mut self, origin: handoff::HandoffOrigin, cx: &mut Context<Self>) {
-        let to = self.provider_kind();
-        let divider = crate::handoff_snapshot::divider_turn(
-            &format!("handoff-divider-{}", self.session_id),
-            origin.from,
-            to,
-            crate::handoff_snapshot::divider_text(origin.from, to, None, None),
-        );
-        self.handoff_origin = Some(origin);
-        self.handoff_divider = Some(Rc::new(divider));
-        self.follow = true;
-        self.refresh_render_cache();
-        cx.notify();
-    }
-
     /// Remember the pack's texts when it submits, so the view can hide the
     /// destination's first user turn (the divider stands for it) live and
     /// after a replay, where the bubble shows the summary instead.
@@ -121,6 +100,58 @@ impl SessionView {
         self.handoff_pack_display = Some(display);
         self.refresh_render_cache();
         cx.notify();
+    }
+
+    /// Whether the destination already shows the source prefix above its
+    /// divider. Landing sets it before the pack submits, so the
+    /// acknowledgement never redraws the transcript to add it — the user
+    /// perceives only the divider joining turns that were already there.
+    pub(crate) fn has_handoff_prefix(&self) -> bool {
+        !self.handoff_prefix.is_empty()
+    }
+
+    /// The pack turn's terminal on this destination: when the first user
+    /// turn matching the submitted pack is followed by an assistant turn
+    /// carrying a failure card, that card's reason. The match takes
+    /// either pack text — lanes echo the full pack, muse folds the short
+    /// display form its wire echoed. Only the pack's own reply counts: a
+    /// later turn failing is that turn's business, never the handoff's.
+    /// `None` while the pack turn is still running or answered cleanly.
+    pub(crate) fn pack_turn_failed_reason(&self) -> Option<String> {
+        let (full, display) = match (&self.handoff_pack_full, &self.handoff_pack_display) {
+            (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
+            _ => return None,
+        };
+        let Some(session) = self.fold.session(&self.session_id) else { return None };
+        let mut turns = session.turns.iter();
+        for turn in turns.by_ref() {
+            let is_pack = match turn {
+                Turn::User { text, .. } => text == full || display.is_some_and(|d| text == d),
+                _ => false,
+            };
+            if !is_pack {
+                continue;
+            }
+            // The pack submits once: the first user turn matching it is
+            // the pack turn, and its own reply is the first assistant
+            // turn behind it.
+            for following in turns.by_ref() {
+                if let Turn::Assistant { blocks, .. } = following {
+                    for block in blocks {
+                        if let Block::Error { title, detail, .. } = block {
+                            let reason = detail.trim();
+                            if reason.is_empty() {
+                                return Some(title.clone());
+                            }
+                            return Some(reason.to_owned());
+                        }
+                    }
+                    return None;
+                }
+            }
+            return None;
+        }
+        None
     }
 
     /// Show the handoff prefix at activation (or on reopen): the source

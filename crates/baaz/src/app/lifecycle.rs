@@ -3692,6 +3692,9 @@ impl Harness {
                 self.sync_row_live(&session_id, false, cx);
                 self.record_last_summary(cx);
                 self.title_from_transcript(cx);
+                // A settled pack turn fails its handoff here, with its
+                // reason on the card and the row — never a silent Active.
+                self.reconcile_pack_turns(cx);
                 // The free excerpt just landed; a poor one may earn one
                 // debounced rewrite — idle sessions only, never a running
                 // turn — through the same side session as a title.
@@ -4002,7 +4005,7 @@ impl Harness {
 /// are opened, and acks advance the run to activation.
 impl Harness {
     /// The view for `session_id`: the active one, else a parked one.
-    fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
+    pub(super) fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {
         if let Some(view) = self.active.clone() {
             if view.read(cx).session_id == session_id {
                 return Some(view);
@@ -4111,6 +4114,7 @@ impl Harness {
                 let opened = old.cancel();
                 if opened {
                     if let Some(dest) = old.destination_session.clone() {
+                        self.clear_handoff_links(&source, &dest, cx);
                         self.close_view(&dest, cx);
                     }
                     if self.pending_handoff.as_ref().is_some_and(|p| p.source_session == source) {
@@ -4205,24 +4209,25 @@ impl Harness {
         run.note_checkpointed(pack);
         self.handoffs.insert(source.clone(), run.clone());
         view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
-        // Z8: with the switch on and a Muse sign-in, a cheap model writes
-        // the pack's summary in a hidden side session (one short turn, the
-        // title mechanism). The run stays Checkpointed — the card reads
-        // "Summarising…" — until the summary lands or the 20 s watchdog
-        // keeps the extractive text; only then does the destination open.
-        // Cancel during the wait abandons the side session and never opens
-        // the destination. Otherwise the pack keeps its extractive summary
-        // and the destination opens below, exactly as before.
-        let summary_prompt = crate::handoff::should_model_summary(
-            self.layout.handoff_model_summary,
-            self.client.is_some(),
-        )
-        .then(|| {
-            self.handoffs.get(&source).and_then(|run| run.pack.as_ref()).map(|pack| {
-                crate::handoff::summary_prompt(&crate::handoff::summary_input(pack))
+        // The model summary earns a side session only when it could add
+        // something over the extractive pack (see
+        // [`crate::handoff::should_model_summary`]) — and it never delays
+        // the destination: the run opens below with the extractive pack
+        // either way, and a summary that arrives in time upgrades the
+        // pack the acknowledgement snapshots. Cancel during the wait
+        // abandons the side session; a late answer lands on nothing.
+        let summary_prompt = self
+            .handoffs
+            .get(&source)
+            .and_then(|run| run.pack.as_ref())
+            .filter(|pack| {
+                crate::handoff::should_model_summary(
+                    self.layout.handoff_model_summary,
+                    self.client.is_some(),
+                    pack,
+                )
             })
-        })
-        .flatten();
+            .map(|pack| crate::handoff::summary_prompt(&crate::handoff::summary_input(pack)));
         if let Some(prompt) = summary_prompt {
             if let Some(run) = self.handoffs.get_mut(&source) {
                 run.note_summary_pending();
@@ -4234,12 +4239,16 @@ impl Harness {
             }
             crate::baaz_log!("handoff requested epoch={epoch} {source} -> {} (summarising)", to.as_str());
             self.start_handoff_summary(source.clone(), epoch, prompt, cx);
-            return;
         }
         crate::baaz_log!("handoff requested epoch={epoch} {source} -> {}", to.as_str());
         // Prepared next: the destination opens in the source's workspace,
-        // and the pack submits when it lands.
-        self.pending_handoff = Some(crate::handoff::PendingHandoff { source_session: source, epoch });
+        // and the pack submits when it lands. The source's visible turns
+        // ride on the pending handoff, so landing applies them before the
+        // destination's first render — no frame shows the empty
+        // destination waiting for the pack's acknowledgement.
+        let prefix = view.update(cx, |view, _| view.handoff_snapshot_turns());
+        self.pending_handoff =
+            Some(crate::handoff::PendingHandoff { source_session: source, epoch, prefix });
         if to == ProviderId::Muse {
             self.select_new_provider(ProviderId::Muse, cx);
             self.session_switch_pending = true;
@@ -4254,9 +4263,12 @@ impl Harness {
     }
 
     /// The fresh session landed: when it is a handoff's destination under
-    /// the current epoch, mark Prepared, leave the origin marker, and
-    /// submit the pack as its first turn. Anything else (an ordinary open,
-    /// a superseded request) is left alone.
+    /// the current epoch, mark Prepared, show the source prefix above the
+    /// divider before the first render, link the chain, and submit the
+    /// pack as its first turn. Landing does everything activation does
+    /// except the run-state change, so the acknowledgement adds no frame
+    /// of its own. Anything else (an ordinary open, a superseded request)
+    /// is left alone.
     pub(super) fn land_handoff_destination(&mut self, dest: String, cx: &mut Context<Self>) {
         let pending = self.pending_handoff.clone();
         let Some(pending) = pending else { return };
@@ -4313,13 +4325,39 @@ impl Harness {
             from: run.from,
             from_model: run.from_model.clone(),
         };
+        // The prefix the destination renders from its first frame: stashed
+        // at request time, or snapshot live when the stash is empty (a
+        // pending from before the stash existed). Either way it lands
+        // before the pack submits — no frame shows the empty destination.
+        let mut prefix = pending.prefix.clone();
+        if prefix.is_empty() {
+            if let Some(source) = self.find_view(&pending.source_session, cx) {
+                prefix = source.update(cx, |view, _| view.handoff_snapshot_turns());
+            }
+        }
         let text = crate::handoff::pack_text(&pack, run.from);
         let display = crate::handoff::display_text(&pack, run.from);
+        let divider = crate::handoff_snapshot::divider_text(
+            run.from,
+            run.to,
+            (!run.to_model.is_empty()).then(|| run.to_model.clone()).as_deref(),
+            Some(pack.recent.len()),
+        );
         view.update(cx, |view, cx| {
-            view.note_handoff_origin(origin, cx);
-            view.note_handoff_pack(text.clone(), display.clone(), cx);
-            view.submit_pack(text, display, cx);
+            view.show_handoff_prefix(
+                origin,
+                prefix,
+                divider,
+                Some(text.clone()),
+                Some(display.clone()),
+                cx,
+            );
         });
+        // The links land before the rows rebuild, so the sidebar row joins
+        // the chain in this same frame — and the title guard already sees
+        // a handoff destination when the pack turn starts, never an
+        // untitled fresh session.
+        self.persist_handoff_links(&pending.source_session, run.from, &dest, run.to, cx);
         // The pack is a live turn: the row reads running with a fresh time
         // from the submit, exactly like `ProviderTurnAccepted` (Y2a) — so
         // the head row shows "Working" and is never filtered as empty.
@@ -4341,6 +4379,9 @@ impl Harness {
                 entry.last_error = None;
             }
         }
+        view.update(cx, |view, cx| {
+            view.submit_pack(text, display, cx);
+        });
         self.invalidate_list();
     }
 
@@ -4410,17 +4451,23 @@ impl Harness {
                 view.retire_for_handoff(to, dest.clone(), cx);
             });
         }
+        // Landing already shows the prefix from the destination's first
+        // frame: re-showing it here would rebuild the transcript and lose
+        // the scroll position, so the acknowledgement only fills in a
+        // prefix landing never placed (a pending from before the stash).
         if let Some(view) = self.find_view(&dest, cx) {
-            view.update(cx, |view, cx| {
-                view.show_handoff_prefix(
-                    origin,
-                    snap_turns,
-                    divider,
-                    (!pack_full.is_empty()).then(|| pack_full.clone()),
-                    (!pack_display.is_empty()).then(|| pack_display.clone()),
-                    cx,
-                );
-            });
+            if !view.read(cx).has_handoff_prefix() {
+                view.update(cx, |view, cx| {
+                    view.show_handoff_prefix(
+                        origin,
+                        snap_turns,
+                        divider,
+                        (!pack_full.is_empty()).then(|| pack_full.clone()),
+                        (!pack_display.is_empty()).then(|| pack_display.clone()),
+                        cx,
+                    );
+                });
+            }
         }
         self.persist_handoff_links(&source, from, &dest, to, cx);
         crate::baaz_log!("handoff activated {source} -> {dest}");
@@ -4443,9 +4490,12 @@ impl Harness {
         cx.notify();
     }
 
-    /// The pack never landed: the run fails with the reason, the source
-    /// stays usable (a Failed card sends again). An event for an unknown
-    /// destination is ignored — it belongs to no run.
+    /// The pack never landed — or it landed and its turn ended failed:
+    /// the run fails with the reason (before or after activation, never a
+    /// silent Active), the source stays usable (a Failed card sends
+    /// again), the chain links roll back, and the destination row reads
+    /// "Hand-off failed: <reason>". An event for an unknown destination
+    /// is ignored — it belongs to no run.
     pub(super) fn fail_handoff(&mut self, dest: String, reason: String, cx: &mut Context<Self>) {
         let source = self
             .handoffs
@@ -4454,15 +4504,78 @@ impl Harness {
             .map(|(source, _)| source.clone());
         let Some(source) = source else { return };
         let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
-        run.fail(reason.clone());
+        run.fail_pack_turn(reason.clone());
         let card = run.card();
         let card_id = run.card_id.clone();
         self.handoffs.insert(source.clone(), run);
         if let Some(view) = self.find_view(&source, cx) {
             view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
         }
+        self.clear_handoff_links(&source, &dest, cx);
+        let row_reason = format!("Hand-off failed: {reason}");
+        if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == dest) {
+            entry.last_error = Some(row_reason.clone());
+        }
+        self.set_override(&dest, |meta| meta.last_error = Some(row_reason.clone()), cx);
         crate::baaz_log!("handoff failed {source}: {reason}");
         cx.notify();
+    }
+
+    /// Undo what landing linked: the chain halves in both stores leave,
+    /// so a Failed or Cancelled handoff lists the source on its own again
+    /// and leaves the destination standing alone. Only this handoff's own
+    /// halves unlink — another chain's links are never touched.
+    fn clear_handoff_links(&mut self, source: &str, dest: &str, cx: &mut Context<Self>) {
+        crate::provider_sessions::clear_handoff(&mut self.provider_sessions, source, dest);
+        crate::provider_sessions::write(&self.provider_sessions);
+        let (source, dest) = (source.to_owned(), dest.to_owned());
+        if let Some(meta) = self.overrides.get(source.as_str()) {
+            if meta.handoff_to.as_deref() == Some(dest.as_str()) {
+                self.set_override(source.as_str(), |meta| meta.handoff_to = None, cx);
+            }
+        }
+        if let Some(meta) = self.overrides.get(dest.as_str()) {
+            if meta.handoff_from.as_deref() == Some(source.as_str()) {
+                self.set_override(dest.as_str(), |meta| {
+                    meta.handoff_from = None;
+                    meta.handoff_from_provider = None;
+                    meta.handoff_title = None;
+                }, cx);
+            }
+        }
+        self.merge_provider_rows();
+        self.invalidate_list();
+    }
+
+    /// A pack turn settled on a handoff destination: when the
+    /// destination's folded transcript shows its pack turn failed, the
+    /// run fails with the turn's reason — before or after activation, so
+    /// the card and the row read "Hand-off failed: <reason>" instead of a
+    /// silent Active. Runs without a destination, settled runs, and
+    /// destinations whose pack turn answered all pass through untouched.
+    /// Called after every settled turn on either lane (the muse lane's
+    /// `turn/completed` lands in `maybe_rewrite_byline`, the provider
+    /// lane's `TurnFinished` in its own arm); a no-op without a handoff.
+    pub(crate) fn reconcile_pack_turns(&mut self, cx: &mut Context<Self>) {
+        let failures: Vec<(String, String)> = self
+            .handoffs
+            .iter()
+            .filter(|(_, run)| {
+                run.destination_session.is_some()
+                    && !matches!(
+                        run.state,
+                        aui_protocol::HandoffState::Failed { .. } | aui_protocol::HandoffState::Cancelled
+                    )
+            })
+            .filter_map(|(_, run)| {
+                let dest = run.destination_session.clone()?;
+                let reason = self.find_view(&dest, cx)?.read(cx).pack_turn_failed_reason()?;
+                Some((dest, reason))
+            })
+            .collect();
+        for (dest, reason) in failures {
+            self.fail_handoff(dest, reason, cx);
+        }
     }
 
     /// "Cancel" on a handoff card: aborts while cancellable and shuts the
@@ -4476,6 +4589,7 @@ impl Harness {
         let opened = run.cancel();
         if opened {
             if let Some(dest) = run.destination_session.clone() {
+                self.clear_handoff_links(&source, &dest, cx);
                 self.close_view(&dest, cx);
             }
         }
@@ -4518,6 +4632,12 @@ impl Harness {
     /// so fresh opens pass through untouched. No child is ever spawned for
     /// the source — history comes from the file.
     fn attach_handoff_prefix(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        // Landing already shows the prefix from the destination's first
+        // frame: reopening or re-attaching the same view must not wipe it
+        // back to the fallback divider with no turns.
+        if view.read(cx).has_handoff_prefix() {
+            return;
+        }
         let (session_id, to) = {
             let view = view.read(cx);
             (view.session_id.clone(), view.provider_kind())
@@ -6947,6 +7067,356 @@ mod tests {
         ));
         harness.merge_provider_rows();
         harness.collapse_handoff_chains();
+    }
+
+    /// A checkpointed handoff run with a two-turn pack, plus the pending
+    /// open carrying the source's turns — what `start_handoff` leaves
+    /// behind once the destination opens.
+    fn seed_b3_handoff(harness: &mut Harness, source: &str) {
+        use aui_protocol::{Block as B, Turn as T};
+        let user = || T::User {
+            id: "b3-u1".to_owned(),
+            text: "Chart the ferry routes".to_owned(),
+            attachments: vec![],
+            mentions: vec![],
+            timestamp: None,
+        };
+        let assistant = || T::Assistant {
+            id: "b3-a1".to_owned(),
+            blocks: vec![B::Text {
+                text: "Three routes: Cormorant, Heron, Gull.".to_owned(),
+                streaming: false,
+            }],
+            meta: Default::default(),
+            timestamp: None,
+        };
+        let mut session =
+            aui_protocol::Session::new(source, aui_protocol::Provider::Claude, "m", "/tmp/ws");
+        session.turns.push(user());
+        session.turns.push(assistant());
+        let pack = crate::handoff::build_pack(&session, "/tmp/ws");
+        let mut run = crate::handoff::HandoffRun::request(
+            source.to_owned(),
+            1,
+            ProviderId::ClaudeCode,
+            ProviderId::Codex,
+            "claude".to_owned(),
+            String::new(),
+            false,
+            false,
+            false,
+        )
+        .expect("fresh request starts");
+        run.note_quiescing();
+        run.note_checkpointed(pack);
+        harness.handoffs.insert(source.to_owned(), run);
+        harness.pending_handoff = Some(crate::handoff::PendingHandoff {
+            source_session: source.to_owned(),
+            epoch: 1,
+            prefix: vec![user(), assistant()],
+        });
+    }
+
+    /// A scripted Codex lane with a seeded handoff waiting to land on it:
+    /// returns the destination session id.
+    fn open_b3_destination(
+        vc: &mut gpui::VisualTestContext,
+        baaz: &gpui::Entity<Harness>,
+    ) -> String {
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                crate::provider_sessions::upsert_open(
+                    &mut harness.provider_sessions,
+                    "claude-code",
+                    "b3-src",
+                    Some("/tmp/ws".to_owned()),
+                    None,
+                    Some("Chart the ferry routes".to_owned()),
+                );
+                harness.merge_provider_rows();
+                seed_b3_handoff(harness, "b3-src");
+                harness.active.clone().expect("the lane is open").read(cx).session_id.clone()
+            })
+        })
+    }
+
+    /// B3: landing shows the source prefix before the pack submits — the
+    /// destination renders prefix + divider from its first frame, and the
+    /// acknowledgement adds no second frame of its own.
+    #[gpui::test]
+    fn land_shows_the_prefix_before_the_pack_submits(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3-land");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let dest = open_b3_destination(vc, &baaz);
+        // Landing itself, before the pack's submit round-trips.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.land_handoff_destination(dest.clone(), cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Prepared),
+                    "landing marks Prepared, state is {:?}",
+                    run.state
+                );
+                assert!(harness.pending_handoff.is_none(), "landing consumes the pending open");
+                let view = harness.active.clone().expect("the destination");
+                assert!(
+                    view.read(cx).has_handoff_prefix(),
+                    "the prefix lands before the pack submits"
+                );
+                assert!(
+                    sidebar::is_handoff_dest(&dest, &harness.provider_sessions, &harness.overrides),
+                    "the links land with the prefix, in the same frame"
+                );
+            });
+        });
+        // The pack's acknowledgement: the run activates, and the frame
+        // still reads prefix, divider, then the destination's own turns.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.acknowledge_handoff(dest.clone(), cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Activated),
+                    "the ack activates, state is {:?}",
+                    run.state
+                );
+                let view = harness.active.clone().expect("the destination");
+                assert!(
+                    view.read(cx).has_handoff_prefix(),
+                    "the acknowledgement keeps the landed prefix"
+                );
+                let ids: Vec<String> = view.update(cx, |view, _| {
+                    view.handoff_snapshot_turns().iter().map(|turn| turn.id().to_owned()).collect()
+                });
+                assert_eq!(
+                    ids,
+                    vec![
+                        "b3-u1".to_owned(),
+                        "b3-a1".to_owned(),
+                        format!("handoff-divider-{dest}"),
+                    ],
+                    "prefix, divider, then the destination's own turns (pack exchange hidden)"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3: the destination row joins the chain at land — one row for the
+    /// hop, headed at the destination, from the first frame.
+    #[gpui::test]
+    fn a_handoff_destination_row_joins_the_chain_at_land(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3-chain");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let dest = open_b3_destination(vc, &baaz);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.land_handoff_destination(dest.clone(), cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let visible = harness.visible_sessions(cx);
+                assert_eq!(visible.len(), 1, "source and destination, one row");
+                assert_eq!(visible[0].id, dest, "the head is what is listed");
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3: no title side session ever starts for a handoff destination —
+    /// the land-time links make the guard hold before the pack turn
+    /// starts. `auto_title` stays on, so the guard does the work.
+    #[gpui::test]
+    fn a_handoff_destination_never_starts_a_title_side_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3-title");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let dest = open_b3_destination(vc, &baaz);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(harness.layout.auto_title, "the switch is on: the guard does the work");
+                harness.land_handoff_destination(dest.clone(), cx);
+                harness.maybe_start_title(
+                    &dest,
+                    Some("Handed off from Claude Code: Chart the ferry routes".to_owned()),
+                    cx,
+                );
+                assert!(
+                    !harness.titles_pending.contains(&dest),
+                    "a handoff destination earns no generated title"
+                );
+                assert!(
+                    !harness.title_jobs.values().any(|job| job.real_id == dest),
+                    "and starts no title side session"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3: a pack turn that ends failed fails the handoff — `turn/started`
+    /// then `turn/completed{status: failed}` on the destination leaves the
+    /// run Failed with the turn's reason on the card and the row, links
+    /// rolled back, never a silent Active.
+    #[gpui::test]
+    fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
+        use muse_client::MuseEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3-pack-fail");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let reason = "model `gpt-6-astra` does not exist or you lack access";
+        let pack_full = "Continuing a session handed off from Claude Code. Context follows.\n\n## Original goal\nChart the ferry routes";
+        // A muse destination with the pack submitted: the run is Prepared,
+        // the row exists, the chain links are in place.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.open("dest-m".to_owned(), false, false, window, cx);
+                let view = harness.active.clone().expect("the destination is open");
+                view.update(cx, |view, cx| {
+                    view.note_handoff_pack(
+                        pack_full.to_owned(),
+                        "Handed off from Claude Code: Chart the ferry routes".to_owned(),
+                        cx,
+                    );
+                });
+                let mut session =
+                    aui_protocol::Session::new("src-m", aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                session.turns.push(aui_protocol::Turn::User {
+                    id: "u1".to_owned(),
+                    text: "Chart the ferry routes".to_owned(),
+                    attachments: vec![],
+                    mentions: vec![],
+                    timestamp: None,
+                });
+                let pack = crate::handoff::build_pack(&session, "/tmp/ws");
+                let mut run = crate::handoff::HandoffRun::request(
+                    "src-m".to_owned(),
+                    1,
+                    ProviderId::ClaudeCode,
+                    ProviderId::Muse,
+                    "claude".to_owned(),
+                    String::new(),
+                    false,
+                    false,
+                    false,
+                )
+                .expect("fresh request starts");
+                run.note_quiescing();
+                run.note_checkpointed(pack);
+                run.note_prepared("dest-m".to_owned());
+                harness.handoffs.insert("src-m".to_owned(), run);
+                harness.sessions.push(sidebar::local_started_row(
+                    "dest-m",
+                    "Chart the ferry routes".to_owned(),
+                    None,
+                    Some("/tmp/ws".to_owned()),
+                    crate::clock::now_local(),
+                ));
+                harness.set_override("src-m", |meta| meta.handoff_to = Some("dest-m".to_owned()), cx);
+                harness.set_override("dest-m", |meta| {
+                    meta.handoff_from = Some("src-m".to_owned());
+                    meta.handoff_from_provider = Some("claude-code".to_owned());
+                    meta.handoff_title = Some("Chart the ferry routes".to_owned());
+                }, cx);
+            });
+        });
+        // turn/started, then turn/completed{status: failed} on the
+        // destination — through the settled-turn hook the live wire
+        // reaches after every muse turn.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the destination is open");
+                let event = |method: &str, params: serde_json::Value| MuseEvent::Notification {
+                    method: method.to_owned(),
+                    params,
+                    cursor: None,
+                    session_id: Some("dest-m".to_owned()),
+                };
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event("session/started", serde_json::json!({"session": {"sessionId": "dest-m"}})),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx)
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "item/completed",
+                            serde_json::json!({"item": {
+                                "itemId": "m-1",
+                                "turnId": "t-1",
+                                "kind": "userMessage",
+                                "status": "completed",
+                                "revision": 1,
+                                "text": pack_full,
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "turn/completed",
+                            serde_json::json!({"turnId": "t-1", "terminal": "failed", "error": {
+                                "kind": "modelError",
+                                "message": reason,
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                harness.maybe_rewrite_byline(cx);
+                let run = harness.handoffs.get("src-m").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
+                    "a failed pack turn fails the handoff, state is {:?}",
+                    run.state
+                );
+                assert_eq!(run.reason.as_deref(), Some(reason));
+                let entry =
+                    harness.sessions.iter().find(|entry| entry.id == "dest-m").expect("the row");
+                let expected_row = format!("Hand-off failed: {reason}");
+                assert_eq!(
+                    entry.last_error.as_deref(),
+                    Some(expected_row.as_str()),
+                    "the row names the handoff failure"
+                );
+                assert!(
+                    !sidebar::is_handoff_dest(
+                        "dest-m",
+                        &harness.provider_sessions,
+                        &harness.overrides
+                    ),
+                    "the links roll back"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
     }
 
     /// X3b, sidebar half (Y2a: view-time collapse): storage keeps every
