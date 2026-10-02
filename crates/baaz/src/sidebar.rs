@@ -834,8 +834,19 @@ impl SessionEntry {
         if self.running {
             row = row.pulse();
         }
-        row
+        let density = row_density(COMPACT_ROWS.load(std::sync::atomic::Ordering::Relaxed), summary_has_context(&row));
+        row.density(density)
     }
+}
+
+/// The Settings → Sidebar "Compact rows" switch, mirrored here so every
+/// summary builder reads it without threading the layout through each
+/// grouping; [`set_compact_rows`] keeps it in step with the layout.
+static COMPACT_ROWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mirror the layout's compact-rows switch (on load and on every flip).
+pub fn set_compact_rows(on: bool) {
+    COMPACT_ROWS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The `workspace_root` a `--replay` capture ran in: the first `session/…`
@@ -1621,11 +1632,10 @@ pub fn grouping_by_project(
         let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
         // The plain default group row: no mark; the chevron and the
         // trailing branch only when the layout flags ask. The current mark
-        // draws from `current(true)` below alone — `current_bar` rides
-        // along for old callers and changes nothing. The count stays.
+        // draws from `current(true)` below alone; the retired
+        // `group_bar` flag no longer draws a second bar. The count stays.
         let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count)
-            .chevron(layout.group_chevron)
-            .current_bar(layout.group_bar);
+            .chevron(layout.group_chevron);
         if layout.group_branch {
             if let Some(branch) = branches.get(&project.id) {
                 group = group.trailing(branch.clone());
@@ -1801,8 +1811,6 @@ pub(crate) fn hover_title(label: &str) -> String {
 /// One row, one height per density — the library draws the context line in
 /// Two and skips it in One, so state keeps riding the leading glyph and the
 /// trailing slot either way.
-#[allow(dead_code)] // Exercised by tests; no view affordance forwards it yet:
-// v0.3.15's virtual list builds every row at its default Two.
 pub fn row_density(compact_rows: bool, has_context: bool) -> RowDensity {
     if !compact_rows && has_context {
         RowDensity::Two
@@ -1814,7 +1822,6 @@ pub fn row_density(compact_rows: bool, has_context: bool) -> RowDensity {
 /// Whether a built summary carries a context/byline line: anything but the
 /// empty line kind — attention, byline, preview, `project · branch`, legacy
 /// meta — counts, exactly as the row's second-line slot reads it.
-#[allow(dead_code)] // Exercised by tests; see [`row_density`].
 pub fn summary_has_context(summary: &SessionSummary) -> bool {
     !matches!(
         aui::nav::context_line_kind(summary),
@@ -1875,6 +1882,21 @@ mod tests {
         assert_eq!(row_density(false, false), RowDensity::One);
         assert_eq!(row_density(true, true), RowDensity::One);
         assert_eq!(row_density(true, false), RowDensity::One);
+    }
+
+    /// The Compact rows switch reaches every built summary: on, a row with
+    /// a byline still renders One; off, it renders Two.
+    #[test]
+    fn the_compact_rows_switch_sets_each_summarys_density() {
+        let now = Local::now();
+        let mut lined = entry("lined");
+        lined.description = "patched the validator".into();
+        set_compact_rows(true);
+        let compact = lined.summary(now).density;
+        set_compact_rows(false);
+        let comfortable = lined.summary(now).density;
+        assert_eq!(compact, Some(RowDensity::One));
+        assert_eq!(comfortable, Some(RowDensity::Two));
     }
 
     /// A summary with a byline counts as context; a bare row does not.
@@ -3104,7 +3126,7 @@ mod tests {
         };
         let group = folded_group(&groups, "p-baaz");
         assert!(group.chevron);
-        assert!(group.current_bar);
+        assert!(!group.current_bar, "the retired group_bar flag never draws a second bar");
         assert_eq!(group.trailing.as_deref(), Some("main"));
     }
 

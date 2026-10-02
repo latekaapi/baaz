@@ -568,6 +568,7 @@ impl Harness {
         if !apply_setting(&mut self.layout, id, on) {
             return;
         }
+        crate::sidebar::set_compact_rows(self.layout.compact_rows);
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
