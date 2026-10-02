@@ -748,8 +748,7 @@ impl SessionView {
             // would be worse than no row. `/skills` typed as a whole draft
             // arrives here too: the page opens, and no turn is ever sent.
             Command::RightBrowser
-            | Command::RightDiff
-            | Command::RightGit
+            | Command::RightChanges
             | Command::RightFiles
             | Command::Terminal
             | Command::Skills

@@ -292,7 +292,7 @@ mod tests {
         let meta = SessionMeta {
             right: Some(RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: Some("Cargo.toml".into()),
                 files_selected: Some("Cargo.toml".into()),
                 files_expanded: vec!["src".into()],
@@ -304,7 +304,7 @@ mod tests {
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains("\"right\":{"));
         assert!(text.contains("\"open\":true"));
-        assert!(text.contains("\"kind\":\"diff\""));
+        assert!(text.contains("\"kind\":\"changes\""));
         assert!(text.contains("\"filesPreview\":\"Cargo.toml\""));
         assert!(text.contains("\"filesSelected\":\"Cargo.toml\""));
         assert!(text.contains("\"filesExpanded\":[\"src\"]"));

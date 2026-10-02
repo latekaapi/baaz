@@ -86,7 +86,7 @@
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
-//! | `right:<browser\|diff\|git\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown records a step failure, free |
+//! | `right:<browser\|changes\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles; `diff`/`git` alias `changes`); unknown records a step failure, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
@@ -331,13 +331,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
 ];
 
 impl Harness {
-    /// `right:<browser|diff|git|files|off>`: open the right pane on that kind
-    /// through the same [`Harness::show_right`] the ⌘K rows call, so the
-    /// capture shows the production pane — same-kind-closes included.
-    /// Empty toggles the pane through [`Harness::toggle_right`]. An
-    /// unknown slug records a step failure instead of capturing a window
-    /// where nothing happened (a known verb that silently does nothing
-    /// reports success). Free: no turn, no wire.
+    /// `right:<browser|changes|files|off>`: open the right pane on that kind
+    /// through the same [`Harness::select_right`] the header tabs call, so
+    /// the capture shows the production pane — never toggling. `diff` and
+    /// `git` stay as aliases of `changes`. Empty toggles the pane through
+    /// [`Harness::toggle_right`]. An unknown slug records a step failure
+    /// instead of capturing a window where nothing happened (a known verb
+    /// that silently does nothing reports success). Free: no turn, no wire.
     pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) {
         let slug = rest.trim();
         if slug.is_empty() {
@@ -357,8 +357,9 @@ impl Harness {
         // at all — booted with a right pane it never asked for and reported
         // 22 changed regions. Run order decided what the suite saw.
         //
-        // Deliberately not `show_right`, which toggles when asked for the
-        // kind already showing — correct for ⌘K, wrong for a capture. The
+        // Deliberately not `select_right`, which persists to `layout.json`
+        // like any user pick — a capture aid must not write it (see
+        // above). The
         // verb also persists, so a toggling verb made captures alternate:
         // run one opened the pane and saved it, run two booted open on that
         // kind and the same step closed it again, and the probe's
@@ -842,6 +843,7 @@ mod tests {
     #[test]
     fn right_verbs_are_known_steps() {
         assert!(super::is_known_step("right:browser"));
+        assert!(super::is_known_step("right:changes"));
         assert!(super::is_known_step("right:diff"));
         assert!(super::is_known_step("right:git"));
         assert!(super::is_known_step("right:files"));
@@ -1015,6 +1017,16 @@ mod tests {
                 "{kind:?} opens the pane"
             );
             assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+        }
+        // The retired slugs stay aliases of the merged view.
+        for slug in ["diff", "git"] {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(slug, cx)));
+            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open), "{slug} opens the pane");
+            assert_eq!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_kind),
+                Some(crate::layout::RightKind::Changes),
+                "{slug} opens the merged view"
+            );
         }
         restore_state(state);
     }

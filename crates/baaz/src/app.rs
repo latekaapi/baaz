@@ -61,7 +61,7 @@ use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
 use aui::shell::{
     RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
-    header_cell, resize_handle, sidebar_header,
+    header_cell, resize_handle, right_header, sidebar_header, tab_strip,
 };
 use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
 use aui_icons::{icon, IconName, Provider};
@@ -152,6 +152,12 @@ actions!(
         ToggleTerminal,
         /// Toggle the right pane (⌘⌥B).
         ToggleRightPane,
+        /// Show Changes in the right pane (⌘⇧D).
+        RightChanges,
+        /// Show Files in the right pane (⌘⇧J).
+        RightFiles,
+        /// Show the browser in the right pane (⌘⇧B).
+        RightBrowser,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -684,7 +690,7 @@ pub struct Harness {
     /// when a restore left the pane open on Browser.
     pub(crate) browser_idle_warmed: bool,
     /// The person's own Browser open still owes the URL field its focus
-    /// (Z7a2). Armed by `show_right`/`toggle_right` when they land open on
+    /// (Z7a2). Armed by `select_right`/`toggle_right` when they land open on
     /// Browser, consumed once by the next frame's webview ensure — and only
     /// there, so activation, restore and boot never steal the keyboard into
     /// the URL field. Never persists.
@@ -2094,23 +2100,19 @@ impl Harness {
         cx.notify();
     }
 
-    /// Open the right pane on `kind`: records the kind, forces the pane
-    /// open, persists, notifies. Task T3 calls this from the ⌘K palette, so
-    /// it works with no session open and never touches [`Self::active`].
-    /// Calling it with the kind already showing while the pane is open
-    /// closes the pane again, the way pressing a menu's own button closes it.
-    /// Either way the pane's data is re-read off the render path when it ends
-    /// up open.
-    pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+    /// Open the right pane on `kind`, never closing it: records the kind,
+    /// forces the pane open, persists, notifies. The header tabs, the ⌘K
+    /// palette rows, the slash commands, the new right-pane shortcuts and
+    /// the agent's browser open all call this, so it works with no session
+    /// open and never touches [`Self::active`]. Clicking the already-showing
+    /// tab keeps the pane open. The pane's data is re-read off the render
+    /// path when it ends up open.
+    pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
-        if self.layout.right_open && self.layout.right_kind == Some(kind) {
-            self.layout.right_open = false;
-        } else {
-            self.layout.right_kind = Some(kind);
-            self.layout.right_open = true;
-        }
-        crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
+        self.layout.right_kind = Some(kind);
+        self.layout.right_open = true;
+        crate::baaz_log!("select right pane: {kind:?}");
         self.arm_browser_url_focus();
         layout::write(&self.layout);
         // B7: prepare the webview on the pick, before the pane animates.
@@ -2223,7 +2225,7 @@ impl Harness {
     }
 
     /// Build the Browser webview outside `render` after an open action
-    /// (B7fix2): the action itself — `toggle_right`, `show_right`, the
+    /// (B7fix2): the action itself — `toggle_right`, `select_right`, the
     /// palette's window command, the agent open — holds no window, so the
     /// construction rides a deferred task that runs at the end of the
     /// effect cycle, before the next frame paints, with the window in
@@ -3333,6 +3335,20 @@ impl Harness {
                 // window — render never constructs first.
                 this.prewarm_browser_in(window, cx);
             }))
+            // B8: the per-kind shortcuts select (never toggle) through
+            // `select_right`, so they show in Settings → Shortcuts from the
+            // keymap table. The Browser key builds the real webview itself,
+            // like the toggle above.
+            .on_action(cx.listener(|this, _: &RightChanges, _, cx| {
+                this.select_right(layout::RightKind::Changes, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RightFiles, _, cx| {
+                this.select_right(layout::RightKind::Files, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RightBrowser, window, cx| {
+                this.select_right(layout::RightKind::Browser, cx);
+                this.prewarm_browser_in(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.new_terminal(window, cx);
             }))
@@ -3996,13 +4012,24 @@ impl Render for Harness {
                 )
                 .header_centre(self.render_centre_header(window, cx))
                 .header_right(
-                    header_cell("hd-right").child(
-                        div()
-                            .id("hd-right-title")
-                            .role(gpui::Role::Label)
-                            .aria_label(kind.label())
-                            .child(kind.label()),
-                    ),
+                    // B8: the pane's three fixed tabs — Changes · Files ·
+                    // Browser, icons plus labels, keyboard ←/→ and the
+                    // tab-list role from the library — plus the existing
+                    // close control. No title, no `+`: the tabs ARE the
+                    // subject. A tab click selects (never toggles) through
+                    // `select_right`; the X keeps toggling the pane.
+                    right_header("hd-right")
+                        .tabs(
+                            tab_strip("hd-right-tabs", crate::right::right_tabs(), kind.tab_index())
+                                .on_select(cx.listener(
+                                    |this, id: &SharedString, _, cx| {
+                                        if let Some(kind) = layout::RightKind::from_tab_id(id) {
+                                            this.select_right(kind, cx);
+                                        }
+                                    },
+                                )),
+                        )
+                        .on_close(cx.listener(|this, _, _, cx| this.toggle_right(cx))),
                 )
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
@@ -4732,7 +4759,7 @@ mod tests {
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         draw_shell(&mut *vc, &baaz);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Browser, cx)));
         draw_shell(&mut *vc, &baaz);
         let url_focus = vc.update(|_, cx| {
             baaz.read(cx)
@@ -4802,7 +4829,7 @@ mod tests {
         );
         // Open on Browser: the webview is prepared on the toggle, before
         // any frame — never as a render side effect.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Browser, cx)));
         assert!(
             vc.update(|_, cx| baaz.read(cx).browser.states.contains_key("s-1")),
             "opening on Browser prepares the webview off the render path"
@@ -4855,7 +4882,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Changes, cx)));
         assert!(
             !crate::sessions::path().exists(),
             "the toggle itself still writes nothing synchronously"
@@ -4876,7 +4903,7 @@ mod tests {
             disk.get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -4909,7 +4936,7 @@ mod tests {
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         // The open action builds, with no frame drawn yet.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Browser, cx)));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).browser_builds),
             1,
@@ -4929,7 +4956,7 @@ mod tests {
         );
         // Close and reopen: still the same single webview.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Browser, cx)));
         draw_shell(&mut *vc, &baaz);
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).browser_builds),
@@ -4954,7 +4981,7 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         // Arm the debounced pane save, then rename inside its window: the
         // rename writes synchronously and supersedes the armed write.
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Changes, cx)));
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.set_override("s-1", |meta| meta.name = Some("Renamed".to_owned()), cx)
@@ -4992,7 +5019,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Changes, cx)));
         assert!(
             !crate::sessions::path().exists(),
             "the toggle itself still writes nothing synchronously"
@@ -5007,7 +5034,7 @@ mod tests {
             crate::sessions::read().get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -5094,12 +5121,13 @@ mod tests {
         restore_state(state);
     }
 
-    /// `show_right` opens each of the four kinds, closes the pane when
-    /// called with the kind already showing, and switches kinds without
-    /// closing — all with no session open.
+    /// B8: `select_right` opens the pane on the asked kind and never
+    /// closes it — not from closed, not when re-selecting the showing
+    /// kind — and switches kinds without closing, all with no session
+    /// open. The header tabs and shortcuts ride this.
     #[gpui::test]
-    fn show_right_opens_each_kind_and_closes_the_current_one(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("show");
+    fn select_right_opens_and_never_closes(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("select");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
@@ -5107,39 +5135,39 @@ mod tests {
         });
         assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "no session is open");
         for kind in crate::layout::RightKind::ALL {
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
             assert!(
                 vc.update(|_, cx| baaz.read(cx).layout.right_open),
                 "{kind:?} opens the pane"
             );
             assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
-            // The same kind again closes the pane, keeping the kind so a
-            // later reopen restores it.
-            vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
+            // Re-selecting the showing kind keeps the pane open — the
+            // difference from the old `show_right`, which toggled there.
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
             assert!(
-                !vc.update(|_, cx| baaz.read(cx).layout.right_open),
-                "{kind:?} again closes the pane"
+                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} again keeps the pane open"
             );
             assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
-            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "show_right never opens a session");
+            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "select_right never opens a session");
         }
         // A different kind while open switches without closing.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Files, cx))
+            baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Files, cx))
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx))
+            baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Browser, cx))
         });
         assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_kind),
-            Some(crate::layout::RightKind::Diff)
+            Some(crate::layout::RightKind::Browser)
         );
         restore_state(state);
     }
 
     /// Z2: the right pane belongs to each session and a switch restores it
-    /// without animating. A shows Diff while B shows Browser; every switch
+    /// without animating. A shows Changes while B shows Browser; every switch
     /// restores the shown session's pane (B first shows it closed); a
     /// restart restores from the store; the restore arms `right_snap` for
     /// exactly one frame while user toggles never arm it; a new session
@@ -5171,7 +5199,7 @@ mod tests {
         }
         macro_rules! show {
             ($kind:expr) => {
-                vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right($kind, cx)))
+                vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right($kind, cx)))
             };
         }
         macro_rules! pane {
@@ -5191,23 +5219,23 @@ mod tests {
                 )
             };
         }
-        // Session A shows Diff; a user change never arms the snap.
+        // Session A shows Changes; a user change never arms the snap.
         open_session!("sess-a");
-        show!(crate::layout::RightKind::Diff);
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        show!(crate::layout::RightKind::Changes);
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // Switching to B (no stored state) closes the pane, snapped — and
         // one frame consumes the snap.
         open_session!("sess-b");
-        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // Browser in B; a user change still does not snap.
         show!(crate::layout::RightKind::Browser);
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
-        // Back to A: Diff again — open throughout, so no snap. Back to B:
+        // Back to A: Changes again — open throughout, so no snap. Back to B:
         // Browser again, no snap either.
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         open_session!("sess-b");
         assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Browser), false));
         draw!();
@@ -5215,14 +5243,14 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(pane!(), (false, Some(crate::layout::RightKind::Browser), false));
         open_session!("sess-a");
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), true));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), true));
         draw!();
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "one frame consumes the snap");
         // A user toggle after the snap is consumed never re-arms it.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert!(!vc.update(|_, cx| baaz.read(cx).right_snap), "a user toggle must still animate");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Diff), false));
+        assert_eq!(pane!(), (true, Some(crate::layout::RightKind::Changes), false));
         // A restore arms the snap; a user toggle BEFORE any frame consumes it
         // must still animate (review finding): the toggle disarms it.
         open_session!("sess-b");
@@ -5232,13 +5260,13 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         open_session!("sess-a");
         draw!();
-        // Restart: the store carries A home as Diff.
+        // Restart: the store carries A home as Changes.
         let disk = crate::sessions::read();
         assert_eq!(
             disk.get("sess-a").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -5249,10 +5277,10 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
-        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Diff after restart");
+        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Changes after restart");
         assert_eq!(
             vc.update(|_, cx| baaz2.read(cx).layout.right_kind),
-            Some(crate::layout::RightKind::Diff)
+            Some(crate::layout::RightKind::Changes)
         );
         // A brand-new session starts closed.
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-c".to_owned(), window, cx)));
@@ -5324,7 +5352,7 @@ mod tests {
     }
 
     /// R1: the file tree's Refresh action performs a real re-read. Opening the
-    /// pane on Files requests one through `show_right`, and `refresh_files`
+    /// pane on Files requests one through `select_right`, and `refresh_files`
     /// — what the pane's Refresh action calls — requests another; both land
     /// the listing in the cache after the background task drains.
     #[gpui::test]
@@ -5336,7 +5364,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+            baaz.update(cx, |harness, cx| harness.select_right(crate::layout::RightKind::Files, cx))
         });
         vc.run_until_parked();
         let root = vc
@@ -5374,7 +5402,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
+            baaz.update(cx, |harness, cx| harness.select_right(crate::layout::RightKind::Files, cx))
         });
         vc.run_until_parked();
         let root = vc

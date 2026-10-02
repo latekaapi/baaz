@@ -390,10 +390,9 @@ pub enum Command {
     Skills,
     /// Show the browser in the right pane.
     RightBrowser,
-    /// Review the diff in the right pane.
-    RightDiff,
-    /// Show git changes and the PR form.
-    RightGit,
+    /// Show this session's edits and the working-tree changes in the
+    /// right pane. `/diff` stays as an alias (see [`Command::parse`]).
+    RightChanges,
     /// Show the file tree in the right pane.
     RightFiles,
     /// Toggle the terminal dock.
@@ -405,10 +404,10 @@ pub enum Command {
 impl Command {
     /// Every command, in the order the menu lists them.
     ///
-    /// The six window-level commands sit together just before `Help`: the
-    /// four right-pane commands as one group, then the two terminal commands
+    /// The five window-level commands sit together just before `Help`: the
+    /// three right-pane commands as one group, then the two terminal commands
     /// as another, with `Help` still closing the list.
-    pub const ALL: [Command; 25] = [
+    pub const ALL: [Command; 24] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -427,8 +426,7 @@ impl Command {
         Command::Empty,
         Command::Logout,
         Command::RightBrowser,
-        Command::RightDiff,
-        Command::RightGit,
+        Command::RightChanges,
         Command::RightFiles,
         Command::Terminal,
         Command::NewTerminalCmd,
@@ -458,8 +456,7 @@ impl Command {
             Command::Logout => "/logout",
             Command::Help => "/help",
             Command::RightBrowser => "/browser",
-            Command::RightDiff => "/diff",
-            Command::RightGit => "/changes",
+            Command::RightChanges => "/changes",
             Command::RightFiles => "/files",
             Command::Terminal => "/terminal",
             Command::NewTerminalCmd => "/new-terminal",
@@ -489,8 +486,7 @@ impl Command {
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
             Command::RightBrowser => "Show the browser in the right pane",
-            Command::RightDiff => "Review the diff in the right pane",
-            Command::RightGit => "Show git changes and the PR form",
+            Command::RightChanges => "Show session edits and working-tree changes in the right pane",
             Command::RightFiles => "Show the file tree in the right pane",
             Command::Terminal => "Toggle the terminal dock",
             Command::NewTerminalCmd => "Open a new terminal tab",
@@ -498,9 +494,22 @@ impl Command {
         }
     }
 
-    /// Parse a typed slash command.
+    /// Parse a typed slash command. `/diff` stays as an alias of
+    /// `/changes` (B8): the merged view answers both.
     pub fn parse(text: &str) -> Option<Command> {
+        if text == "/diff" {
+            return Some(Command::RightChanges);
+        }
         Command::ALL.into_iter().find(|c| c.slash() == text)
+    }
+
+    /// Retired slash spellings that still resolve: the palette filter in
+    /// `dialogs.rs` matches these too, so `/diff` stays discoverable.
+    pub fn aliases(&self) -> &'static [&'static str] {
+        match self {
+            Command::RightChanges => &["/diff"],
+            _ => &[],
+        }
     }
 
     /// Parse a whole typed line into a command and whatever followed it.
@@ -675,12 +684,20 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
-        assert_eq!(Command::ALL.len(), 25, "the palette lists every command");
+        assert_eq!(Command::ALL.len(), 24, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
             assert_eq!(Command::parse_line(command.slash()), Some((command, "")));
         }
         assert_eq!(Command::parse("/nope"), None);
+    }
+
+    /// B8: `/diff` stays as an alias of `/changes`.
+    #[test]
+    fn diff_stays_an_alias_of_changes() {
+        assert_eq!(Command::parse("/diff"), Some(Command::RightChanges));
+        assert_eq!(Command::parse_line("/diff"), Some((Command::RightChanges, "")));
+        assert_eq!(Command::RightChanges.slash(), "/changes");
     }
 
     fn walk_with(paths: &[&str]) -> crate::files::WalkResult {
