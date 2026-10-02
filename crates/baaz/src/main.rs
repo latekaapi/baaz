@@ -683,6 +683,26 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
         .update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, cx| {
                 crate::tier::cleanup_probes();
+                // B7fix2: the red dot hides the app rather than quitting,
+                // but up to 750 ms of debounced pane state still lands
+                // first — the hidden window must come back to its pane.
+                for any in cx.windows() {
+                    let _ = any
+                        .downcast::<Root>()
+                        .and_then(|handle| {
+                            handle
+                                .update(cx, |root, _, cx| {
+                                    root.view()
+                                        .clone()
+                                        .downcast::<crate::app::Harness>()
+                                        .map(|harness| {
+                                            harness.update(cx, |this, _| this.flush_right_save())
+                                        })
+                                        .unwrap_or(())
+                                })
+                                .ok()
+                        });
+                }
                 cx.hide();
                 false
             });
@@ -752,9 +772,30 @@ fn main() {
         crate::log::boot_mark("window-open-requested");
         let (handle, capture) = open_shell_window(&args, cx);
         crate::log::boot_mark("window-shown");
-        cx.on_app_quit(|_| async {
-            crate::tier::cleanup_probes();
-            crate::browser::cleanup_screenshots();
+        cx.on_app_quit(|cx| {
+            // B7fix2: a quit that bypasses the menu's `QuitApp` (the Dock,
+            // a signal-driven quit) still lands pending pane state first.
+            for any in cx.windows() {
+                let _ = any
+                    .downcast::<Root>()
+                    .and_then(|handle| {
+                        handle
+                            .update(cx, |root, _, cx| {
+                                root.view()
+                                    .clone()
+                                    .downcast::<crate::app::Harness>()
+                                    .map(|harness| {
+                                        harness.update(cx, |this, _| this.flush_right_save())
+                                    })
+                                    .unwrap_or(())
+                            })
+                            .ok()
+                    });
+            }
+            async {
+                crate::tier::cleanup_probes();
+                crate::browser::cleanup_screenshots();
+            }
         })
         .detach();
         match screenshot {

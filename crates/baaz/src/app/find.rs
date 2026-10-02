@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[cfg(test)]
+static SEARCH_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Harness {
     /// Open the full-text search palette and put the keyboard in its query.
     ///
@@ -225,13 +228,35 @@ impl Harness {
         out
     }
 
+    /// How many times [`Self::rebuild_search_index`] ran in this process.
+    /// Test builds only: the B7 pane-toggle test resets it, toggles, and
+    /// asserts it stays put — right-pane state is not searchable, so a
+    /// toggle must never rebuild.
+    #[cfg(test)]
+    pub(crate) fn search_rebuild_count() -> usize {
+        SEARCH_REBUILDS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Zero [`Self::search_rebuild_count`]; see above.
+    #[cfg(test)]
+    pub(crate) fn reset_search_rebuild_count() {
+        SEARCH_REBUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Rebuild the session half of `search.db` off the UI thread.
     ///
     /// Runs at boot and after each index refresh; the files half is never
     /// touched here, so recorded files survive a rebuild. When the rebuild
     /// lands while the palette is open, the open query runs again against
     /// the fresh index.
+    ///
+    /// Never runs for right-pane state (open/kind/width, Files
+    /// expand/collapse/select, browser navigations): that state is not
+    /// searchable, so those paths persist through the cheap debounced write
+    /// instead (see [`Self::schedule_overrides_write`]).
     pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        SEARCH_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let at = std::time::Instant::now();
         let rows = self.search_session_rows();
         crate::log::boot_mark(&format!(

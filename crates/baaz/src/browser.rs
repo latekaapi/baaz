@@ -301,6 +301,7 @@ impl Harness {
         let fresh_blank = initial == BLANK;
         // Explicit boot flag, never environment sniffed in render: captures
         // and tests run the scripted page, the app runs WKWebView.
+        self.browser_builds += 1;
         let fake = self.browser.fake || cfg!(test);
         let state = cx.new(|cx| {
             if fake {
@@ -338,6 +339,92 @@ impl Harness {
         state
     }
 
+    /// The live webview for the key the pane shows, when one already
+    /// exists — never creating. The closing frame uses this: the page's
+    /// last snapshot stays on screen while the column slides out instead
+    /// of the "Opening the page" placeholder (B7).
+    pub(crate) fn existing_browser(&self, cx: &gpui::App) -> Option<Entity<WebviewState>> {
+        let key = self.browser_key(cx);
+        if key == HOME_KEY {
+            self.browser.home.clone()
+        } else {
+            self.browser.states.get(&key).cloned()
+        }
+    }
+
+    /// Prepare the active session's webview ahead of the pane animating
+    /// (B7): `toggle_right`/`show_right` call this when they land open on
+    /// Browser, so the opening frame shows the page instead of paying the
+    /// construction cost inside `render`. Only the scripted backend can be
+    /// prepared without a window — see [`Self::prewarm_browser_in`] for the
+    /// real webview, which the windowed open paths build instead. Never
+    /// focuses: focus rides only on the person's own open through
+    /// [`Self::ensure_browser_person`].
+    pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+            return;
+        }
+        if !(self.browser.fake || cfg!(test)) {
+            return;
+        }
+        let key = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx).session_id.clone())
+            .unwrap_or_else(|| HOME_KEY.to_owned());
+        if key == HOME_KEY {
+            if self.browser.home.is_some() {
+                return;
+            }
+        } else if self.browser.states.contains_key(&key) {
+            return;
+        }
+        let stored = if key == HOME_KEY {
+            None
+        } else {
+            self.overrides.get(&key).and_then(|meta| meta.right.clone()).and_then(|right| right.browser_url)
+        };
+        let initial = initial_url(stored.as_deref()).to_owned();
+        self.browser_builds += 1;
+        let state = cx.new(|cx| {
+            let mut backend = FakeWebBackend::new();
+            if backend.url().as_ref() != initial.as_str() {
+                backend.navigate(&initial);
+            }
+            WebviewState::new(Box::new(backend), cx)
+        });
+        if key == HOME_KEY {
+            self.browser.home = Some(state.clone());
+        } else {
+            self.browser.states.insert(key.clone(), state.clone());
+        }
+        self.terminal_service.register_browser(&key, state);
+    }
+
+    /// Build the real webview outside `render` (B7fix2): the open action's
+    /// own construction, with the window in hand — the shipped app's
+    /// WKWebView, the scripted page in tests and captures. Callers are the
+    /// click/key handlers that land open on Browser, the deferred warmup
+    /// behind [`crate::app::Harness::defer_browser_prewarm`], and the first
+    /// signed-in frame. Never more than one webview per session (an
+    /// existing one is reused), never focused: focus rides only on the
+    /// person's own open through [`Self::ensure_browser_person`].
+    pub(crate) fn prewarm_browser_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+            return;
+        }
+        let key = self.browser_key(cx);
+        let exists = if key == HOME_KEY {
+            self.browser.home.is_some()
+        } else {
+            self.browser.states.contains_key(&key)
+        };
+        if exists {
+            return;
+        }
+        let _ = self.browser_for(&key, false, window, cx);
+    }
+
     /// The webview the pane shows this frame, creating it on first use.
     /// The caller gates on pane-open-on-Browser, so activation, boot and
     /// every other kind never create a webview as a side effect; the
@@ -352,7 +439,23 @@ impl Harness {
     ) -> Entity<WebviewState> {
         let focus = std::mem::take(&mut self.browser_url_focus_armed);
         let key = self.browser_key(cx);
-        self.browser_for(&key, focus, window, cx)
+        // B7fix: the toggle prewarms the webview before the frame, so the
+        // creation-time focus inside `browser_for` no longer fires on a
+        // by-hand open — the state already exists by render. Honor the armed
+        // focus on the prewarmed blank page here instead. Restores never arm
+        // it, so they still leave the composer's keyboard alone, and an
+        // armed open onto a navigated page still does not steal focus.
+        let existed = if key == HOME_KEY {
+            self.browser.home.is_some()
+        } else {
+            self.browser.states.contains_key(&key)
+        };
+        let state = self.browser_for(&key, focus, window, cx);
+        if focus && existed && state.read(cx).url().to_string() == BLANK {
+            let focus_handle = state.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+        }
+        state
     }
 
     /// `browse:<url>`: navigate the active (or home) browser, idempotently —
@@ -476,16 +579,10 @@ impl Harness {
                 .get(&key)
                 .and_then(|meta| meta.right.clone())
                 .and_then(|right| right.browser_url);
+            // B7: a navigation is not searchable, so it persists through
+            // the cheap debounced write — never the session-list settle.
             if should_remember(&current, stored.as_deref()) {
-                self.set_override(
-                    &key,
-                    |meta| {
-                        let mut right = meta.right.clone().unwrap_or_default();
-                        right.browser_url = Some(current.clone());
-                        meta.right = Some(right);
-                    },
-                    cx,
-                );
+                self.remember_browser_url_cheap(&key, current, cx);
             }
         }
         // A Screenshot whose bytes were not there yet attaches on arrival.
