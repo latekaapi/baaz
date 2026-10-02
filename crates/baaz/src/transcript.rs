@@ -26,9 +26,10 @@ use aui::transcript::{
     ToolCardAction, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
 };
 use aui_protocol::{
-    ActivityState, Answer, Block, Diff, DiffKind, DiffLine, Hunk, MarkerKind, PlanSection,
-    PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, Turn, TurnMeta,
+    ActivityState, Answer, Block, Diff, DiffKind, DiffLine, HandoffState, Hunk, MarkerKind,
+    PlanSection, PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, Turn, TurnMeta,
 };
+use crate::handoff::{SummaryKind, handoff_card_started_ms, handoff_steps};
 use crate::terminal::{RunRequest, send_enter_for_alt};
 use aui_tokens::scale;
 use aui_icons::IconName;
@@ -997,9 +998,18 @@ fn block(
     }
 }
 
-/// One handoff card: the move's state, what the pack carried and what it
-/// left behind, and the two intents the card raises ("Open the new
-/// session", "Cancel"). Read-only without [`Folds::handoff`].
+/// One handoff card: the move's state, its progress steps, what the pack
+/// carried and what it left behind, and the two intents the card raises
+/// ("Open the new session", "Cancel"). Read-only without [`Folds::handoff`].
+///
+/// The protocol card carries no step list, so the steps re-derive here
+/// from the block's own fields through [`handoff_steps`]: the same
+/// mapping [`crate::handoff::HandoffRun::steps`] uses. The wait reads off
+/// the Checkpointed shape (extractive kind, no destination yet); the
+/// current step's elapsed counter reads the run's age off the card id's
+/// creation stamp against this frame's clock, so it ticks on any
+/// re-render — a stamp-less id simply shows no counter. Every step row
+/// already carries its role and label from the library.
 fn handoff_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement {
     let Block::Handoff {
         id: handoff_id,
@@ -1016,11 +1026,38 @@ fn handoff_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElement
     else {
         return div().into_any_element();
     };
+    let summary_kind = carried
+        .first()
+        .and_then(|item| item.detail.as_deref())
+        .and_then(|detail| {
+            if detail == SummaryKind::Model.label() {
+                Some(SummaryKind::Model)
+            } else if detail == SummaryKind::Extractive.label() {
+                Some(SummaryKind::Extractive)
+            } else {
+                None
+            }
+        });
+    let waiting = matches!(state, HandoffState::Checkpointed)
+        && !matches!(summary_kind, Some(SummaryKind::Model))
+        && destination_session.is_none();
+    let elapsed = handoff_card_started_ms(handoff_id)
+        .map(|started| folds.now_ms.saturating_sub(started) / 1000);
+    let steps = handoff_steps(
+        state,
+        *to,
+        summary_kind,
+        waiting,
+        destination_session.is_some(),
+        !carried.is_empty(),
+        elapsed,
+    );
     let card = handoff_card(id, *from, *to, to_model.clone(), state.clone())
         .from_model(from_model.clone())
         .carried(carried.clone())
         .lost(lost.clone())
         .pack_tokens(*pack_tokens)
+        .steps(steps)
         .destination_session(destination_session.clone());
     let Some(handoff) = &folds.handoff else { return card.into_any_element() };
     let (open, cancel) = (handoff.open.clone(), handoff.cancel.clone());

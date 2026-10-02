@@ -12,6 +12,10 @@
 //! [`Harness`](crate::app::Harness) owns one [`HandoffRun`] per source
 //! session plus the owner-epoch counter that fences stale acks.
 
+use std::collections::HashMap;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use aui::transcript::{HandoffStep, HandoffStepState, default_handoff_steps};
 use aui_protocol::{Block, HandoffItem, HandoffState, Session, TodoState, Turn};
 
 use crate::providers::ProviderId;
@@ -496,18 +500,26 @@ pub struct HandoffRun {
     pub from_model: String,
     /// Model label the destination starts with.
     pub to_model: String,
-    /// The card's block id in the source transcript.
+    /// The card's block id in the source transcript. Mints through
+    /// [`handoff_card_id`], so it stamps its own creation wall-ms — the
+    /// run-age basis for the current step's elapsed counter, read back
+    /// with [`handoff_card_started_ms`] (the protocol card carries no
+    /// timestamps). Opaque everywhere else: cancel matches it by
+    /// equality, and snapshots strip the card.
     pub card_id: String,
+    /// When the request ran: the run-age basis for [`HandoffRun::steps`].
+    pub started_at: Instant,
     /// Where the move is.
     pub state: HandoffState,
     /// The pack, from Checkpointed on.
     pub pack: Option<ContextPack>,
     /// A model-written summary is in flight for the checkpointed pack:
-    /// the card's summary line reads "Summarising…" until the side
-    /// session answers, the watchdog keeps the extractive text, or the
-    /// destination lands (which stands the wait down: the submitted pack
-    /// is already the extractive one). Every transition out of the wait
-    /// clears this, so a settled card never reads "Summarising…".
+    /// the summary step reads Current (with its elapsed counter) until
+    /// the side session answers, the watchdog keeps the extractive
+    /// text, or the destination lands (which stands the wait down: the
+    /// submitted pack is already the extractive one). Every transition
+    /// out of the wait clears this. The carried row always names the
+    /// kind the pack carries — never the wait.
     pub summarising: bool,
     /// The destination's pack turn has reached its terminal state and been
     /// judged, once. Until then a failed pack turn fails the move in any
@@ -550,7 +562,8 @@ impl HandoffRun {
             return Err(HandoffRefusal::TurnUninterruptible);
         }
         Ok(Self {
-            card_id: format!("handoff-{}", nanoid()),
+            card_id: handoff_card_id(),
+            started_at: Instant::now(),
             state: HandoffState::Requested,
             source_session,
             epoch,
@@ -577,7 +590,8 @@ impl HandoffRun {
         refusal: HandoffRefusal,
     ) -> Self {
         Self {
-            card_id: format!("handoff-{}", nanoid()),
+            card_id: handoff_card_id(),
+            started_at: Instant::now(),
             state: HandoffState::Refused { reason: refusal.to_string() },
             source_session,
             epoch,
@@ -610,8 +624,8 @@ impl HandoffRun {
     }
 
     /// A model-written summary started for the checkpointed pack: the run
-    /// stays Checkpointed, and the card reads "Summarising…" until the
-    /// summary resolves.
+    /// stays Checkpointed, and the summary step reads Current (with its
+    /// elapsed counter) until the summary resolves.
     pub fn note_summary_pending(&mut self) {
         if matches!(self.state, HandoffState::Checkpointed) {
             self.summarising = true;
@@ -661,8 +675,8 @@ impl HandoffRun {
 
     /// The destination's first `TurnStarted` (or submit ack) under `epoch`.
     /// A stale epoch is ignored — returns `false` and changes nothing.
-    /// Acknowledging also stands a stuck summary wait down, so the card
-    /// never keeps reading "Summarising…" past this point.
+    /// Acknowledging also stands a stuck summary wait down, so the
+    /// summary step never stays Current past this point.
     pub fn acknowledge(&mut self, epoch: u64) -> bool {
         if epoch != self.epoch {
             return false;
@@ -677,7 +691,7 @@ impl HandoffRun {
 
     /// The fresh session runs on the destination; the source retires.
     /// Stands a stuck summary wait down, like every transition out of
-    /// the waiting states.
+    /// the waiting states. Settled cards hide the step list again.
     pub fn activate(&mut self) {
         if matches!(self.state, HandoffState::Acknowledged) {
             self.summarising = false;
@@ -686,8 +700,8 @@ impl HandoffRun {
     }
 
     /// A step failed: the source stays usable, the card names the reason.
-    /// Stands a stuck summary wait down, so the Failed card names the
-    /// extractive summary it carries.
+    /// Stands a stuck summary wait down. The failed step carries the
+    /// reason (see [`handoff_steps`]).
     pub fn fail(&mut self, reason: String) {
         if !matches!(self.state, HandoffState::Activated | HandoffState::Cancelled) {
             self.summarising = false;
@@ -734,7 +748,7 @@ impl HandoffRun {
     /// destination was already opened, so the caller can shut it down.
     /// After Acknowledged the move is done and cancel is a no-op `false`.
     /// Cancelling during a summary wait also stands the wait down, so the
-    /// card stops reading "Summarising…" and a late side-session answer
+    /// summary step stops reading Current and a late side-session answer
     /// lands on nothing.
     pub fn cancel(&mut self) -> bool {
         if self.cancellable() {
@@ -758,24 +772,48 @@ impl HandoffRun {
         )
     }
 
-    /// The card block for the current state. While a model-written
-    /// summary is in flight the summary line reads "Summarising…";
-    /// otherwise it names the kind the pack carries. Settled states
-    /// never read "Summarising…": every transition out of the wait
-    /// clears the flag, and the state gate below holds even a stuck
-    /// one down.
+    /// Whether the move is still in flight: Requested through
+    /// Acknowledged. Settled runs (Activated, Cancelled, Refused,
+    /// Failed) own no per-second re-render — see [`handoff_tick_wanted`].
+    pub fn is_live(&self) -> bool {
+        matches!(
+            self.state,
+            HandoffState::Requested
+                | HandoffState::Quiescing
+                | HandoffState::Checkpointed
+                | HandoffState::Prepared
+                | HandoffState::Acknowledged
+        )
+    }
+
+    /// The card's progress steps: the library's four defaults with this
+    /// run's states marked (see [`handoff_steps`], the mapping the
+    /// transcript shares from the block alone). The current step carries
+    /// the run's age (`"n s"`); a refused run stays all pending —
+    /// nothing started, so the state line and the pill carry the reason.
+    pub fn steps(&self) -> Vec<HandoffStep> {
+        handoff_steps(
+            &self.state,
+            wire_provider(self.to),
+            self.pack.as_ref().map(|pack| pack.summary_kind),
+            self.summarising,
+            self.destination_session.is_some(),
+            self.pack.is_some(),
+            Some(self.started_at.elapsed().as_secs()),
+        )
+    }
+
+    /// The card block for the current state. The progress steps ride the
+    /// view card, not this block (the protocol has no step list): the
+    /// transcript re-derives them from the block's own fields with
+    /// [`handoff_steps`]. The first carried row always names the kind
+    /// the pack carries — never the wait: while a model-written summary
+    /// is in flight the summary step reads Current, not the carried text.
     pub fn card(&self) -> Block {
-        let (mut carried, lost, tokens) = match &self.pack {
+        let (carried, lost, tokens) = match &self.pack {
             Some(pack) => (carried_items(pack), lost_items(), Some(pack.tokens)),
             None => (Vec::new(), lost_items(), None),
         };
-        if self.summarising
-            && matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared)
-        {
-            if let Some(first) = carried.first_mut() {
-                first.detail = Some("Summarising…".to_owned());
-            }
-        }
         Block::Handoff {
             id: self.card_id.clone(),
             from: wire_provider(self.from),
@@ -789,6 +827,129 @@ impl HandoffRun {
             destination_session: self.destination_session.clone(),
         }
     }
+}
+
+/// Whether any run is still in flight: the per-second card refresh
+/// (which is what ticks the current step's elapsed counter) runs only
+/// while this holds, and no timer is armed otherwise.
+pub fn handoff_tick_wanted(handoffs: &HashMap<String, HandoffRun>) -> bool {
+    handoffs.values().any(HandoffRun::is_live)
+}
+
+/// Mark the library's four default steps from a run's state — the one
+/// mapping both [`HandoffRun::steps`] and the transcript's card build
+/// share (the protocol card carries no step list, so the transcript
+/// re-derives the same steps from the block's own fields).
+///
+/// `summary_kind` is the pack's kind once checkpointed (`None` before);
+/// `waiting_summary` is the summary side session still being awaited;
+/// `elapsed_secs` details the one current step (`"n s"`), when the
+/// caller knows a basis for it. The failed step carries the reason;
+/// refused stays all pending (nothing started).
+#[allow(clippy::too_many_arguments)]
+pub fn handoff_steps(
+    state: &HandoffState,
+    to: aui_protocol::Provider,
+    summary_kind: Option<SummaryKind>,
+    waiting_summary: bool,
+    has_destination: bool,
+    has_pack: bool,
+    elapsed_secs: Option<u64>,
+) -> Vec<HandoffStep> {
+    let mut steps = default_handoff_steps(to);
+    let current = elapsed_secs.map(|secs| format!("{secs} s"));
+    let summary_settled = |steps: &mut Vec<HandoffStep>| {
+        steps[1].state = match summary_kind {
+            Some(SummaryKind::Model) => HandoffStepState::Done,
+            _ => HandoffStepState::Skipped,
+        };
+    };
+    match state {
+        HandoffState::Requested | HandoffState::Quiescing => {
+            steps[0].state = HandoffStepState::Current;
+            steps[0].detail = current;
+        }
+        HandoffState::Checkpointed => {
+            steps[0].state = HandoffStepState::Done;
+            match summary_kind {
+                Some(SummaryKind::Model) => steps[1].state = HandoffStepState::Done,
+                _ if waiting_summary => {
+                    steps[1].state = HandoffStepState::Current;
+                    steps[1].detail = current;
+                }
+                Some(SummaryKind::Extractive) => steps[1].state = HandoffStepState::Skipped,
+                None => steps[1].state = HandoffStepState::Pending,
+            }
+        }
+        HandoffState::Prepared | HandoffState::Acknowledged => {
+            // Landing stands the summary wait down: the submitted pack is
+            // fixed, so extractive reads skipped from here on.
+            steps[0].state = HandoffStepState::Done;
+            summary_settled(&mut steps);
+            steps[2].state = HandoffStepState::Done;
+            steps[3].state = HandoffStepState::Current;
+            steps[3].detail = current;
+        }
+        HandoffState::Activated => {
+            // Settled cards hide the list again (the library's call), but
+            // the mapping stays total either way.
+            steps[0].state = HandoffStepState::Done;
+            summary_settled(&mut steps);
+            steps[2].state = HandoffStepState::Done;
+            steps[3].state = HandoffStepState::Done;
+        }
+        HandoffState::Cancelled => {
+            // A cancelled move never reads as complete: what ran stays
+            // done, what never happened reads skipped.
+            steps[0].state = HandoffStepState::Done;
+            summary_settled(&mut steps);
+            steps[2].state = if has_destination { HandoffStepState::Done } else { HandoffStepState::Skipped };
+            steps[3].state = HandoffStepState::Skipped;
+        }
+        HandoffState::Failed { reason } => {
+            summary_settled(&mut steps);
+            if has_destination {
+                // The pack turn failed after the open: <To> never confirmed.
+                steps[0].state = HandoffStepState::Done;
+                steps[2].state = HandoffStepState::Done;
+                steps[3].state = HandoffStepState::Failed;
+                steps[3].detail = Some(reason.clone());
+            } else if has_pack {
+                // The destination never opened.
+                steps[0].state = HandoffStepState::Done;
+                steps[2].state = HandoffStepState::Failed;
+                steps[2].detail = Some(reason.clone());
+            } else {
+                // Nothing to hand off, or the request never started it.
+                steps[0].state = HandoffStepState::Failed;
+                steps[0].detail = Some(reason.clone());
+            }
+        }
+        HandoffState::Refused { .. } => {}
+    }
+    steps
+}
+
+/// A card id that stamps its own creation wall-ms: `handoff-<rand>-<ms>`.
+/// The [`Block::Handoff`] card carries no timestamps, so the elapsed
+/// counter on its current step reads this back at render time with
+/// [`handoff_card_started_ms`] against the frame clock.
+fn handoff_card_id() -> String {
+    let ms =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    format!("handoff-{}-{ms}", nanoid())
+}
+
+/// The run-age basis a card id stamps: `Some(ms)` for ids minted by
+/// [`handoff_card_id`], `None` for the older stamp-less shape (replays
+/// and snapshots from before it) — those cards show no counter.
+pub fn handoff_card_started_ms(card_id: &str) -> Option<u64> {
+    let rest = card_id.strip_prefix("handoff-")?;
+    let (_, ms) = rest.rsplit_once('-')?;
+    if ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    ms.parse().ok()
 }
 
 fn push_unique(out: &mut Vec<String>, item: String) {
@@ -1096,6 +1257,195 @@ mod tests {
     }
 
     #[test]
+    fn steps_follow_the_run_from_request_to_activation() {
+        let mut run = run();
+        // The labels are the library's four defaults, naming the destination.
+        let expected = default_handoff_steps(wire_provider(ProviderId::Codex));
+        let steps = run.steps();
+        let labels: Vec<&str> = steps.iter().map(|step| step.label.as_str()).collect();
+        assert_eq!(labels[0], "Pack the context");
+        assert_eq!(labels[1], "Write a summary");
+        assert_eq!(labels[2], expected[2].label.as_str());
+        assert_eq!(labels[3], expected[3].label.as_str());
+        // Requested: packing now, with the run's age on it.
+        let states = |run: &HandoffRun| run.steps().iter().map(|step| step.state).collect::<Vec<_>>();
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Current,
+                HandoffStepState::Pending,
+                HandoffStepState::Pending,
+                HandoffStepState::Pending,
+            ]
+        );
+        assert_eq!(run.steps()[0].detail.as_deref(), Some("0 s"));
+        run.note_quiescing();
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Current,
+                HandoffStepState::Pending,
+                HandoffStepState::Pending,
+                HandoffStepState::Pending,
+            ]
+        );
+        // Checkpointed with no summary wait: the model summary is skipped.
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Done,
+                HandoffStepState::Skipped,
+                HandoffStepState::Pending,
+                HandoffStepState::Pending,
+            ]
+        );
+        // Prepared: the destination is open, waiting on its confirm.
+        run.note_prepared("dst".to_owned());
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Done,
+                HandoffStepState::Skipped,
+                HandoffStepState::Done,
+                HandoffStepState::Current,
+            ]
+        );
+        assert_eq!(run.steps()[3].detail.as_deref(), Some("0 s"));
+        // Acknowledged, then activated: the confirm lands, then all done.
+        assert!(run.acknowledge(7));
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Done,
+                HandoffStepState::Skipped,
+                HandoffStepState::Done,
+                HandoffStepState::Current,
+            ]
+        );
+        run.activate();
+        assert_eq!(
+            states(&run),
+            vec![
+                HandoffStepState::Done,
+                HandoffStepState::Skipped,
+                HandoffStepState::Done,
+                HandoffStepState::Done,
+            ]
+        );
+        assert!(run.steps().iter().all(|step| step.detail.is_none()), "settled steps carry no counter");
+    }
+
+    #[test]
+    fn steps_fail_at_start_names_the_pack_step() {
+        let mut run = run();
+        run.note_quiescing();
+        run.fail("nothing to hand off — the session has no turns".to_owned());
+        let steps = run.steps();
+        assert!(matches!(steps[0].state, HandoffStepState::Failed));
+        assert_eq!(
+            steps[0].detail.as_deref(),
+            Some("nothing to hand off — the session has no turns"),
+            "the failed step carries the reason"
+        );
+        assert!(
+            !steps.iter().any(|step| matches!(step.state, HandoffStepState::Current)),
+            "nothing is left Current on a dead card"
+        );
+    }
+
+    #[test]
+    fn steps_fail_at_the_pack_turn_names_the_confirm_step() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_prepared("dst".to_owned());
+        assert!(run.acknowledge(7));
+        run.activate();
+        run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
+        assert!(matches!(run.state, HandoffState::Failed { .. }));
+        let steps = run.steps();
+        assert_eq!(
+            (steps[0].state, steps[1].state, steps[2].state),
+            (HandoffStepState::Done, HandoffStepState::Skipped, HandoffStepState::Done)
+        );
+        assert!(matches!(steps[3].state, HandoffStepState::Failed));
+        assert_eq!(
+            steps[3].detail.as_deref(),
+            Some("model `gpt-6-astra` does not exist or you lack access"),
+            "the failed step carries the reason"
+        );
+    }
+
+    #[test]
+    fn steps_show_the_summary_waited_or_skipped() {
+        // Skipped: checkpointed with no wait — no model summary is used.
+        let mut skipped = run();
+        skipped.note_quiescing();
+        skipped.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        assert!(matches!(skipped.steps()[1].state, HandoffStepState::Skipped));
+        assert_eq!(skipped.steps()[1].detail, None);
+        // Waited: the summary step is Current with its elapsed counter…
+        let mut waited = run();
+        waited.note_quiescing();
+        waited.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        waited.note_summary_pending();
+        assert!(matches!(waited.steps()[1].state, HandoffStepState::Current));
+        assert_eq!(waited.steps()[1].detail.as_deref(), Some("0 s"));
+        // …while the carried row still names the kind, never the wait.
+        if let Block::Handoff { carried, .. } = waited.card() {
+            assert_eq!(carried[0].detail.as_deref(), Some("extractive summary"));
+        } else {
+            panic!("not a handoff card");
+        }
+        // Harvested before landing: the step reads done.
+        waited.apply_model_summary("Did X. Decided Y.".to_owned());
+        assert!(matches!(waited.steps()[1].state, HandoffStepState::Done));
+        // Landed without a summary: skipped from here on.
+        let mut landed = run();
+        landed.note_quiescing();
+        landed.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        landed.note_prepared("dst".to_owned());
+        assert!(matches!(landed.steps()[1].state, HandoffStepState::Skipped));
+    }
+
+    #[test]
+    fn no_tick_is_wanted_when_no_run_is_in_flight() {
+        let empty: HashMap<String, HandoffRun> = HashMap::new();
+        assert!(!handoff_tick_wanted(&empty), "no runs, no timer");
+        let mut settled: HashMap<String, HandoffRun> = HashMap::new();
+        let mut done = run();
+        done.note_quiescing();
+        done.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        done.note_prepared("dst".to_owned());
+        assert!(done.acknowledge(7));
+        done.activate();
+        settled.insert("a".to_owned(), done);
+        let mut cancelled = run();
+        cancelled.note_quiescing();
+        assert!(!cancelled.cancel());
+        settled.insert("b".to_owned(), cancelled);
+        assert!(!handoff_tick_wanted(&settled), "settled runs own no timer");
+        let mut live: HashMap<String, HandoffRun> = HashMap::new();
+        live.insert("c".to_owned(), run());
+        assert!(handoff_tick_wanted(&live), "a requested run ticks");
+    }
+
+    #[test]
+    fn card_ids_carry_their_creation_time() {
+        let id = run().card_id;
+        let started = handoff_card_started_ms(&id).expect("fresh ids stamp their creation");
+        let now =
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        assert!(started <= now && now - started < 60_000, "the stamp reads wall-ms");
+        assert_eq!(
+            handoff_card_started_ms("handoff-deadbeef"),
+            None,
+            "stamp-less ids show no counter"
+        );
+    }
+
+    #[test]
     fn a_harvested_summary_replaces_the_extractive_one() {
         let mut run = run();
         run.note_quiescing();
@@ -1130,14 +1480,15 @@ mod tests {
     }
 
     #[test]
-    fn a_timeout_keeps_the_extractive_summary_and_says_so() {
+    fn a_timeout_keeps_the_extractive_summary() {
         let mut run = run();
         run.note_quiescing();
         run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
         run.note_summary_pending();
         let waiting = run.card();
         if let Block::Handoff { carried, .. } = waiting {
-            assert_eq!(carried[0].detail.as_deref(), Some("Summarising…"));
+            // The wait lives on the summary step now, never the carried row.
+            assert_eq!(carried[0].detail.as_deref(), Some("extractive summary"));
         } else {
             panic!("not a handoff card");
         }
@@ -1537,4 +1888,17 @@ mod tests {
         });
         assert!(refused.is_err(), "a shut destination answers nothing");
     }
+
+#[cfg(test)]
+mod cancelled_steps_tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_move_never_reads_complete() {
+        let steps = handoff_steps(&HandoffState::Cancelled, aui_protocol::Provider::Codex, Some(SummaryKind::Extractive), false, false, true, None);
+        assert_eq!(steps[3].state, HandoffStepState::Skipped);
+        assert_eq!(steps[2].state, HandoffStepState::Skipped);
+    }
+}
+
 }
