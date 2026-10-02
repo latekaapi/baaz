@@ -76,6 +76,14 @@ impl ProviderId {
         }
     }
 
+    /// The key this provider's per-project model/effort defaults live under
+    /// in [`crate::projects::ProjectDefaults`]: the canonical wire id, so
+    /// every spelling of one backend reads the one stored default and a
+    /// pick on one lane never becomes another lane's start model.
+    pub fn defaults_key(self) -> &'static str {
+        self.as_str()
+    }
+
     /// The switcher label: a human name, never the wire id.
     pub fn label(self) -> &'static str {
         match self {

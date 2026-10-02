@@ -87,7 +87,9 @@ impl SessionView {
         let selected = match kind {
             MenuKind::Model => {
                 self.load_models(cx);
-                self.models.iter().position(|m| m.is_active).unwrap_or(0)
+                // The check follows the chip, not the catalog's active
+                // flag: `model_menu_checked` names the row, or no row.
+                self.model_menu_checked().unwrap_or(self.models.len())
             }
             MenuKind::Effort => match self.effort_options() {
                 EffortOptions::Unavailable(_) => 0,
@@ -236,6 +238,20 @@ impl SessionView {
         self.set_model(model_id, cx);
         cx.emit(SessionEvent::ModelSelected { model_id: model_id.to_owned() });
         self.close_menu(cx);
+    }
+
+    /// The model menu's checked row: the row equal to the chip's
+    /// [`SessionView::model_id`]. `None` when nothing matches — an empty
+    /// chip, or a chip the catalog omits — so the menu checks nothing
+    /// rather than the catalog's `is_active` row (or the first row, before
+    /// any catalog folds). The caller maps `None` past the last row, which
+    /// no row equals, so no check is drawn and the keyboard still wraps.
+    pub(super) fn model_menu_checked(&self) -> Option<usize> {
+        let id = self.model_id();
+        if id.is_empty() {
+            return None;
+        }
+        self.models.iter().position(|m| m.model_id == id)
     }
 
     /// The effort menu's answer for this session: the current provider's

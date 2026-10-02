@@ -1316,6 +1316,41 @@ impl SessionView {
         SharedString::from(label)
     }
 
+    /// This view's cached muse `model/list` ids, for the muse start path:
+    /// what [`crate::projects::muse_start_model`] checks a stored default
+    /// against. A provider lane's catalog is another lane's list and reads
+    /// as nothing here, and a muse view with no catalog yet contributes
+    /// nothing — an empty cache never drops a default.
+    pub(crate) fn cached_muse_catalog_ids(&self) -> Vec<String> {
+        if !crate::providers::uses_legacy_pump(self.provider_kind()) {
+            return Vec::new();
+        }
+        self.models.iter().map(|m| m.model_id.clone()).collect()
+    }
+
+    /// Seed this view's cached muse `model/list` catalog in tests: one row
+    /// per id, so the muse start path's catalog check has rows to read
+    /// without a wire child behind the view.
+    #[cfg(test)]
+    pub(crate) fn seed_test_catalog(&mut self, ids: &[&str]) {
+        self.models = ids
+            .iter()
+            .map(|id| ModelCatalogEntry {
+                context_limit: None,
+                cost: None,
+                description: None,
+                display_label: (*id).to_owned(),
+                is_active: false,
+                is_default: false,
+                model_id: (*id).to_owned(),
+                output_limit: None,
+                profile_id: None,
+                provider_id: "muse".to_owned(),
+                release_date: None,
+            })
+            .collect();
+    }
+
     /// What the muse lane's composer chip reads: the catalog's display
     /// label when a row names the session's model, else the model id
     /// humanised for display — never the bare provider id.
@@ -2909,6 +2944,94 @@ mod tests {
             let chip = view.read(cx).model().to_string();
             assert_eq!(chip, "Muse", "with no model known the chip names the human label");
             assert_ne!(chip, "muse", "the chip never wears the bare provider id");
+        });
+    }
+
+    /// B2: the model menu checks the row the chip names, not the catalog's
+    /// `is_active` row — and checks nothing when the chip names no row.
+    /// The catalog flags row 0 active while the chip reads row 1; the menu
+    /// must check row 1. A chip no row matches leaves every row unchecked.
+    #[gpui::test]
+    fn the_model_menu_checks_the_row_the_chip_names(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = SessionHost {
+                provider_id: "muse".to_owned(),
+                workspace: "/tmp/b2-model-menu".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| SessionView::new("s-b2".to_owned(), None, host, window, cx))
+        });
+        let row = |id: &str, label: &str, active: bool| ModelCatalogEntry {
+            context_limit: None,
+            cost: None,
+            description: None,
+            display_label: label.to_owned(),
+            is_active: active,
+            is_default: false,
+            model_id: id.to_owned(),
+            output_limit: None,
+            profile_id: None,
+            provider_id: "muse".to_owned(),
+            release_date: None,
+        };
+        // The catalog's active row is stale: the chip names row 1.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.models =
+                    vec![row("muse-first", "Muse First", true), row("muse-second", "Muse Second", false)];
+                view.pending_model = Some("muse-second".to_owned());
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).model_id(), "muse-second");
+            assert_eq!(view.read(cx).model().to_string(), "Muse Second");
+            assert_eq!(view.read(cx).model_menu_checked(), Some(1));
+        });
+        // Opening the picker checks the chip's row, not the active one.
+        // (Offline the catalog fetch is a no-op, so the rows above stand.)
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
+        });
+        vc.update(|_, cx| {
+            let selected = view
+                .read(cx)
+                .overlays
+                .read(cx)
+                .menu
+                .as_ref()
+                .filter(|m| m.kind == MenuKind::Model)
+                .map(|m| m.selected);
+            assert_eq!(selected, Some(1), "the menu checks the row the chip names");
+            view.update(cx, |view, cx| view.close_menu(cx));
+        });
+        // A chip no row matches: nothing is checked, never the first row.
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.pending_model = Some("muse-ghost".to_owned());
+            });
+        });
+        vc.update(|_, cx| {
+            assert_eq!(view.read(cx).model_menu_checked(), None);
+        });
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
+        });
+        vc.update(|_, cx| {
+            let selected = view
+                .read(cx)
+                .overlays
+                .read(cx)
+                .menu
+                .as_ref()
+                .filter(|m| m.kind == MenuKind::Model)
+                .map(|m| m.selected);
+            assert_eq!(selected, Some(2), "with no match no row is checked");
         });
     }
 }
