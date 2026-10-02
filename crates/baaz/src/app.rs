@@ -643,6 +643,11 @@ pub struct Harness {
     /// the shell's `resizing` bypass. User toggles never set it, so they
     /// keep animating exactly as today.
     pub(crate) right_snap: bool,
+    /// Generation of the debounced right-pane `sessions.json` write (B7):
+    /// every cheap right-state persist bumps it and arms a delayed
+    /// off-thread write; only the latest generation writes, so quick
+    /// toggles coalesce into one. Never persists.
+    pub(crate) right_save_epoch: u64,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1130,6 +1135,7 @@ impl Harness {
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
+            right_save_epoch: 0,
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -2016,6 +2022,10 @@ impl Harness {
         crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
         self.arm_browser_url_focus();
         layout::write(&self.layout);
+        // B7: the webview is prepared here, on the toggle — never as a
+        // render side effect — so the opening animation's first frame
+        // does not pay the construction cost.
+        self.prewarm_browser_if_needed(cx);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
@@ -2040,6 +2050,8 @@ impl Harness {
         crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
         self.arm_browser_url_focus();
         layout::write(&self.layout);
+        // B7: prepare the webview on the pick, before the pane animates.
+        self.prewarm_browser_if_needed(cx);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
         cx.notify();
@@ -2055,6 +2067,65 @@ impl Harness {
         }
     }
 
+    /// Persist one session's right-pane state without the session-list
+    /// settle (B7): the in-memory override is edited at once, and the
+    /// `sessions.json` write follows debounced off the UI thread. No
+    /// `rejoin`, no `rebuild_search_index` — pane state is not searchable —
+    /// and no synchronous store write on the gesture. Callers notify
+    /// themselves; this only arms the write.
+    pub(crate) fn store_right_state_cheap(
+        &mut self,
+        session_id: &str,
+        state: crate::sessions::RightState,
+        cx: &mut Context<Self>,
+    ) {
+        self.overrides.entry(session_id.to_owned()).or_default().right = Some(state);
+        self.schedule_overrides_write(cx);
+    }
+
+    /// Persist one session's browser URL without the session-list settle
+    /// (B7): same cheap debounced write as
+    /// [`Self::store_right_state_cheap`], preserving every other right-pane
+    /// field. A no-op when the stored URL already matches.
+    pub(crate) fn remember_browser_url_cheap(
+        &mut self,
+        session_id: &str,
+        url: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.overrides.entry(session_id.to_owned()).or_default();
+        let mut right = entry.right.clone().unwrap_or_default();
+        if right.browser_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        right.browser_url = Some(url);
+        entry.right = Some(right);
+        self.schedule_overrides_write(cx);
+    }
+
+    /// Arm the debounced off-thread `sessions.json` write behind the cheap
+    /// right-pane persists. Only the latest generation writes, so a burst
+    /// of toggles, expansions and navigations coalesces into one write —
+    /// and a toggle never blocks its own animation frame on the store.
+    fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
+        self.right_save_epoch += 1;
+        let epoch = self.right_save_epoch;
+        let snapshot = self.overrides.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(750)).await;
+            let current = this.update(cx, |this, _| this.right_save_epoch == epoch).unwrap_or(false);
+            if !current {
+                return;
+            }
+            cx.background_executor()
+                .spawn(async move {
+                    crate::sessions::write(&snapshot);
+                })
+                .await;
+        })
+        .detach();
+    }
+
     /// Save the live pane state onto the active session (Z2): open, kind,
     /// and the Files preview/selection/expansion for the current project.
     /// Called on every user change while a session is active — toggle,
@@ -2062,6 +2133,9 @@ impl Harness {
     /// verbs. With no session active (home/empty state) this is a no-op and
     /// today's global `layout.json` behaviour stands. `right_width` stays
     /// global and is never saved here.
+    ///
+    /// B7: the persist is the cheap debounced write above — no `rejoin`,
+    /// no search rebuild, no synchronous `sessions.json` write.
     pub(crate) fn save_right_for_active(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         let session_id = view.read(cx).session_id.clone();
@@ -2091,7 +2165,7 @@ impl Harness {
             files_expanded,
             browser_url,
         };
-        self.set_override(&session_id, |meta| meta.right = Some(state), cx);
+        self.store_right_state_cheap(&session_id, state, cx);
     }
 
     /// Restore the live pane state from `session_id`'s stored [`RightState`]
@@ -3716,9 +3790,22 @@ impl Render for Harness {
             // before. Gated on pane-open-on-Browser: activation, boot
             // and every other kind never create a webview as a render
             // side effect — creation happens only where the pane shows.
-            let browser = (self.layout.right_open && kind == layout::RightKind::Browser)
-                .then(|| self.ensure_browser_person(window, cx));
-            let right = right::render(kind, &self.right_cache, right_project, browser.as_ref(), cx);
+            // B7: the toggle prewarms the webview ahead of the animation
+            // (see `prewarm_browser_if_needed`); while closing, the
+            // existing webview is passed through without creating, so
+            // the last page snapshot slides out instead of the
+            // "Opening the page" placeholder.
+            let browser = if kind == layout::RightKind::Browser {
+                if self.layout.right_open {
+                    Some(self.ensure_browser_person(window, cx))
+                } else {
+                    self.existing_browser(cx)
+                }
+            } else {
+                None
+            };
+            let right =
+                right::render(kind, &self.right_cache, right_project, browser.as_ref(), self.layout.right_open, cx);
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -4518,6 +4605,69 @@ mod tests {
         restore_state(state);
     }
 
+    /// B7: opening or closing the right pane does no session-list or search
+    /// work and no synchronous `sessions.json` write. Pane state is not
+    /// searchable, so the toggle persists through the cheap debounced
+    /// off-thread write only: the search-rebuild counter stays put and no
+    /// `sessions.json` exists synchronously afterwards. Opening on Browser
+    /// also prepares the webview ahead of the animation, off the render
+    /// path: the state exists before any frame draws it.
+    #[gpui::test]
+    fn toggling_the_right_pane_does_no_search_or_sessions_write(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("toggle-cheap");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        Harness::reset_search_rebuild_count();
+        assert!(
+            !crate::sessions::path().exists(),
+            "the hermetic store starts with no sessions.json"
+        );
+        // Open on Browser: the webview is prepared on the toggle, before
+        // any frame — never as a render side effect.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).browser.states.contains_key("s-1")),
+            "opening on Browser prepares the webview off the render path"
+        );
+        assert_eq!(
+            Harness::search_rebuild_count(),
+            0,
+            "opening the pane must not rebuild the search index"
+        );
+        assert!(
+            !crate::sessions::path().exists(),
+            "opening the pane must not synchronously write sessions.json"
+        );
+        // The in-memory state still lands at once: the cheap path defers
+        // only the disk write, never the state itself.
+        assert!(
+            vc.update(|_, cx| baaz
+                .read(cx)
+                .overrides
+                .get("s-1")
+                .and_then(|meta| meta.right.clone())
+                .is_some_and(|right| right.open && right.kind == crate::layout::RightKind::Browser)),
+            "the pane state lands in memory on open"
+        );
+        // Close again: still no search work and still no synchronous write.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).layout.right_open), "the toggle closes the pane");
+        assert_eq!(
+            Harness::search_rebuild_count(),
+            0,
+            "closing the pane must not rebuild the search index"
+        );
+        assert!(
+            !crate::sessions::path().exists(),
+            "closing the pane must not synchronously write sessions.json"
+        );
+        restore_state(state);
+    }
+
     /// P2: the hero carries no provider control — the picker lives in the
     /// composer's action row now (the hero switcher was an accident of an
     /// underspecified brief, never the design). Draws both empty states (a
@@ -4802,7 +4952,8 @@ mod tests {
             for _ in 0..2 {
                 vc.update(|_, cx| {
                     baaz.update(cx, |harness, cx| {
-                        let _ = crate::right::render(kind, &harness.right_cache, project.clone(), None, cx);
+                        let _ =
+                            crate::right::render(kind, &harness.right_cache, project.clone(), None, true, cx);
                     });
                 });
             }
