@@ -428,6 +428,44 @@ pub fn display_diff(diff: &Diff, cap: usize) -> Diff {
     }
 }
 
+/// B8b: the files the session edited, in edit order: every Edit/Write tool
+/// block's target across the folded turns, lone calls and grouped calls
+/// alike. Every lane folds its edit-family tools — `apply_patch` included
+/// — to [`ToolKind::Edit`]/[`ToolKind::Write`], so the kind is the whole
+/// filter; reads, searches, shell commands and skill rows never join.
+/// Blank targets are skipped and repeats keep their first position, so the
+/// Changes pane's "This session" section lists each file once, in the order
+/// the session touched it.
+pub fn session_edited_paths(turns: &[Turn]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+    let mut push = |kind: &ToolKind, target: &str| {
+        if !matches!(kind, ToolKind::Edit | ToolKind::Write) {
+            return;
+        }
+        let path = target.trim();
+        if path.is_empty() || !seen.insert(path.to_owned()) {
+            return;
+        }
+        ordered.push(path.to_owned());
+    };
+    for turn in turns {
+        let Turn::Assistant { blocks, .. } = turn else { continue };
+        for block in blocks {
+            match block {
+                Block::ToolCall { kind, target, .. } => push(kind, target),
+                Block::ToolGroup { calls, .. } => {
+                    for call in calls {
+                        push(&call.kind, &call.target);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    ordered
+}
+
 /// Z6b: a file-card path for display. Inside the session's workspace
 /// root it reads relative to the root (`crates/baaz/src/app.rs`); outside
 /// it stays absolute but abbreviates `$HOME` to `~`. A sibling directory
@@ -2881,6 +2919,86 @@ mod tests {
     #[test]
     fn shell_cards_start_open() {
         assert!(default_open(&shell_call("Ran", "npm test")));
+    }
+
+    /// B8b: the session's edited files in edit order — two Edit blocks plus
+    /// a grouped edit, with reads, shell calls and blanks filtered out and
+    /// repeats keeping their first position.
+    #[test]
+    fn session_edits_list_edited_files_in_edit_order() {
+        fn edit_call(target: &str) -> ToolCall {
+            let mut call = write_call(3);
+            call.kind = ToolKind::Edit;
+            call.verb = "Edited".to_owned();
+            call.target = target.to_owned();
+            call
+        }
+        let mut read = write_call(3);
+        read.kind = ToolKind::Read;
+        read.target = "notes.md".to_owned();
+        let mut blank = write_call(3);
+        blank.kind = ToolKind::Edit;
+        blank.target = "   ".to_owned();
+        let repeat = edit_call("src/b.rs");
+        let turns = vec![
+            assistant(
+                vec![
+                    Block::ToolCall {
+                        id: "c-read".to_owned(),
+                        kind: read.kind.clone(),
+                        verb: read.verb.clone(),
+                        target: read.target.clone(),
+                        status: aui_protocol::ToolStatus::Success,
+                        duration_ms: None,
+                        body: ToolBody::None,
+                        diff_stat: None,
+                    },
+                    Block::ToolCall {
+                        id: "c-1".to_owned(),
+                        kind: ToolKind::Edit,
+                        verb: "Edited".to_owned(),
+                        target: "src/b.rs".to_owned(),
+                        status: aui_protocol::ToolStatus::Success,
+                        duration_ms: None,
+                        body: ToolBody::None,
+                        diff_stat: None,
+                    },
+                ],
+                0,
+            ),
+            assistant(
+                vec![
+                    Block::ToolGroup {
+                        calls: vec![edit_call("src/a.rs"), shell_call("Ran", "cargo test")],
+                        summary: "edited".to_owned(),
+                        state: ActivityState::Done,
+                    },
+                    Block::ToolCall {
+                        id: "c-blank".to_owned(),
+                        kind: ToolKind::Edit,
+                        verb: "Edited".to_owned(),
+                        target: "   ".to_owned(),
+                        status: aui_protocol::ToolStatus::Success,
+                        duration_ms: None,
+                        body: ToolBody::None,
+                        diff_stat: None,
+                    },
+                    Block::ToolCall {
+                        id: "c-repeat".to_owned(),
+                        kind: repeat.kind.clone(),
+                        verb: repeat.verb.clone(),
+                        target: repeat.target.clone(),
+                        status: aui_protocol::ToolStatus::Success,
+                        duration_ms: None,
+                        body: ToolBody::None,
+                        diff_stat: None,
+                    },
+                ],
+                0,
+            ),
+        ];
+        assert_eq!(session_edited_paths(&turns), vec!["src/b.rs".to_owned(), "src/a.rs".to_owned()]);
+        assert!(session_edited_paths(&[]).is_empty());
     }
 
     /// X2: an opened big diff draws the first 40 rows of the first hunk
