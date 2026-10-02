@@ -12,6 +12,7 @@
 //! [`Harness`](crate::app::Harness) owns one [`HandoffRun`] per source
 //! session plus the owner-epoch counter that fences stale acks.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -508,6 +509,9 @@ pub struct HandoffRun {
     /// equality, and snapshots strip the card.
     pub card_id: String,
     /// When the request ran: the run-age basis for [`HandoffRun::steps`].
+    /// The rendered card derives its age from the card id instead, so only
+    /// the run-model tests read this.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub started_at: Instant,
     /// Where the move is.
     pub state: HandoffState,
@@ -791,6 +795,7 @@ impl HandoffRun {
     /// transcript shares from the block alone). The current step carries
     /// the run's age (`"n s"`); a refused run stays all pending —
     /// nothing started, so the state line and the pill carry the reason.
+    #[cfg(test)]
     pub fn steps(&self) -> Vec<HandoffStep> {
         handoff_steps(
             &self.state,
@@ -832,6 +837,7 @@ impl HandoffRun {
 /// Whether any run is still in flight: the per-second card refresh
 /// (which is what ticks the current step's elapsed counter) runs only
 /// while this holds, and no timer is armed otherwise.
+#[cfg(test)]
 pub fn handoff_tick_wanted(handoffs: &HashMap<String, HandoffRun>) -> bool {
     handoffs.values().any(HandoffRun::is_live)
 }
