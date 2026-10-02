@@ -4211,7 +4211,25 @@ impl Render for Harness {
             } else {
                 None
             };
-            let right = right::render(kind, &self.right_cache, right_project, browser.as_ref(), right_open, cx);
+            // B8b: the files the active session's folded transcript shows it
+            // edited, oldest first — the Changes pane's "This session"
+            // section. Read off the view like every other render-path read
+            // of the active session; empty when no session is open.
+            let session_edits: Vec<String> = self
+                .active
+                .as_ref()
+                .and_then(|view| view.read(cx).session())
+                .map(|session| crate::transcript::session_edited_paths(&session.turns))
+                .unwrap_or_default();
+            let right = right::render(
+                kind,
+                &self.right_cache,
+                right_project,
+                &session_edits,
+                browser.as_ref(),
+                right_open,
+                cx,
+            );
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -5895,8 +5913,15 @@ mod tests {
             for _ in 0..2 {
                 vc.update(|_, cx| {
                     baaz.update(cx, |harness, cx| {
-                        let _ =
-                            crate::right::render(kind, &harness.right_cache, project.clone(), None, true, cx);
+                        let _ = crate::right::render(
+                            kind,
+                            &harness.right_cache,
+                            project.clone(),
+                            &[],
+                            None,
+                            true,
+                            cx,
+                        );
                     });
                 });
             }

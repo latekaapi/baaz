@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize, Serializer};
 
 /// How the sidebar groups its rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +32,12 @@ pub enum GroupBy {
 ///
 /// B8 merged the old Diff review and Git changes into one [`RightKind::Changes`]
 /// view (this session's edits on top, the rest of the working tree below).
-/// The `Diff` and `Git` variants stay so older `layout.json` / `sessions.json`
-/// files — and the call sites outside the B8 file set — still compile and
-/// round-trip: [`RightKind::parse`] and [`right_kind`] map them onto
-/// `Changes`, so they load as the merged view and never render on their own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// B8b serialises every load AND write as `changes`: the `Diff` and `Git`
+/// variants stay so the call sites outside the B8b file set still compile,
+/// but they never reach a file — [`RightKind::parse`] maps the stored
+/// `diff`/`git` slugs onto `Changes`, and serialising any of
+/// `Changes`/`Diff`/`Git` writes `changes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightKind {
     /// An embedded browser.
     Browser,
@@ -46,9 +46,33 @@ pub enum RightKind {
     /// The workspace file tree.
     Files,
     /// Legacy alias of [`RightKind::Changes`] (the old Diff review).
+    /// Retained so the call sites outside the B8b file set keep compiling;
+    /// serde never produces it (see the impls above).
+    #[allow(dead_code)]
     Diff,
     /// Legacy alias of [`RightKind::Changes`] (the old Git changes).
+    /// Retained like [`RightKind::Diff`].
+    #[allow(dead_code)]
     Git,
+}
+
+impl Serialize for RightKind {
+    /// The [`RightKind::slug`]: the legacy aliases write as `changes`, so a
+    /// stored `diff`/`git` migrates the moment anything re-saves the file.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.slug())
+    }
+}
+
+impl<'de> Deserialize<'de> for RightKind {
+    /// The inverse of [`RightKind::slug`], through [`RightKind::parse`]: the
+    /// pre-merge `diff`/`git` slugs load as `Changes`, like `changes` does.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        RightKind::parse(&text).ok_or_else(|| {
+            de::Error::unknown_variant(text.as_str(), &["browser", "changes", "files", "diff", "git"])
+        })
+    }
 }
 
 impl Default for RightKind {
@@ -87,8 +111,9 @@ impl RightKind {
     /// The inverse of [`RightKind::slug`]: `None` for an unknown string.
     /// The pre-merge slugs `diff` and `git` load as `Changes`, so persisted
     /// layouts and step scripts written before B8 keep opening the merged
-    /// view instead of failing. (Stored JSON keeps round-tripping the
-    /// legacy variants as-is; [`right_kind`] normalises them on read.)
+    /// view instead of failing. (Stored JSON deserialises straight to
+    /// `Changes` too — no read ever produces the legacy variants — and
+    /// [`right_kind`] normalises an in-memory legacy value on read.)
     pub fn parse(s: &str) -> Option<RightKind> {
         match s {
             "browser" => Some(RightKind::Browser),
@@ -504,19 +529,28 @@ mod tests {
 
     #[test]
     fn pre_merge_slugs_and_stores_load_as_changes() {
-        // B8: layouts and session states persisted as `diff` or `git`
-        // reopen on the merged Changes view, never on a removed kind.
-        // Stored JSON round-trips the legacy variants as-is (older files
-        // keep reading); `parse` and `right_kind` map them onto Changes.
+        // B8b: layouts persisted as `diff` or `git` load as `Changes`, and
+        // every write lands as `changes` — the legacy kinds never reach a
+        // file again. `parse` and `right_kind` map the in-memory aliases
+        // onto Changes the same way.
         assert_eq!(RightKind::parse("diff"), Some(RightKind::Changes));
         assert_eq!(RightKind::parse("git"), Some(RightKind::Changes));
         assert_eq!(RightKind::parse("changes"), Some(RightKind::Changes));
-        for (slug, legacy) in [("diff", RightKind::Diff), ("git", RightKind::Git)] {
-            let layout: Layout =
-                serde_json::from_str(&format!("{{\"rightKind\":{slug:?}}}")).unwrap();
-            assert_eq!(layout.right_kind, Some(legacy), "{slug} still deserialises");
+        for slug in ["diff", "git", "changes"] {
+            let layout: Layout = serde_json::from_str(&format!("{{\"rightKind\":{slug:?}}}")).unwrap();
+            assert_eq!(layout.right_kind, Some(RightKind::Changes), "{slug} loads as Changes");
             assert_eq!(right_kind(&layout), RightKind::Changes, "{slug} reads as Changes");
+            // And re-saving writes `changes`, migrating the legacy slug.
+            let text = serde_json::to_string(&layout).unwrap();
+            assert!(text.contains("\"rightKind\":\"changes\""), "{slug} re-saves as changes: {text}");
         }
+        // Every in-memory spelling of the merged view writes `changes`.
+        for kind in [RightKind::Changes, RightKind::Diff, RightKind::Git] {
+            let text = serde_json::to_string(&kind).unwrap();
+            assert_eq!(text, "\"changes\"", "{kind:?} writes as changes");
+        }
+        assert_eq!(serde_json::to_string(&RightKind::Files).unwrap(), "\"files\"");
+        assert_eq!(serde_json::to_string(&RightKind::Browser).unwrap(), "\"browser\"");
         // The legacy variants label and slug as the view they load into.
         assert_eq!(RightKind::Diff.label(), "Changes");
         assert_eq!(RightKind::Git.label(), "Changes");
