@@ -20,14 +20,15 @@ use std::rc::Rc;
 use aui::data::button;
 use aui::transcript::{
     activity_group, answered_row, approval_card, assistant_turn, error_card, generic_item_card,
-    goal_card, handoff_card, marker_row, parse_markdown, plan_card, question_card, runnable_command,
-    summary_card, thinking_block, todo_list, tool_card, tool_group, user_turn, AssistantTurnAction,
-    HandoffIntent, LinkTarget, MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent,
-    ToolCardAction, ToolCardIntent, ToolGroupData, ToolGroupIntent, UserTurnAction,
+    goal_card, handoff_card, live_activity_row, marker_row, parse_markdown, plan_card,
+    question_card, runnable_command, summary_card, thinking_block, todo_list, tool_card,
+    tool_group, turn_fold, user_turn, AssistantTurnAction, GenericItemIntent, HandoffIntent,
+    LinkTarget, MarkdownBlock, MessageSelection, QuestionOutcome, SpanEvent, ToolCardAction,
+    ToolCardIntent, ToolGroupData, ToolGroupIntent, TurnFoldIntent, UserTurnAction,
 };
 use aui_protocol::{
-    ActivityState, Answer, Block, Diff, DiffKind, DiffLine, HandoffState, Hunk, MarkerKind,
-    PlanSection, PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, Turn, TurnMeta,
+    ActivityState, Answer, ApprovalState, Block, Diff, DiffKind, DiffLine, HandoffState, Hunk, MarkerKind,
+    PlanSection, PlanState, Step, ThinkingState, ToolBody, ToolCall, ToolKind, ToolStatus, Turn, TurnMeta,
 };
 use crate::handoff::{SummaryKind, handoff_card_started_ms, handoff_steps};
 use crate::terminal::{RunRequest, send_enter_for_alt};
@@ -191,7 +192,26 @@ pub struct Folds {
     /// through [`display_path`]. Display only: the blocks keep their full
     /// targets, so clicks, reveals and run-in-terminal are unchanged.
     pub workspace_root: String,
+    /// B12: whether settled assistant turns fold their work behind one
+    /// turn-fold row (default on). Off leaves every run expanded after
+    /// settle, for people auditing agents live. The persisted Settings
+    /// switch lives outside this module's scope; this is the per-frame
+    /// backing the view fills in.
+    pub fold_finished_turns: bool,
+    /// B12: "Open full text" on a generic card (and the open-in-pane fold
+    /// row on search/MCP cards): the card's title and its whole text, out
+    /// to the right pane's read-only doc view. `None` leaves the card's
+    /// own capped body as the whole affordance.
+    pub open_full_text: Option<FullTextHandler>,
+    /// B12: the turn fold's `+N −M` chip: the turn id, out to the Changes
+    /// view scoped to that turn (or the session without a per-turn
+    /// checkpoint). `None` draws the chip without its tap.
+    pub open_turn_diff: Option<CardHandler>,
 }
+
+/// B12: show a whole text elsewhere (the right pane's doc view): the
+/// card's title and its full text, out.
+pub type FullTextHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
 
 /// What a handoff card needs to talk back: "Open the new session" opens
 /// the destination by id, "Cancel" aborts the move by the card's block id.
@@ -673,6 +693,627 @@ pub fn block_key(turn_id: &str, index: usize) -> String {
     format!("{turn_id}:{index}")
 }
 
+/// B12: the key that identifies one settled turn's fold row: the header
+/// toggle and the row mapping share it, so expanding and row counts agree.
+pub fn fold_key(turn_id: &str) -> String {
+    format!("{turn_id}:fold")
+}
+
+/// B12: the key that identifies one live run's row: the run starting at
+/// block `start` of `turn_id`.
+pub fn live_key(turn_id: &str, start: usize) -> String {
+    format!("{turn_id}:live:{start}")
+}
+
+/// B12: what a settled assistant turn folds to: one header row summarising
+/// the work, the final answer outside it, and the kept-visible kinds
+/// (denied approvals, unrecovered failures, answered questions,
+/// plans/todos, handoff dividers/cards) staying out with the answer.
+/// B12fix: cached per turn (see [`fold_plan_cached`]), so it is `Clone`.
+#[derive(Clone, Debug)]
+pub struct FoldPlan {
+    /// Files read (read-family tool calls, group members included).
+    pub reads: u32,
+    /// Files edited or written.
+    pub edits: u32,
+    /// Shell commands run.
+    pub commands: u32,
+    /// The turn's wall-clock time, from its meta.
+    pub elapsed_ms: u64,
+    /// Summed `+` lines over the turn's diff stats.
+    pub diff_added: u64,
+    /// Summed `−` lines over the turn's diff stats.
+    pub diff_removed: u64,
+    /// Block indices hidden while the fold is closed, in turn order:
+    /// tool cards, groups, thinking, and interim prose.
+    pub folded: Vec<usize>,
+    /// Block indices that stay visible while closed, in turn order.
+    pub visible: Vec<usize>,
+    /// The final answer's block index: the last non-blank text block.
+    /// Rendered after the fold, never inside it.
+    pub answer: Option<usize>,
+}
+
+/// B12: whether an approval card stays visible after settle: only a
+/// granted approval folds away. Pending, approving (stuck), denied and
+/// refused approvals shaped the answer, so they stay out.
+fn approval_folds(state: &ApprovalState) -> bool {
+    matches!(state, ApprovalState::AllowedOnce { .. } | ApprovalState::AutoAllowed { .. })
+}
+
+/// B12: count one tool call's family for the fold summary.
+fn count_call(plan: &mut FoldPlan, call: &ToolCall) {
+    match &call.kind {
+        ToolKind::Read => plan.reads += 1,
+        ToolKind::Edit | ToolKind::Write => plan.edits += 1,
+        ToolKind::Shell => plan.commands += 1,
+        _ => {}
+    }
+    if let Some(stat) = &call.diff_stat {
+        plan.diff_added += stat.added;
+        plan.diff_removed += stat.removed;
+    }
+}
+
+/// B12: whether a tool call keeps its own row even inside a settled turn:
+/// an error or cancelled call is an unrecovered failure until proven
+/// otherwise, so it stays visible.
+fn call_failed(call: &ToolCall) -> bool {
+    matches!(call.status, ToolStatus::Error | ToolStatus::Cancelled)
+}
+
+/// B12fix: an empty Thinking block takes no row at all — live or
+/// settled, folded or open. The folds already refuse to mint one (a
+/// redacted trace is signature without utterance); this is the
+/// transcript side of the same rule, for blocks built by hand.
+pub fn is_empty_thinking(block: &Block) -> bool {
+    matches!(block, Block::Thinking { text, .. } if text.trim().is_empty())
+}
+
+/// B12fix: what identifies a tool call for recovery: the tool's family
+/// and what it worked on. A failed call followed later in the turn by a
+/// successful call with the same identity recovered — the retry is the
+/// visible outcome, so the failure folds.
+fn tool_identity(call: &ToolCall) -> (std::mem::Discriminant<ToolKind>, &str, &str) {
+    (std::mem::discriminant(&call.kind), call.verb.as_str(), call.target.as_str())
+}
+
+/// B12fix: whether a failed top-level tool call recovered later in the
+/// turn: a successful call with the same tool identity sits past it.
+/// Recovered failures fold; unrecovered ones stay visible.
+fn recovered_failure(blocks: &[Block], index: usize, call: &ToolCall) -> bool {
+    let identity = tool_identity(call);
+    blocks.iter().skip(index + 1).filter_map(|block| block.as_tool_call()).any(|later| {
+        later.status == ToolStatus::Success && tool_identity(&later) == identity
+    })
+}
+
+/// B12: the fold plan for one assistant turn, or `None` when the turn gets
+/// no fold row: user turns, and assistant turns with no tool activity
+/// (a fold must hide something).
+///
+/// B12fix answer rule: the answer is the trailing Text block(s) after the
+/// last non-Text block. A turn ending on prose answers with its last
+/// non-blank trailing text (earlier trailing texts stay out with it); a
+/// turn ending on a tool or an error has no separate answer — the last
+/// non-blank Text stays visible in its original position along with the
+/// ending failure. The old rule (last non-empty Text anywhere) put the
+/// answer before kept-visible blocks that came after it.
+pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
+    let Turn::Assistant { blocks, meta, .. } = turn else { return None };
+    if !blocks.iter().any(|block| {
+        matches!(block, Block::ToolCall { .. } | Block::ToolGroup { .. })
+    }) {
+        return None;
+    }
+    let mut plan = FoldPlan {
+        reads: 0,
+        edits: 0,
+        commands: 0,
+        elapsed_ms: meta.duration_ms,
+        diff_added: 0,
+        diff_removed: 0,
+        folded: Vec::new(),
+        visible: Vec::new(),
+        answer: None,
+    };
+    // Where the prose tail starts: past the last non-Text block. `None`
+    // is an all-text turn, which returns `None` above (no tool activity),
+    // so the tail always has a head here.
+    let last_non_text = blocks.iter().rposition(|block| !matches!(block, Block::Text { .. }));
+    let ends_on_text = matches!(blocks.last(), Some(Block::Text { .. }));
+    // The last non-blank Text anywhere: the answer candidate when the
+    // turn ends on prose, the kept-visible prose when it ends on a tool.
+    let last_text = blocks.iter().enumerate().rev().find_map(|(index, block)| match block {
+        Block::Text { text, .. } if !text.trim().is_empty() => Some(index),
+        _ => None,
+    });
+    if ends_on_text {
+        // The final answer: the last text block with anything to say. An
+        // all-blank tail is not an answer — it folds away with the work.
+        plan.answer = last_text;
+    }
+    for (index, block) in blocks.iter().enumerate() {
+        if Some(index) == plan.answer {
+            continue;
+        }
+        // An empty Thinking block takes no row: excluded from both lists,
+        // so neither the closed mapping nor the open one addresses it.
+        if is_empty_thinking(block) {
+            continue;
+        }
+        match block {
+            Block::ToolCall { .. } => {
+                let call = block.as_tool_call().expect("matched ToolCall");
+                count_call(&mut plan, &call);
+                if call_failed(&call) && !recovered_failure(blocks, index, &call) {
+                    plan.visible.push(index);
+                } else {
+                    plan.folded.push(index);
+                }
+            }
+            Block::ToolGroup { calls, .. } => {
+                for call in calls {
+                    count_call(&mut plan, call);
+                }
+                // A group with a failed call stays visible (collapsed, so
+                // its header and preview name the failure): the fold row
+                // counts reads/edits/commands only and would hide it.
+                if calls.iter().any(call_failed) {
+                    plan.visible.push(index);
+                } else {
+                    plan.folded.push(index);
+                }
+            }
+            Block::Thinking { .. } | Block::Generic { .. } => {
+                plan.folded.push(index);
+            }
+            Block::Text { text, .. } => {
+                if text.trim().is_empty() {
+                    plan.folded.push(index);
+                } else if ends_on_text {
+                    // Trailing prose stays out with the answer; interim
+                    // prose (before the tail's head) folds.
+                    let in_tail = last_non_text.is_none_or(|head| index > head);
+                    if in_tail {
+                        plan.visible.push(index);
+                    } else {
+                        plan.folded.push(index);
+                    }
+                } else {
+                    // No answer: only the last Text stays visible, in its
+                    // original position with the ending failure; earlier
+                    // prose folds.
+                    if Some(index) == last_text {
+                        plan.visible.push(index);
+                    } else {
+                        plan.folded.push(index);
+                    }
+                }
+            }
+            Block::Approval { state, .. } => {
+                if approval_folds(state) {
+                    plan.folded.push(index);
+                } else {
+                    plan.visible.push(index);
+                }
+            }
+            // Kept visible after settle: failures, answered questions,
+            // plans/todos, handoff dividers/cards, activity and summaries.
+            Block::Error { .. }
+            | Block::Question { .. }
+            | Block::Plan { .. }
+            | Block::Todo { .. }
+            | Block::Marker { .. }
+            | Block::Handoff { .. }
+            | Block::Activity { .. }
+            | Block::Summary { .. }
+            | Block::Goal { .. } => plan.visible.push(index),
+        }
+    }
+    Some(plan)
+}
+
+/// B12fix: a cheap fingerprint of a turn's blocks, so the cached fold
+/// plan notices in-place updates (a running call settling, a failure
+/// landing) that keep the block count: kind per index, failure state,
+/// and text length. Part of the cache key beside the specified four.
+fn blocks_fingerprint(blocks: &[Block]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for block in blocks {
+        match block {
+            Block::ToolCall { .. } => {
+                let call = block.as_tool_call().expect("matched ToolCall");
+                0u8.hash(&mut hasher);
+                tool_identity(&call).hash(&mut hasher);
+                (call_failed(&call) as u8).hash(&mut hasher);
+            }
+            Block::ToolGroup { calls, .. } => {
+                1u8.hash(&mut hasher);
+                calls.len().hash(&mut hasher);
+                calls.iter().filter(|call| call_failed(call)).count().hash(&mut hasher);
+            }
+            Block::Thinking { text, .. } => {
+                2u8.hash(&mut hasher);
+                text.len().hash(&mut hasher);
+            }
+            Block::Text { text, .. } => {
+                3u8.hash(&mut hasher);
+                text.len().hash(&mut hasher);
+            }
+            Block::Approval { state, .. } => {
+                4u8.hash(&mut hasher);
+                approval_folds(state).hash(&mut hasher);
+            }
+            other => {
+                5u8.hash(&mut hasher);
+                std::mem::discriminant(other).hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// B12fix: the cached fold plan for one assistant turn: `None` for turns
+/// with no plan, exactly like [`fold_plan`]. Keyed by turn id, block
+/// count, busyness (settled or live), the fold's toggled state, and a
+/// fingerprint of the blocks — so steady-state rebuilds skip the walk
+/// while an in-place update (a settle, a failure) still re-plans. Bounded:
+/// past the cap the whole cache drops rather than growing with the
+/// transcript.
+/// B12fix: what the per-turn fold cache holds, keyed by turn id, block
+/// count, busyness, toggled state and block fingerprint.
+type FoldCache = HashMap<(String, usize, bool, bool, u64), Option<FoldPlan>>;
+
+pub fn fold_plan_cached(turn: &Turn, settled: bool, toggled: &HashSet<String>) -> Option<FoldPlan> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static FOLD_CACHE: RefCell<FoldCache> = RefCell::new(HashMap::new());
+    }
+    const FOLD_CACHE_CAP: usize = 128;
+    let Turn::Assistant { id, blocks, .. } = turn else { return None };
+    let key = (
+        id.clone(),
+        blocks.len(),
+        settled,
+        toggled.contains(&fold_key(id)),
+        blocks_fingerprint(blocks),
+    );
+    if let Some(hit) = FOLD_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let plan = fold_plan(turn);
+    FOLD_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= FOLD_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, plan.clone());
+    });
+    plan
+}
+
+/// B12: one live run of tool calls: consecutive quiet calls with no prose
+/// between them, drawn as one [`live_activity_row`] naming the current
+/// (last) call.
+pub struct LiveRun {
+    /// The run's block indices, in turn order; the current call is last.
+    pub blocks: Vec<usize>,
+    /// Present-tense verb naming the current call ("Reading").
+    pub verb: String,
+    /// What the current call works on.
+    pub target: String,
+    /// Calls before the current one in the run.
+    pub earlier: usize,
+    /// The run's wall-clock time, saturating at the frame's clock.
+    pub elapsed_ms: u64,
+}
+
+/// B12: present-tense verb and target naming one tool call on a live row.
+pub fn run_verb_target(call: &ToolCall) -> (String, String) {
+    let target = call.target.clone();
+    let verb = match &call.kind {
+        ToolKind::Read => "Reading",
+        ToolKind::Search => "Searching",
+        ToolKind::Shell => "Running",
+        ToolKind::Edit => "Editing",
+        ToolKind::Write => "Writing",
+        ToolKind::Web => "Loading",
+        ToolKind::Browser => "Browsing",
+        ToolKind::SubAgent => "Delegating",
+        ToolKind::Mcp { .. } => "Using",
+    };
+    (verb.to_owned(), target)
+}
+
+/// B12fix: whether a tool call joins a live run: quiet reads, searches
+/// and MCP calls. Edits, sub-agent delegations and failures keep their
+/// own cards because the person may act on them. Shells join unless they
+/// are still running past the ~2 s line — a finished command (even a slow
+/// one) joins the run; only a command RUNNING long gets its own card, so
+/// the wait reads as running, never hung.
+fn call_joins_run(call: &ToolCall) -> bool {
+    if call_failed(call) {
+        return false;
+    }
+    match &call.kind {
+        ToolKind::Read | ToolKind::Search | ToolKind::Mcp { .. } => true,
+        ToolKind::Shell => {
+            !(call.status == ToolStatus::Running && call.duration_ms.is_some_and(|ms| ms > 2_000))
+        }
+        ToolKind::Edit | ToolKind::Write | ToolKind::Web | ToolKind::Browser | ToolKind::SubAgent => {
+            false
+        }
+    }
+}
+
+/// B12fix: whether a tool group joins a live run: every member joins on
+/// its own. A group with an edit, a failure or a long-running command
+/// keeps its own card; a quiet group (the muse lane's read runs) folds
+/// into the run like its members would.
+fn group_joins_run(calls: &[ToolCall]) -> bool {
+    !calls.is_empty() && calls.iter().all(call_joins_run)
+}
+
+/// B12fix: present-tense verb and target naming one tool group on a live
+/// row: the group's current (last) call speaks for the run.
+fn group_verb_target(calls: &[ToolCall]) -> (String, String) {
+    match calls.last() {
+        Some(call) => run_verb_target(call),
+        None => ("Working".to_owned(), String::new()),
+    }
+}
+
+/// B12fix: partition one turn's blocks into live runs: maximal runs of
+/// consecutive joinable tool calls — quiet calls and quiet groups, even a
+/// lone one, which still earns the live row. Edits, failures,
+/// long-running commands and prose break the run and render as their own
+/// rows. Only live turns collapse; settled turns fold instead (see
+/// [`fold_plan`]).
+pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
+    let Turn::Assistant { blocks, timestamp, .. } = turn else { return Vec::new() };
+    let turn_elapsed_ms = timestamp.map(|sent| now_ms.saturating_sub(sent)).unwrap_or(0);
+    let mut runs = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let flush = |current: &mut Vec<usize>, runs: &mut Vec<LiveRun>| {
+        if current.is_empty() {
+            return;
+        }
+        let blocks_taken = std::mem::take(current);
+        let last = blocks_taken.last().copied().and_then(|i| blocks.get(i));
+        let Some(last) = last else { return };
+        let (verb, target) = match last {
+            Block::ToolCall { .. } => {
+                run_verb_target(&last.as_tool_call().expect("matched ToolCall"))
+            }
+            Block::ToolGroup { calls, .. } => group_verb_target(calls),
+            _ => ("Working".to_owned(), String::new()),
+        };
+        // B12fix: the elapsed shown is the run's own — the member calls'
+        // measured time added up — falling back to the turn's age while
+        // any member is still running unmeasured.
+        let mut run_ms = 0u64;
+        let mut measured = true;
+        for index in &blocks_taken {
+            match blocks.get(*index) {
+                Some(Block::ToolCall { .. }) => {
+                    let call = blocks[*index].as_tool_call().expect("matched ToolCall");
+                    match call.duration_ms {
+                        Some(ms) => run_ms = run_ms.saturating_add(ms),
+                        None => measured = false,
+                    }
+                }
+                Some(Block::ToolGroup { calls, .. }) => {
+                    for call in calls {
+                        match call.duration_ms {
+                            Some(ms) => run_ms = run_ms.saturating_add(ms),
+                            None => measured = false,
+                        }
+                    }
+                }
+                _ => measured = false,
+            }
+        }
+        runs.push(LiveRun {
+            earlier: blocks_taken.len() - 1,
+            blocks: blocks_taken,
+            verb,
+            target,
+            elapsed_ms: if measured { run_ms } else { turn_elapsed_ms },
+        });
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        // An empty Thinking block takes no row and breaks no run: it is
+        // not a row at all, so the run flows around it.
+        if is_empty_thinking(block) {
+            continue;
+        }
+        let joins = match block {
+            Block::ToolCall { .. } => {
+                block.as_tool_call().is_some_and(|call| call_joins_run(&call))
+            }
+            Block::ToolGroup { calls, .. } => group_joins_run(calls),
+            _ => false,
+        };
+        if joins {
+            current.push(index);
+        } else {
+            flush(&mut current, &mut runs);
+        }
+    }
+    flush(&mut current, &mut runs);
+    runs
+}
+
+/// B12: one addressable row of a mapped turn: the row counts and the row
+/// renderer share this, so a click and a count never disagree. Selection
+/// is per turn id (the library's [`turn_selected_text`]), not per row, so
+/// folding moves rows without moving spans.
+pub enum TurnSlot {
+    /// The settled fold's header row.
+    FoldHeader,
+    /// One live run's collapsed row: the run's block indices.
+    LiveRun(Vec<usize>),
+    /// One block's own row.
+    Block(usize),
+    /// The silent-reasoning footer row.
+    SilentFooter,
+}
+
+/// B12fix: the block indices of a turn that take rows: every block but
+/// an empty Thinking block, which takes no row at all (live or settled).
+fn shown_indices(blocks: &[Block]) -> Vec<usize> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| !is_empty_thinking(block))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// B12: how many rows a turn occupies under folding: the unfolded count
+/// ([`turn_rows`]) except for a settled turn with a fold plan (header +
+/// visible + answer, or header + everything when open) and a live turn
+/// with collapsed runs. `toggled` carries the person's open overrides;
+/// `fold_enabled` is the "Fold finished turns" setting (default on).
+/// B12fix: empty Thinking blocks take no row in any state, and the plan
+/// comes from the per-turn cache.
+pub fn turn_mapped_rows(
+    turn: &Turn,
+    settled: bool,
+    toggled: &HashSet<String>,
+    fold_enabled: bool,
+) -> usize {
+    let Turn::Assistant { id, blocks, .. } = turn else { return turn_rows(turn) };
+    let silent = usize::from(silent_reasoning(turn).is_some());
+    let shown = shown_indices(blocks).len();
+    if settled && fold_enabled {
+        if let Some(plan) = fold_plan_cached(turn, settled, toggled) {
+            let open = toggled.contains(&fold_key(id));
+            if open {
+                return 1 + shown + silent;
+            }
+            return 1 + plan.visible.len() + usize::from(plan.answer.is_some()) + silent;
+        }
+        return shown + silent;
+    }
+    if !settled {
+        let runs = live_runs(turn, 0);
+        if runs.is_empty() {
+            return shown + silent;
+        }
+        let mut rows = shown + silent;
+        for run in &runs {
+            let open = toggled.contains(&live_key(id, run.blocks[0]));
+            rows -= run.blocks.len();
+            rows += if open { 1 + run.blocks.len() } else { 1 };
+        }
+        return rows;
+    }
+    shown + silent
+}
+
+/// B12: which slot row `row` of a mapped turn is: the single mapping the
+/// row counts ([`turn_mapped_rows`]) and [`turn_row`] share. `None` is a
+/// stale row past the mapping — a list one frame ahead of its cache —
+/// and renders nothing, like the old past-`turn_rows` guard.
+pub fn turn_slot_at(
+    turn: &Turn,
+    settled: bool,
+    toggled: &HashSet<String>,
+    fold_enabled: bool,
+    row: usize,
+) -> Option<TurnSlot> {
+    let Turn::Assistant { id, blocks, .. } = turn else {
+        return (row == 0).then_some(TurnSlot::Block(0));
+    };
+    let silent_here = silent_reasoning(turn).is_some();
+    // B12fix: rows only ever address shown blocks — an empty Thinking
+    // block is skipped in every walk below, live or settled.
+    let shown = shown_indices(blocks);
+    if settled && fold_enabled {
+        if let Some(plan) = fold_plan_cached(turn, settled, toggled) {
+            let open = toggled.contains(&fold_key(id));
+            if open {
+                if row == 0 {
+                    return Some(TurnSlot::FoldHeader);
+                }
+                let inner = row - 1;
+                if inner < shown.len() {
+                    return Some(TurnSlot::Block(shown[inner]));
+                }
+                return silent_here.then_some(TurnSlot::SilentFooter);
+            }
+            if row == 0 {
+                return Some(TurnSlot::FoldHeader);
+            }
+            // B12fix: the closed fold keeps original order among the
+            // visible blocks and the answer — the answer reads where the
+            // turn put it, not appended after kept-visible blocks that
+            // came after it.
+            let mut slots: Vec<usize> = plan.visible.clone();
+            if let Some(answer) = plan.answer {
+                if !slots.contains(&answer) {
+                    slots.push(answer);
+                }
+            }
+            slots.sort_unstable();
+            if row - 1 < slots.len() {
+                return Some(TurnSlot::Block(slots[row - 1]));
+            }
+            return silent_here.then_some(TurnSlot::SilentFooter);
+        }
+        if row < shown.len() {
+            return Some(TurnSlot::Block(shown[row]));
+        }
+        return (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter);
+    }
+    if !settled {
+        let runs = live_runs(turn, 0);
+        if !runs.is_empty() {
+            // Walk the shown blocks, collapsing closed runs to one row and
+            // expanding open runs to header + members.
+            let mut at = 0usize;
+            let mut run_at: HashMap<usize, &LiveRun> = HashMap::new();
+            for run in &runs {
+                run_at.insert(run.blocks[0], run);
+            }
+            let mut shown_at = 0usize;
+            while shown_at < shown.len() {
+                let index = shown[shown_at];
+                if let Some(run) = run_at.get(&index) {
+                    let open = toggled.contains(&live_key(id, run.blocks[0]));
+                    if at == row {
+                        return Some(TurnSlot::LiveRun(run.blocks.clone()));
+                    }
+                    at += 1;
+                    if open {
+                        if row >= at && row < at + run.blocks.len() {
+                            return Some(TurnSlot::Block(run.blocks[row - at]));
+                        }
+                        at += run.blocks.len();
+                    }
+                    shown_at += run.blocks.len();
+                } else {
+                    if at == row {
+                        return Some(TurnSlot::Block(index));
+                    }
+                    at += 1;
+                    shown_at += 1;
+                }
+            }
+            return (silent_here && at == row).then_some(TurnSlot::SilentFooter);
+        }
+        if row < shown.len() {
+            return Some(TurnSlot::Block(shown[row]));
+        }
+        return (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter);
+    }
+    None
+}
+
 /// The reasoning tokens a finished turn billed without showing any work, if any.
 ///
 /// A turn can bill a reasoning budget and emit no `reasoning` item at all —
@@ -908,25 +1549,178 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             div().w_full().child(turn).into_any_element()
         }
         Turn::Assistant { id, blocks, meta, timestamp, .. } => {
-            let last = blocks.len().saturating_sub(1);
+            // B12: rows go through the shared slot mapping, so counts and
+            // clicks agree whether the fold is open or closed, live or
+            // settled. A stale row past the mapping renders nothing, like
+            // the old past-`turn_rows` guard.
+            let answer = fold_plan_cached(turn, settled, &folds.toggled).and_then(|plan| plan.answer);
             // A silent turn gets Baaz's own footer row, so its blocks
             // carry no library footer.
             let library_meta = if silent.is_some() { None } else { Some(meta) };
-            match blocks.get(row) {
-                Some(b) => {
-                    let key = block_key(id, row);
-                    let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), row, settled, window, cx);
-                    let body = block(&key, id, b, row == last, library_meta, *timestamp, folds, cx);
-                    div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
+            let render_block = |index: usize, window: &mut Window, cx: &mut App| {
+                let Some(b) = blocks.get(index) else {
+                    return div().into_any_element();
+                };
+                let key = block_key(id, index);
+                let reveal = stream_reveal(ElementId::from(SharedString::from(key.clone())), row, settled, window, cx);
+                // The turn's closing text block carries the token footer;
+                // under a fold that is the final answer wherever it sits.
+                let last = answer.map_or(index == blocks.len().saturating_sub(1), |a| a == index);
+                let body = block(&key, id, b, last, library_meta, *timestamp, folds, cx);
+                div().w_full().relative().top(reveal.offset_y).opacity(reveal.opacity).child(body).into_any_element()
+            };
+            match turn_slot_at(turn, settled, &folds.toggled, folds.fold_finished_turns, row) {
+                Some(TurnSlot::FoldHeader) => {
+                    let plan = fold_plan_cached(turn, settled, &folds.toggled).expect("header implies a plan");
+                    let open = folds.open(&fold_key(id), false);
+                    fold_header_row(id, &plan, open, folds)
                 }
-                None => match silent {
-                    Some(count) if row == blocks.len() => {
-                        silent_footer_row(meta, count, turn_age(*timestamp, folds.now_ms), cx)
+                Some(TurnSlot::LiveRun(indices)) => {
+                    let start = indices.first().copied().unwrap_or(0);
+                    let open = folds.open(&live_key(id, start), false);
+                    match live_runs(turn, folds.now_ms)
+                        .into_iter()
+                        .find(|run| run.blocks.first() == Some(&start))
+                    {
+                        Some(run) => live_run_row(id, &run, open, folds),
+                        None => render_block(start, window, cx),
                     }
-                    _ => div().into_any_element(),
+                }
+                Some(TurnSlot::Block(index)) => render_block(index, window, cx),
+                Some(TurnSlot::SilentFooter) => match silent {
+                    Some(count) => silent_footer_row(meta, count, turn_age(*timestamp, folds.now_ms), cx),
+                    None => div().into_any_element(),
                 },
+                None => div().into_any_element(),
             }
         }
+    }
+}
+
+/// B12: one settled turn's fold header row: "Worked for 2m 14s · read 12
+/// files, edited 3, ran 5 commands" with the `+N −M` chip opening
+/// Changes. The header toggles the fold; the chip opens the turn's diff.
+/// No new chrome is added here — the library owns the row's roles and
+/// labels — only the two intents are wired.
+fn fold_header_row(turn_id: &str, plan: &FoldPlan, open: bool, folds: &Folds) -> AnyElement {
+    use aui_protocol::DiffStat;
+    let id = ElementId::from(SharedString::from(format!("{turn_id}:fold")));
+    let diff = (plan.diff_added + plan.diff_removed > 0).then_some(DiffStat {
+        added: plan.diff_added,
+        removed: plan.diff_removed,
+        files: 0,
+    });
+    let toggle = folds.toggle.clone();
+    let key = fold_key(turn_id);
+    let open_diff = folds.open_turn_diff.clone();
+    let turn_id = turn_id.to_owned();
+    turn_fold(id, plan.elapsed_ms, plan.reads, plan.edits, plan.commands)
+        .diff_stat(diff)
+        .open(open)
+        .on_intent(move |intent, window, cx| match intent {
+            TurnFoldIntent::Toggle => toggle(key.clone(), window, cx),
+            TurnFoldIntent::OpenDiff => {
+                if let Some(open_diff) = &open_diff {
+                    open_diff(turn_id.clone(), window, cx);
+                }
+            }
+        })
+        .into_any_element()
+}
+
+/// B12: one live run's collapsed row: the current call's verb and target
+/// with "+N earlier" and the run's elapsed. Clicking expands to the run's
+/// cards, which the row mapping then hosts as following rows.
+fn live_run_row(turn_id: &str, run: &LiveRun, open: bool, folds: &Folds) -> AnyElement {
+    let start = run.blocks.first().copied().unwrap_or(0);
+    let id = ElementId::from(SharedString::from(format!("{turn_id}:live:{start}")));
+    let toggle = folds.toggle.clone();
+    let key = live_key(turn_id, start);
+    live_activity_row(id, run.verb.clone(), run.target.clone(), run.earlier, run.elapsed_ms)
+        .open(open)
+        .on_toggle(move |_, window, cx| toggle(key.clone(), window, cx))
+        .into_any_element()
+}
+
+/// B12fix: the one-line text an Artifact tool folds to: `published
+/// <title or url>` when the result names what it made, else the tool's
+/// own kind (`quickstart`). Pure, so the folds and the tests share it —
+/// the card never inlines the artifact body.
+pub fn artifact_summary_text(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return "Artifact · quickstart".to_owned();
+    }
+    let first = detail.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return "Artifact · quickstart".to_owned();
+    }
+    format!("Artifact · published {first}")
+}
+
+/// B12: the fallback card for an unknown item kind: collapsed to a preview
+/// by default, with a working chevron and "Open full text" into the right
+/// pane's read-only doc view.
+fn generic_card(key: &str, id: ElementId, kind: &str, status: &str, text: &str, folds: &Folds) -> AnyElement {
+    let mut card = generic_item_card(id, kind.to_owned(), status.to_owned(), text.to_owned())
+        .open(folds.open(key, false));
+    let toggle = folds.toggle.clone();
+    let key = key.to_owned();
+    let title = kind.to_owned();
+    let body = text.to_owned();
+    let open_full = folds.open_full_text.clone();
+    let (full_title, full_body) = (title.clone(), body.clone());
+    card = card.on_intent(move |intent, window, cx| match intent {
+        GenericItemIntent::Toggle => toggle(key.clone(), window, cx),
+        GenericItemIntent::OpenFull => {
+            if let Some(open_full) = &open_full {
+                open_full(title.clone(), body.clone(), window, cx);
+            } else {
+                toggle(key.clone(), window, cx);
+            }
+        }
+    });
+    if let Some(open_full) = &folds.open_full_text {
+        let open_full = open_full.clone();
+        card = card.on_open_full(move |window, cx| open_full(full_title.clone(), full_body.clone(), window, cx));
+    }
+    card.into_any_element()
+}
+
+/// B12: the whole text an open-in-pane fold row offers: search hits, MCP
+/// results and shell output open in the right pane's doc view instead of
+/// inlining past a few lines. `None` is a card with nothing worth opening
+/// (reads, bare headers), which keeps its toggle.
+fn tool_pane_text(call: &ToolCall) -> Option<(String, String)> {
+    let title = if call.target.trim().is_empty() {
+        call.verb.clone()
+    } else {
+        format!("{} {}", call.verb, call.target)
+    };
+    match &call.body {
+        ToolBody::Search { hits } => {
+            let text = hits
+                .iter()
+                .map(|hit| format!("{}:{}: {}", hit.path, hit.line, hit.snippet))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((title, text))
+        }
+        ToolBody::Mcp { result_json, .. } => Some((title, result_json.clone())),
+        ToolBody::Shell { output_lines, .. } => Some((title, output_lines.join("\n"))),
+        ToolBody::Web { results, .. } => {
+            let text = results
+                .iter()
+                .map(|result| format!("{} — {}", result.title, result.url))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((title, text))
+        }
+        ToolBody::Read { .. }
+        | ToolBody::Edit { .. }
+        | ToolBody::Browser { .. }
+        | ToolBody::SubAgent { .. }
+        | ToolBody::None => None,
     }
 }
 
@@ -965,7 +1759,7 @@ fn block(
                 Some(name) => skill_load_row(id, name, folds, cx),
                 None => tool_call_card(key, id, &call, folds),
             },
-            None => generic_item_card(id, "tool", "done", String::new()).into_any_element(),
+            None => generic_card(key, id, "tool", "done", "", folds),
         },
         Block::ToolGroup { .. } => tool_group_card(id, key, block, folds),
         Block::Approval { .. } => approval_block_card(id, block, folds),
@@ -989,10 +1783,15 @@ fn block(
             goal_block_card(id, objective, status, *percent_complete, current_work.as_deref(), next_work.as_deref())
         }
         // MSP's item kinds are an open set and mandate exactly this fallback:
-        // the kind, the status and the server's own one-line text.
-        Block::Generic { kind, status, text } => {
-            generic_item_card(id, kind.clone(), status.clone(), text.clone()).into_any_element()
+        // the kind, the status and the server's own one-line text — B12
+        // collapsed to a preview with a working chevron and "Open full
+        // text" into the right pane.
+        // B12fix: the Artifact tool reads as a one-line summary card,
+        // never the generic dump — the body opens in the pane on demand.
+        Block::Generic { kind, status, text } if kind == "Artifact" => {
+            generic_card(key, id, kind, status, &artifact_summary_text(text), folds)
         }
+        Block::Generic { kind, status, text } => generic_card(key, id, kind, status, text, folds),
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
         Block::Handoff { .. } => handoff_block_card(id, block, folds),
     }
@@ -1325,7 +2124,7 @@ fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> An
     let home = home_dir();
     let shown = display_group_block(block, &folds.workspace_root, &home);
     let Some(data) = ToolGroupData::from_block(&shown) else {
-        return generic_item_card(id, "tool", "done", String::new()).into_any_element();
+        return generic_card(key, id, "tool", "done", "", folds);
     };
     let mut group = tool_group(id, &data, folds.open(key, false));
     for (index, _) in data.calls.iter().enumerate() {
@@ -1639,7 +2438,15 @@ fn tool_call_card(key: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> A
         .on_intent({
             let toggle = folds.toggle.clone();
             let key = key.to_owned();
+            // B12: the open-in-pane fold row on search/MCP cards shows the
+            // whole text in the right pane's doc view; without wiring it
+            // keeps the toggle.
+            let pane = tool_pane_text(call).zip(folds.open_full_text.clone());
             move |intent, window, cx| match intent {
+                ToolCardIntent::OpenInPane => match &pane {
+                    Some(((title, text), open)) => open(title.clone(), text.clone(), window, cx),
+                    None => toggle(key.clone(), window, cx),
+                },
                 ToolCardIntent::Unfold if fetchable && idle => {
                     if let Some(show) = &show {
                         show(block_id.clone(), window, cx);
@@ -2383,6 +3190,9 @@ mod tests {
             handoff: None,
             handoff_back: None,
             workspace_root: "/ws".to_owned(),
+            fold_finished_turns: true,
+            open_full_text: None,
+            open_turn_diff: None,
         }
     }
 
@@ -2432,5 +3242,477 @@ mod tests {
             thinking_card(thinking_id(), "t:0", "hmm", 0, None, ThinkingState::Done, &folds).is_some(),
             "a real trace still cards"
         );
+    }
+
+    /// B12: a read call, a search call, a shell call and a write, shaped
+    /// like the three lanes' folds mint them.
+    fn read_call(target: &str) -> Block {
+        Block::ToolCall {
+            id: format!("read:{target}"),
+            kind: ToolKind::Read,
+            verb: "Read".to_owned(),
+            target: target.to_owned(),
+            status: aui_protocol::ToolStatus::Success,
+            duration_ms: Some(120),
+            body: ToolBody::Read { lines: 42 },
+            diff_stat: None,
+        }
+    }
+
+    fn search_call(target: &str) -> Block {
+        Block::ToolCall {
+            id: format!("search:{target}"),
+            kind: ToolKind::Search,
+            verb: "Searched".to_owned(),
+            target: target.to_owned(),
+            status: aui_protocol::ToolStatus::Success,
+            duration_ms: Some(80),
+            body: ToolBody::Search { hits: Vec::new() },
+            diff_stat: None,
+        }
+    }
+
+    fn failed_call() -> Block {
+        let mut call = shell_call("Ran", "exit 1");
+        call.status = aui_protocol::ToolStatus::Error;
+        Block::tool_call(call)
+    }
+
+    fn mixed_turn() -> Turn {
+        Turn::Assistant {
+            id: "turn-fold".to_owned(),
+            blocks: vec![
+                Block::Text { text: "Let me check the layout.".to_owned(), streaming: false },
+                read_call("crates/baaz/src/app.rs"),
+                search_call("fold_finished_turns"),
+                Block::tool_call(shell_call("Ran", "cargo test")),
+                Block::ToolCall {
+                    id: "call-write".to_owned(),
+                    kind: ToolKind::Write,
+                    verb: "Wrote".to_owned(),
+                    target: "index.html".to_owned(),
+                    status: aui_protocol::ToolStatus::Success,
+                    duration_ms: Some(40),
+                    body: ToolBody::Edit { diff: edit_diff(&write_call(5)) },
+                    diff_stat: Some(aui_protocol::DiffStat { added: 5, removed: 0, files: 1 }),
+                },
+                thinking_block(),
+                Block::Text { text: "Done — folded rows are quiet.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta {
+                model: "m".to_owned(),
+                duration_ms: 134_000,
+                tokens_in: 0,
+                tokens_out: 0,
+                reasoning_tokens: 0,
+                cost_usd: 0.0,
+                ..TurnMeta::default()
+            },
+            timestamp: None,
+        }
+    }
+
+    fn empty_toggled() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    /// B12: a mixed turn folds to one header row plus the final answer:
+    /// tool cards, thinking and interim prose hide; the summary counts
+    /// the work and the chip carries the diff.
+    #[test]
+    fn fold_row_counts_and_summary_for_a_mixed_turn() {
+        let turn = mixed_turn();
+        let plan = fold_plan(&turn).expect("a turn with tool activity folds");
+        assert_eq!((plan.reads, plan.edits, plan.commands), (1, 1, 1));
+        assert_eq!(plan.elapsed_ms, 134_000);
+        assert_eq!((plan.diff_added, plan.diff_removed), (5, 0));
+        // Interim prose (0), four tool cards (1-4), thinking (5) fold;
+        // the final answer (6) stays out.
+        assert_eq!(plan.folded, vec![0, 1, 2, 3, 4, 5]);
+        assert!(plan.visible.is_empty());
+        assert_eq!(plan.answer, Some(6));
+        // Closed: header + answer. Open: header + all seven blocks.
+        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), true), 2);
+        let mut open = HashSet::new();
+        open.insert(fold_key("turn-fold"));
+        assert_eq!(turn_mapped_rows(&turn, true, &open, true), 8);
+        // Off: every block keeps its row.
+        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), false), 7);
+    }
+
+    /// B12: the final answer is outside the fold: the closed mapping
+    /// addresses the header then the answer block, in that order.
+    #[test]
+    fn final_answer_stays_outside_the_fold() {
+        let turn = mixed_turn();
+        let toggled = empty_toggled();
+        assert!(matches!(turn_slot_at(&turn, true, &toggled, true, 0), Some(TurnSlot::FoldHeader)));
+        assert!(matches!(
+            turn_slot_at(&turn, true, &toggled, true, 1),
+            Some(TurnSlot::Block(6))
+        ));
+    }
+
+    /// B12: kept-visible kinds stay out of the fold: a failed call, a
+    /// denied approval, an answered question, a todo list and a marker.
+    #[test]
+    fn kept_visible_kinds_stay_visible() {
+        assert!(!approval_folds(&ApprovalState::Denied));
+        assert!(!approval_folds(&ApprovalState::Pending));
+        assert!(approval_folds(&ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 9 }));
+        let turn = Turn::Assistant {
+            id: "turn-kept".to_owned(),
+            blocks: vec![
+                read_call("a.rs"),
+                failed_call(),
+                Block::Question {
+                    id: "q".to_owned(),
+                    header: String::new(),
+                    prompt: "Which?".to_owned(),
+                    subtitle: String::new(),
+                    options: Vec::new(),
+                    multi: false,
+                    allow_other: false,
+                    answer: Some(Answer { selected: vec![], other: None }),
+                    timeout_ms: None,
+                },
+                Block::Todo {
+                    items: vec![aui_protocol::TodoItem {
+                        label: "x".to_owned(),
+                        state: aui_protocol::TodoState::Done,
+                        elapsed_ms: None,
+                    }],
+                },
+                Block::Marker { kind: MarkerKind::ContextCompacted, text: "compacted".to_owned() },
+                Block::Text { text: "answer".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.folded, vec![0]);
+        assert_eq!(plan.visible, vec![1, 2, 3, 4]);
+        assert_eq!(plan.answer, Some(5));
+        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), true), 6);
+    }
+
+    /// B12: a turn with no tool activity gets no fold row — a fold must
+    /// hide something.
+    #[test]
+    fn a_turn_with_no_tool_activity_gets_no_fold() {
+        let turn = assistant(vec![text_block(), thinking_block()], 0);
+        assert!(fold_plan(&turn).is_none());
+        let user = Turn::User {
+            id: "u".to_owned(),
+            text: "hi".to_owned(),
+            attachments: vec![],
+            mentions: vec![],
+            timestamp: None,
+        };
+        assert!(fold_plan(&user).is_none());
+    }
+
+    /// B12: a live run of quiet calls collapses to one row naming the
+    /// current call with "+N earlier"; an edit breaks the run. B12fix: a
+    /// lone quiet call earns the live row too, and the elapsed shown is
+    /// the run's own measured time.
+    #[test]
+    fn live_run_collapses_to_one_row_with_the_right_verb_target() {
+        let turn = Turn::Assistant {
+            id: "turn-live".to_owned(),
+            blocks: vec![
+                read_call("a.rs"),
+                read_call("b.rs"),
+                search_call("fold"),
+                Block::Text { text: "Meanwhile…".to_owned(), streaming: false },
+                read_call("c.rs"),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let runs = live_runs(&turn, 0);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].blocks, vec![0, 1, 2]);
+        assert_eq!(runs[0].verb, "Searching");
+        assert_eq!(runs[0].target, "fold");
+        assert_eq!(runs[0].earlier, 2);
+        // The elapsed is the run's own measured time (120 + 120 + 80),
+        // not the turn's age.
+        assert_eq!(runs[0].elapsed_ms, 320);
+        // The lone trailing read earns its own live row.
+        assert_eq!(runs[1].blocks, vec![4]);
+        assert_eq!(runs[1].earlier, 0);
+        assert_eq!(runs[1].elapsed_ms, 120);
+        // Five blocks collapse to run + prose + run: 3 rows.
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 3);
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 0),
+            Some(TurnSlot::LiveRun(_))
+        ));
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 2),
+            Some(TurnSlot::LiveRun(_))
+        ));
+        // An edit keeps its own card and never joins a run.
+        let mut edit = write_call(3);
+        edit.kind = ToolKind::Edit;
+        let turn = Turn::Assistant {
+            id: "turn-live-edit".to_owned(),
+            blocks: vec![read_call("a.rs"), read_call("b.rs"), Block::ToolCall {
+                id: "e".to_owned(),
+                kind: ToolKind::Edit,
+                verb: "Edited".to_owned(),
+                target: "a.rs".to_owned(),
+                status: aui_protocol::ToolStatus::Success,
+                duration_ms: None,
+                body: ToolBody::Edit { diff: edit_diff(&edit) },
+                diff_stat: None,
+            }],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let runs = live_runs(&turn, 0);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+    }
+
+    /// B12: generic cards start collapsed — the chevron has something to
+    /// open — and open when the person toggles them.
+    #[test]
+    fn generic_cards_start_collapsed_with_a_working_toggle() {
+        let folds = quiet_folds();
+        assert!(!folds.open("turn-1:9", false));
+        let mut toggled = HashSet::new();
+        toggled.insert("turn-1:9".to_owned());
+        let folds = Folds { toggled: Rc::new(toggled), ..quiet_folds() };
+        assert!(folds.open("turn-1:9", false));
+    }
+
+    /// B12: the fold carries the turn's real elapsed time, not a frozen
+    /// zero — the header reads what the turn cost.
+    #[test]
+    fn thinking_and_fold_elapsed_are_real() {
+        let turn = mixed_turn();
+        let plan = fold_plan(&turn).expect("folds");
+        assert_eq!(plan.elapsed_ms, 134_000);
+        assert_eq!(aui::transcript::turn_fold_elapsed(134_000), "2m 14s");
+    }
+
+    /// B12: the open-in-pane affordance covers search hits, MCP results
+    /// and shell output — never reads or bare headers.
+    #[test]
+    fn open_in_pane_covers_search_mcp_and_shell() {
+        let mut search = shell_call("Searched", "fold");
+        search.kind = ToolKind::Search;
+        search.body = ToolBody::Search {
+            hits: vec![aui_protocol::SearchHit {
+                path: "a.rs".to_owned(),
+                line: 3,
+                snippet: "fold".to_owned(),
+            }],
+        };
+        let (title, text) = tool_pane_text(&search).expect("pane text");
+        assert!(title.contains("fold"));
+        assert!(text.contains("a.rs:3"));
+        let mut read = shell_call("Read", "a.rs");
+        read.kind = ToolKind::Read;
+        read.body = ToolBody::Read { lines: 3 };
+        assert!(tool_pane_text(&read).is_none());
+    }
+
+    /// B12fix: a turn ending on a tool has no separate answer — the last
+    /// Text stays visible in its original position, before the ending
+    /// failure, and the closed mapping keeps that order.
+    #[test]
+    fn no_answer_when_the_turn_ends_on_a_tool() {
+        let turn = Turn::Assistant {
+            id: "turn-tail-tool".to_owned(),
+            blocks: vec![
+                Block::Text { text: "Trying a build.".to_owned(), streaming: false },
+                read_call("a.rs"),
+                failed_call(),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.answer, None);
+        assert_eq!(plan.folded, vec![1]);
+        assert_eq!(plan.visible, vec![0, 2]);
+        // Header, then the prose where the turn put it, then the failure.
+        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), true), 3);
+        assert!(matches!(
+            turn_slot_at(&turn, true, &empty_toggled(), true, 1),
+            Some(TurnSlot::Block(0))
+        ));
+        assert!(matches!(
+            turn_slot_at(&turn, true, &empty_toggled(), true, 2),
+            Some(TurnSlot::Block(2))
+        ));
+    }
+
+    /// B12fix: a recovered failure folds — the retry is the visible
+    /// outcome — while an unrecovered one stays visible.
+    #[test]
+    fn recovered_failures_fold_while_unrecovered_stay() {
+        let mut retry_failed = shell_call("Ran", "make");
+        retry_failed.status = aui_protocol::ToolStatus::Error;
+        let retry_ok = shell_call("Ran", "make");
+        let mut other_failed = shell_call("Ran", "lint");
+        other_failed.status = aui_protocol::ToolStatus::Error;
+        let turn = Turn::Assistant {
+            id: "turn-recovered".to_owned(),
+            blocks: vec![
+                Block::tool_call(retry_failed),
+                Block::tool_call(retry_ok),
+                Block::tool_call(other_failed),
+                Block::Text { text: "Lint still red.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.folded, vec![0, 1]);
+        assert_eq!(plan.visible, vec![2]);
+        assert_eq!(plan.answer, Some(3));
+    }
+
+    /// B12fix: a ToolGroup with one failure folds behind its header —
+    /// keeping it out would show every successful call beside the one
+    /// that failed.
+    #[test]
+    fn a_tool_group_with_an_unrecovered_failure_stays_visible() {
+        let mut failed = shell_call("Ran", "make");
+        failed.status = aui_protocol::ToolStatus::Error;
+        let turn = Turn::Assistant {
+            id: "turn-group-fail".to_owned(),
+            blocks: vec![
+                Block::ToolGroup {
+                    calls: vec![shell_call("Ran", "setup"), failed, shell_call("Ran", "teardown")],
+                    summary: "Ran 3 commands".into(),
+                    state: aui_protocol::ActivityState::Failed,
+                },
+                Block::Text { text: "The middle step failed.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert!(plan.folded.is_empty(), "the failed group is not hidden in the fold");
+        assert_eq!(plan.visible, vec![0]);
+        assert_eq!(plan.answer, Some(1));
+    }
+
+    /// B12fix: an empty Thinking block takes no row — closed, open, live
+    /// or settled.
+    #[test]
+    fn an_empty_thinking_block_takes_no_row() {
+        let empty = Block::Thinking {
+            text: "  ".to_owned(),
+            elapsed_ms: 0,
+            summary: None,
+            state: ThinkingState::Done,
+        };
+        let turn = Turn::Assistant {
+            id: "turn-empty-think".to_owned(),
+            blocks: vec![
+                read_call("a.rs"),
+                empty,
+                Block::Text { text: "Done.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.folded, vec![0]);
+        assert!(plan.visible.is_empty());
+        assert_eq!(plan.answer, Some(2));
+        // Closed: header + answer. Open: header + read + answer — the
+        // empty trace is addressed nowhere.
+        assert_eq!(turn_mapped_rows(&turn, true, &empty_toggled(), true), 2);
+        let mut open = HashSet::new();
+        open.insert(fold_key("turn-empty-think"));
+        assert_eq!(turn_mapped_rows(&turn, true, &open, true), 3);
+        assert!(matches!(
+            turn_slot_at(&turn, true, &open, true, 1),
+            Some(TurnSlot::Block(0))
+        ));
+        assert!(matches!(
+            turn_slot_at(&turn, true, &open, true, 2),
+            Some(TurnSlot::Block(2))
+        ));
+        // Live: the empty trace breaks no run and takes no row.
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+    }
+
+    /// B12fix: finished fast commands join the live run; only a command
+    /// still RUNNING past 2 s keeps its own card.
+    #[test]
+    fn finished_fast_commands_join_the_run() {
+        let mut fast = shell_call("Ran", "make");
+        fast.duration_ms = Some(900);
+        let mut slow_running = shell_call("Run", "sleep 30");
+        slow_running.status = aui_protocol::ToolStatus::Running;
+        slow_running.duration_ms = Some(5_000);
+        let turn = Turn::Assistant {
+            id: "turn-shell-join".to_owned(),
+            blocks: vec![read_call("a.rs"), Block::tool_call(fast), Block::tool_call(slow_running)],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let runs = live_runs(&turn, 0);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].blocks, vec![0, 1]);
+        assert_eq!(runs[0].verb, "Running");
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+    }
+
+    /// B12fix: Artifact tools read as a one-line summary, never the
+    /// generic dump.
+    #[test]
+    fn artifact_tools_read_as_a_one_line_summary() {
+        assert_eq!(artifact_summary_text("My Launch Post"), "Artifact · published My Launch Post");
+        assert_eq!(
+            artifact_summary_text("https://example.com/a\nsecond line"),
+            "Artifact · published https://example.com/a"
+        );
+        assert_eq!(artifact_summary_text("   "), "Artifact · quickstart");
+        assert_eq!(artifact_summary_text(""), "Artifact · quickstart");
+    }
+
+    /// B12fix: the cached plan agrees with a fresh walk and re-plans when
+    /// a call settles in place (same block count, new failure).
+    #[test]
+    fn the_cached_fold_plan_agrees_and_notices_updates() {
+        let turn = Turn::Assistant {
+            id: "turn-cache-probe".to_owned(),
+            blocks: vec![
+                Block::tool_call(shell_call("Ran", "make")),
+                Block::Text { text: "Green.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let toggled = empty_toggled();
+        let first = fold_plan_cached(&turn, true, &toggled).expect("folds");
+        let fresh = fold_plan(&turn).expect("folds");
+        assert_eq!(first.folded, fresh.folded);
+        assert_eq!(first.visible, fresh.visible);
+        assert_eq!(first.answer, fresh.answer);
+        // The same call failing in place re-plans: it turns visible.
+        let mut failed = shell_call("Ran", "make");
+        failed.status = aui_protocol::ToolStatus::Error;
+        let updated = Turn::Assistant {
+            id: "turn-cache-probe".to_owned(),
+            blocks: vec![
+                Block::tool_call(failed),
+                Block::Text { text: "Green.".to_owned(), streaming: false },
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let second = fold_plan_cached(&updated, true, &toggled).expect("folds");
+        assert_eq!(second.visible, vec![0]);
+        assert!(second.folded.is_empty());
     }
 }

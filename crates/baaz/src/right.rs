@@ -167,6 +167,19 @@ pub(crate) enum PreviewContent {
     },
 }
 
+/// B12: one open read-only text doc in the Files pane: the whole text a
+/// transcript card's "Open full text" (generic cards, search/MCP
+/// open-in-pane rows) offered. Not a file — no path, no reload, no
+/// directory entry — so it lives beside the file previews, and opening a
+/// file preview replaces it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextDoc {
+    /// The doc view's title: the card's kind or `verb target`.
+    pub title: String,
+    /// The whole text, never truncated; the pane scrolls it.
+    pub text: String,
+}
+
 /// One open file preview: which file, and what the pane shows for it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FilePreview {
@@ -243,6 +256,9 @@ pub(crate) struct RightCache {
     pub selected: HashMap<PathBuf, String>,
     /// The open preview per root, if the pane is previewing a file.
     pub previews: HashMap<PathBuf, FilePreview>,
+    /// The open read-only text doc, if a transcript card's "Open full
+    /// text" is showing. Opening a file preview replaces it.
+    pub text_doc: Option<TextDoc>,
     /// The walk's per-directory listing cache: stamped per directory mtime,
     /// surviving between refreshes, dropped when the root changes.
     dir_lists: DirListCache,
@@ -285,6 +301,12 @@ impl RightCache {
     /// The open preview for `root`, if the pane is previewing a file.
     pub(crate) fn preview_for(&self, root: &Path) -> Option<FilePreview> {
         self.previews.get(root).cloned()
+    }
+
+    /// B12: the open read-only text doc, if a transcript card's "Open
+    /// full text" is showing.
+    pub(crate) fn text_doc(&self) -> Option<TextDoc> {
+        self.text_doc.clone()
     }
 
     /// The last selected file id for `root`, if any.
@@ -512,7 +534,13 @@ pub(crate) fn render(
                 "Open or adopt a project and its uncommitted changes will be listed here.",
             ),
         },
-        RightKind::Files => match project {
+        RightKind::Files => {
+            // B12: a transcript card's whole text reads here, above the
+            // tree's own states — one doc surface, with its own way back.
+            if let Some(doc) = cache.text_doc() {
+                return text_doc_pane(&doc, harness);
+            }
+            match project {
             Some((root, name)) => match cache.files_for(&root) {
                 None => loading_state(
                     "right-files-loading",
@@ -532,7 +560,8 @@ pub(crate) fn render(
                 "No project is open",
                 "Open or adopt a project to browse its files here.",
             ),
-        },
+            }
+        }
     }
 }
 
@@ -646,6 +675,29 @@ impl Harness {
     /// call. Returns whether one was open.
     pub(crate) fn close_file_preview_for(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
         let closed = close_file_preview(&mut self.right_cache, root);
+        if closed {
+            self.save_right_for_active(cx);
+            cx.notify();
+        }
+        closed
+    }
+
+    /// B12: show a transcript card's whole text in the Files pane's
+    /// read-only doc view: the pane stands open on Files and the saved
+    /// state says so, like a person's own navigation would.
+    pub(crate) fn open_text_doc_for(&mut self, title: String, text: String, cx: &mut Context<Self>) {
+        open_text_doc(&mut self.right_cache, title, text);
+        self.layout.right_kind = Some(RightKind::Files);
+        self.layout.right_open = true;
+        self.save_right_for_active(cx);
+        self.refresh_right_now(cx);
+        cx.notify();
+    }
+
+    /// B12: close the open text doc, returning to the tree. What the doc
+    /// pane's back control calls. Returns whether one was open.
+    pub(crate) fn close_text_doc_for(&mut self, cx: &mut Context<Self>) -> bool {
+        let closed = close_text_doc(&mut self.right_cache);
         if closed {
             self.save_right_for_active(cx);
             cx.notify();
@@ -1415,6 +1467,19 @@ pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
     cache.previews.remove(root).is_some()
 }
 
+/// B12: show a transcript card's whole text as the Files pane's read-only
+/// doc. Replaces any open file preview — one doc surface, never stacked.
+pub(crate) fn open_text_doc(cache: &mut RightCache, title: String, text: String) {
+    cache.previews.clear();
+    cache.text_doc = Some(TextDoc { title, text });
+}
+
+/// B12: forget the open text doc, returning to the tree. Returns whether
+/// one was open.
+pub(crate) fn close_text_doc(cache: &mut RightCache) -> bool {
+    cache.text_doc.take().is_some()
+}
+
 /// Start previewing `id` for `root`: the tree's selected marker moves at
 /// once, and a text file under [`PREVIEW_MAX_BYTES`] opens in `Loading`
 /// for the background read to complete. A directory toggles instead and
@@ -1435,6 +1500,8 @@ pub(crate) fn begin_file_preview_highlight(
     id: &str,
     highlight: Option<std::ops::Range<u32>>,
 ) -> bool {
+    // One doc surface: a file preview replaces the transcript text doc.
+    cache.text_doc = None;
     let path = root.join(id);
     let name = id.rsplit('/').next().unwrap_or(id).to_string();
     let meta = std::fs::metadata(&path);
@@ -1941,7 +2008,10 @@ fn file_preview_pane(
                 preview.path.clone(),
                 code.clone(),
             )
-            .language(language.clone());
+            .language(language.clone())
+            // The preview is the pane's own scroller: a long file
+            // virtualises against the pane's height (L6 fill mode).
+            .fill(true);
             // A B9 link band: highlight the linked lines and start the
             // list there (the library starts at the highlight when no
             // explicit scroll line rides along, so the start doubles).
@@ -1993,6 +2063,53 @@ fn file_preview_pane(
         .size_full()
         .overflow_y_scroll()
         .track_scroll(&scroll)
+        .child(header)
+        .child(body)
+        .into_any_element()
+}
+
+/// B12: the read-only text doc half of the Files pane: a header naming
+/// the card with a back control, then the card's whole text in a
+/// `code_block` — the same surface a text file preview uses, so long
+/// results scroll instead of inlining. Every control carries its role
+/// and label; no action here toasts.
+fn text_doc_pane(doc: &TextDoc, harness: WeakEntity<Harness>) -> AnyElement {
+    let back_harness = harness.clone();
+    let back = button("right-text-back", "Back")
+        .accessibility_label("Back to files")
+        .on_click(move |_, _, cx| {
+            let _ = back_harness.update(cx, |this, cx| {
+                this.close_text_doc_for(cx);
+            });
+        });
+    let header = h_flex()
+        .id("right-text-header")
+        .role(gpui::Role::Group)
+        .aria_label(format!("Reading {}", doc.title))
+        .w_full()
+        .flex_none()
+        .items_center()
+        .gap(px(8.0))
+        .p(px(8.0))
+        .child(back)
+        .child(
+            div()
+                .id("right-text-title")
+                .role(gpui::Role::Label)
+                .aria_label(format!("Reading {}", doc.title))
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .child(doc.title.clone()),
+        );
+    let body =
+        code_block("right-text-code", doc.title.clone(), doc.text.clone()).language("text".to_owned());
+    v_flex()
+        .id("right-text-doc")
+        .role(gpui::Role::Group)
+        .aria_label(format!("Full text: {}", doc.title))
+        .size_full()
+        .overflow_y_scroll()
         .child(header)
         .child(body)
         .into_any_element()
@@ -2120,6 +2237,24 @@ fn changes_pane_from(status: &GitStatus, parsed: Option<ParsedDiffs>, notify: &T
 
 #[cfg(test)]
 mod tests {
+
+    /// B12: a transcript card's whole text opens as the doc and closes
+    /// back to the tree; opening a file preview replaces it — one doc
+    /// surface, never stacked.
+    #[test]
+    fn the_text_doc_opens_whole_and_closes() {
+        use super::{close_text_doc, open_text_doc, RightCache};
+        let mut cache = RightCache::default();
+        assert!(cache.text_doc().is_none());
+        open_text_doc(&mut cache, "Artifact".to_owned(), "line1\nline2".to_owned());
+        assert_eq!(
+            cache.text_doc(),
+            Some(super::TextDoc { title: "Artifact".to_owned(), text: "line1\nline2".to_owned() })
+        );
+        assert!(close_text_doc(&mut cache));
+        assert!(cache.text_doc().is_none());
+        assert!(!close_text_doc(&mut cache));
+    }
 
     #[test]
     fn only_the_foreground_agent_flips_the_visible_pane() {

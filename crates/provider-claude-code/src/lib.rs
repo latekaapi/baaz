@@ -1789,6 +1789,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&other_workspace);
     }
 
+    /// B12fix: stored history goes through the same `isMeta` handling as
+    /// live: the loader replays the file through `frame::decode_line`, so
+    /// a replayed skill body is a chip, never a user bubble, and never
+    /// splits the turn — on reopen exactly as on arrival.
+    #[test]
+    fn stored_history_suppresses_ismeta_skill_bodies_like_live() {
+        let _guard = crate::history::tests::lock_config_env();
+        let _cleared = crate::history::tests::SavedConfigDir::clear();
+        let home = std::env::temp_dir().join("cc-ismeta-test-home");
+        let workspace = std::env::temp_dir().join("cc-ismeta-test-work");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let resolved = crate::history::resolve_cwd(&workspace).expect("resolves");
+        let slug = crate::history::slug_for_cwd(&resolved);
+        let dir = home.join(".claude").join("projects").join(slug);
+        std::fs::create_dir_all(&dir).expect("slug dir");
+        std::fs::write(
+            dir.join("sess-ismeta.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu-skill\",\"name\":\"Skill\",\"input\":{\"skill\":\"plan\"}}]},\"uuid\":\"u-1\",\"session_id\":\"sess-ismeta\"}\n\
+             {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"# Skill: plan\\nDo the thing.\"}]},\"uuid\":\"u-2\",\"session_id\":\"sess-ismeta\",\"isMeta\":true}\n\
+             {\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"On it.\"}]},\"uuid\":\"u-3\",\"session_id\":\"sess-ismeta\"}\n",
+        )
+        .expect("plant");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_home(home.clone())
+            .with_workspace(workspace.clone());
+        let (deltas, _) = adapter.stored_history("sess-ismeta").expect("stored history reads");
+        let bubbles: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                aui_protocol::Delta::TurnStarted { turn: aui_protocol::Turn::User { text, .. }, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(bubbles.is_empty(), "no user bubble for the stored skill body: {bubbles:?}");
+        let assistant_starts = deltas
+            .iter()
+            .filter(|delta| {
+                matches!(delta, aui_protocol::Delta::TurnStarted { turn: aui_protocol::Turn::Assistant { .. }, .. })
+            })
+            .count();
+        assert_eq!(assistant_starts, 1, "one assistant turn, never split: {deltas:?}");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn the_pinned_config_dir_wins_over_home_and_env() {
         use std::path::PathBuf;

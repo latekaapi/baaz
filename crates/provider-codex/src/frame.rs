@@ -115,6 +115,49 @@ pub struct FileChangeEntry {
     pub diff: String,
 }
 
+/// B12: one `commandActions[]` entry inside a `commandExecution` item:
+/// what one step of the command did — a read, a file listing, a search —
+/// with the path, name or query that names it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandAction {
+    /// The action type (`read`, `listFiles`, `search`, `unknown`, …).
+    pub action_type: String,
+    /// The shell step that did it, when reported.
+    pub command: String,
+    /// The action's name (`notes.txt`), when reported.
+    pub name: String,
+    /// The path it touched, when reported.
+    pub path: String,
+    /// The search query, for `search` actions.
+    pub query: String,
+}
+
+/// Decode `commandActions[]`, tolerating missing fields and non-object
+/// entries: an action the wire half-reports still labels the command.
+fn command_actions_from(item: &Value) -> Vec<CommandAction> {
+    item.get("commandActions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(|action| {
+                    let object = action.as_object()?;
+                    let str_field = |key: &str| {
+                        object.get(key).and_then(Value::as_str).unwrap_or_default().to_owned()
+                    };
+                    Some(CommandAction {
+                        action_type: str_field("type"),
+                        command: str_field("command"),
+                        name: str_field("name"),
+                        path: str_field("path"),
+                        query: str_field("query"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One transcript item carried by `item/started` / `item/completed`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
@@ -140,6 +183,10 @@ pub enum Item {
         id: String,
         /// The trace text.
         text: String,
+        /// B12: `startedAtMs`, when the wire reports it.
+        started_ms: Option<u64>,
+        /// B12: `completedAtMs`, when the wire reports it.
+        completed_ms: Option<u64>,
     },
     /// A `commandExecution`: one shell invocation and its outcome.
     CommandExecution {
@@ -155,6 +202,13 @@ pub enum Item {
         /// what the card body renders. `None` while running or when the
         /// server reports none.
         aggregated_output: Option<String>,
+        /// B12: `durationMs`, when the wire reports it: the card's real
+        /// duration instead of an untimed pill.
+        duration_ms: Option<u64>,
+        /// B12: `commandActions[]`: what the command actually did — reads,
+        /// file listings, searches — so a read-only command folds to a
+        /// read/search card instead of a shell card.
+        actions: Vec<CommandAction>,
     },
     /// A `fileChange`: the agent's edit, with per-file diffs.
     FileChange {
@@ -532,7 +586,12 @@ fn decode_item(item: &Value) -> Item {
         "reasoning" => {
             let mut text = item.get("summary").map(strings_joined).unwrap_or_default();
             text.push_str(&item.get("content").map(strings_joined).unwrap_or_default());
-            Item::Reasoning { id, text }
+            Item::Reasoning {
+                id,
+                text,
+                started_ms: item.get("startedAtMs").and_then(Value::as_u64),
+                completed_ms: item.get("completedAtMs").and_then(Value::as_u64),
+            }
         }
         "commandExecution" => Item::CommandExecution {
             id,
@@ -543,6 +602,8 @@ fn decode_item(item: &Value) -> Item {
                 .get("aggregatedOutput")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            duration_ms: item.get("durationMs").and_then(Value::as_u64),
+            actions: command_actions_from(item),
         },
         "fileChange" => Item::FileChange {
             id,
@@ -910,6 +971,36 @@ impl Item {
     pub fn aggregated_output(&self) -> Option<&str> {
         match self {
             Item::CommandExecution { aggregated_output, .. } => aggregated_output.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// B12: the wire's own duration, for command executions that report
+    /// it; `None` otherwise (and while running).
+    pub fn command_duration_ms(&self) -> Option<u64> {
+        match self {
+            Item::CommandExecution { duration_ms, .. } => *duration_ms,
+            _ => None,
+        }
+    }
+
+    /// B12: what the command did, for command executions; empty
+    /// otherwise. Read-only commands fold to read/search cards off this.
+    pub fn command_actions(&self) -> &[CommandAction] {
+        match self {
+            Item::CommandExecution { actions, .. } => actions,
+            _ => &[],
+        }
+    }
+
+    /// B12: the reasoning trace's own elapsed time, when the wire timed
+    /// both ends (`completedAtMs` past `startedAtMs`); `None` otherwise —
+    /// unknown, never zero-claimed.
+    pub fn reasoning_elapsed_ms(&self) -> Option<u64> {
+        match self {
+            Item::Reasoning { started_ms: Some(start), completed_ms: Some(end), .. } => {
+                Some(end.saturating_sub(*start))
+            }
             _ => None,
         }
     }
