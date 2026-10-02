@@ -61,7 +61,7 @@ use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
 use aui::shell::{
     RESIZE_HANDLE_W, TabItem, app_shell, clamp_sidebar_width, drag_capture_overlay,
-    header_cell, resize_handle, right_header, sidebar_header, tab_strip,
+    header_cell, resize_handle, sidebar_header, tab_strip,
 };
 use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
 use aui_icons::{icon, IconName, Provider};
@@ -676,6 +676,14 @@ pub struct Harness {
     /// write (B7fix): set when the write is armed, cleared when it lands
     /// or when [`Self::flush_right_save`] lands it early on session switch.
     pub(crate) right_save_pending: bool,
+    /// Sessions whose in-memory pane state still uses a pre-merge
+    /// `diff`/`git` kind and whose disk copy must migrate onto the merged
+    /// `changes` view (B8fix): marked by [`Self::save_right_for_active`],
+    /// honoured by the two `sessions.json` writes. Memory keeps the stored
+    /// spelling, so the per-session round-trip restores exactly what the
+    /// pane showed; a verbatim handoff carry never marks, so it persists
+    /// verbatim. Never persists.
+    pub(crate) right_kind_migrate: std::collections::HashSet<String>,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1187,6 +1195,7 @@ impl Harness {
             right_snap: false,
             right_save_epoch: 0,
             right_save_pending: false,
+            right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -2107,7 +2116,9 @@ impl Harness {
     /// closes the pane again, the way pressing a menu's own button closes it.
     /// Either way the pane's data is re-read off the render path when it ends
     /// up open. Prefer [`Self::select_right`]: this stays only for the ⌘K
-    /// menu-toggle behaviour its test pins.
+    /// menu-toggle behaviour its test pins, so it compiles into test
+    /// builds only — no production caller remains.
+    #[cfg(test)]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
@@ -2200,6 +2211,30 @@ impl Harness {
         .collect()
     }
 
+    /// Copy the overrides with the marked sessions' legacy right-pane kinds
+    /// migrated onto the merged view (B8fix): a marked pre-merge `diff`/`git`
+    /// lands on disk as `changes`, so a user-gesture save migrates
+    /// `sessions.json` onto the three live kinds and a restart restores the
+    /// merged view. Memory is untouched — the in-memory round-trip keeps the
+    /// stored spelling by design — and unmarked sessions (a verbatim handoff
+    /// carry) persist exactly as stored.
+    fn overrides_for_disk(&self) -> crate::sessions::Overrides {
+        let mut disk = self.overrides.clone();
+        for id in &self.right_kind_migrate {
+            if let Some(meta) = disk.get_mut(id) {
+                if let Some(right) = meta.right.as_mut() {
+                    right.kind = match right.kind {
+                        layout::RightKind::Diff | layout::RightKind::Git => {
+                            layout::RightKind::Changes
+                        }
+                        kind => kind,
+                    };
+                }
+            }
+        }
+        disk
+    }
+
     /// Persist one session's right-pane state without the session-list
     /// settle (B7): the in-memory override is edited at once, and the
     /// `sessions.json` write follows debounced off the UI thread. No
@@ -2257,7 +2292,7 @@ impl Harness {
                         return None;
                     }
                     this.right_save_pending = false;
-                    Some(this.overrides.clone())
+                    Some(this.overrides_for_disk())
                 })
                 .unwrap_or(None);
             let Some(snapshot) = snapshot else {
@@ -2286,7 +2321,10 @@ impl Harness {
             return;
         }
         self.right_save_epoch += 1;
-        crate::sessions::write(&self.overrides);
+        // Drop migration marks for sessions that no longer exist; a marked
+        // session with no override entry has nothing to migrate.
+        self.right_kind_migrate.retain(|id| self.overrides.contains_key(id));
+        crate::sessions::write(&self.overrides_for_disk());
         self.right_save_pending = false;
     }
 
@@ -2367,14 +2405,27 @@ impl Harness {
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
+        // B8fix: the in-memory state keeps the stored spelling — a legacy
+        // `diff`/`git` kind stays as-is and reads back as the merged
+        // Changes view through `layout::right_kind`, so the per-session
+        // round-trip restores exactly what the pane showed. A legacy kind
+        // saved by a user gesture still migrates on disk: mark the session
+        // so the disk writes land it as `changes` (`overrides_for_disk`).
+        // A verbatim handoff carry never marks, so it persists as stored.
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
-            kind: layout::right_kind(&self.layout),
+            kind: self.layout.right_kind.unwrap_or(layout::RightKind::Files),
             files_preview,
             files_selected,
             files_expanded,
             browser_url,
         };
+        if matches!(
+            state.kind,
+            layout::RightKind::Diff | layout::RightKind::Git
+        ) {
+            self.right_kind_migrate.insert(session_id.clone());
+        }
         self.store_right_state_cheap(&session_id, state, cx);
     }
 
@@ -4082,11 +4133,34 @@ impl Render for Harness {
                     // strip's ←/→, TabList role and per-tab labels come from
                     // the library; selecting a tab opens that kind without
                     // ever closing, and the close X toggles the pane.
+                    //
+                    // B8fix: the strip rides the PLAIN (non-shell) variant
+                    // inside a `header_cell`, never the library's
+                    // `right_header(...).tabs(...)`: the shell variant lifts
+                    // its ink indicator into a deferred layer, and a deferred
+                    // element prepainted by `VisualTestContext::draw`
+                    // outlives that draw's element arena — the next frame
+                    // panics dereferencing it ("attempted to dereference an
+                    // ArenaRef after its Arena was cleared"). The plain
+                    // variant draws its indicator inline, so every frame
+                    // stays arena-local. Handlers capture only the weak
+                    // entity handle and owned tab ids.
                     let select = cx.weak_entity();
-                    let close = cx.weak_entity();
-                    right_header("hd-right")
-                        .tabs(
-                            tab_strip("hd-right-tabs", Self::right_tab_items(), Self::right_tab_index(kind))
+                    let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_right(cx);
+                    });
+                    header_cell("hd-right").child(
+                        h_flex()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                tab_strip(
+                                    "hd-right-tabs",
+                                    Self::right_tab_items(),
+                                    Self::right_tab_index(kind),
+                                )
                                 .accessibility_label("Right pane")
                                 .on_select(move |id, _, cx| {
                                     if let Some(kind) = layout::RightKind::parse(id) {
@@ -4094,10 +4168,24 @@ impl Render for Harness {
                                             .update(cx, |this, cx| this.select_right(kind, cx));
                                     }
                                 }),
-                        )
-                        .on_close(move |_, _, cx| {
-                            let _ = close.update(cx, |this, cx| this.toggle_right(cx));
-                        })
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("hd-right-close")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Close right pane")
+                                    .child(
+                                        icon_button("hd-right-close", IconName::X)
+                                            .ghost()
+                                            .muted()
+                                            .size(ButtonSize::Xs)
+                                            .icon_size(px(10.0))
+                                            .accessibility_label("Close right pane")
+                                            .on_click(close),
+                                    ),
+                            ),
+                    )
                 })
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
