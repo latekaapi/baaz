@@ -890,13 +890,21 @@ pub fn handoff_steps(
             steps[3].state = HandoffStepState::Current;
             steps[3].detail = current;
         }
-        HandoffState::Activated | HandoffState::Cancelled => {
+        HandoffState::Activated => {
             // Settled cards hide the list again (the library's call), but
             // the mapping stays total either way.
             steps[0].state = HandoffStepState::Done;
             summary_settled(&mut steps);
             steps[2].state = HandoffStepState::Done;
             steps[3].state = HandoffStepState::Done;
+        }
+        HandoffState::Cancelled => {
+            // A cancelled move never reads as complete: what ran stays
+            // done, what never happened reads skipped.
+            steps[0].state = HandoffStepState::Done;
+            summary_settled(&mut steps);
+            steps[2].state = if has_destination { HandoffStepState::Done } else { HandoffStepState::Skipped };
+            steps[3].state = HandoffStepState::Skipped;
         }
         HandoffState::Failed { reason } => {
             summary_settled(&mut steps);
@@ -1880,4 +1888,17 @@ mod tests {
         });
         assert!(refused.is_err(), "a shut destination answers nothing");
     }
+
+#[cfg(test)]
+mod cancelled_steps_tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_move_never_reads_complete() {
+        let steps = handoff_steps(&HandoffState::Cancelled, aui_protocol::Provider::Codex, Some(SummaryKind::Extractive), false, false, true, None);
+        assert_eq!(steps[3].state, HandoffStepState::Skipped);
+        assert_eq!(steps[2].state, HandoffStepState::Skipped);
+    }
+}
+
 }
