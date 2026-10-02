@@ -390,9 +390,10 @@ pub enum Command {
     Skills,
     /// Show the browser in the right pane.
     RightBrowser,
-    /// Review the diff in the right pane.
+    /// Legacy `/diff` spelling of [`Command::RightGit`]: kept as a variant
+    /// so older call sites compile, with no palette row of its own.
     RightDiff,
-    /// Show git changes and the PR form.
+    /// Show session edits and working-tree changes in the right pane.
     RightGit,
     /// Show the file tree in the right pane.
     RightFiles,
@@ -405,10 +406,13 @@ pub enum Command {
 impl Command {
     /// Every command, in the order the menu lists them.
     ///
-    /// The six window-level commands sit together just before `Help`: the
-    /// four right-pane commands as one group, then the two terminal commands
-    /// as another, with `Help` still closing the list.
-    pub const ALL: [Command; 25] = [
+    /// The five window-level commands sit together just before `Help`: the
+    /// three right-pane commands as one group, then the two terminal commands
+    /// as another, with `Help` still closing the list. `RightDiff` is the
+    /// legacy `/diff` spelling of the Changes command: it stays a variant so
+    /// older call sites compile, but it lists no palette row of its own —
+    /// [`Command::parse`] maps the typed `/diff` onto `RightGit`.
+    pub const ALL: [Command; 24] = [
         Command::Model,
         Command::Effort,
         Command::Mode,
@@ -427,7 +431,6 @@ impl Command {
         Command::Empty,
         Command::Logout,
         Command::RightBrowser,
-        Command::RightDiff,
         Command::RightGit,
         Command::RightFiles,
         Command::Terminal,
@@ -489,8 +492,8 @@ impl Command {
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
             Command::RightBrowser => "Show the browser in the right pane",
-            Command::RightDiff => "Review the diff in the right pane",
-            Command::RightGit => "Show git changes and the PR form",
+            Command::RightDiff => "Review the diff in the right pane (legacy spelling of /changes)",
+            Command::RightGit => "Show session edits and working-tree changes in the right pane",
             Command::RightFiles => "Show the file tree in the right pane",
             Command::Terminal => "Toggle the terminal dock",
             Command::NewTerminalCmd => "Open a new terminal tab",
@@ -498,8 +501,12 @@ impl Command {
         }
     }
 
-    /// Parse a typed slash command.
+    /// Parse a typed slash command. `/diff` is the legacy spelling of
+    /// `/changes`: it parses onto the same command rather than failing.
     pub fn parse(text: &str) -> Option<Command> {
+        if text == Command::RightDiff.slash() {
+            return Some(Command::RightGit);
+        }
         Command::ALL.into_iter().find(|c| c.slash() == text)
     }
 
@@ -675,11 +682,16 @@ mod tests {
 
     #[test]
     fn every_command_parses_back_from_its_slash() {
-        assert_eq!(Command::ALL.len(), 25, "the palette lists every command");
+        assert_eq!(Command::ALL.len(), 24, "the palette lists every command");
         for command in Command::ALL {
             assert_eq!(Command::parse(command.slash()), Some(command));
             assert_eq!(Command::parse_line(command.slash()), Some((command, "")));
         }
+        // B8: `/diff` is an alias of `/changes`, not its own row.
+        assert_eq!(Command::parse("/diff"), Some(Command::RightGit));
+        assert_eq!(Command::parse_line("/diff"), Some((Command::RightGit, "")));
+        assert_eq!(Command::parse("/changes"), Some(Command::RightGit));
+        assert!(!Command::ALL.contains(&Command::RightDiff), "/diff lists no palette row of its own");
         assert_eq!(Command::parse("/nope"), None);
     }
 

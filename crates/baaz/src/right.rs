@@ -1,4 +1,4 @@
-//! The right pane's four bodies: real read-only data, inert labelled actions.
+//! The right pane's three bodies: real read-only data, inert labelled actions.
 //!
 //! [`render`] dispatches on [`RightKind`](crate::layout::RightKind) to one
 //! builder per pane. It never touches a subprocess or the filesystem: it draws
@@ -292,7 +292,7 @@ impl RightCache {
     pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
         match kind {
             RightKind::Browser => None,
-            RightKind::Git | RightKind::Diff => {
+            RightKind::Changes | RightKind::Git | RightKind::Diff => {
                 self.git.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at)
             }
             RightKind::Files => self.files.as_ref().filter(|slot| slot.root == root).map(|slot| slot.at),
@@ -459,66 +459,35 @@ pub(crate) fn render(
             ),
             BrowserPlaceholder::Closed => closed_browser_state(),
         },
-        RightKind::Diff => match project {
+        RightKind::Changes | RightKind::Diff | RightKind::Git => match project {
             Some((root, _)) => match cache.git_for(&root) {
                 None => loading_state(
-                    "right-diff-loading",
-                    "Diff review",
-                    "Loading the working tree",
-                    "The pane re-reads the repository in the background and fills in on its own.",
-                ),
-                Some(None) => empty_state(
-                    "right-diff-empty",
-                    "Diff review",
-                    "Not a git repository",
-                    "This project's folder is not a git checkout, so there is nothing to review.",
-                ),
-                Some(Some(status)) => {
-                    if status.files.is_empty() {
-                        empty_state(
-                            "right-diff-clean",
-                            "Diff review",
-                            "No unstaged changes",
-                            "The working tree is clean — there is nothing to review.",
-                        )
-                    } else {
-                        match cache.diffs_for(&root) {
-                            None => loading_state(
-                                "right-diff-loading",
-                                "Diff review",
-                                "Loading the working tree",
-                                "The pane re-reads the repository in the background and fills in on its own.",
-                            ),
-                            Some(parsed) => diff_pane_from(&status, &parsed, &notify),
-                        }
-                    }
-                }
-            },
-            None => empty_state(
-                "right-diff-empty",
-                "Diff review",
-                "No project is open",
-                "Open or adopt a project and its unstaged changes will be reviewed here.",
-            ),
-        },
-        RightKind::Git => match project {
-            Some((root, _)) => match cache.git_for(&root) {
-                None => loading_state(
-                    "right-git-loading",
+                    "right-changes-loading",
                     "Changes",
                     "Loading changes",
                     "The pane re-reads the repository in the background and fills in on its own.",
                 ),
                 Some(None) => empty_state(
-                    "right-git-empty",
+                    "right-changes-empty",
                     "Changes",
                     "Not a git repository",
                     "This project's folder is not a git checkout, so there are no changes to show.",
                 ),
-                Some(Some(status)) => git_pane_from(&status, &notify),
+                Some(Some(status)) => {
+                    if status.files.is_empty() {
+                        empty_state(
+                            "right-changes-clean",
+                            "Changes",
+                            "No unstaged changes",
+                            "The working tree is clean — there is nothing to review.",
+                        )
+                    } else {
+                        changes_pane_from(&status, cache.diffs_for(&root), &notify)
+                    }
+                }
             },
             None => empty_state(
-                "right-git-empty",
+                "right-changes-empty",
                 "Changes",
                 "No project is open",
                 "Open or adopt a project and its uncommitted changes will be listed here.",
@@ -605,10 +574,11 @@ impl Harness {
     /// Open the right pane on the Browser kind because the agent navigated
     /// `session_id` there (Z7b): like a person's click would — the pane
     /// stands open on Browser and the session's saved state says so — but
-    /// without the toggle (`show_right` would close a pane already showing
-    /// Browser) and without arming URL focus (the person's keyboard stays
-    /// where it was). Works for a session that is not active: the saved
-    /// state is written onto `session_id` directly.
+    /// through the non-toggling [`Harness::select_right`] (`show_right`
+    /// would close a pane already showing Browser) and without arming URL
+    /// focus (the person's keyboard stays where it was). Works for a
+    /// session that is not active: the saved state is written onto
+    /// `session_id` directly.
     pub(crate) fn show_browser_for_agent(&mut self, session_id: &str, cx: &mut Context<Self>) {
         // Only the session on screen changes what is on screen (review): an
         // agent in a background session must not flip the person's visible
@@ -617,10 +587,10 @@ impl Harness {
         let active = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let foreground = agent_open_flips_visible_pane(active.as_deref(), session_id);
         if foreground {
-            self.right_snap = false;
-            self.layout.right_kind = Some(RightKind::Browser);
-            self.layout.right_open = true;
-            crate::layout::write(&self.layout);
+            self.select_right(RightKind::Browser, cx);
+            // A person's own open earns URL-field focus; an agent's never
+            // does — undo the arm `select_right` owes the person.
+            self.browser_url_focus_armed = false;
         }
         let mut right =
             self.overrides.get(session_id).and_then(|meta| meta.right.clone()).unwrap_or_default();
@@ -1911,17 +1881,79 @@ fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harn
         .into_any_element()
 }
 
-/// Real status, inert verbs: the changes panel plus the PR form. The form
-/// has no head parameter, so the real branch rides in the description; the
-/// checks stay empty rather than fabricating green rows. Commit and Push
-/// reach [`inert`] and never shell out. The status arrives already read.
-fn git_pane_from(status: &GitStatus, notify: &ToastSink) -> AnyElement {
-    let changes = git_changes("right-git", status.files.clone(), "", status.ahead, status.behind)
-        .flush()
-        .branch(status.branch.clone())
-        .on_action(git_handler(notify.clone()));
+/// One section heading inside the merged Changes view: a labelled row, so
+/// the two halves read as sections rather than two panes glued together.
+fn changes_heading(id: &'static str, label: &'static str) -> AnyElement {
+    div()
+        .id(id)
+        .role(gpui::Role::Label)
+        .aria_label(label)
+        .px(px(16.0))
+        .pt(px(12.0))
+        .child(label)
+        .into_any_element()
+}
+
+/// The merged Changes view (B8): this session's edits on top, the rest of
+/// the working tree below, in one scrollable view. The top section is the
+/// old Diff review (unstaged diff parsed with caps, the first file shown,
+/// real numstat totals in the summary); the bottom is the old Git changes
+/// panel plus the PR form (whose head parameter the library lacks, so the
+/// real branch rides in the description). Commit, Push and every other verb
+/// reach [`inert`] and never shell out. Status and parsed diff arrive
+/// already read; a clean tree never reaches here (the caller draws the
+/// clean empty state instead), and a diff that has not landed yet draws a
+/// labelled loading row under its heading rather than blocking the tree.
+fn changes_pane_from(status: &GitStatus, parsed: Option<ParsedDiffs>, notify: &ToastSink) -> AnyElement {
+    let review_files: Vec<ReviewFile> = status.files.iter().take(DIFF_FILES_CAP).enumerate()
+        .map(|(index, (change, _))| ReviewFile { change: change.clone(), notes: 0, selected: index == 0 })
+        .collect();
+    let first_path = review_files.first().map(|file| file.change.path.clone()).unwrap_or_default();
+    let session: AnyElement = match parsed.as_ref() {
+        Some(parsed) => {
+            let shown = parsed
+                .diffs
+                .iter()
+                .find(|diff| diff.path == first_path)
+                .or_else(|| parsed.diffs.first())
+                .cloned()
+                .unwrap_or(Diff { path: first_path, hunks: Vec::new(), added: 0, removed: 0 });
+            let lead = if parsed.truncated {
+                format!(
+                    "Unstaged changes — showing the first {DIFF_FILES_CAP} files, \
+                     {DIFF_LINES_PER_FILE_CAP} lines each"
+                )
+            } else {
+                "Unstaged changes".to_string()
+            };
+            diff_review(
+                "right-changes-session",
+                review_files,
+                shown,
+                Vec::new(),
+                DiffScope::Unstaged,
+                DiffView::Unified,
+            )
+            .flush()
+            .summary(lead, status.added, status.removed)
+            .on_action(diff_handler(notify.clone()))
+            .into_any_element()
+        }
+        None => div()
+            .id("right-changes-session-loading")
+            .role(gpui::Role::Label)
+            .aria_label("Session edits loading")
+            .p(px(16.0))
+            .child("Loading the working tree…")
+            .into_any_element(),
+    };
+    let changes =
+        git_changes("right-changes-tree", status.files.clone(), "", status.ahead, status.behind)
+            .flush()
+            .branch(status.branch.clone())
+            .on_action(git_handler(notify.clone()));
     let form = pr_form(
-        "right-pr",
+        "right-changes-pr",
         "main",
         "",
         vec![PrDescription::Text(SharedString::from(format!("Head branch: {}", status.branch)))],
@@ -1930,50 +1962,16 @@ fn git_pane_from(status: &GitStatus, notify: &ToastSink) -> AnyElement {
     .flush()
     .on_action(pr_handler(notify.clone()));
     v_flex()
-        .id("right-git-pane")
+        .id("right-changes-pane")
         .role(gpui::Role::Group)
         .aria_label("Changes")
         .size_full()
+        .overflow_y_scroll()
+        .child(changes_heading("right-changes-session-heading", "Session edits"))
+        .child(session)
+        .child(changes_heading("right-changes-tree-heading", "Working tree"))
         .child(changes)
         .child(form)
-        .into_any_element()
-}
-
-/// The working tree, read-only: unstaged diff parsed with caps, the first
-/// file selected, real numstat totals in the summary. Status and parsed diff
-/// arrive already read; a clean tree never reaches here (the caller draws the
-/// clean empty state instead).
-fn diff_pane_from(status: &GitStatus, parsed: &ParsedDiffs, notify: &ToastSink) -> AnyElement {
-    let review_files: Vec<ReviewFile> = status.files.iter().take(DIFF_FILES_CAP).enumerate()
-        .map(|(index, (change, _))| ReviewFile { change: change.clone(), notes: 0, selected: index == 0 })
-        .collect();
-    let first_path = review_files.first().map(|file| file.change.path.clone()).unwrap_or_default();
-    let shown = parsed
-        .diffs
-        .iter()
-        .find(|diff| diff.path == first_path)
-        .or_else(|| parsed.diffs.first())
-        .cloned()
-        .unwrap_or(Diff { path: first_path, hunks: Vec::new(), added: 0, removed: 0 });
-    let lead = if parsed.truncated {
-        format!(
-            "Unstaged changes — showing the first {DIFF_FILES_CAP} files, \
-             {DIFF_LINES_PER_FILE_CAP} lines each"
-        )
-    } else {
-        "Unstaged changes".to_string()
-    };
-    let review = diff_review("right-diff", review_files, shown, Vec::new(), DiffScope::Unstaged, DiffView::Unified)
-        .flush()
-        .fill()
-        .summary(lead, status.added, status.removed)
-        .on_action(diff_handler(notify.clone()));
-    v_flex()
-        .id("right-diff-pane")
-        .role(gpui::Role::Group)
-        .aria_label("Diff review")
-        .size_full()
-        .child(review)
         .into_any_element()
 }
 
