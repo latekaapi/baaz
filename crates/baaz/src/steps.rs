@@ -331,9 +331,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
 ];
 
 impl Harness {
-    /// `right:<browser|diff|git|files|off>`: open the right pane on that kind
-    /// through the same [`Harness::show_right`] the ⌘K rows call, so the
-    /// capture shows the production pane — same-kind-closes included.
+    /// `right:<browser|changes|files|off>`: open the right pane on that kind
+    /// idempotently (a kind OPENS it, never toggles), so the capture shows
+    /// the production pane. The pre-merge `diff`/`git` slugs still parse —
+    /// onto Changes — so older scripts keep working.
     /// Empty toggles the pane through [`Harness::toggle_right`]. An
     /// unknown slug records a step failure instead of capturing a window
     /// where nothing happened (a known verb that silently does nothing

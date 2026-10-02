@@ -29,17 +29,26 @@ pub enum GroupBy {
 /// Which right-pane kind was last shown, so reopening restores it. Task
 /// T3's ⌘K rows reuse [`RightKind::label`]; task T4's `right:<kind>` step
 /// verb parses [`RightKind::slug`].
+///
+/// B8 merged the old Diff review and Git changes into one [`RightKind::Changes`]
+/// view (this session's edits on top, the rest of the working tree below).
+/// The `Diff` and `Git` variants stay so older `layout.json` / `sessions.json`
+/// files — and the call sites outside the B8 file set — still compile and
+/// round-trip: [`RightKind::parse`] and [`right_kind`] map them onto
+/// `Changes`, so they load as the merged view and never render on their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RightKind {
     /// An embedded browser.
     Browser,
-    /// A diff review surface.
-    Diff,
-    /// The uncommitted changes.
-    Git,
+    /// This session's edits over the rest of the working tree.
+    Changes,
     /// The workspace file tree.
     Files,
+    /// Legacy alias of [`RightKind::Changes`] (the old Diff review).
+    Diff,
+    /// Legacy alias of [`RightKind::Changes`] (the old Git changes).
+    Git,
 }
 
 impl Default for RightKind {
@@ -50,36 +59,40 @@ impl Default for RightKind {
 }
 
 impl RightKind {
-    /// Every kind, for the toggle-all-kinds test and T3's palette rows.
-    pub const ALL: [RightKind; 4] =
-        [RightKind::Browser, RightKind::Diff, RightKind::Git, RightKind::Files];
+    /// Every kind the header tabs offer: Changes · Files · Browser.
+    pub const ALL: [RightKind; 3] =
+        [RightKind::Changes, RightKind::Files, RightKind::Browser];
 
-    /// The user-visible name: the right header's title, and T3's ⌘K labels.
+    /// The user-visible name: the header tabs' labels, and T3's ⌘K labels.
+    /// The legacy aliases label as the view they load into.
     pub fn label(self) -> &'static str {
         match self {
             RightKind::Browser => "Browser",
-            RightKind::Diff => "Diff review",
-            RightKind::Git => "Changes",
+            RightKind::Changes | RightKind::Diff | RightKind::Git => "Changes",
             RightKind::Files => "Files",
         }
     }
 
-    /// The machine name: T4's `right:<kind>` verb parses these back.
+    /// The machine name: the header tabs' ids, and T4's `right:<kind>` verb
+    /// parses these back. The legacy aliases slug as the kind they load
+    /// into, so a stored `diff`/`git` round-trips through `changes`.
     pub fn slug(self) -> &'static str {
         match self {
             RightKind::Browser => "browser",
-            RightKind::Diff => "diff",
-            RightKind::Git => "git",
+            RightKind::Changes | RightKind::Diff | RightKind::Git => "changes",
             RightKind::Files => "files",
         }
     }
 
     /// The inverse of [`RightKind::slug`]: `None` for an unknown string.
+    /// The pre-merge slugs `diff` and `git` load as `Changes`, so persisted
+    /// layouts and step scripts written before B8 keep opening the merged
+    /// view instead of failing. (Stored JSON keeps round-tripping the
+    /// legacy variants as-is; [`right_kind`] normalises them on read.)
     pub fn parse(s: &str) -> Option<RightKind> {
         match s {
             "browser" => Some(RightKind::Browser),
-            "diff" => Some(RightKind::Diff),
-            "git" => Some(RightKind::Git),
+            "changes" | "diff" | "git" => Some(RightKind::Changes),
             "files" => Some(RightKind::Files),
             _ => None,
         }
@@ -185,8 +198,9 @@ pub struct Layout {
     /// set one. `None` is "never resized": the default width.
     #[serde(rename = "rightWidth", default, skip_serializing_if = "Option::is_none")]
     pub right_width: Option<f32>,
-    /// Which of the four right-pane kinds was last shown, so reopening
-    /// restores it. `None` is "never opened": [`RightKind::Files`].
+    /// Which of the three right-pane kinds was last shown, so reopening
+    /// restores it. `None` is "never opened": [`RightKind::Files`]. A stored
+    /// pre-merge `diff`/`git` reads back as [`RightKind::Changes`].
     #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
     pub right_kind: Option<RightKind>,
     /// The two inherit-owner-servers opt-ins, owned by the Settings →
@@ -285,9 +299,14 @@ pub fn right_width(layout: &Layout) -> f32 {
 }
 
 /// The kind the right pane should show: the last one stored, or Files when
-/// nothing was ever stored.
+/// nothing was ever stored. A stored pre-merge `diff`/`git` (written before
+/// B8, or constructed by a legacy call site) normalises to `Changes` here,
+/// so every reader below sees only the three live kinds.
 pub fn right_kind(layout: &Layout) -> RightKind {
-    layout.right_kind.unwrap_or(RightKind::Files)
+    match layout.right_kind.unwrap_or(RightKind::Files) {
+        RightKind::Diff | RightKind::Git => RightKind::Changes,
+        kind => kind,
+    }
 }
 
 /// One drag move on the right pane's divider. The minus is the whole
@@ -362,7 +381,7 @@ mod tests {
             terminal_height: Some(300.0),
             right_open: true,
             right_width: Some(420.0),
-            right_kind: Some(RightKind::Diff),
+            right_kind: Some(RightKind::Changes),
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
         };
         let text = serde_json::to_string(&stored).unwrap();
@@ -377,7 +396,7 @@ mod tests {
         assert!(text.contains("\"terminalHeight\":300.0"));
         assert!(text.contains("\"rightOpen\":true"));
         assert!(text.contains("\"rightWidth\":420.0"));
-        assert!(text.contains("\"rightKind\":\"diff\""));
+        assert!(text.contains("\"rightKind\":\"changes\""));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
@@ -391,7 +410,7 @@ mod tests {
         assert_eq!(back.terminal_height, Some(300.0));
         assert!(back.right_open);
         assert_eq!(back.right_width, Some(420.0));
-        assert_eq!(back.right_kind, Some(RightKind::Diff));
+        assert_eq!(back.right_kind, Some(RightKind::Changes));
         assert!(back.use_own_mcp.codex);
         assert!(!back.use_own_mcp.claude_code);
         // An old file with only a width still reads, taking the new defaults.
@@ -455,6 +474,30 @@ mod tests {
         assert_eq!(RightKind::parse("nope"), None);
         assert_eq!(RightKind::parse(""), None);
         assert_eq!(RightKind::parse("DIFF"), None);
+    }
+
+    #[test]
+    fn pre_merge_slugs_and_stores_load_as_changes() {
+        // B8: layouts and session states persisted as `diff` or `git`
+        // reopen on the merged Changes view, never on a removed kind.
+        // Stored JSON round-trips the legacy variants as-is (older files
+        // keep reading); `parse` and `right_kind` map them onto Changes.
+        assert_eq!(RightKind::parse("diff"), Some(RightKind::Changes));
+        assert_eq!(RightKind::parse("git"), Some(RightKind::Changes));
+        assert_eq!(RightKind::parse("changes"), Some(RightKind::Changes));
+        for (slug, legacy) in [("diff", RightKind::Diff), ("git", RightKind::Git)] {
+            let layout: Layout =
+                serde_json::from_str(&format!("{{\"rightKind\":{slug:?}}}")).unwrap();
+            assert_eq!(layout.right_kind, Some(legacy), "{slug} still deserialises");
+            assert_eq!(right_kind(&layout), RightKind::Changes, "{slug} reads as Changes");
+        }
+        // The legacy variants label and slug as the view they load into.
+        assert_eq!(RightKind::Diff.label(), "Changes");
+        assert_eq!(RightKind::Git.label(), "Changes");
+        assert_eq!(RightKind::Diff.slug(), "changes");
+        assert_eq!(RightKind::Git.slug(), "changes");
+        // And the three live tabs are exactly Changes · Files · Browser.
+        assert_eq!(RightKind::ALL, [RightKind::Changes, RightKind::Files, RightKind::Browser]);
     }
 
     #[test]

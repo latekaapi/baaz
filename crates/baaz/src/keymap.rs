@@ -112,6 +112,9 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
     KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
     KeymapEntry { action: "ToggleRightPane", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Toggle right pane" },
+    KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
+    KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
+    KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
     KeymapEntry { action: "FocusAddress", keystroke: "cmd-l", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Focus address bar" },
     KeymapEntry { action: "TerminalSigint", keystroke: "ctrl-c", context: Some(crate::app::TERMINAL_CONTEXT), category: "terminal", label: "Interrupt terminal program" },
     KeymapEntry { action: "NoAction", keystroke: "enter", context: Some("BaazTerminal && !menu"), category: "terminal", label: "Terminal takes the key" },
@@ -186,6 +189,21 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "ToggleRightPane" => Some(gpui::KeyBinding::new(
             keystroke,
             crate::app::ToggleRightPane,
+            context,
+        )),
+        "ShowRightChanges" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::ShowRightChanges,
+            context,
+        )),
+        "ShowRightFiles" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::ShowRightFiles,
+            context,
+        )),
+        "ShowRightBrowser" => Some(gpui::KeyBinding::new(
+            keystroke,
+            crate::app::ShowRightBrowser,
             context,
         )),
         "FocusAddress" => Some(gpui::KeyBinding::new(keystroke, aui_webview::FocusAddress, context)),
@@ -823,6 +841,33 @@ mod tests {
                 row.context
             );
         }
+    }
+
+    /// B8: the three right-pane shortcuts are registered — ⌘⇧D Changes,
+    /// ⌘⌥E Files (⌘⇧E was already the effort picker), ⌘⇧B Browser — each on
+    /// its own free chord in the root context, so they list in Settings →
+    /// Shortcuts and none of them collides with an existing row.
+    #[test]
+    fn right_pane_shortcuts_are_registered_without_conflicts() {
+        for (action, keystroke) in [
+            ("ShowRightChanges", "cmd-shift-d"),
+            ("ShowRightFiles", "cmd-alt-e"),
+            ("ShowRightBrowser", "cmd-shift-b"),
+        ] {
+            let row = KEYMAP
+                .iter()
+                .find(|row| row.action == action)
+                .unwrap_or_else(|| panic!("keymap has no {action} row"));
+            assert_eq!(row.keystroke, keystroke, "{action} rides the wrong chord");
+            assert_eq!(row.category, "pane", "{action} lists outside the pane group");
+            assert!(!row.label.is_empty(), "{action} has no Settings label");
+            // Free chords: no other row claims the same keystroke anywhere.
+            let claims = KEYMAP.iter().filter(|row| row.keystroke == keystroke).count();
+            assert_eq!(claims, 1, "{keystroke:?} is claimed {claims} times");
+        }
+        // ⌘⇧E stays the effort picker: the reason Files rides ⌘⌥E instead.
+        let effort = KEYMAP.iter().find(|row| row.action == "OpenEffortMenu").expect("effort row");
+        assert_eq!(effort.keystroke, "cmd-shift-e");
     }
 
     /// The Settings-stage metadata is filled in for every row, so no
