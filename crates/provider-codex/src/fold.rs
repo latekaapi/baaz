@@ -8,7 +8,10 @@
 //! (the completed text renders whole). When a turn ends with buffered deltas
 //! still open — the interrupted path, where `item/completed` never arrives
 //! for the streamed message — `turn/completed` flushes them so the streamed
-//! text survives. `item/started` is likewise carried, not rendered.
+//! text survives. `item/started` is carried, not rendered — except a
+//! `commandExecution` start, which opens the command's running shell card
+//! so the wait reads as running, never hung; the completion updates that
+//! same card in place.
 //!
 //! Why `item/completed` stays primary:
 //!
@@ -283,6 +286,52 @@ fn parse_tool_gate(server_name: &str, message: &str) -> Option<(String, String)>
 /// double-quoted), and the card titles the inner command — the wrapper
 /// is how it ran, not what was asked. Unwraps one layer only; anything
 /// else renders verbatim, and the full wrapper stays in the fixture.
+/// One `commandExecution` item as its shell card, shared by the running
+/// card `item/started` opens and the update its completion lands in
+/// place: the same status, verb, exit and body either way, so a command
+/// never renders as two different cards. `live` reads running — the pill
+/// and the elapsed belong to the open execution, never the finished one.
+fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
+    // Every `CommandExecutionStatus` in the schema, named: the wire status
+    // is a plain string, so a future CLI version can send a fifth value
+    // no arm names — that unknown fails closed to `Error`, never back to
+    // a spinner that never stops.
+    let status = match (item.status(), item.exit_code()) {
+        ("inProgress", _) => ToolStatus::Running,
+        ("completed", Some(0)) => ToolStatus::Success,
+        ("completed", _) => ToolStatus::Error,
+        ("failed", _) => ToolStatus::Error,
+        ("declined", _) => ToolStatus::Cancelled,
+        (_unknown, _) => ToolStatus::Error,
+    };
+    // A still-open execution reads pending; only a finished one reads
+    // done, and a declined one reads denied.
+    let verb = match status {
+        ToolStatus::Running => "Run",
+        ToolStatus::Cancelled => "Denied",
+        _ => "Ran",
+    };
+    let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
+    let block = Block::ToolCall {
+        id: item.id().to_owned(),
+        kind: ToolKind::Shell,
+        verb: verb.into(),
+        target: display_command(item.command()),
+        status,
+        duration_ms: None,
+        body: ToolBody::Shell {
+            output_lines: item
+                .aggregated_output()
+                .map(|output| output.lines().map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            exit_code,
+            live: matches!(status, ToolStatus::Running),
+        },
+        diff_stat: None,
+    };
+    (block, status, exit_code)
+}
+
 fn display_command(command: &str) -> String {
     let Some(arg) = shell_wrapper_arg(command) else { return command.to_owned() };
     // The wrapper takes exactly one argument: anything that is not one
@@ -669,6 +718,22 @@ struct CodexApprovalSite {
     card: Block,
 }
 
+/// Where a live `commandExecution` card lives: `item/started` cards it as
+/// running, and the completion updates that same card in place — one card
+/// per command, running in between. The card itself rides along so a
+/// `turn/completed` that never got the item's completion can still settle
+/// it in place instead of leaving it spinning.
+#[derive(Clone, Debug)]
+struct CommandSite {
+    /// The turn hosting the card.
+    turn_id: String,
+    /// The card's block index in that turn, for the in-place update.
+    block_index: usize,
+    /// The running card as `item/started` opened it: the turn-end settle
+    /// flips this to its terminal face.
+    card: Block,
+}
+
 /// A pending MCP tool-call elicitation's card, keyed by the gated call's
 /// `(turn, server, tool)` triple: the elicitation names no item id, so
 /// its `mcpToolCall` item cannot address the card directly, and the
@@ -831,6 +896,11 @@ pub struct CodexFold {
     /// reads this back to face its card with the paths and a bounded
     /// diff preview. Dropped when the item completes.
     file_changes: HashMap<String, Vec<FileChangeEntry>>,
+    /// Wire item id → the live `commandExecution` card `item/started`
+    /// opened, so the completion updates it in place instead of adding a
+    /// second card. Dropped when the item completes; bounded like
+    /// `file_changes`, and past the bound completions push as before.
+    running_commands: HashMap<String, CommandSite>,
     /// `(turn, server, tool)` → the pending MCP tool-call elicitation
     /// gating that call (its card's approval id). The elicitation names
     /// no item id, so this is the join its `mcpToolCall` item settles
@@ -1589,12 +1659,35 @@ impl CodexFold {
     /// Carry one started item's `fileChange` changes by item id, so the
     /// `item/fileChange/requestApproval` that follows can face its card
     /// with the paths and the diff. Carried, never rendered: no deltas.
+    /// A started `commandExecution` is more than memory: it opens the
+    /// command's running shell card (live pill, elapsed) right away, and
+    /// the completion updates that same card in place — one card per
+    /// command, running in between. A start for an already-carded item
+    /// (a re-delivered start) cards nothing twice.
     fn remember_item(&mut self, notification: &Notification) -> Vec<Delta> {
-        if let Some(item) = notification.item() {
-            let changes = item.changes();
-            if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
-                self.file_changes.insert(item.id().to_owned(), changes.to_owned());
+        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else {
+            return Vec::new();
+        };
+        if item.kind() == "commandExecution" {
+            if self.running_commands.contains_key(item.id()) {
+                return Vec::new();
             }
+            let mut deltas = Vec::new();
+            self.ensure_assistant(turn_id, &mut deltas);
+            let (block, _, _) = command_execution_block(item);
+            if self.running_commands.len() < 64 {
+                let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+                self.running_commands.insert(
+                    item.id().to_owned(),
+                    CommandSite { turn_id: turn_id.to_owned(), block_index, card: block.clone() },
+                );
+            }
+            self.push_block(turn_id, block, &mut deltas);
+            return deltas;
+        }
+        let changes = item.changes();
+        if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
+            self.file_changes.insert(item.id().to_owned(), changes.to_owned());
         }
         Vec::new()
     }
@@ -1664,57 +1757,44 @@ impl CodexFold {
             }
             "commandExecution" => {
                 self.ensure_assistant(turn_id, &mut deltas);
-                // Every `CommandExecutionStatus` in the schema, named: the
-                // wire status is a plain string, so a future CLI version can
-                // send a fifth value no arm names — that unknown fails closed
-                // to `Error`, never back to a spinner that never stops.
-                let status = match (item.status(), item.exit_code()) {
-                    ("inProgress", _) => ToolStatus::Running,
-                    ("completed", Some(0)) => ToolStatus::Success,
-                    ("completed", _) => ToolStatus::Error,
-                    ("failed", _) => ToolStatus::Error,
-                    ("declined", _) => ToolStatus::Cancelled,
-                    (_unknown, _) => ToolStatus::Error,
-                };
-                // A still-open execution reads pending; only a finished one
-                // reads done, and a declined one reads denied.
-                let verb = match status {
-                    ToolStatus::Running => "Run",
-                    ToolStatus::Cancelled => "Denied",
-                    _ => "Ran",
-                };
-                let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
-                self.push_block(
-                    turn_id,
-                    Block::ToolCall {
-                        id: item.id().to_owned(),
-                        kind: ToolKind::Shell,
-                        verb: verb.into(),
-                        target: display_command(item.command()),
-                        status,
-                        duration_ms: None,
-                        body: ToolBody::Shell {
-                            output_lines: item
-                                .aggregated_output()
-                                .map(|output| {
-                                    output.lines().map(str::to_owned).collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default(),
-                            exit_code,
-                            live: false,
-                        },
-                        diff_stat: None,
-                    },
-                    &mut deltas,
-                );
+                let (block, status, exit_code) = command_execution_block(item);
+                // A completion for a card `item/started` already opened
+                // updates it in place — one card per command, running in
+                // between — while a completion with no start behind it
+                // (history, a missed start) pushes as before and opens the
+                // site for any later frame of the same item.
+                if let Some(site) = self.running_commands.remove(item.id()) {
+                    deltas.push(Delta::BlockUpdated {
+                        turn_id: site.turn_id,
+                        block_index: site.block_index,
+                        block,
+                    });
+                } else {
+                    if self.running_commands.len() < 64 {
+                        let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
+                        self.running_commands.insert(
+                            item.id().to_owned(),
+                            CommandSite {
+                                turn_id: turn_id.to_owned(),
+                                block_index,
+                                card: block.clone(),
+                            },
+                        );
+                    }
+                    self.push_block(turn_id, block, &mut deltas);
+                }
                 // A terminal completion settles the approval that gated this
                 // item: allowed when it ran (even when it then failed), and
-                // denied when it completed declined without running.
+                // denied when it completed declined without running. A
+                // failed run with no exit code still reads failed: the
+                // approval never reports a clean zero it never saw.
                 if !matches!(status, ToolStatus::Running) {
+                    self.running_commands.remove(item.id());
                     let state = match status {
                         ToolStatus::Cancelled => ApprovalState::Denied,
                         _ => ApprovalState::AllowedOnce {
-                            exit_code: exit_code.unwrap_or(0),
+                            exit_code: exit_code
+                                .unwrap_or(i32::from(matches!(status, ToolStatus::Error))),
                             duration_ms: 0,
                         },
                     };
@@ -1882,9 +1962,64 @@ impl CodexFold {
         }
     }
 
+    /// Settle every command card of `turn_id` that never completed: an
+    /// interrupted, cancelled, or crashed turn sends no `item/completed`
+    /// for its open executions, and without this the cards spin forever
+    /// while their map entries leak (past 64 the fold then stops recording
+    /// and a later completion cards twice). Interrupted/cancelled reads
+    /// cancelled; anything else fails closed to error — success is only
+    /// ever read off the item's own completion, never assumed from the
+    /// turn ending.
+    fn settle_running_commands(&mut self, turn_id: &str, turn_status: &str, deltas: &mut Vec<Delta>) {
+        let end = {
+            let normalized = turn_status.to_ascii_lowercase();
+            if normalized.contains("interrupt") || normalized.contains("cancel") {
+                ToolStatus::Cancelled
+            } else {
+                ToolStatus::Error
+            }
+        };
+        let stale: Vec<String> = self
+            .running_commands
+            .iter()
+            .filter(|(_, site)| site.turn_id == turn_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for item_id in stale {
+            let Some(site) = self.running_commands.remove(&item_id) else { continue };
+            let mut card = site.card;
+            if let Block::ToolCall { status, verb, body, .. } = &mut card {
+                *status = end;
+                *verb = (if end == ToolStatus::Cancelled { "Denied" } else { "Ran" }).into();
+                if let ToolBody::Shell { live, .. } = body {
+                    *live = false;
+                }
+            }
+            deltas.push(Delta::BlockUpdated {
+                turn_id: site.turn_id,
+                block_index: site.block_index,
+                block: card,
+            });
+            // The gate settles with the run: denied when the turn was
+            // stopped, failed-marked (never a clean zero) otherwise.
+            let state = match end {
+                ToolStatus::Cancelled => ApprovalState::Denied,
+                _ => ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 },
+            };
+            self.resolve_approval(&item_id, state, deltas);
+        }
+    }
+
     fn finish_turn(&mut self, notification: &Notification) -> Vec<Delta> {
         let Some(turn_id) = notification.turn_id() else { return Vec::new() };
         let mut deltas = Vec::new();
+        // Close the turn's still-open executions first: their cards must
+        // stop spinning even on a turn that carried no other content.
+        self.settle_running_commands(
+            turn_id,
+            notification.completed_status().unwrap_or("completed"),
+            &mut deltas,
+        );
         // The interrupted path never sends `item/completed` for the streamed
         // message, so flush whatever the delta lane still holds: without this
         // the whole turn folds to zero deltas — not even a `TurnFinished`.
@@ -2356,28 +2491,41 @@ mod tests {
         assert_eq!(thinking, ["plannedtrace"], "summary plus content, joined");
     }
 
+    /// Final shell-card state under the running-card change: `item/started`
+    /// adds the card as running and the completion updates it in place
+    /// (`BlockUpdated`), so the final face is the last add-or-update per
+    /// card id — one entry per card, never one per delta.
     fn shell_cards(deltas: &[Delta]) -> Vec<(ToolStatus, String, Vec<String>, Option<i32>)> {
-        deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                Delta::BlockAdded {
-                    block:
-                        Block::ToolCall {
-                            kind: ToolKind::Shell,
-                            status,
-                            target,
-                            body: ToolBody::Shell { output_lines, exit_code, .. },
-                            ..
-                        },
-                    ..
-                } => Some((
-                    *status,
-                    target.clone(),
-                    output_lines.clone(),
-                    *exit_code,
-                )),
-                _ => None,
-            })
+        use std::collections::HashMap;
+        let mut order: Vec<String> = Vec::new();
+        let mut final_state: HashMap<String, (ToolStatus, String, Vec<String>, Option<i32>)> =
+            HashMap::new();
+        for delta in deltas {
+            let block = match delta {
+                Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => block,
+                _ => continue,
+            };
+            if let Block::ToolCall {
+                id,
+                kind: ToolKind::Shell,
+                status,
+                target,
+                body: ToolBody::Shell { output_lines, exit_code, .. },
+                ..
+            } = block
+            {
+                if !final_state.contains_key(id) {
+                    order.push(id.clone());
+                }
+                final_state.insert(
+                    id.clone(),
+                    (*status, target.clone(), output_lines.clone(), *exit_code),
+                );
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|id| final_state.remove(&id))
             .collect()
     }
 
@@ -2944,9 +3092,13 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1, "settling updates the card, never cards twice");
         assert!(
-            rest.iter().any(|delta| matches!(
+            ask.iter().chain(rest.iter()).any(|delta| matches!(
                 delta,
                 Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
+                    ..
+                }
+                | Delta::BlockUpdated {
                     block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
                     ..
                 }
@@ -3196,17 +3348,18 @@ mod tests {
             )),
             "an open execution settles nothing"
         );
-        // Finished: done verb, settled card.
+        // Finished: the open card updates in place to done (never a
+        // second card for the same command), and the approval settles.
         deltas.extend(fold.apply(&completed("exec-1", "completed")));
         assert!(
             deltas.iter().any(|delta| matches!(
                 delta,
-                Delta::BlockAdded {
+                Delta::BlockUpdated {
                     block: Block::ToolCall { kind: ToolKind::Shell, verb, status: ToolStatus::Success, .. },
                     ..
                 } if verb == "Ran"
             )),
-            "done reads done"
+            "done updates the running card in place"
         );
         assert!(
             deltas.iter().any(|delta| matches!(
@@ -3236,6 +3389,285 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the decline settles the card to denied"
+        );
+    }
+
+    /// B5: a `commandExecution` `item/started` opens the command's
+    /// running shell card (live pill) right away, and the completion
+    /// updates that same card in place — one card per command, running
+    /// in between. A re-delivered start cards nothing twice.
+    #[test]
+    fn started_command_cards_running_then_completes_in_place() {
+        fn started(item: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "th", "turnId": "t-9",
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "inProgress"},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic start decodes")
+        }
+        fn completed(item: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th", "turnId": "t-9",
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "completed", "exitCode": 0, "aggregatedOutput": "ok\n"},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic completion decodes")
+        }
+        fn shell_cards(deltas: &[Delta]) -> Vec<(String, ToolStatus, bool)> {
+            deltas
+                .iter()
+                .filter_map(|delta| match delta {
+                    Delta::BlockAdded {
+                        block:
+                            Block::ToolCall {
+                                kind: ToolKind::Shell,
+                                verb,
+                                status,
+                                body: ToolBody::Shell { live, .. },
+                                ..
+                            },
+                        ..
+                    } => Some((verb.clone(), *status, *live)),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut fold = CodexFold::new();
+        let mut deltas = fold.apply(&started("exec-9"));
+        assert_eq!(
+            shell_cards(&deltas),
+            [("Run".to_owned(), ToolStatus::Running, true)],
+            "the start opens one live running card: {deltas:?}"
+        );
+        // A re-delivered start cards nothing twice.
+        deltas.extend(fold.apply(&started("exec-9")));
+        assert_eq!(shell_cards(&deltas).len(), 1, "one command, one card: {deltas:?}");
+        // The completion updates that card in place — no second card.
+        deltas.extend(fold.apply(&completed("exec-9")));
+        assert_eq!(shell_cards(&deltas).len(), 1, "the finish adds no card: {deltas:?}");
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Shell,
+                            verb,
+                            status: ToolStatus::Success,
+                            body: ToolBody::Shell { live: false, .. },
+                            ..
+                        },
+                    ..
+                } if verb == "Ran"
+            )),
+            "the finish updates the running card to done: {deltas:?}"
+        );
+    }
+
+    /// B5fix2: `started` then `turn/completed` interrupted settles the
+    /// still-running card in place (cancelled, pill off) and drops the map
+    /// entry — no card spins forever, nothing leaks.
+    #[test]
+    fn interrupted_turn_settles_running_commands_and_clears_the_map() {
+        fn started(turn: &str, item: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "th", "turnId": turn,
+                    "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "inProgress"},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic start decodes")
+        }
+        fn finished(turn: &str, status: &str) -> Frame {
+            let line = serde_json::json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "th",
+                    "turn": {"id": turn, "status": status, "durationMs": 5},
+                },
+            })
+            .to_string();
+            crate::frame::decode_line(&line).expect("synthetic turn end decodes")
+        }
+        let mut fold = CodexFold::new();
+        let mut deltas = fold.apply(&started("t-1", "exec-1"));
+        assert_eq!(fold.running_commands.len(), 1, "the start records the live card");
+        deltas.extend(fold.apply(&finished("t-1", "interrupted")));
+        assert!(
+            fold.running_commands.is_empty(),
+            "the interrupted turn drops the live entry"
+        );
+        let added = deltas
+            .iter()
+            .filter(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::ToolCall { kind: ToolKind::Shell, .. }, .. }
+            ))
+            .count();
+        assert_eq!(added, 1, "one command, one card: {deltas:?}");
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block:
+                        Block::ToolCall {
+                            kind: ToolKind::Shell,
+                            status: ToolStatus::Cancelled,
+                            body: ToolBody::Shell { live: false, .. },
+                            ..
+                        },
+                    ..
+                }
+            )),
+            "the interrupted turn settles the card cancelled with the pill off: {deltas:?}"
+        );
+        // The final face per card is settled, never live: the last
+        // add-or-update wins, so a still-spinning card would surface here.
+        for (status, _, _, _) in shell_cards(&deltas) {
+            assert_ne!(
+                status,
+                ToolStatus::Running,
+                "no card still reads live after the turn ends: {deltas:?}"
+            );
+        }
+        // A failed turn fails its open cards closed instead of cancelling them.
+        let mut fold = CodexFold::new();
+        let mut deltas = fold.apply(&started("t-2", "exec-2"));
+        deltas.extend(fold.apply(&finished("t-2", "failed")));
+        assert!(
+            fold.running_commands.is_empty(),
+            "the failed turn drops the live entry too"
+        );
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated {
+                    block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Error, .. },
+                    ..
+                }
+            )),
+            "the failed turn settles the card failed: {deltas:?}"
+        );
+    }
+
+    /// B5fix2: 70 interrupted commands across turns card exactly once each
+    /// and leave nothing live — the per-turn settle clears the map, so no
+    /// entry leaks and no later completion can card twice.
+    #[test]
+    fn interrupted_commands_across_turns_never_duplicate_a_card() {
+        let mut fold = CodexFold::new();
+        let mut deltas = Vec::new();
+        for i in 0..70 {
+            let turn = format!("t-{i}");
+            let item = format!("exec-{i}");
+            for (method, params) in [
+                (
+                    "item/started",
+                    serde_json::json!({
+                        "threadId": "th", "turnId": turn,
+                        "item": {"type": "commandExecution", "id": item, "command": "make check", "status": "inProgress"},
+                    }),
+                ),
+                (
+                    "turn/completed",
+                    serde_json::json!({
+                        "threadId": "th",
+                        "turn": {"id": turn, "status": "interrupted", "durationMs": 1},
+                    }),
+                ),
+            ] {
+                let line = serde_json::json!({"method": method, "params": params}).to_string();
+                let frame = crate::frame::decode_line(&line).expect("synthetic frame decodes");
+                deltas.extend(fold.apply(&frame));
+            }
+        }
+        assert!(
+            fold.running_commands.is_empty(),
+            "every interrupted turn drops its entries"
+        );
+        let mut cards: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for delta in &deltas {
+            if let Delta::BlockAdded {
+                block: Block::ToolCall { kind: ToolKind::Shell, id, .. },
+                ..
+            } = delta
+            {
+                *cards.entry(id.clone()).or_default() += 1;
+            }
+        }
+        assert_eq!(cards.len(), 70, "seventy commands, seventy cards: {cards:?}");
+        assert!(
+            cards.values().all(|count| *count == 1),
+            "no command cards twice: {cards:?}"
+        );
+        for (status, _, _, _) in shell_cards(&deltas) {
+            assert_eq!(
+                status,
+                ToolStatus::Cancelled,
+                "every interrupted card settles cancelled"
+            );
+        }
+    }
+
+    /// B5fix2: a failed command with no exit code still reads failed on the
+    /// approval card — never a clean zero the run never reported.
+    #[test]
+    fn failed_command_without_exit_code_marks_the_approval_failed() {
+        fn request(item: &str) -> String {
+            serde_json::json!({
+                "id": 9,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "th", "turnId": "t-1", "itemId": item,
+                    "reason": "Run it?", "command": "make check", "cwd": "/tmp/work",
+                },
+            })
+            .to_string()
+        }
+        // No `exitCode`: the wire said the run failed and nothing more.
+        let line = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "th", "turnId": "t-1",
+                "item": {"type": "commandExecution", "id": "exec-f", "command": "make check", "status": "failed"},
+            },
+        })
+        .to_string();
+        let mut fold = CodexFold::new();
+        let frame = crate::frame::decode_line(&request("exec-f")).expect("ask decodes");
+        let mut deltas = fold.apply(&frame);
+        let frame = crate::frame::decode_line(&line).expect("synthetic completion decodes");
+        deltas.extend(fold.apply(&frame));
+        // No start opened a card, so the completion cards it directly
+        // (BlockAdded); the face still reads failed either way.
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Error, .. }, .. }
+                | Delta::BlockUpdated { block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Error, .. }, .. }
+            )),
+            "the shell card reads failed: {deltas:?}"
+        );
+        let mut exits = deltas.iter().filter_map(|delta| match delta {
+            Delta::BlockUpdated {
+                block: Block::Approval { state: ApprovalState::AllowedOnce { exit_code, .. }, .. },
+                ..
+            } => Some(*exit_code),
+            _ => None,
+        });
+        assert_eq!(
+            exits.next(),
+            Some(1),
+            "a failed run with no exit code marks the card failed, never zero: {deltas:?}"
         );
     }
 
@@ -3735,26 +4167,38 @@ mod tests {
     #[test]
     fn command_executions_fold_to_shell_cards() {
         let (_, deltas) = replay("approval.jsonl");
-        let shells: Vec<(&ToolStatus, _)> = deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                Delta::BlockAdded {
-                    block:
-                        Block::ToolCall {
-                            kind: ToolKind::Shell,
-                            status,
-                            target,
-                            body: ToolBody::Shell { exit_code, .. },
-                            ..
-                        },
-                    ..
-                } => Some((status, (target.clone(), *exit_code))),
-                _ => None,
-            })
+        // Final state per card: the start adds it running, the completion
+        // updates it in place — so read the last add-or-update per card id.
+        let mut order: Vec<String> = Vec::new();
+        let mut final_state: std::collections::HashMap<String, (ToolStatus, String, Option<i32>)> =
+            std::collections::HashMap::new();
+        for delta in &deltas {
+            let block = match delta {
+                Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => block,
+                _ => continue,
+            };
+            if let Block::ToolCall {
+                id,
+                kind: ToolKind::Shell,
+                status,
+                target,
+                body: ToolBody::Shell { exit_code, .. },
+                ..
+            } = block
+            {
+                if !final_state.contains_key(id) {
+                    order.push(id.clone());
+                }
+                final_state.insert(id.clone(), (*status, target.clone(), *exit_code));
+            }
+        }
+        let shells: Vec<(ToolStatus, String, Option<i32>)> = order
+            .into_iter()
+            .filter_map(|id| final_state.remove(&id))
             .collect();
         assert_eq!(shells.len(), 1, "one executed command, one card");
-        assert_eq!(shells[0].0, &ToolStatus::Success);
-        assert_eq!(shells[0].1.1, Some(0));
-        assert!(shells[0].1.0.contains("baaz_probe_write.txt"), "target: {}", shells[0].1.0);
+        assert_eq!(shells[0].0, ToolStatus::Success);
+        assert_eq!(shells[0].2, Some(0));
+        assert!(shells[0].1.contains("baaz_probe_write.txt"), "target: {}", shells[0].1);
     }
 }
