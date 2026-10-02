@@ -93,9 +93,12 @@ pub fn path() -> PathBuf {
 /// Under `BAAZ_DETERMINISTIC=1` (the visual probe's captures) the store reads
 /// empty, the same rule the keymap applies to the user file: a capture must
 /// not paint the owner's real sessions into the sidebar, or every baseline
-/// depends on whatever that machine happened to run.
+/// depends on whatever that machine happened to run. `BAAZ_MIGRATION_FIXTURE`
+/// lifts that rule for the migration probe entry only
+/// (`scripts/uiprobe.py`'s `migrate-sessions`): the registry it reads is
+/// the fixture in the temp state dir, never the owner's.
 pub fn read() -> ProviderSessionStore {
-    if deterministic() {
+    if deterministic() && std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_none() {
         return ProviderSessionStore::new();
     }
     crate::store::read_json(&path())

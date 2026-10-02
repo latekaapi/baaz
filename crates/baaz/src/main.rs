@@ -70,6 +70,7 @@ mod resize;
 mod right;
 mod search;
 mod session;
+mod session_migration;
 mod sessions;
 mod settings;
 mod settings_providers;
