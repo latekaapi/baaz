@@ -516,6 +516,10 @@ impl Harness {
                     // wholesale replace dropped.
                     this.sessions = sidebar::merge_session_list(wire, &this.sessions);
                     this.merge_provider_rows();
+                    // The wire's projection may say idle while a live view
+                    // still holds its turn: lay the live truth back over
+                    // every row with a view, so no busy row reads Settled.
+                    this.sync_all_live_rows(cx);
                     this.branches = branches;
                     this.derive_titles(cx);
                     crate::log::boot_mark(&format!(

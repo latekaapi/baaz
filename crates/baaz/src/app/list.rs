@@ -363,12 +363,16 @@ impl Harness {
         }, cx);
     }
 
-    /// The live view for a session: the open one, or a parked one the MRU
-    /// still holds. A parked provider lane keeps its child and drain task,
-    /// so its fold stays current — the row re-reads it the same way it
-    /// re-reads the open view (B3b). Never renders the parked transcript:
-    /// only the row's live facts come back. Takes the fields, not `self`,
-    /// so the caller keeps its mutable row borrow (disjoint fields).
+    /// The live view for a session: the open one, or a parked provider lane
+    /// the MRU still holds. A parked provider lane keeps its child and drain
+    /// task, so its fold stays current — the row re-reads it the same way it
+    /// re-reads the open view (B3b). A parked muse view dropped its event
+    /// subscription when it parked, so its fold is frozen at park time: a
+    /// busy bit from then would re-arm the row as Working (and re-pin stale
+    /// approvals) over the wire's idle status — the row defers to the wire
+    /// instead. Never renders the parked transcript: only the row's live
+    /// facts come back. Takes the fields, not `self`, so the caller keeps
+    /// its mutable row borrow (disjoint fields).
     fn live_view_for(
         active: &Option<Entity<SessionView>>,
         cache: &[(String, Entity<SessionView>)],
@@ -380,7 +384,11 @@ impl Harness {
                 return Some(view);
             }
         }
-        cache.iter().find(|(id, _)| id == session_id).map(|(_, view)| view.clone())
+        cache
+            .iter()
+            .find(|(id, _)| id == session_id)
+            .filter(|(_, view)| view.read(cx).is_provider_lane())
+            .map(|(_, view)| view.clone())
     }
 
     /// Keep one row's live facts current without waiting for `session/list`.
@@ -459,6 +467,22 @@ impl Harness {
         }
         if changed {
             self.invalidate_list();
+        }
+    }
+
+    /// Lay every live view's truth back over its row: a `session/list`
+    /// reply rebuilds rows from the wire's projection, which may still say
+    /// idle while a view holds a live turn (a command running after its
+    /// approval emits nothing for minutes). Without this the open
+    /// session's row flips to `Settled` until its next live event. Runs
+    /// with `started: false`, so no row manufactures `Working` — a view
+    /// that already stood down stays stood down.
+    pub(crate) fn sync_all_live_rows(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|entry| entry.id.clone()).collect();
+        for id in ids {
+            if Self::live_view_for(&self.active, &self.session_cache, &id, cx).is_some() {
+                self.sync_row_live(&id, false, cx);
+            }
         }
     }
 

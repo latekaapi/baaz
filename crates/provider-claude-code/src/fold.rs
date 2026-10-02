@@ -1301,10 +1301,13 @@ impl ClaudeFold {
     }
 
     /// Complete one tool card from its result, settling the linked approval
-    /// card alongside it when the result is a success: a tool that ran and
-    /// answered was allowed, full stop. An error result completes only the
-    /// tool card — allowed-but-failed and denied look identical here, and
-    /// the turn's `permission_denials` tells them apart below.
+    /// card alongside it: a tool that ran and answered was allowed, full
+    /// stop — including when it then failed, which settles allowed with a
+    /// nonzero exit rather than leaving the card pending forever. An error
+    /// result settles provisionally only: allowed-but-failed and denied
+    /// look identical here, and the turn's `permission_denials` still
+    /// corrects a denial to `Denied` below (the join is kept for exactly
+    /// that correction).
     fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Vec<Delta> {
         if self.todo_tool_ids.contains(&result.tool_use_id) {
             return self.apply_todo_result(result).into_iter().collect();
@@ -1325,17 +1328,16 @@ impl ClaudeFold {
         );
         let mut deltas =
             vec![Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block }];
-        if !result.is_error {
-            if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
-                let exit_code = match &site.kind {
-                    ToolKind::Shell => parse_exit_code(&result.text).unwrap_or(0),
-                    _ => 0,
-                };
-                self.resolve_approval_card(
-                    &request_id,
-                    ApprovalState::AllowedOnce { exit_code, duration_ms: 0 },
-                    &mut deltas,
-                );
+        if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
+            let exit_code = match &site.kind {
+                ToolKind::Shell => parse_exit_code(&result.text).unwrap_or(i32::from(result.is_error)),
+                _ => i32::from(result.is_error),
+            };
+            let state = ApprovalState::AllowedOnce { exit_code, duration_ms: 0 };
+            if result.is_error {
+                self.update_approval_state(&request_id, state, &mut deltas);
+            } else {
+                self.resolve_approval_card(&request_id, state, &mut deltas);
             }
         }
         deltas
@@ -1656,6 +1658,37 @@ impl ClaudeFold {
             }
         }
         deltas
+    }
+
+    /// Re-face one carded approval without consuming its join: an error
+    /// tool result means the command ran and failed, so the card reads
+    /// allowed-with-exit-code now — while a later `permission_denials`
+    /// can still correct it to denied through the kept site. The request
+    /// moves off the answerable queue (pending to decided), so a failed
+    /// tool is never offered for a decision; a repeat for an
+    /// already-settled id is a no-op.
+    fn update_approval_state(&mut self, request_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
+        let Some(site) = self.approval_sites.get(request_id).cloned() else { return };
+        let request = self
+            .decided
+            .get(request_id)
+            .cloned()
+            .or_else(|| {
+                self.pending
+                    .iter()
+                    .position(|queued| queued.request_id == request_id)
+                    .map(|position| {
+                        let request = self.pending.remove(position);
+                        self.decided.insert(request_id.to_owned(), request.clone());
+                        request
+                    })
+            });
+        let Some(request) = request else { return };
+        let mut card = approval_card(&request, &self.session_cwd);
+        if let Block::Approval { state: slot, .. } = &mut card {
+            *slot = state;
+        }
+        deltas.push(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block: card });
     }
 
     /// Settle one carded approval to its decided state: the only thing that
@@ -2787,6 +2820,62 @@ mod tests {
             other => panic!("a shell body, got {other:?}"),
         }
         assert!(!finished_metas(&deltas).is_empty(), "the turn still finishes");
+    }
+
+    /// B5: `error.jsonl` — the approved Bash run fails. The allow press
+    /// settles nothing by itself; the error result settles the card to
+    /// allowed-with-exit-code rather than leaving it pending forever, the
+    /// tool card reads error, and nothing waits afterwards. A denial on
+    /// the result frame still corrects the card to denied.
+    #[test]
+    fn approved_then_failed_command_ends_failed_not_pending() {
+        let lines = fixture_lines("error.jsonl");
+        let asked_at = nth_control_request(&lines, 1).expect("the Bash ask on the wire");
+        let (mut fold, _) = fold_lines(&lines[..asked_at]);
+        assert_eq!(fold.pending_approvals().len(), 1, "the Bash ask waits");
+        let request = fold.pending_approvals()[0].clone();
+        assert_eq!(request.tool_name, "Bash");
+        // The press settles nothing: take the allow, then run the rest of
+        // the capture — the failed result settles the card.
+        fold.take_approval(&request.request_id).expect("the ask is answerable");
+        let mut rest = Vec::new();
+        for line in &lines[asked_at..] {
+            rest.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { exit_code: 1, .. }, .. }, .. }
+            )),
+            "the failed run settles the card failed-marked"
+        );
+        assert!(
+            rest.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Error, .. }, .. }
+            )),
+            "the failed run completes its card as an error"
+        );
+        assert!(fold.pending_approvals().is_empty(), "nothing waits after the failed run");
+        // A denial arriving after the error still wins: the error settle
+        // kept the join for exactly this correction.
+        let denied = serde_json::json!({
+            "type": "result",
+            "session_id": "denied-late",
+            "permission_denials": [{
+                "tool_name": request.tool_name,
+                "tool_use_id": request.tool_use_id,
+            }],
+        })
+        .to_string();
+        let late: Vec<Delta> = fold.apply(&decode_line(&denied).expect("decodes"));
+        assert!(
+            late.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
+            )),
+            "the late denial still corrects the card to denied"
+        );
     }
 
     /// `error.jsonl`: the Bash `can_use_tool` ask cards as a command — the
