@@ -45,7 +45,8 @@ impl RunningChild {
         // to the Baaz-owned home ([`crate::home`]), never the owner's
         // `~/.claude` — that is what keeps Baaz sessions out of the
         // desktop app's listing. No filesystem work happens here: the
-        // host ensures the home before the adapter spawns.
+        // adapter re-ensures the absent-only owner links before every
+        // spawn, so late-created owner dirs are linked without a restart.
         let mut command = Command::new(program);
         command
             .args(&launch.argv)

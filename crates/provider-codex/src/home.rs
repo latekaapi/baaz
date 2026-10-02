@@ -62,16 +62,64 @@ pub fn ensure_home(owner_home: &Path, state_dir: &Path) -> std::io::Result<PathB
 
 /// Re-check the `auth.json` link before a spawn: when the owner's
 /// `auth.json` exists and the Baaz home's copy is absent, link it; when
-/// the Baaz copy exists but is no longer a symlink (codex replaced it by
-/// rename on a token rotation), replace it with the link. An existing
-/// symlink — even one pointing elsewhere — is left alone. No owner
-/// `auth.json`, no work.
+/// the Baaz copy exists but is no longer a symlink, see
+/// [`relink_auth_at`]. An existing symlink — even one pointing elsewhere
+/// — is left alone. No owner `auth.json`, no work.
 pub fn relink_auth(owner_home: &Path, state_dir: &Path) -> std::io::Result<()> {
     relink_auth_at(&owner_home_dir(owner_home).join(AUTH_FILE_NAME), &home_dir(state_dir))
 }
 
+/// Whether the Baaz home's real `auth.json` is newer than the owner's: a
+/// token Codex rotated into the Baaz home after the owner's last write.
+/// `false` on any metadata error — the move-aside path below preserves
+/// both files, so doubt relinks rather than keeps.
+fn baaz_auth_is_newer(owner_auth: &Path, dst: &Path) -> bool {
+    let (Ok(owner_meta), Ok(dst_meta)) =
+        (std::fs::metadata(owner_auth), std::fs::metadata(dst))
+    else {
+        return false;
+    };
+    let (Ok(owner_mtime), Ok(dst_mtime)) = (owner_meta.modified(), dst_meta.modified()) else {
+        return false;
+    };
+    dst_mtime > owner_mtime
+}
+
+/// The aside name for a real `auth.json` the relink moves out of the way:
+/// `auth.json.replaced-<unix secs>`, with a counter when the second ticks
+/// collide. The token survives beside the new link, never deleted.
+fn replaced_name(dst: &Path) -> PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let base = format!("{AUTH_FILE_NAME}.replaced-{secs}");
+    let mut candidate = dst.with_file_name(&base);
+    let mut attempt = 1u32;
+    while std::fs::symlink_metadata(&candidate).is_ok() {
+        attempt += 1;
+        candidate = dst.with_file_name(format!("{base}-{attempt}"));
+    }
+    candidate
+}
+
+/// Link `owner_auth` at `dst`, creating the home dir first. Unix-only:
+/// provider homes need symlinks.
+#[cfg(unix)]
+fn link_owner_auth(owner_auth: &Path, home: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    std::os::unix::fs::symlink(owner_auth, dst)
+}
+
 /// The re-check behind [`relink_auth`], against explicit paths so tests
 /// drive it with temp dirs.
+///
+/// Never deletes a token: when the Baaz copy exists as a real file (Codex
+/// replaced the link by rename on a token rotation), a copy NEWER than the
+/// owner's is left in place — Baaz keeps using it — and logged once,
+/// while an older-or-equal copy is renamed aside to
+/// `auth.json.replaced-<unix>` and the link is restored. Either way both
+/// tokens survive on disk.
 fn relink_auth_at(owner_auth: &Path, home: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(owner_auth).is_err() {
         return Ok(());
@@ -79,9 +127,8 @@ fn relink_auth_at(owner_auth: &Path, home: &Path) -> std::io::Result<()> {
     let dst = home.join(AUTH_FILE_NAME);
     match std::fs::symlink_metadata(&dst) {
         Err(_) => {
-            std::fs::create_dir_all(home)?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(owner_auth, &dst)?;
+            link_owner_auth(owner_auth, home, &dst)?;
             #[cfg(not(unix))]
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -90,7 +137,18 @@ fn relink_auth_at(owner_auth: &Path, home: &Path) -> std::io::Result<()> {
         }
         Ok(meta) if meta.file_type().is_symlink() => {}
         Ok(_) => {
-            std::fs::remove_file(&dst)?;
+            if baaz_auth_is_newer(owner_auth, &dst) {
+                static KEEP_LOGGED: std::sync::Once = std::sync::Once::new();
+                KEEP_LOGGED.call_once(|| {
+                    eprintln!(
+                        "baaz: keeping newer Baaz Codex auth at {}; the owner's token stays for the next rotation",
+                        dst.display()
+                    );
+                });
+                return Ok(());
+            }
+            let aside = replaced_name(&dst);
+            std::fs::rename(&dst, &aside)?;
             #[cfg(unix)]
             std::os::unix::fs::symlink(owner_auth, &dst)?;
             #[cfg(not(unix))]
@@ -206,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn the_auth_recheck_repairs_a_rotated_copy_but_leaves_links_alone() {
+    fn the_auth_recheck_links_when_absent_and_leaves_links_alone() {
         let root = temp_root("relink");
         let owner = root.join("owner-home");
         let state = root.join("state");
@@ -222,25 +280,107 @@ mod tests {
         relink_auth(&owner, &state).expect("relink keeps");
         assert!(std::fs::symlink_metadata(&dst).expect("meta").file_type().is_symlink());
 
-        // Codex replaced the link with a private rotated copy: re-linked.
+        // No owner auth: no work, no error.
+        std::fs::remove_file(owner.join(".codex").join("auth.json")).expect("owner signed out");
         std::fs::remove_file(&dst).expect("unlink");
-        std::fs::write(&dst, "{\"token\":\"rotated\"}").expect("codex's rotated copy");
+        relink_auth(&owner, &state).expect("no owner auth is fine");
+        assert!(std::fs::symlink_metadata(&dst).is_err(), "nothing planted without a source");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Rewrite `path` until its mtime is strictly after `older`'s (or the
+    /// deadline passes): filesystems with one-second granularity need the
+    /// tick to turn over before "newer" is observable.
+    fn make_newer_than(path: &Path, older: &Path) {
+        let start = std::time::Instant::now();
+        let body = std::fs::read(path).expect("read to rewrite");
+        loop {
+            std::fs::write(path, &body).expect("rewrite to bump the mtime");
+            let (Ok(newer), Ok(base)) =
+                (std::fs::metadata(path).and_then(|meta| meta.modified()),
+                 std::fs::metadata(older).and_then(|meta| meta.modified()))
+            else {
+                panic!("mtimes must be readable");
+            };
+            if newer > base {
+                return;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(30), "the clock never advanced");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn the_auth_recheck_keeps_a_newer_real_file() {
+        let root = temp_root("relink-newer");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&owner).expect("owner home");
+        seed_owner(&owner);
+        let owner_auth = owner.join(".codex").join("auth.json");
+        let home = state.join("codex-home");
+        std::fs::create_dir_all(&home).expect("baaz home");
+
+        // Codex rotated the token into the Baaz home after the owner's
+        // last write: the newest token stays where it is, as a real file.
+        let dst = home.join("auth.json");
+        std::fs::write(&dst, "{\"token\":\"rotated-newest\"}").expect("codex's rotated copy");
+        make_newer_than(&dst, &owner_auth);
+        relink_auth(&owner, &state).expect("relink keeps");
+        assert!(
+            std::fs::symlink_metadata(&dst).expect("meta").file_type().is_file(),
+            "a newer real file is never replaced by a link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dst).expect("reads"),
+            "{\"token\":\"rotated-newest\"}",
+            "the newest token survives"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&owner_auth).expect("reads"),
+            "{\"token\":\"t\"}",
+            "the owner's token is untouched too"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_auth_recheck_moves_an_older_real_file_aside_and_relinks() {
+        let root = temp_root("relink-older");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&owner).expect("owner home");
+        seed_owner(&owner);
+        let owner_auth = owner.join(".codex").join("auth.json");
+        let home = state.join("codex-home");
+        std::fs::create_dir_all(&home).expect("baaz home");
+
+        // A stale private copy predates the owner's current token: it is
+        // renamed aside (never deleted) and the link is restored.
+        let dst = home.join("auth.json");
+        std::fs::write(&dst, "{\"token\":\"stale\"}").expect("a stale private copy");
+        make_newer_than(&owner_auth, &dst);
         relink_auth(&owner, &state).expect("relink repairs");
         assert!(
             std::fs::symlink_metadata(&dst).expect("meta").file_type().is_symlink(),
-            "a replaced link is re-linked"
+            "the link is restored"
         );
         assert_eq!(
             std::fs::read_to_string(&dst).expect("reads through"),
             "{\"token\":\"t\"}",
             "the link reaches the owner's auth again"
         );
-
-        // No owner auth: no work, no error.
-        std::fs::remove_file(owner.join(".codex").join("auth.json")).expect("owner signed out");
-        std::fs::remove_file(&dst).expect("unlink");
-        relink_auth(&owner, &state).expect("no owner auth is fine");
-        assert!(std::fs::symlink_metadata(&dst).is_err(), "nothing planted without a source");
+        let asides: Vec<_> = std::fs::read_dir(&home)
+            .expect("read home")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| name.to_string_lossy().starts_with("auth.json.replaced-"))
+            .collect();
+        assert_eq!(asides.len(), 1, "exactly one aside file: {asides:?}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(&asides[0])).expect("reads"),
+            "{\"token\":\"stale\"}",
+            "the older token survives beside the link"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

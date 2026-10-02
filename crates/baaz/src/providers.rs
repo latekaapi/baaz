@@ -385,6 +385,10 @@ pub(crate) fn codex_terminal_relay(socket: &Path) -> provider_codex::TerminalRel
 /// failure is logged and the adapter keeps its default resolution (the
 /// same path), so the open still proceeds.
 fn pin_claude_home(adapter: &provider_claude_code::ClaudeCodeAdapter) {
+    // Adapter setup runs on the startup path: capture the launched-under-
+    // a-desktop-agent fact before any provider thread spawns, so every
+    // later per-`Command` scrub replays the launch value.
+    provider::child_env::capture_startup_entrypoint();
     let state = crate::store::support_dir();
     let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) else { return };
     match provider_claude_code::home::ensure_home(&owner, &state) {

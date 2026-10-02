@@ -153,17 +153,25 @@ pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
 
 /// Extra env for every terminal PTY shell: the identity markers plus the
 /// shared env scrub ([`provider::child_env`]) as blanked values. The PTY
-/// backend only adds vars, never removes them, so each scrubbed var the
-/// parent carries is set to `""` — empty is falsy for the node CLIs that
+/// backend (`aui-terminal`'s `PtyConfig`) only adds vars — it has
+/// `with_env` and no removal — so each scrubbed var the parent carries is
+/// set to `""` instead of removed: empty is falsy for the node CLIs that
 /// read these, which behave as if unset. Deliberately no Baaz homes: a
 /// shell the person drives keeps the owner's own `~/.claude` / `~/.codex`,
 /// only the inherited desktop-agent vars go.
 pub fn pty_extra_env() -> Vec<(String, String)> {
+    pty_extra_env_for(provider::child_env::startup_had_entrypoint())
+}
+
+/// [`pty_extra_env`] for an explicit entrypoint flag. The PTY tests drive
+/// this directly — the flag is process-cached, so tests never depend on
+/// when the capture landed.
+fn pty_extra_env_for(parent_had_entrypoint: bool) -> Vec<(String, String)> {
     let mut env = vec![
         ("BAAZ_TERMINAL".to_owned(), "1".to_owned()),
         ("CLICOLOR".to_owned(), "1".to_owned()),
     ];
-    env.extend(provider::child_env::scrub_overrides());
+    env.extend(provider::child_env::scrub_overrides_for(parent_had_entrypoint));
     env
 }
 
@@ -536,10 +544,6 @@ mod tests {
         assert_eq!(title_from_command(""), "shell");
     }
 
-    /// Serialize the tests that mutate the scrubbed env names: the
-    /// runner shares one environment across threads.
-    static SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct SavedScrubEnv {
         vars: Vec<(String, Option<std::ffi::OsString>)>,
     }
@@ -563,26 +567,29 @@ mod tests {
 
     #[test]
     fn pty_shells_keep_markers_and_blank_the_desktop_inheritance() {
-        let _guard = SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The entrypoint flag is process-cached, so the explicit-flag
+        // builder carries the flag while the parent env carries the
+        // names. The shared lock serializes against the other tests in
+        // this binary that touch these names.
+        let _guard =
+            crate::connect::SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _saved = SavedScrubEnv::save(&[
             "CLAUDECODE",
-            "CLAUDE_CODE_ENTRYPOINT",
             "CLAUDE_CODE_SESSION_ID",
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_API_KEY",
         ]);
         std::env::set_var("CLAUDECODE", "1");
-        std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "claude-desktop");
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "s-desktop");
         std::env::set_var("ANTHROPIC_BASE_URL", "http://desktop:2000");
         std::env::set_var("ANTHROPIC_API_KEY", "owner-key");
 
-        let env = pty_extra_env();
+        let env = pty_extra_env_for(true);
         // The markers that make the terminal Baaz's and colourful.
         assert!(env.contains(&("BAAZ_TERMINAL".to_owned(), "1".to_owned())));
         assert!(env.contains(&("CLICOLOR".to_owned(), "1".to_owned())));
         // The inherited desktop vars blank — never the homes.
-        for name in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "ANTHROPIC_BASE_URL"] {
+        for name in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "ANTHROPIC_BASE_URL"] {
             assert!(
                 env.contains(&(name.to_owned(), String::new())),
                 "scrubbed vars blank: {name}"
@@ -600,11 +607,11 @@ mod tests {
 
     #[test]
     fn pty_shells_keep_an_owner_base_url_off_a_plain_launch() {
-        let _guard = SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _saved = SavedScrubEnv::save(&["CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_BASE_URL"]);
-        std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
+        let _guard =
+            crate::connect::SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _saved = SavedScrubEnv::save(&["ANTHROPIC_BASE_URL"]);
         std::env::set_var("ANTHROPIC_BASE_URL", "https://owner-proxy:8443");
-        let env = pty_extra_env();
+        let env = pty_extra_env_for(false);
         assert!(
             !env.iter().any(|(name, _)| name == "ANTHROPIC_BASE_URL"),
             "an owner-set value on a plain launch survives: {env:?}"
