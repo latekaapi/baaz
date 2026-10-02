@@ -60,8 +60,8 @@ use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
 use aui::shell::{
-    RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
-    header_cell, resize_handle, sidebar_header,
+    RESIZE_HANDLE_W, TabItem, app_shell, clamp_sidebar_width, drag_capture_overlay,
+    header_cell, resize_handle, sidebar_header, tab_strip,
 };
 use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
 use aui_icons::{icon, IconName, Provider};
@@ -152,6 +152,12 @@ actions!(
         ToggleTerminal,
         /// Toggle the right pane (⌘⌥B).
         ToggleRightPane,
+        /// Show Changes in the right pane (⌘⇧D).
+        ShowRightChanges,
+        /// Show Files in the right pane (⌘⌥E; ⌘⇧E is the effort picker).
+        ShowRightFiles,
+        /// Show Browser in the right pane (⌘⇧B).
+        ShowRightBrowser,
         /// Open a new terminal tab on the current project.
         NewTerminal,
         /// Send SIGINT to the active terminal tab (⌃C while the dock is focused).
@@ -676,6 +682,14 @@ pub struct Harness {
     /// write (B7fix): set when the write is armed, cleared when it lands
     /// or when [`Self::flush_right_save`] lands it early on session switch.
     pub(crate) right_save_pending: bool,
+    /// Sessions whose in-memory pane state still uses a pre-merge
+    /// `diff`/`git` kind and whose disk copy must migrate onto the merged
+    /// `changes` view (B8fix): marked by [`Self::save_right_for_active`],
+    /// honoured by the two `sessions.json` writes. Memory keeps the stored
+    /// spelling, so the per-session round-trip restores exactly what the
+    /// pane showed; a verbatim handoff carry never marks, so it persists
+    /// verbatim. Never persists.
+    pub(crate) right_kind_migrate: std::collections::HashSet<String>,
     /// The browser pane's engines (Z7a): one live `WebviewState` per session
     /// plus the no-session/home one, created lazily, hidden on switch, never
     /// destroyed. The boot flag picks WKWebView vs the scripted page.
@@ -1202,6 +1216,7 @@ impl Harness {
             right_snap: false,
             right_save_epoch: 0,
             right_save_pending: false,
+            right_kind_migrate: std::collections::HashSet::new(),
             sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
             sidebar_list: sidebar_list_state(0),
@@ -2138,7 +2153,10 @@ impl Harness {
     /// closes the pane again, the way pressing a menu's own button closes it.
     /// Either way the pane's data is re-read off the render path when it ends
     /// up open. While the Settings page stands open this is ignored with no
-    /// state change (B11b), like [`Self::toggle_right`].
+    /// state change (B11b), like [`Self::toggle_right`]. Prefer
+    /// [`Self::select_right`]: this stays only for the menu-toggle behaviour
+    /// its test pins, so it compiles into test builds only.
+    #[cfg(test)]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         if self.settings_page.open {
             return;
@@ -2163,6 +2181,40 @@ impl Harness {
         cx.notify();
     }
 
+    /// Open the right pane on `kind` without ever closing it (B8): records
+    /// the kind, forces the pane open, persists, notifies, and re-reads the
+    /// pane's data off the render path. Asking for the kind already showing
+    /// keeps the pane open on that kind — what makes this safe for header
+    /// tab clicks, where toggling would punish the active tab. A legacy
+    /// `diff`/`git` kind is stored as-is and reads back as the merged
+    /// Changes view through [`layout::right_kind`]. Works with no session
+    /// open and never touches [`Self::active`].
+    pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        // A user pick always animates (see `toggle_right`).
+        self.right_snap = false;
+        self.open_right_on(kind, cx);
+        self.arm_browser_url_focus();
+    }
+
+    /// The non-toggling open behind [`Self::select_right`], [`Self::show_right`]
+    /// and the agent's `browser_open`: set the kind, force the pane open,
+    /// persist, prewarm, save, refresh, notify. Never arms URL focus — the
+    /// callers that owe it (a person's own open) arm it themselves, so an
+    /// agent navigation never steals the keyboard.
+    pub(crate) fn open_right_on(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
+        self.layout.right_kind = Some(kind);
+        self.layout.right_open = true;
+        crate::baaz_log!("open right pane: {kind:?} open={}", self.layout.right_open);
+        layout::write(&self.layout);
+        // B7: prepare the webview on the pick, before the pane animates.
+        self.prewarm_browser_if_needed(cx);
+        // B7fix2: the real webview rides a deferred task with the window.
+        self.defer_browser_prewarm(cx);
+        self.save_right_for_active(cx);
+        self.refresh_right_now(cx);
+        cx.notify();
+    }
+
     /// Arm the URL-field focus the next Browser frame owes (Z7a2): only a
     /// person's own open — a click, the palette, a shortcut — earns it, and
     /// only landing open on Browser. Restores never arm it, so a restored
@@ -2171,6 +2223,57 @@ impl Harness {
         if self.layout.right_open && layout::right_kind(&self.layout) == layout::RightKind::Browser {
             self.browser_url_focus_armed = true;
         }
+    }
+
+    /// The header tab index showing `kind` (B8): Changes first, then Files,
+    /// then Browser. Legacy `diff`/`git` kinds sit on the Changes tab, the
+    /// view they load into.
+    pub(crate) fn right_tab_index(kind: layout::RightKind) -> usize {
+        match kind {
+            layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git => 0,
+            layout::RightKind::Files => 1,
+            layout::RightKind::Browser => 2,
+        }
+    }
+
+    /// The right pane's three header tabs (B8): Changes · Files · Browser,
+    /// fixed and unclosable, in that order. Each tab's id and label are its
+    /// [`RightKind`](layout::RightKind) slug and label, so `on_select`
+    /// parses straight back to the kind; roles and labels come from the
+    /// library's tab strip (TabList named "Right pane", one Tab per tab).
+    pub(crate) fn right_tab_items() -> Vec<TabItem> {
+        [
+            (layout::RightKind::Changes, IconName::Git),
+            (layout::RightKind::Files, IconName::Folder),
+            (layout::RightKind::Browser, IconName::Globe),
+        ]
+        .into_iter()
+        .map(|(kind, icon)| TabItem::new(kind.slug(), kind.label(), icon).closable(false))
+        .collect()
+    }
+
+    /// Copy the overrides with the marked sessions' legacy right-pane kinds
+    /// migrated onto the merged view (B8fix): a marked pre-merge `diff`/`git`
+    /// lands on disk as `changes`, so a user-gesture save migrates
+    /// `sessions.json` onto the three live kinds and a restart restores the
+    /// merged view. Memory is untouched — the in-memory round-trip keeps the
+    /// stored spelling by design — and unmarked sessions (a verbatim handoff
+    /// carry) persist exactly as stored.
+    fn overrides_for_disk(&self) -> crate::sessions::Overrides {
+        let mut disk = self.overrides.clone();
+        for id in &self.right_kind_migrate {
+            if let Some(meta) = disk.get_mut(id) {
+                if let Some(right) = meta.right.as_mut() {
+                    right.kind = match right.kind {
+                        layout::RightKind::Diff | layout::RightKind::Git => {
+                            layout::RightKind::Changes
+                        }
+                        kind => kind,
+                    };
+                }
+            }
+        }
+        disk
     }
 
     /// Persist one session's right-pane state without the session-list
@@ -2230,7 +2333,7 @@ impl Harness {
                         return None;
                     }
                     this.right_save_pending = false;
-                    Some(this.overrides.clone())
+                    Some(this.overrides_for_disk())
                 })
                 .unwrap_or(None);
             let Some(snapshot) = snapshot else {
@@ -2259,7 +2362,10 @@ impl Harness {
             return;
         }
         self.right_save_epoch += 1;
-        crate::sessions::write(&self.overrides);
+        // Drop migration marks for sessions that no longer exist; a marked
+        // session with no override entry has nothing to migrate.
+        self.right_kind_migrate.retain(|id| self.overrides.contains_key(id));
+        crate::sessions::write(&self.overrides_for_disk());
         self.right_save_pending = false;
     }
 
@@ -2340,14 +2446,27 @@ impl Harness {
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
+        // B8fix: the in-memory state keeps the stored spelling — a legacy
+        // `diff`/`git` kind stays as-is and reads back as the merged
+        // Changes view through `layout::right_kind`, so the per-session
+        // round-trip restores exactly what the pane showed. A legacy kind
+        // saved by a user gesture still migrates on disk: mark the session
+        // so the disk writes land it as `changes` (`overrides_for_disk`).
+        // A verbatim handoff carry never marks, so it persists as stored.
         let state = crate::sessions::RightState {
             open: self.layout.right_open,
-            kind: layout::right_kind(&self.layout),
+            kind: self.layout.right_kind.unwrap_or(layout::RightKind::Files),
             files_preview,
             files_selected,
             files_expanded,
             browser_url,
         };
+        if matches!(
+            state.kind,
+            layout::RightKind::Diff | layout::RightKind::Git
+        ) {
+            self.right_kind_migrate.insert(session_id.clone());
+        }
         self.store_right_state_cheap(&session_id, state, cx);
     }
 
@@ -3389,6 +3508,18 @@ impl Harness {
                 // window — render never constructs first.
                 this.prewarm_browser_in(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowRightChanges, _, cx| {
+                this.select_right(layout::RightKind::Changes, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowRightFiles, _, cx| {
+                this.select_right(layout::RightKind::Files, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowRightBrowser, window, cx| {
+                this.select_right(layout::RightKind::Browser, cx);
+                // B7fix2: the key builds the real webview itself, with the
+                // window — render never constructs first.
+                this.prewarm_browser_in(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.new_terminal(window, cx);
             }))
@@ -4075,15 +4206,67 @@ impl Render for Harness {
                 } else {
                     self.render_centre_header(window, cx)
                 })
-                .header_right(
+                .header_right({
+                    // B8: the pane's tab strip — Changes · Files · Browser —
+                    // in place of the old plain title. No title (the tabs
+                    // name the pane) and no `+` (the tabs are fixed). The
+                    // strip's ←/→, TabList role and per-tab labels come from
+                    // the library; selecting a tab opens that kind without
+                    // ever closing, and the close X toggles the pane.
+                    //
+                    // B8fix: the strip rides the PLAIN (non-shell) variant
+                    // inside a `header_cell`, never the library's
+                    // `right_header(...).tabs(...)`: the shell variant lifts
+                    // its ink indicator into a deferred layer, and a deferred
+                    // element prepainted by `VisualTestContext::draw`
+                    // outlives that draw's element arena — the next frame
+                    // panics dereferencing it ("attempted to dereference an
+                    // ArenaRef after its Arena was cleared"). The plain
+                    // variant draws its indicator inline, so every frame
+                    // stays arena-local. Handlers capture only the weak
+                    // entity handle and owned tab ids.
+                    let select = cx.weak_entity();
+                    let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_right(cx);
+                    });
                     header_cell("hd-right").child(
-                        div()
-                            .id("hd-right-title")
-                            .role(gpui::Role::Label)
-                            .aria_label(kind.label())
-                            .child(kind.label()),
-                    ),
-                )
+                        h_flex()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                tab_strip(
+                                    "hd-right-tabs",
+                                    Self::right_tab_items(),
+                                    Self::right_tab_index(kind),
+                                )
+                                .accessibility_label("Right pane")
+                                .on_select(move |id, _, cx| {
+                                    if let Some(kind) = layout::RightKind::parse(id) {
+                                        let _ = select
+                                            .update(cx, |this, cx| this.select_right(kind, cx));
+                                    }
+                                }),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("hd-right-close")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Close right pane")
+                                    .child(
+                                        icon_button("hd-right-close", IconName::X)
+                                            .ghost()
+                                            .muted()
+                                            .size(ButtonSize::Xs)
+                                            .icon_size(px(10.0))
+                                            .accessibility_label("Close right pane")
+                                            .on_click(close),
+                                    ),
+                            ),
+                    )
+                })
                 .sidebar(sidebar)
                 .rail(self.render_rail(cx))
                 .right(right)
@@ -5152,7 +5335,7 @@ mod tests {
             disk.get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -5283,7 +5466,7 @@ mod tests {
             crate::sessions::read().get("s-1").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -5404,22 +5587,90 @@ mod tests {
             baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Files, cx))
         });
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Diff, cx))
+            baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx))
         });
         assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).layout.right_kind),
-            Some(crate::layout::RightKind::Diff)
+            Some(crate::layout::RightKind::Changes)
         );
         restore_state(state);
     }
 
+    /// B8: `select_right` opens the pane on each of the three kinds and
+    /// never closes it — not even when asked twice for the kind already
+    /// showing (what a header tab click does), and never opening a session.
+    #[gpui::test]
+    fn select_right_opens_each_kind_and_never_closes(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("select");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "no session is open");
+        for kind in crate::layout::RightKind::ALL {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
+            assert!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} opens the pane"
+            );
+            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            // The same kind again keeps the pane open on that kind.
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
+            assert!(
+                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                "{kind:?} again must not close the pane"
+            );
+            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "select_right never opens a session");
+        }
+        // Legacy kinds open the merged view, still without closing: the
+        // stored value is kept as-is and reads back as Changes.
+        for legacy in [crate::layout::RightKind::Diff, crate::layout::RightKind::Git] {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(legacy, cx)));
+            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
+            assert_eq!(
+                vc.update(|_, cx| crate::layout::right_kind(&baaz.read(cx).layout)),
+                crate::layout::RightKind::Changes,
+                "{legacy:?} loads as Changes"
+            );
+        }
+        restore_state(state);
+    }
+
+    /// B8: the header carries exactly the three tabs Changes · Files ·
+    /// Browser, each id parsing back to its kind, with the active index
+    /// following the kind (legacy kinds sit on Changes).
+    #[test]
+    fn the_three_header_tabs_map_to_the_three_kinds() {
+        let tabs = Harness::right_tab_items();
+        assert_eq!(tabs.len(), 3, "Changes, Files, Browser — no more");
+        for (index, tab) in tabs.iter().enumerate() {
+            let kind = crate::layout::RightKind::parse(&tab.id).unwrap_or_else(|| {
+                panic!("header tab {:?} parses back to no kind", tab.id)
+            });
+            assert_eq!(Harness::right_tab_index(kind), index, "tab {:?} sits at its own index", tab.id);
+            assert_eq!(kind.label(), tab.label.as_ref(), "tab {:?} is labelled as its kind", tab.id);
+        }
+        assert_eq!(tabs[0].label.as_ref(), "Changes");
+        assert_eq!(tabs[1].label.as_ref(), "Files");
+        assert_eq!(tabs[2].label.as_ref(), "Browser");
+        assert!(!tabs.iter().any(|tab| tab.closable), "header tabs are fixed, never closable");
+        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Changes), 0);
+        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Files), 1);
+        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Browser), 2);
+        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Diff), 0);
+        assert_eq!(Harness::right_tab_index(crate::layout::RightKind::Git), 0);
+    }
+
     /// Z2: the right pane belongs to each session and a switch restores it
-    /// without animating. A shows Diff while B shows Browser; every switch
-    /// restores the shown session's pane (B first shows it closed); a
-    /// restart restores from the store; the restore arms `right_snap` for
-    /// exactly one frame while user toggles never arm it; a new session
-    /// starts closed; Files previews are per session too.
+    /// without animating. A shows the legacy Diff kind (saved and restored
+    /// as Changes) while B shows Browser; every switch restores the shown
+    /// session's pane (B first shows it closed); a restart restores from
+    /// the store; the restore arms `right_snap` for exactly one frame while
+    /// user toggles never arm it; a new session starts closed; Files
+    /// previews are per session too.
     #[gpui::test]
     fn the_right_pane_is_per_session_and_restores_without_animating(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -5508,13 +5759,14 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         open_session!("sess-a");
         draw!();
-        // Restart: the store carries A home as Diff.
+        // Restart: the store carries A home as Changes (the save
+        // normalises the legacy Diff kind onto the merged view).
         let disk = crate::sessions::read();
         assert_eq!(
             disk.get("sess-a").and_then(|meta| meta.right.clone()),
             Some(crate::sessions::RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: None,
                 files_selected: None,
                 files_expanded: Vec::new(),
@@ -5525,10 +5777,10 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
-        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Diff after restart");
+        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Changes after restart");
         assert_eq!(
             vc.update(|_, cx| baaz2.read(cx).layout.right_kind),
-            Some(crate::layout::RightKind::Diff)
+            Some(crate::layout::RightKind::Changes)
         );
         // A brand-new session starts closed.
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-c".to_owned(), window, cx)));

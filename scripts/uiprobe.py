@@ -131,10 +131,8 @@ ENTRIES = {
     # the entry captures deterministically like `right-browser` does.
     "right-browser-page":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:browser;browse:https://example.com"]},
-    "right-diff":           {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "right-width:400;right:diff"]},
-    "right-git":            {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "right-width:400;right:git"]},
+    "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
     # The Files pane previewing a small file: the same preview a tree
@@ -305,6 +303,14 @@ ENTRIES = {
                                      "BAAZ_MIGRATION_OWNER_HOME": _MIGRATE_OWNER,
                                      "BAAZ_MIGRATION_FIXTURE": "1"}},
 }
+
+
+# B8 merged Diff review and Git changes into one Changes view: the old
+# `right-diff` and `right-git` entry names stay as aliases of
+# `right-changes` (same steps, same screen), so older invocations keep
+# working. No baselines: capture and look.
+ENTRIES["right-diff"] = ENTRIES["right-changes"]
+ENTRIES["right-git"] = ENTRIES["right-changes"]
 
 
 def boot(entry, verb):
