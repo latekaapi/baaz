@@ -3412,7 +3412,21 @@ impl Harness {
         true
     }
 
-    fn activate(&mut self, view: Entity<SessionView>, quiet: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Every session switch lands here — resume, reopen, draft, local
+    /// draft, provider lane, fork, handoff destination — so this is where
+    /// the Settings page exits for navigation (B11b): the destination owns
+    /// the next route, and nothing is restored. Opening the overlay closed
+    /// already keeps the frame's just-closed parking off the composer's
+    /// focus, which this same swap arms below.
+    pub(crate) fn activate(
+        &mut self,
+        view: Entity<SessionView>,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.exit_settings_for_navigation(cx);
+        self.overlay_was_open = false;
         // Whatever switch the scripts were waiting for has landed: session
         // verbs run against this view from here on.
         self.session_switch_pending = false;
