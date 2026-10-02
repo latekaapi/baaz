@@ -137,11 +137,18 @@ pub struct Layout {
     /// group-chevron` flips it for captures meanwhile.
     #[serde(rename = "groupChevron", default)]
     pub group_chevron: bool,
-    /// Whether the current project wears its 2 px accent bar. Off by
-    /// default: `current(true)` alone keeps only the semibold ink name (O4).
-    /// Owned by the Settings dialog — see [`Self::group_chevron`].
+    /// Retained for old `layout.json` files and the `group-bar` step verb:
+    /// no longer gates anything. The current project's 2 px accent mark
+    /// draws from `current(true)` alone (agentic-ui v0.3.15), so this flag
+    /// is accepted and ignored — Settings no longer offers it.
     #[serde(rename = "groupBar", default)]
     pub group_bar: bool,
+    /// Compact sidebar rows: one line per session (title only) instead of
+    /// the comfortable two (title plus the context/byline line). Off by
+    /// default: rows draw comfortable. Owned by the Settings page's Sidebar
+    /// section — see [`Self::group_chevron`].
+    #[serde(rename = "compactRows", default)]
+    pub compact_rows: bool,
     /// Whether project group rows trail the workspace branch in mono. Off
     /// by default (O4). Owned by the Settings dialog — see
     /// [`Self::group_chevron`].
@@ -215,6 +222,7 @@ impl Default for Layout {
             search_all_projects: true,
             group_chevron: false,
             group_bar: false,
+            compact_rows: false,
             group_branch: false,
             auto_title: true,
             auto_summary: true,
@@ -345,6 +353,7 @@ mod tests {
         assert!(layout.search_all_projects);
         assert!(!layout.group_chevron);
         assert!(!layout.group_bar);
+        assert!(!layout.compact_rows);
         assert!(!layout.group_branch);
         let stored = Layout {
             sidebar_width: Some(300.0),
@@ -354,6 +363,7 @@ mod tests {
             search_all_projects: false,
             group_chevron: true,
             group_bar: true,
+            compact_rows: true,
             group_branch: true,
             auto_title: true,
             auto_summary: true,
@@ -372,6 +382,7 @@ mod tests {
         assert!(text.contains("\"searchAllProjects\":false"));
         assert!(text.contains("\"groupChevron\":true"));
         assert!(text.contains("\"groupBar\":true"));
+        assert!(text.contains("\"compactRows\":true"));
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"terminalOpen\":true"));
         assert!(text.contains("\"terminalHeight\":300.0"));
@@ -386,6 +397,7 @@ mod tests {
         assert!(!back.search_all_projects);
         assert!(back.group_chevron);
         assert!(back.group_bar);
+        assert!(back.compact_rows);
         assert!(back.group_branch);
         assert!(back.terminal_open);
         assert_eq!(back.terminal_height, Some(300.0));
@@ -401,6 +413,7 @@ mod tests {
         assert!(old.search_all_projects);
         assert!(!old.group_chevron);
         assert!(!old.group_bar);
+        assert!(!old.compact_rows);
         assert!(!old.group_branch);
         // Both auto switches default ON, old files included: new behaviour
         // without a migration.

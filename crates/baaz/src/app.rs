@@ -1522,9 +1522,15 @@ impl Harness {
     /// and row can never disagree (Y2a3). Falls back to the stored row's
     /// title ladder when the head is filtered out of the view.
     pub(crate) fn collapsed_head_label(&self, head: &str, cx: &gpui::App) -> Option<String> {
+        // One row-line, cut where the row would truncate it anyway: a pasted
+        // brief as the derived title can never fill the whole header, and
+        // the row and the crumb read the same words.
         if let Some(entry) = self.visible_sessions(cx).iter().find(|e| e.id == head) {
             let pending = entry.title_pending || self.titles_pending.contains(&entry.id);
-            return Some(crate::sidebar::display_label(&entry.label, pending).to_owned());
+            return Some(crate::sidebar::one_line(crate::sidebar::display_label(
+                &entry.label,
+                pending,
+            )));
         }
         self.sessions.iter().find(|e| e.id == head).map(|e| {
             let pending = e.title_pending || self.titles_pending.contains(&e.id);
@@ -1535,7 +1541,7 @@ impl Harness {
             } else {
                 e.label.clone()
             };
-            crate::sidebar::display_label(&text, pending).to_owned()
+            crate::sidebar::one_line(crate::sidebar::display_label(&text, pending))
         })
     }
 
@@ -1887,7 +1893,10 @@ impl Harness {
                         .map(|t| sidebar::one_line(&t))
                         .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
                 } else {
-                    prompt.filter(|prompt| !prompt.is_empty()).unwrap_or_else(|| sidebar::UNNAMED.to_owned())
+                    prompt
+                        .filter(|prompt| !prompt.is_empty())
+                        .map(|prompt| sidebar::one_line(&prompt))
+                        .unwrap_or_else(|| sidebar::UNNAMED.to_owned())
                 };
                 let row = sidebar::local_started_row(
                     &session_id,
@@ -1899,6 +1908,13 @@ impl Harness {
                 self.sessions.retain(|entry| entry.id != session_id);
                 self.sessions.push(row);
                 self.invalidate_list();
+                // The row did not exist when this session opened, so the
+                // reveal armed then may already have given up on it: re-arm
+                // exactly as the `first_send_update` branch above does, so
+                // the sidebar still steers to the row a first send just
+                // created. This branch only runs for the open session.
+                self.reveal = Some(session_id.clone());
+                self.reveal_unknown = None;
             }
             // A first send may earn a generated title: one cheap model call
             // in a throwaway side session, never blocking this turn. Only
@@ -5367,6 +5383,43 @@ mod tests {
                 "the hero still draws a provider picker (no_project={no_project})"
             );
         }
+        restore_state(state);
+    }
+
+    /// A 2,000-char first message titles the local row — and the header
+    /// crumb reads the same row — with at most one 80-char line each. The
+    /// first-send insert site clamps the prompt on the way in, and the
+    /// crumb clamps whatever the row carries.
+    #[gpui::test]
+    fn a_two_thousand_char_first_message_yields_short_row_and_header_titles(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("long-title");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+        });
+        let long = "w".repeat(2000);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sessions.push(crate::sidebar::local_started_row(
+                    "s-long",
+                    crate::sidebar::one_line(&long),
+                    None,
+                    None,
+                    crate::clock::now_local(),
+                ));
+                h.sessions_loaded = true;
+                h.index_loaded = true;
+                h.invalidate_list();
+            })
+        });
+        let (row_len, head_len) = vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let row = h.sessions.iter().find(|e| e.id == "s-long").expect("the row");
+            let head = h.collapsed_head_label("s-long", cx).expect("the header crumb");
+            (row.label.chars().count(), head.chars().count())
+        });
+        assert!(row_len <= 80, "row title is {row_len} chars");
+        assert!(head_len <= 80, "header title is {head_len} chars");
         restore_state(state);
     }
 

@@ -1110,7 +1110,9 @@ impl SessionView {
         if first.is_empty() {
             return None;
         }
-        Some(first.split_whitespace().collect::<Vec<_>>().join(" "))
+        // One row-line, cut where the row would truncate it anyway: a pasted
+        // brief that is one long paragraph never becomes the whole title.
+        Some(crate::sidebar::one_line(first))
     }
 
     /// The text of the newest assistant text block, which is the plan reply.

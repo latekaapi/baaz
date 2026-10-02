@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use aui_tokens::AgentState;
 pub use aui::nav::Grouping;
 
-use aui::nav::{Byline, DateGroup, ProjectGroup, RowStatus, RowStatusKind, SessionSummary};
+use aui::nav::{Byline, DateGroup, ProjectGroup, RowDensity, RowStatus, RowStatusKind, SessionSummary};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 
 use crate::index::IndexEntry;
@@ -586,10 +586,18 @@ impl SessionEntry {
         self.turns == 0 && !self.running && !self.named
     }
 
-    /// The row's state dot: running sessions pulse, everything else is idle.
+    /// The row's state dot: running sessions pulse, sessions waiting on a
+    /// person read waiting, sessions holding a terminal error read failed,
+    /// everything else is idle. The compact row (agentic-ui v0.3.15) has no
+    /// status verb line, so this dot — plus the trailing slot — is the only
+    /// place the state reads: "Needs approval" and "Failed" ride both.
     fn state(&self) -> AgentState {
         if self.running {
             AgentState::Running
+        } else if self.needs_approval() || self.asked() {
+            AgentState::Waiting
+        } else if self.last_error.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
+            AgentState::Failed
         } else {
             AgentState::Idle
         }
@@ -652,10 +660,12 @@ impl SessionEntry {
         self.question_text().is_some() || self.attention.iter().any(|flag| matches!(flag, AttentionFlag::InputPending))
     }
 
-    /// The row's third line, option B's status verb: which sentence it draws
-    /// and in which colour, against `now`. Total — every entry maps to
-    /// exactly one state, so every row keeps its third line whatever the
-    /// caller passes:
+    /// The row's state verdict, against `now`: which sentence names it and
+    /// in which colour. The compact row (agentic-ui v0.3.15) draws no status
+    /// verb line of its own — `Needs approval` and `Failed` ride the
+    /// trailing slot (and the hover card), `Working` rides the pulsing dot,
+    /// and the rest read as the plain age. Total — every entry maps to
+    /// exactly one state:
     ///
     /// 1. waiting on a person beats everything (an approval mid-turn still
     ///    reads `Needs approval`, never `Working`);
@@ -713,7 +723,8 @@ impl SessionEntry {
     }
 
     /// The hover detail's content: the whole picture the row truncates —
-    /// full title, ask and latest reply, the status with its detail (the
+    /// full title (capped at [`hover_title`]'s 160-char budget), ask and
+    /// latest reply, the status with its detail (the
     /// pending question, the approval command, the terminal error),
     /// project, branch, turn count, last change, workspace path and the
     /// open session's pending words. Only what the app knows: empty words
@@ -734,7 +745,7 @@ impl SessionEntry {
         };
         let elapsed = elapsed_at(self.updated, now);
         aui::nav::SessionDetailData {
-            title: Some(self.label.clone().into()),
+            title: Some(hover_title(&self.label).into()),
             ask: self.last_ask.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
             reply: (!self.description.trim().is_empty()).then(|| self.description.clone().into()),
             status: Some(status),
@@ -808,11 +819,11 @@ impl SessionEntry {
             row = row.meta(aui::nav::MetaItem::Text(hint.into()));
         }
         // A provisional row carries no turn count, no running bit and no
-        // status verb — the index knows none of them — so the status line
-        // stays unset: the row renders its third line as empty space at
-        // exactly the same height (`status_line` in the library), and the
-        // real row fills that same line in when it lands. No false
-        // `Settled · 0 turns`, no layout jump.
+        // status verdict — the index knows none of them — so no status is
+        // set: the row's trailing slot reads the plain age (never a false
+        // `Settled · 0 turns`), and the real row fills the verdict in when
+        // it lands. No layout jump either way: every density is one height
+        // in every state.
         if !self.provisional {
             let status = self.row_status(now);
             row = row.status(status.kind, status.detail);
@@ -1485,6 +1496,12 @@ pub struct GroupView<'a> {
     pub expanded: &'a HashSet<String>,
     /// The open session's id, if any.
     pub active: Option<&'a str>,
+    /// The open session's project, when it has no row in `entries` (a
+    /// brand-new session before its first send): resolved by the caller
+    /// through [`rowless_session_project`], so the session's project still
+    /// counts as current. `None` when the session has a row (its project
+    /// reads from the row) or when no session is open.
+    pub active_project: Option<&'a str>,
     /// The click's target: `resume` names it before any view exists (and on
     /// a client-less run no view ever comes), so without the rescue below
     /// the highlight it earned would sit behind "Show N more" unseen.
@@ -1496,9 +1513,10 @@ pub struct GroupView<'a> {
 /// One group per adoption in [`Projects::sorted`] order — pinned first, then
 /// name, never recency — each a plain muted label with
 /// the visible-session count (an empty project still gets its row, counting
-/// `"0"`), a running dot when any of its sessions runs, and, only when the
-/// layout flags ask, the collapse chevron, the current-project bar and the
-/// trailing branch. No coloured mark anywhere. Sessions inside run
+/// `"0"`), a running dot when any of its sessions runs, the current-project
+/// accent mark on the open session's project (from `current(true)` alone —
+/// no layout flag gates it), and, only when the layout flags ask, the
+/// collapse chevron and the trailing branch. Sessions inside run
 /// newest-first with pinned rows first, each drawn exactly as the date view
 /// draws it. Entries that resolve to no project land in a last muted "Other
 /// workspaces" group, each row tagged with its workspace's folder name. A
@@ -1536,15 +1554,20 @@ pub fn grouping_by_project(
             None => other.push(entry),
         }
     }
-    // D4: the project the open session belongs to wears the accent bar. With
-    // no session open the store's current project wears it instead — that is
-    // the project the header crumb names and the one a new session would land
-    // in, so the bar keeps pointing at the same place either way. Either
-    // falls back past a missing root, exactly as the crumb does.
+    // D4: the project the open session belongs to wears the accent mark,
+    // drawn from `current(true)` alone (agentic-ui v0.3.15 — the `group_bar`
+    // flag no longer gates it). With no session open the store's current
+    // project wears it instead — that is the project the header crumb names
+    // and the one a new session would land in, so the mark keeps pointing
+    // at the same place either way. A brand-new session has no row yet, so
+    // its project arrives through `view.active_project` (the caller resolves
+    // it past the rows); a session with a row reads its project from the
+    // row. Either falls back past a missing root, exactly as the crumb does.
     let current_project: Option<&str> = view
         .active
         .and_then(|open| entries.iter().find(|e| e.id == open))
         .and_then(|e| e.project.as_deref())
+        .or(view.active_project)
         .and_then(|id| projects.find_available(id))
         .map(|p| p.id.as_str())
         .or_else(|| projects.effective_current().map(|p| p.id.as_str()));
@@ -1596,9 +1619,10 @@ pub fn grouping_by_project(
         // is empty, which the absent rows already say, and it puts a
         // meaningless digit on the same baseline as the meaningful ones.
         let count = if rows.is_empty() { String::new() } else { rows.len().to_string() };
-        // The plain default group row: no mark, the
-        // chevron, the current bar and the trailing branch only when the
-        // layout flags ask. The count stays.
+        // The plain default group row: no mark; the chevron and the
+        // trailing branch only when the layout flags ask. The current mark
+        // draws from `current(true)` below alone — `current_bar` rides
+        // along for old callers and changes nothing. The count stays.
         let mut group = ProjectGroup::new(project.id.clone(), project.name.clone(), count)
             .chevron(layout.group_chevron)
             .current_bar(layout.group_bar);
@@ -1758,6 +1782,67 @@ pub(crate) fn one_line(text: &str) -> String {
     flattened.chars().take(79).collect::<String>() + "\u{2026}"
 }
 
+/// The hover card's title budget: the card clamps to three laid-out lines
+/// itself (agentic-ui v0.3.15), and this char budget keeps one long line
+/// from ever reaching it unclamped. Row labels already pass through
+/// [`one_line`], so this only ever bites on labels built another way.
+pub(crate) fn hover_title(label: &str) -> String {
+    const BUDGET: usize = 160;
+    let flattened: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= BUDGET {
+        return flattened;
+    }
+    flattened.chars().take(BUDGET - 1).collect::<String>() + "\u{2026}"
+}
+
+/// Which compact density a row draws ([`RowDensity`], agentic-ui v0.3.15):
+/// [`RowDensity::Two`] when the row carries a context/byline line and the
+/// sidebar stands in its comfortable mode; [`RowDensity::One`] otherwise.
+/// One row, one height per density — the library draws the context line in
+/// Two and skips it in One, so state keeps riding the leading glyph and the
+/// trailing slot either way.
+#[allow(dead_code)] // Exercised by tests; no view affordance forwards it yet:
+// v0.3.15's virtual list builds every row at its default Two.
+pub fn row_density(compact_rows: bool, has_context: bool) -> RowDensity {
+    if !compact_rows && has_context {
+        RowDensity::Two
+    } else {
+        RowDensity::One
+    }
+}
+
+/// Whether a built summary carries a context/byline line: anything but the
+/// empty line kind — attention, byline, preview, `project · branch`, legacy
+/// meta — counts, exactly as the row's second-line slot reads it.
+#[allow(dead_code)] // Exercised by tests; see [`row_density`].
+pub fn summary_has_context(summary: &SessionSummary) -> bool {
+    !matches!(
+        aui::nav::context_line_kind(summary),
+        aui::nav::ContextLineKind::Empty
+    )
+}
+
+/// The project a rowless session belongs to: its built row first, then
+/// Baaz's own override (drafts file their project before their first
+/// send), then the provider-lane record, else nothing. What marks the
+/// rowless active session's project current and what the scroll-follow
+/// falls back to when the session has no row yet.
+pub fn rowless_session_project(
+    session_id: &str,
+    entries: &[SessionEntry],
+    overrides: &crate::sessions::Overrides,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+) -> Option<String> {
+    entries
+        .iter()
+        .find(|e| e.id == session_id)
+        .and_then(|e| e.project.clone())
+        .or_else(|| overrides.get(session_id).and_then(|m| m.project.clone()))
+        .or_else(|| provider_sessions.get(session_id).and_then(|r| r.project.clone()))
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1779,6 +1864,144 @@ mod tests {
     fn a_prompt_becomes_a_single_line_row() {
         assert_eq!(one_line("why does\n  this  panic"), "why does this panic");
         assert_eq!(one_line(&"x".repeat(200)).chars().count(), 80);
+    }
+
+    /// [`row_density`]: Two needs both a context/byline line and the
+    /// comfortable mode — anything else draws the one-line row, where
+    /// state keeps riding the glyph and the trailing slot.
+    #[test]
+    fn compact_density_needs_a_context_line_in_comfortable_mode() {
+        assert_eq!(row_density(false, true), RowDensity::Two);
+        assert_eq!(row_density(false, false), RowDensity::One);
+        assert_eq!(row_density(true, true), RowDensity::One);
+        assert_eq!(row_density(true, false), RowDensity::One);
+    }
+
+    /// A summary with a byline counts as context; a bare row does not.
+    #[test]
+    fn a_summary_with_a_byline_counts_as_context() {
+        let now = Local::now();
+        let mut lined = entry("lined");
+        lined.description = "patched the validator".into();
+        let summary = lined.summary(now);
+        assert!(summary_has_context(&summary));
+        assert_eq!(row_density(false, summary_has_context(&summary)), RowDensity::Two);
+        let bare = entry("bare");
+        let summary = bare.summary(now);
+        assert!(!summary_has_context(&summary), "a bare row carries no second line");
+        assert_eq!(row_density(false, summary_has_context(&summary)), RowDensity::One);
+    }
+
+    /// No status verb line survives: "Needs approval" and "Failed" read
+    /// through the glyph state and the trailing words, "Working" through
+    /// the pulsing running dot.
+    #[test]
+    fn waiting_failed_and_working_read_on_the_glyph_and_the_trailing_slot() {
+        use aui::nav::row_trailing_kind;
+        let now = Local::now();
+        let mut approval = entry("approval");
+        approval.turns = 2;
+        approval.approval_command = Some("ls /tmp".into());
+        let summary = approval.summary(now);
+        assert_eq!(summary.state, AgentState::Waiting);
+        assert_eq!(row_trailing_kind(&summary).text(&summary).as_ref(), "Needs approval");
+        let mut failed = entry("failed");
+        failed.turns = 3;
+        failed.last_error = Some("boom".into());
+        let summary = failed.summary(now);
+        assert_eq!(summary.state, AgentState::Failed);
+        assert_eq!(row_trailing_kind(&summary).text(&summary).as_ref(), "Failed");
+        let mut working = entry("working");
+        working.turns = 1;
+        working.running = true;
+        working.turn_started = Some(now);
+        let summary = working.summary(now);
+        assert_eq!(summary.state, AgentState::Running);
+        assert!(summary.pulse, "a working row pulses its dot");
+    }
+
+    /// A 2,000-char single-line first message joins to a one-line row
+    /// title of at most 80 chars.
+    #[test]
+    fn a_two_thousand_char_first_message_yields_a_short_row_title() {
+        let projects = crate::projects::Projects::default();
+        let mut session = wire_session();
+        session.first_user_prompt = Some("w".repeat(2000));
+        session.turn_count = 1;
+        let row = SessionEntry::join(&session, None, None, &projects);
+        assert!(row.label.chars().count() <= 80, "row title is {} chars", row.label.chars().count());
+        assert!(row.label.ends_with("\u{2026}"), "a cut title carries its elision");
+    }
+
+    /// Whatever label a row carries, the hover card's title stays within
+    /// its 160-char budget.
+    #[test]
+    fn the_hover_card_title_never_exceeds_its_budget() {
+        let now = Local::now();
+        let mut row = entry("long");
+        row.label = "w".repeat(2000);
+        let data = row.detail_data(now);
+        let title = data.title.expect("a title");
+        assert!(title.chars().count() <= 160, "hover title is {} chars", title.chars().count());
+    }
+
+    /// The open session's project group is current: for a session with a
+    /// row, and for a brand-new session whose project arrives past the
+    /// rows through `active_project`.
+    #[test]
+    fn the_open_session_marks_its_project_current() {
+        let projects = grouped_projects();
+        let entries = vec![grouped_entry("s1", Some("p-baaz"), Some("/work/p-baaz"), 0)];
+        let Grouping::Project(groups) =
+            by_project_view(&entries, &projects, &HashSet::new(), &HashSet::new(), Some("s1"))
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        assert!(folded_group(&groups, "p-baaz").current, "the open session's project is current");
+        assert!(!folded_group(&groups, "p-agentic").current, "other projects stay plain");
+        // Brand-new: no row yet, so the project resolves past the rows.
+        let empty: Vec<SessionEntry> = Vec::new();
+        let closed = HashSet::new();
+        let expanded = HashSet::new();
+        let view = GroupView {
+            closed: &closed,
+            expanded: &expanded,
+            active: Some("s-new"),
+            active_project: Some("p-agentic"),
+            pending: None,
+        };
+        let Grouping::Project(groups) =
+            grouping_by_project(&empty, &projects, &HashMap::new(), &view, &crate::layout::Layout::default(), Local::now())
+        else {
+            panic!("project grouping must yield project groups");
+        };
+        assert!(folded_group(&groups, "p-agentic").current, "a new session marks its project current");
+        assert!(!folded_group(&groups, "p-baaz").current, "other projects stay plain");
+    }
+
+    /// [`rowless_session_project`]: the row first, then the override a
+    /// draft files before its first send, then the provider-lane record.
+    #[test]
+    fn a_rowless_session_names_its_project_past_the_rows() {
+        let entries = vec![grouped_entry("s1", Some("p-baaz"), Some("/work/p-baaz"), 0)];
+        let overrides: crate::sessions::Overrides = HashMap::new();
+        let records: crate::provider_sessions::ProviderSessionStore = HashMap::new();
+        assert_eq!(
+            rowless_session_project("s1", &entries, &overrides, &records).as_deref(),
+            Some("p-baaz"),
+            "a row names its own project"
+        );
+        assert_eq!(rowless_session_project("s-new", &entries, &overrides, &records), None);
+        let mut overrides = overrides;
+        overrides.insert(
+            "s-new".to_owned(),
+            crate::sessions::SessionMeta { project: Some("p-agentic".to_owned()), ..Default::default() },
+        );
+        assert_eq!(
+            rowless_session_project("s-new", &entries, &overrides, &records).as_deref(),
+            Some("p-agentic"),
+            "a draft's override files its project before the first send"
+        );
     }
 
     #[test]
@@ -2720,7 +2943,7 @@ mod tests {
         active: Option<&str>,
         layout: &crate::layout::Layout,
     ) -> Grouping {
-        let view = GroupView { closed, expanded, active, pending: None };
+        let view = GroupView { closed, expanded, active, active_project: None, pending: None };
         grouping_by_project(entries, projects, &HashMap::new(), &view, layout, Local::now())
     }
 
@@ -2873,7 +3096,7 @@ mod tests {
         branches.insert("p-baaz".to_owned(), "main".to_owned());
         let layout = crate::layout::Layout { group_chevron: true, group_bar: true, group_branch: true, ..Default::default() };
         let empty = HashSet::new();
-        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: None };
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, active_project: None, pending: None };
         let Grouping::Project(groups) =
             grouping_by_project(&entries, &projects, &branches, &view, &layout, Local::now())
         else {
@@ -3011,7 +3234,7 @@ mod tests {
         let projects = grouped_projects();
         let entries = nine_sessions("p-baaz");
         let empty = HashSet::new();
-        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: Some("s8") };
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, active_project: None, pending: Some("s8") };
         let layout = crate::layout::Layout::default();
         let Grouping::Project(groups) =
             grouping_by_project(&entries, &projects, &HashMap::new(), &view, &layout, Local::now())
@@ -3066,7 +3289,7 @@ mod tests {
             })
             .collect();
         let empty = HashSet::new();
-        let view = GroupView { closed: &empty, expanded: &empty, active: None, pending: None };
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, active_project: None, pending: None };
         let layout = crate::layout::Layout::default();
         let cold = std::time::Instant::now();
         for _ in 0..FRAMES {
