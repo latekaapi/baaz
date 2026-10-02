@@ -462,6 +462,22 @@ impl Harness {
         }
     }
 
+    /// Lay every live view's truth back over its row: a `session/list`
+    /// reply rebuilds rows from the wire's projection, which may still say
+    /// idle while a view holds a live turn (a command running after its
+    /// approval emits nothing for minutes). Without this the open
+    /// session's row flips to `Settled` until its next live event. Runs
+    /// with `started: false`, so no row manufactures `Working` — a view
+    /// that already stood down stays stood down.
+    pub(crate) fn sync_all_live_rows(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|entry| entry.id.clone()).collect();
+        for id in ids {
+            if Self::live_view_for(&self.active, &self.session_cache, &id, cx).is_some() {
+                self.sync_row_live(&id, false, cx);
+            }
+        }
+    }
+
     /// Record one turn's terminal on its row and in the store: a failed
     /// turn's message is what `Failed` stands on (taken from
     /// `turn/completed`'s `error`, the only place a mid-turn failure
