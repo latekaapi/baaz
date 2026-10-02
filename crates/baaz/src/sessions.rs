@@ -292,7 +292,7 @@ mod tests {
         let meta = SessionMeta {
             right: Some(RightState {
                 open: true,
-                kind: crate::layout::RightKind::Diff,
+                kind: crate::layout::RightKind::Changes,
                 files_preview: Some("Cargo.toml".into()),
                 files_selected: Some("Cargo.toml".into()),
                 files_expanded: vec!["src".into()],
@@ -304,7 +304,7 @@ mod tests {
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains("\"right\":{"));
         assert!(text.contains("\"open\":true"));
-        assert!(text.contains("\"kind\":\"diff\""));
+        assert!(text.contains("\"kind\":\"changes\""));
         assert!(text.contains("\"filesPreview\":\"Cargo.toml\""));
         assert!(text.contains("\"filesSelected\":\"Cargo.toml\""));
         assert!(text.contains("\"filesExpanded\":[\"src\"]"));
@@ -315,6 +315,24 @@ mod tests {
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
         assert!(old.right.is_none());
         assert!(SessionMeta::default().is_empty());
+    }
+
+    #[test]
+    fn legacy_pane_kinds_load_and_resave_as_changes() {
+        // B8b: a sessions.json written with the pre-merge `diff`/`git` kinds
+        // loads onto the merged Changes view, and re-saving writes
+        // `changes` — the legacy kinds never reach the file again.
+        for slug in ["diff", "git"] {
+            let meta: SessionMeta =
+                serde_json::from_str(&format!("{{\"right\":{{\"open\":true,\"kind\":{slug:?}}}}}")).unwrap();
+            assert_eq!(
+                meta.right.as_ref().map(|right| right.kind),
+                Some(crate::layout::RightKind::Changes),
+                "{slug} loads as Changes"
+            );
+            let text = serde_json::to_string(&meta).unwrap();
+            assert!(text.contains("\"kind\":\"changes\""), "{slug} re-saves as changes: {text}");
+        }
     }
 
     #[test]

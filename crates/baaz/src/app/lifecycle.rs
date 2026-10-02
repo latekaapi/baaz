@@ -5624,7 +5624,10 @@ mod tests {
         let baaz = lane_harness(vc, &state.2);
         let carried = crate::sessions::RightState {
             open: true,
-            kind: crate::layout::RightKind::Diff,
+            // B8b: every load AND write uses `changes` — the carried kind
+            // is `Changes` (the legacy `diff`/`git` slugs load as `Changes`
+            // and re-save as `changes`).
+            kind: crate::layout::RightKind::Changes,
             ..Default::default()
         };
         vc.update(|_, cx| {
