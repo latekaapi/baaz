@@ -1328,6 +1328,29 @@ impl SessionView {
         self.models.iter().map(|m| m.model_id.clone()).collect()
     }
 
+    /// Seed this view's cached muse `model/list` catalog in tests: one row
+    /// per id, so the muse start path's catalog check has rows to read
+    /// without a wire child behind the view.
+    #[cfg(test)]
+    pub(crate) fn seed_test_catalog(&mut self, ids: &[&str]) {
+        self.models = ids
+            .iter()
+            .map(|id| ModelCatalogEntry {
+                context_limit: None,
+                cost: None,
+                description: None,
+                display_label: (*id).to_owned(),
+                is_active: false,
+                is_default: false,
+                model_id: (*id).to_owned(),
+                output_limit: None,
+                profile_id: None,
+                provider_id: "muse".to_owned(),
+                release_date: None,
+            })
+            .collect();
+    }
+
     /// What the muse lane's composer chip reads: the catalog's display
     /// label when a row names the session's model, else the model id
     /// humanised for display — never the bare provider id.

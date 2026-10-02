@@ -640,8 +640,8 @@ fn build_start_params(
 /// winning over the stored one. `None` when there is no such project, which
 /// is the caller's cue to start nothing (the hero owns that state). The
 /// model is this provider's default only: a pick stored under another lane
-/// never rides along (see [`muse_start_model`] for the muse catalog check
-/// the start path applies on top).
+/// never rides along (see [`checked_start_params`] for the muse catalog
+/// check the start path applies on top).
 pub fn start_params(
     projects: &Projects,
     project_id: Option<&str>,
@@ -657,10 +657,20 @@ pub fn start_params(
     ))
 }
 
-/// Whether the dropped-model line has been logged: the drop repeats every
-/// start until the person picks a listed model, and the log must not.
-static DROPPED_MUSE_MODEL_LOGGED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// The dropped-model ids already logged: the drop repeats every start
+/// until the person picks a listed model, and each distinct id logs once.
+static DROPPED_MUSE_MODELS_LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// Record `id` as logged for the drop line. `true` when this is the first
+/// sighting — the only one that logs. A poisoned lock never logs.
+fn note_dropped_muse_model(id: &str) -> bool {
+    DROPPED_MUSE_MODELS_LOGGED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .map(|mut logged| logged.insert(id.to_owned()))
+        .unwrap_or(false)
+}
 
 /// The model a muse `session/start` may carry: the stored muse default,
 /// unless a non-empty cached muse `model/list` names no such row — then
@@ -671,12 +681,33 @@ pub fn muse_start_model(model: Option<String>, catalog_ids: &[String]) -> Option
     if catalog_ids.is_empty() || catalog_ids.iter().any(|id| id == &model) {
         return Some(model);
     }
-    if !DROPPED_MUSE_MODEL_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if note_dropped_muse_model(&model) {
         crate::baaz_log!(
             "muse start: stored model {model} is not in the cached model/list; starting on the server default"
         );
     }
     None
+}
+
+/// [`start_params`], plus the muse catalog check — applied only when
+/// `provider` parses to muse, through the same [`ProviderId`](crate::providers::ProviderId)
+/// parsing the defaults use. A Codex or Claude Code default is never
+/// dropped against the muse catalog; only a muse start consults it.
+/// Every muse `session/start` that carries a project default — a new
+/// session and a handoff destination alike — builds its params here, so
+/// the two cannot drift.
+pub fn checked_start_params(
+    projects: &Projects,
+    project_id: Option<&str>,
+    provider: &str,
+    catalog_ids: &[String],
+    cli_approval: Option<muse_client::schema::ApprovalMode>,
+) -> Option<muse_client::schema::SessionStartParams> {
+    let mut params = start_params(projects, project_id, provider, cli_approval)?;
+    if crate::providers::ProviderId::parse(provider) == crate::providers::ProviderId::Muse {
+        params.model_id = muse_start_model(params.model_id, catalog_ids);
+    }
+    Some(params)
 }
 
 /// The `session/start` params for a session in `root` that is not being
