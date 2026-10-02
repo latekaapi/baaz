@@ -5259,4 +5259,157 @@ mod tests {
         assert_eq!(kind, aui::nav::RowStatusKind::Working, "a busy view never reads Settled");
         restore_state(state);
     }
+
+    /// B5fix2: a parked muse view's frozen busy bit never re-arms its row.
+    /// Switching away drops the view's event subscription, so a later idle
+    /// list reply stands the row down and leaves no stale approval behind —
+    /// the row defers to the wire, not to the parked fold.
+    #[gpui::test]
+    fn parked_muse_view_never_rearms_its_row_after_an_idle_list_reply(cx: &mut gpui::TestAppContext) {
+        use chrono::Local;
+        let state = hermetic_state("list-parked-row");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        fn idle_row(id: &str) -> crate::sidebar::SessionEntry {
+            crate::sidebar::SessionEntry {
+                id: id.to_owned(),
+                label: "x".into(),
+                updated: Local::now(),
+                running: false,
+                turns: 1,
+                hidden: false,
+                pinned: false,
+                archived: false,
+                description: String::new(),
+                replayed: false,
+                provider: None,
+                named: false,
+                needs_title: false,
+                side_marker: false,
+                title_pending: false,
+                last_ask: None,
+                branch: None,
+                terminals_running: 0,
+                local: false,
+                provisional: false,
+                workspace: None,
+                project: None,
+                project_name: None,
+                attention: Vec::new(),
+                approval_command: None,
+                pending_question: None,
+                turn_started: None,
+                last_error: None,
+            }
+        }
+        // s-1 turns live and holds a pending approval, the way a session
+        // looks mid-turn when it is parked.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions.push(idle_row("s-1"));
+                let view = h.active.clone().expect("a session is open");
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        muse_client::MuseEvent::Notification {
+                            method: "turn/started".to_owned(),
+                            params: serde_json::json!({"turnId": "t-1"}),
+                            cursor: None,
+                            session_id: Some("s-1".to_owned()),
+                        },
+                        cx,
+                    );
+                    view.apply(
+                        muse_client::MuseEvent::Notification {
+                            method: "approval/requested".to_owned(),
+                            params: serde_json::json!({
+                                "approvalId": "ap-1",
+                                "availableChoices": [],
+                                "currentRequirementId": {"approvalId": "ap-1", "sourceIndex": 0},
+                                "itemId": "i-1",
+                                "judgeEscalated": false,
+                                "protectedWrite": false,
+                                "rawArgs": "{}",
+                                "sessionId": "s-1",
+                                "sourceRange": {"first": {"id": "e1", "sequence": 1}, "last": {"id": "e1", "sequence": 1}, "stream": {"id": "run", "kind": "run"}},
+                                "subject": {"kind": "shell", "command": "ls /tmp"},
+                                "taskId": "task-1",
+                                "toolCallId": "shell_c-1",
+                                "toolName": "shell",
+                                "turnId": "t-1",
+                                "viewCursor": "c2",
+                            }),
+                            cursor: None,
+                            session_id: Some("s-1".to_owned()),
+                        },
+                        cx,
+                    );
+                });
+                h.sync_row_live("s-1", true, cx);
+            })
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).sessions.iter().any(|e| e.id == "s-1"
+                && e.running
+                && e.approval_command.is_some())),
+            "the live turn arms the row with its pending approval"
+        );
+        // Switch away: s-1 parks in the MRU, s-2 opens. The parked muse view
+        // keeps its busy fold but loses its event subscription.
+        let workspace = state.2.to_string_lossy().into_owned();
+        let view2 = vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace,
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), None, host, window, cx))
+            })
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                let parked = h.active.clone().expect("s-1 open");
+                h.session_cache.push(("s-1".to_owned(), parked));
+                h.active = Some(view2.clone());
+                h.sessions.push(idle_row("s-2"));
+            })
+        });
+        // The list reply says idle with no approvals: the wholesale replace
+        // stands both rows down, then the merge tail must not let the parked
+        // muse fold re-arm s-1.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let wire = vec![idle_row("s-1"), idle_row("s-2")];
+                h.sessions = crate::sidebar::merge_session_list(wire, &h.sessions);
+                h.merge_provider_rows();
+                h.sync_all_live_rows(cx);
+            })
+        });
+        let entry = vc.update(|_, cx| {
+            baaz
+                .read(cx)
+                .sessions
+                .iter()
+                .find(|e| e.id == "s-1")
+                .expect("the row survives the merge")
+                .clone()
+        });
+        assert!(!entry.running, "a parked view never re-arms Working over idle wire");
+        assert!(
+            entry.approval_command.is_none(),
+            "no stale approval from the parked fold: {:?}",
+            entry.approval_command
+        );
+        assert!(
+            entry.pending_question.is_none(),
+            "no stale question from the parked fold"
+        );
+        restore_state(state);
+    }
 }
