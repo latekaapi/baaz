@@ -4159,6 +4159,37 @@ impl Harness {
                 self.open_skills(cx);
                 self.select_skill(name, cx);
             }
+            // A transcript or terminal link (B9): `http(s)` opens in
+            // Baaz's Browser pane (the navigation lands on the next
+            // render); anything external rides the system browser.
+            SessionEvent::OpenUrl { url, external } => {
+                if *external {
+                    cx.open_url(url);
+                } else {
+                    self.open_url_in_browser(url.clone(), cx);
+                }
+            }
+            // A transcript path link (B9): the existence check runs off
+            // the UI thread, and the reveal lands through the Files pane's
+            // own path — folders select and scroll, files preview banded.
+            SessionEvent::RevealPath { abs, highlight } => {
+                let abs = abs.clone();
+                let highlight = highlight.clone();
+                let root = self.right_project().map(|(root, _)| root);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let probe = abs.clone();
+                    let is_dir = cx
+                        .background_executor()
+                        .spawn(async move { std::fs::metadata(&probe).ok().map(|meta| meta.is_dir()) })
+                        .await;
+                    let _ = this.update(cx, |this: &mut Self, cx| {
+                        let owned = root.or_else(|| this.right_project().map(|(root, _)| root));
+                        if let Some(owned) = owned {
+                            this.reveal_link_path(&owned, &abs, is_dir, highlight, cx);
+                        }
+                    });
+                }));
+            }
         }
         cx.notify();
     }

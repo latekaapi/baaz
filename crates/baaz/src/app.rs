@@ -709,6 +709,12 @@ pub struct Harness {
     /// there, so activation, restore and boot never steal the keyboard into
     /// the URL field. Never persists.
     pub(crate) browser_url_focus_armed: bool,
+    /// A link's URL waiting for the Browser pane's next render (B9): set
+    /// by [`Harness::open_url_in_browser`](crate::browser) beside the
+    /// non-toggling open, consumed once by `ensure_browser_person` where
+    /// the window is at hand. The fake backend navigates without a window
+    /// and never arms this. Never persists.
+    pub(crate) browser_pending_url: Option<String>,
     /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
     /// step): the in-process fallback for a real
     /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
@@ -1211,6 +1217,7 @@ impl Harness {
             browser_builds: 0,
             browser_idle_warmed: false,
             browser_url_focus_armed: false,
+            browser_pending_url: None,
             right_refresh_in_flight: false,
             right_last_key: None,
             right_snap: false,
@@ -2776,9 +2783,10 @@ impl Harness {
             TerminalGridIntent::OpenUrl(url) => {
                 // A program can print any OSC 8 link it likes, so only
                 // `http`/`https` ever reach the browser — the rest are
-                // ignored (D53).
+                // ignored (D53). Reached links open in Baaz's Browser pane
+                // (B9), like transcript links.
                 if terminal::intents::openable_url(&url) {
-                    cx.open_url(&url);
+                    self.open_url_in_browser(url.to_string(), cx);
                 }
             }
             TerminalGridIntent::Copy(block) => {
@@ -5932,6 +5940,184 @@ mod tests {
             shows(vc, &baaz).is_some_and(|code| code.contains("version two")),
             "the refresh reloads the rewritten file into the open preview"
         );
+        restore_state(state);
+    }
+
+    /// B9: a link's URL opens the pane on Browser and navigates the fake
+    /// backend at once — no frame, no window needed for the scripted page.
+    #[gpui::test]
+    fn url_links_open_the_browser_pane_and_navigate(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("url-link-browser");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session"));
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.on_session_event(
+                    view.clone(),
+                    &crate::session::SessionEvent::OpenUrl {
+                        url: "https://example.com/page".to_owned(),
+                        external: false,
+                    },
+                    cx,
+                );
+            })
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.layout.right_open, "the link opens the pane");
+            assert_eq!(
+                crate::layout::right_kind(&harness.layout),
+                crate::layout::RightKind::Browser,
+                "the link opens the pane on Browser"
+            );
+            let url = harness
+                .browser
+                .states
+                .get("s-1")
+                .map(|state| state.read(cx).url().to_string());
+            assert_eq!(url.as_deref(), Some("https://example.com/page"), "the fake page navigates");
+            assert!(
+                !harness.browser_url_focus_armed,
+                "a link never earns URL-field focus"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// B9: a link to a folder selects it with every ancestor expanded and
+    /// no preview — through the event's own background existence check.
+    #[gpui::test]
+    fn folder_links_reveal_with_expanded_ancestors(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("folder-link-reveal");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        std::fs::create_dir_all(root.join("crates/baaz/src")).unwrap();
+        let view = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: root.to_string_lossy().into_owned(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| {
+                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                });
+                harness.active = Some(view.clone());
+                view
+            })
+        });
+        let abs = root.join("crates/baaz/src");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.on_session_event(
+                    view.clone(),
+                    &crate::session::SessionEvent::RevealPath { abs: abs.clone(), highlight: None },
+                    cx,
+                );
+            })
+        });
+        vc.run_until_parked();
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.layout.right_open, "the link opens the pane");
+            assert_eq!(
+                crate::layout::right_kind(&harness.layout),
+                crate::layout::RightKind::Files,
+                "a folder link opens the pane on Files"
+            );
+            let open = harness.right_cache.expanded_for(&root);
+            assert!(
+                open.contains("crates") && open.contains("crates/baaz") && open.contains("crates/baaz/src"),
+                "every ancestor stands open, got: {open:?}"
+            );
+            assert_eq!(
+                harness.right_cache.selected_for(&root).as_deref(),
+                Some("crates/baaz/src"),
+                "the folder is selected"
+            );
+            assert!(
+                harness.right_cache.preview_for(&root).is_none(),
+                "a folder reveal previews nothing"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// B9: a link to a file previews it banded on the linked lines.
+    #[gpui::test]
+    fn file_links_preview_with_their_lines(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("file-link-preview");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        });
+        let root = vc
+            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .expect("the hermetic workspace is adopted at boot");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        let view = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".to_owned(),
+                    workspace: root.to_string_lossy().into_owned(),
+                    overlays: harness.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| {
+                    crate::session::SessionView::new("s-1".to_owned(), None, host, window, cx)
+                });
+                harness.active = Some(view.clone());
+                view
+            })
+        });
+        let abs = root.join("src/main.rs");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.on_session_event(
+                    view.clone(),
+                    &crate::session::SessionEvent::RevealPath {
+                        abs: abs.clone(),
+                        highlight: Some(2..3),
+                    },
+                    cx,
+                );
+            })
+        });
+        vc.run_until_parked();
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(
+                crate::layout::right_kind(&harness.layout),
+                crate::layout::RightKind::Files,
+                "a file link opens the pane on Files"
+            );
+            let preview = harness.right_cache.preview_for(&root).expect("a preview");
+            assert_eq!(preview.path, "src/main.rs");
+            assert_eq!(preview.highlight, Some(2..3), "the preview bands the linked lines");
+            assert!(
+                harness.right_cache.expanded_for(&root).contains("src"),
+                "the file's parent stands open"
+            );
+        });
         restore_state(state);
     }
 
