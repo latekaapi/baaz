@@ -589,19 +589,17 @@ impl Harness {
                 true
             }
             Command::RightBrowser => {
-                self.show_right(RightKind::Browser, cx);
+                self.select_right(RightKind::Browser, cx);
                 true
             }
-            Command::RightDiff => {
-                self.show_right(RightKind::Diff, cx);
-                true
-            }
-            Command::RightGit => {
-                self.show_right(RightKind::Git, cx);
+            Command::RightDiff | Command::RightGit => {
+                // B8: both spellings open the merged Changes view, without
+                // ever toggling it shut when it already shows.
+                self.select_right(RightKind::Changes, cx);
                 true
             }
             Command::RightFiles => {
-                self.show_right(RightKind::Files, cx);
+                self.select_right(RightKind::Files, cx);
                 true
             }
             Command::Terminal => {
@@ -1435,8 +1433,8 @@ mod tests {
         let vc = cx.add_empty_window();
         for (command, kind) in [
             (Command::RightBrowser, RightKind::Browser),
-            (Command::RightDiff, RightKind::Diff),
-            (Command::RightGit, RightKind::Git),
+            (Command::RightDiff, RightKind::Changes),
+            (Command::RightGit, RightKind::Changes),
             (Command::RightFiles, RightKind::Files),
         ] {
             let baaz = vc.update(|window, cx| {
@@ -1473,9 +1471,11 @@ mod tests {
 
     /// The two dispatch paths are exhaustive and disjoint: every variant of
     /// [`Command::ALL`] is either a window command (`run_window_command`
-    /// returns `true`) or a session command (`false`), the six new ones are
-    /// in the window set, and the original 17 are not. A 24th variant that
-    /// lands in neither path fails here.
+    /// returns `true`) or a session command (`false`), the six window ones
+    /// are in the window set, and the other eighteen are not. A 25th variant
+    /// that lands in neither path fails here. (`RightDiff` is a legacy
+    /// alias with no palette row: still window-handled when invoked, but
+    /// not in `ALL`, so not counted here.)
     #[gpui::test]
     fn every_command_is_on_exactly_one_dispatch_side(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("sides");
@@ -1502,13 +1502,13 @@ mod tests {
             assert_eq!(handled, is_window, "{command:?} is classified on the wrong side");
             window_count += usize::from(handled);
         }
-        assert_eq!(window_count, 7, "exactly the seven window commands are window-level");
+        assert_eq!(window_count, 6, "exactly the six window commands are window-level");
         restore_state(state);
     }
 
     /// The composer's route reaches the window, not just the palette's.
     ///
-    /// These six also appear in the composer's `/` menu, which is built from
+    /// These also appear in the composer's `/` menu, which is built from
     /// [`Command::ALL`] in `session/render.rs`. They were originally swallowed
     /// in `SessionView::run_command` with an empty arm, so the menu rows and
     /// the typed commands did nothing at all — a gate cannot see that, and it
@@ -1525,7 +1525,7 @@ mod tests {
         // the session would deliver it.
         for (command, kind) in [
             (Command::RightFiles, crate::layout::RightKind::Files),
-            (Command::RightGit, crate::layout::RightKind::Git),
+            (Command::RightGit, crate::layout::RightKind::Changes),
         ] {
             vc.update(|window, cx| {
                 baaz.update(cx, |harness, cx| {
@@ -1831,8 +1831,8 @@ mod tests {
         assert_eq!(filter_commands("BROW"), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("reasoning"), vec![Command::Effort]);
         assert!(filter_commands("zzz-no-such-command").is_empty());
-        assert_eq!(filter_commands("").len(), 25, "an empty query lists every command");
-        assert_eq!(filter_commands("   ").len(), 25, "whitespace is an empty query");
+        assert_eq!(filter_commands("").len(), 24, "an empty query lists every command");
+        assert_eq!(filter_commands("   ").len(), 24, "whitespace is an empty query");
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
@@ -1851,7 +1851,7 @@ mod tests {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
         });
-        assert_eq!(empty, 25, "an empty query lists every command");
+        assert_eq!(empty, 24, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));
