@@ -1235,7 +1235,11 @@ impl Harness {
             index_loaded: false,
             sessions_list_in_flight: false,
             sessions_list_stale: false,
-            layout: layout::read(),
+            layout: {
+                let layout = layout::read();
+                crate::sidebar::set_compact_rows(layout.compact_rows);
+                layout
+            },
             shortcuts_cache: crate::keymap::effective_bindings(),
             recording_shortcut: None,
             shortcut_errors: HashMap::new(),
