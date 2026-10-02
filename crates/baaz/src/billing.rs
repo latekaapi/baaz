@@ -166,7 +166,7 @@ impl Harness {
         self.wire_call(
             cx,
             move || {
-                let value = client.as_ref().and_then(tier::read_usage_value);
+                let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
                 value.and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
             },
             move |this, tier, cx| {
