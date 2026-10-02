@@ -120,6 +120,37 @@ impl SessionView {
     /// answering text behind it is a recoverable card inside a reply
     /// that otherwise completed, not a failed turn. `None` while the
     /// pack turn is still running or answered cleanly.
+    /// The pack turn's outcome once it is terminal: `None` while it is
+    /// still running (no reply yet, or this view is still busy), then
+    /// `Some(None)` when it answered and `Some(Some(reason))` when it
+    /// failed (see [`Self::pack_turn_failed_reason`]).
+    pub(crate) fn pack_turn_outcome(&self) -> Option<Option<String>> {
+        if self.busy() || !self.pack_turn_has_reply() {
+            return None;
+        }
+        Some(self.pack_turn_failed_reason())
+    }
+
+    /// Whether the pack's user turn exists and an assistant turn follows it.
+    fn pack_turn_has_reply(&self) -> bool {
+        let (full, display) = match (&self.handoff_pack_full, &self.handoff_pack_display) {
+            (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
+            _ => return false,
+        };
+        let Some(session) = self.fold.session(&self.session_id) else { return false };
+        let mut turns = session.turns.iter();
+        for turn in turns.by_ref() {
+            let is_pack = match turn {
+                Turn::User { text, .. } => text == full || display.is_some_and(|d| text == d),
+                _ => false,
+            };
+            if is_pack {
+                return turns.any(|t| matches!(t, Turn::Assistant { .. }));
+            }
+        }
+        false
+    }
+
     pub(crate) fn pack_turn_failed_reason(&self) -> Option<String> {
         let (full, display) = match (&self.handoff_pack_full, &self.handoff_pack_display) {
             (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
