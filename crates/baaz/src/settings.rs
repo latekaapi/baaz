@@ -14,6 +14,26 @@
 //! from that state every frame, and a switch intent flips the matching
 //! layout field back through [`crate::layout::write`].
 //!
+//! B11b decisions, kept here so every caller agrees:
+//!
+//! * While the page stands open, pane/terminal toggles and pane-kind
+//!   commands are IGNORED with no state change (never "close Settings,
+//!   then act"): [`Harness::toggle_right`](crate::app::Harness::toggle_right),
+//!   [`show_right`](crate::app::Harness::show_right),
+//!   [`toggle_terminal`](crate::app::Harness::toggle_terminal),
+//!   [`new_terminal`](crate::app::Harness::new_terminal),
+//!   [`open_terminal_tab`](crate::app::Harness::open_terminal_tab), the
+//!   matching palette actions and the `right:*` / `terminal-dock` /
+//!   `files-select` step verbs all return early. The page hides the pane
+//!   and dock without writing their state, so an ignored toggle keeps the
+//!   restore exact.
+//! * The page exits only when a navigation actually happens: every session
+//!   switch lands through `activate`, which exits; a palette ACTION
+//!   executed exits (except the ignored pane/terminal ones above).
+//!   Merely opening the palette — or cancelling it — never exits.
+//! * Opening arms the surface's focus (keyboard nav and ⌘F work at once);
+//!   closing parks the composer next frame.
+//!
 //! Extensibility: a later section is one more id in
 //! [`normalize_settings_target`] + [`SETTINGS_SECTIONS`], one more id in
 //! [`apply_setting`]/[`setting_home`], and one more page arm in
@@ -153,17 +173,75 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
 }
 
 /// Every former setting's exactly-one home page: the row id → page id.
-/// Table-driven so the coverage test enumerates it.
+/// Table-driven so the coverage test enumerates it. Both spellings count:
+/// the `shortcut:<action>` deep-link id and the rendered row id the page
+/// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
         "auto_title" | "auto_summary" | "handoff_model_summary" => Some("general"),
         "group_chevron" | "group_bar" | "group_branch" => Some("sidebar"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
-        _ if id.starts_with("shortcut:") => Some("shortcuts"),
+        _ if id.starts_with("shortcut:") || parse_shortcut_row_id(id).is_some() => Some("shortcuts"),
         _ if id.starts_with("archived:") => Some("archived"),
         _ => None,
     }
+}
+
+/// The General page's switch rows, from the layout they read: the row
+/// model the page renders and the coverage test enumerates.
+pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
+    vec![
+        SettingsRow::Switch {
+            id: SharedString::from("auto_title"),
+            label: SharedString::from("Name sessions automatically"),
+            detail: Some(SharedString::from(
+                "Spend one cheap call naming a new session after its first message",
+            )),
+            on: layout.auto_title,
+        },
+        SettingsRow::Switch {
+            id: SharedString::from("auto_summary"),
+            label: SharedString::from("Summarise sessions in the sidebar"),
+            detail: Some(SharedString::from(
+                "Show the last request beside the last reply; rewrite poor ones",
+            )),
+            on: layout.auto_summary,
+        },
+        SettingsRow::Switch {
+            id: SharedString::from("handoff_model_summary"),
+            label: SharedString::from("Summarise handoffs with a model"),
+            detail: Some(SharedString::from(
+                "A cheap model writes the summary the next provider reads (one short turn). Off: the first lines of the earliest replies.",
+            )),
+            on: layout.handoff_model_summary,
+        },
+    ]
+}
+
+/// The Sidebar page's switch rows, from the layout they read: the row
+/// model the page renders and the coverage test enumerates.
+pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
+    vec![
+        SettingsRow::Switch {
+            id: SharedString::from("group_chevron"),
+            label: SharedString::from("Collapse chevron"),
+            detail: Some(SharedString::from("Show a chevron on project rows to fold them")),
+            on: layout.group_chevron,
+        },
+        SettingsRow::Switch {
+            id: SharedString::from("group_bar"),
+            label: SharedString::from("Current-project bar"),
+            detail: Some(SharedString::from("Mark the open session's project with an accent bar")),
+            on: layout.group_bar,
+        },
+        SettingsRow::Switch {
+            id: SharedString::from("group_branch"),
+            label: SharedString::from("Branch name"),
+            detail: Some(SharedString::from("Show each project's git branch on its row")),
+            on: layout.group_branch,
+        },
+    ]
 }
 
 /// The page state. `open` is the route: while open the left column shows
@@ -281,56 +359,12 @@ impl Harness {
             SettingsSection {
                 id: SharedString::from("general"),
                 label: SharedString::from("General"),
-                rows: vec![
-                    SettingsRow::Switch {
-                        id: SharedString::from("auto_title"),
-                        label: SharedString::from("Name sessions automatically"),
-                        detail: Some(SharedString::from(
-                            "Spend one cheap call naming a new session after its first message",
-                        )),
-                        on: self.layout.auto_title,
-                    },
-                    SettingsRow::Switch {
-                        id: SharedString::from("auto_summary"),
-                        label: SharedString::from("Summarise sessions in the sidebar"),
-                        detail: Some(SharedString::from(
-                            "Show the last request beside the last reply; rewrite poor ones",
-                        )),
-                        on: self.layout.auto_summary,
-                    },
-                    SettingsRow::Switch {
-                        id: SharedString::from("handoff_model_summary"),
-                        label: SharedString::from("Summarise handoffs with a model"),
-                        detail: Some(SharedString::from(
-                            "A cheap model writes the summary the next provider reads (one short turn). Off: the first lines of the earliest replies.",
-                        )),
-                        on: self.layout.handoff_model_summary,
-                    },
-                ],
+                rows: general_settings_rows(&self.layout),
             },
             SettingsSection {
                 id: SharedString::from("sidebar"),
                 label: SharedString::from("Sidebar"),
-                rows: vec![
-                    SettingsRow::Switch {
-                        id: SharedString::from("group_chevron"),
-                        label: SharedString::from("Collapse chevron"),
-                        detail: Some(SharedString::from("Show a chevron on project rows to fold them")),
-                        on: self.layout.group_chevron,
-                    },
-                    SettingsRow::Switch {
-                        id: SharedString::from("group_bar"),
-                        label: SharedString::from("Current-project bar"),
-                        detail: Some(SharedString::from("Mark the open session's project with an accent bar")),
-                        on: self.layout.group_bar,
-                    },
-                    SettingsRow::Switch {
-                        id: SharedString::from("group_branch"),
-                        label: SharedString::from("Branch name"),
-                        detail: Some(SharedString::from("Show each project's git branch on its row")),
-                        on: self.layout.group_branch,
-                    },
-                ],
+                rows: sidebar_settings_rows(&self.layout),
             },
             crate::settings_providers::providers_section(),
             shortcuts_section(
@@ -363,12 +397,14 @@ impl Harness {
     /// Open the Settings page at `target` (`settings:<target>` spelling).
     /// Saves the active session for close-restore; hides (never writes)
     /// right-pane and terminal state. Opening closes the Skills page, so
-    /// only one full-page route stands open.
+    /// only one full-page route stands open. Opening arms the surface's
+    /// focus, so keyboard nav and ⌘F work without a click first.
     pub(crate) fn open_settings_page(&mut self, target: &str, cx: &mut Context<Self>) {
         self.refresh_shortcuts();
         self.recording_shortcut = None;
         let active = self.settings_active_id(cx);
         self.settings_page.open(target, active);
+        self.focus_settings = true;
         if self.skills.open {
             self.skills.open = false;
         }
@@ -457,10 +493,15 @@ impl Harness {
 
     /// Close the Settings page, restoring the saved session. Scroll,
     /// draft, focus, right pane and terminal come back exactly: the page
-    /// never wrote their state, it only hid them.
+    /// never wrote their state, it only hid them. Closing parks the
+    /// composer next frame, and marks the overlay closed already, so the
+    /// frame's just-closed parking does not steal the composer back to
+    /// the root.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_page.close();
         self.recording_shortcut = None;
+        self.focus_composer = true;
+        self.overlay_was_open = false;
         cx.notify();
     }
 
@@ -747,6 +788,7 @@ impl Harness {
             .id("settings-surface")
             .size_full()
             .justify_center()
+            .track_focus(&self.settings_focus)
             .key_context(crate::app::SETTINGS_CONTEXT)
             .on_action(cx.listener(|this, _: &crate::app::SettingsFind, window, cx| {
                 window.focus(&this.settings_search.focus_handle(cx), cx);
@@ -936,7 +978,9 @@ impl Harness {
 
     /// Providers overview: one row per provider in switcher order
     /// (provider mark, name, headline, Enable switch, chevron into the
-    /// sub-page) plus the footer action row.
+    /// sub-page) plus the footer action row. The chevron is decorative —
+    /// the text beside it carries the click and the label — but always
+    /// rendered, so every row reads as a drill-in (§1.3).
     fn settings_providers_overview(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let statuses = crate::provider_status::live_statuses();
@@ -986,6 +1030,13 @@ impl Harness {
                                     .ui(scale::FS_12)
                                     .child(status.headline_text().to_string()),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .ui(scale::FS_13)
+                            .text_color(p.ink_4)
+                            .child("›".to_string()),
                     )
                     .child(
                         Switch::new(format!("settings-enable-{wire}"))
@@ -1884,29 +1935,93 @@ mod tests {
         assert!(!is_provider_subpage("providers"));
     }
 
-    /// Every former setting is reachable on exactly one page: the three
-    /// model-spending switches moved to General, the three row switches
-    /// stay on Sidebar, provider switches on Providers, shortcut rows on
-    /// Shortcuts, archived rows on Archived.
+    /// Every setting id the pages render lives on exactly one page: the
+    /// row models themselves are enumerated — General and Sidebar from
+    /// the switch builders the sections render, Providers from the
+    /// section's own rows, each provider sub-page from its card plus its
+    /// opt-in switch, Shortcuts from the live keymap rows, Archived from
+    /// its link spelling — and each id must both sit on exactly one page
+    /// and agree with [`setting_home`]. Unknown ids name no page.
     #[test]
-    fn every_former_setting_has_exactly_one_home() {
-        let cases = [
-            ("auto_title", "general"),
-            ("auto_summary", "general"),
-            ("handoff_model_summary", "general"),
-            ("group_chevron", "sidebar"),
-            ("group_bar", "sidebar"),
-            ("group_branch", "sidebar"),
-            ("provider-enabled:codex", "providers"),
-            ("provider-enabled:claude-code", "providers"),
-            ("provider-enabled:muse", "providers"),
-            ("shortcut:NewSession", "shortcuts"),
-            ("archived:s-1", "archived"),
+    fn every_rendered_setting_id_has_exactly_one_page() {
+        use crate::providers::ProviderId;
+        let (_env, _dir) = ShortcutEnv::hold("coverage");
+        let layout = Layout::default();
+        let switch_ids = |rows: &[SettingsRow]| {
+            rows.iter()
+                .filter_map(|row| match row {
+                    SettingsRow::Switch { id, .. } => Some(id.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Page id → the setting ids that page renders.
+        let mut pages: Vec<(String, Vec<String>)> = vec![
+            ("general".to_owned(), switch_ids(&general_settings_rows(&layout))),
+            ("sidebar".to_owned(), switch_ids(&sidebar_settings_rows(&layout))),
+            ("providers".to_owned(), switch_ids(&crate::settings_providers::providers_section().rows)),
+            ("archived".to_owned(), vec!["archived:s-1".to_owned()]),
         ];
-        for (id, home) in cases {
-            assert_eq!(setting_home(id), Some(home), "the home of {id}");
+        for provider in ProviderId::all() {
+            let wire = provider.as_str();
+            let mut rows = vec![format!("provider-card:{wire}")];
+            if crate::settings_providers::own_mcp_providers().contains(&provider) {
+                rows.push(format!("use-own-mcp:{wire}"));
+            }
+            pages.push((format!("providers/{wire}"), rows));
         }
-        // Exactly one: no id names two pages, and unknown ids name none.
+        let bindings = crate::keymap::effective_bindings();
+        assert!(!bindings.is_empty(), "the defaults list something");
+        let shortcuts = shortcuts_section(&bindings, None, &std::collections::HashMap::new());
+        let mut shortcut_ids = Vec::new();
+        for row in &shortcuts.rows {
+            if let SettingsRow::Shortcut { id, .. } = row {
+                shortcut_ids.push(id.to_string());
+            }
+        }
+        assert_eq!(
+            shortcut_ids.len(),
+            bindings.len(),
+            "one rendered row per live binding"
+        );
+        pages.push(("shortcuts".to_owned(), shortcut_ids));
+        // The deep-link spellings open their home page too.
+        let links = [
+            ("shortcut:NewSession", "shortcuts"),
+            ("provider-enabled:codex", "providers"),
+            ("use-own-mcp:codex", "providers/*"),
+            ("auto_title", "general"),
+        ];
+        for (id, home) in links {
+            assert_eq!(setting_home(id), Some(home), "the link home of {id}");
+        }
+        // Every rendered id sits on exactly one page and agrees with
+        // `setting_home` (sub-pages report the `providers/*` family).
+        let mut seen: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for (page, ids) in &pages {
+            assert!(!ids.is_empty(), "{page} renders no setting ids");
+            for id in ids {
+                seen.entry(id.clone()).or_default().push(page.clone());
+            }
+        }
+        for (id, homes) in &seen {
+            assert_eq!(homes.len(), 1, "{id} renders on {homes:?}, want exactly one page");
+            let page = &homes[0];
+            let expected = if page.starts_with("providers/") { "providers/*" } else { page.as_str() };
+            assert_eq!(setting_home(id), Some(expected), "the home of {id}");
+        }
+        // The six layout switches are all covered, and unknown ids name
+        // no page.
+        for id in [
+            "auto_title",
+            "auto_summary",
+            "handoff_model_summary",
+            "group_chevron",
+            "group_bar",
+            "group_branch",
+        ] {
+            assert!(seen.contains_key(id), "{id} renders somewhere");
+        }
         assert_eq!(setting_home("nope"), None);
     }
 

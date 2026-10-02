@@ -233,10 +233,11 @@ impl Harness {
         });
     }
 
-    /// Open the palette on one list. A palette jump exits Settings (no
-    /// restore: the jump owns the next route).
+    /// Open the palette on one list. Merely opening never exits Settings
+    /// (B11b): only a palette ACTION executed exits — see
+    /// [`Self::run_palette_row`] — so opening and cancelling keeps the
+    /// page exactly where it was.
     pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
-        self.exit_settings_for_navigation(cx);
         let already = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == kind);
         self.overlays.update(cx, |overlays, _| {
             overlays.palette = if already { None } else { Some(Palette { kind, selected: 0 }) };
@@ -438,7 +439,7 @@ impl Harness {
         self.palette_rows(kind, cx).len()
     }
 
-    fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
+    pub(crate) fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
         match kind {
             PaletteKind::Commands => {
                 let query = self.commands_query.read(cx).value().trim().to_owned();
@@ -511,6 +512,19 @@ impl Harness {
     /// the index back into the same id (finding `performance-7`).
     fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, _| overlays.palette = None);
+        // A palette action executed leaves Settings (no restore: the
+        // destination owns the next route) — except pane/terminal commands,
+        // which are ignored with no state change while the page stands
+        // open (B11b), like their keybindings.
+        if self.settings_page.open {
+            if kind == PaletteKind::Commands
+                && Command::parse(&id).is_some_and(|command| command.is_pane_or_terminal())
+            {
+                cx.notify();
+                return;
+            }
+            self.exit_settings_for_navigation(cx);
+        }
         match kind {
             PaletteKind::Search => {
                 if let Some(session_id) = id.strip_prefix("s:") {
@@ -543,6 +557,19 @@ impl Harness {
             }
         }
         cx.notify();
+    }
+
+    /// The tests' way into [`Self::run_palette_row`]: run one palette row
+    /// by its id, exactly as a click or ↩ would.
+    #[cfg(test)]
+    pub(crate) fn run_palette_row_for_test(
+        &mut self,
+        kind: PaletteKind,
+        id: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_palette_row(kind, id, window, cx);
     }
 
     /// Run one window-level ⌘K command, returning whether it was one.
