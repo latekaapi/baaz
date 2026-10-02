@@ -413,24 +413,51 @@ pub(crate) fn read_snapshot_for_cached(
 /// every frame); toasts travel through a weak handle the action closures
 /// upgrade at click time, when no borrow is held. An empty cache for the
 /// current kind draws the pane's loading state — never a blocking fill.
+/// What the Browser arm draws when there is no live webview (B7): the
+/// loading placeholder only while the pane stands open; the closed marker
+/// once it stands closed — never the loading placeholder on close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserPlaceholder {
+    /// The live page.
+    Page,
+    /// The pane is open and the webview is still attaching.
+    Loading,
+    /// The pane is closed: no page, no placeholder flash.
+    Closed,
+}
+
+/// Pick the [`BrowserPlaceholder`] for `pane_open` and whether the frame
+/// has a live webview. Pure so tests pin the close rule directly.
+pub(crate) fn browser_placeholder_for(pane_open: bool, has_webview: bool) -> BrowserPlaceholder {
+    if has_webview {
+        BrowserPlaceholder::Page
+    } else if pane_open {
+        BrowserPlaceholder::Loading
+    } else {
+        BrowserPlaceholder::Closed
+    }
+}
+
 pub(crate) fn render(
     kind: RightKind,
     cache: &RightCache,
     project: Option<(PathBuf, String)>,
     browser: Option<&Entity<aui_webview::WebviewState>>,
+    pane_open: bool,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
     let notify = toast_sink(cx.weak_entity());
     let harness = cx.weak_entity();
     match kind {
-        RightKind::Browser => match browser {
-            Some(state) => browser_pane(state, cx),
-            None => loading_state(
+        RightKind::Browser => match browser_placeholder_for(pane_open, browser.is_some()) {
+            BrowserPlaceholder::Page => browser_pane(browser.expect("has_webview means Some"), cx),
+            BrowserPlaceholder::Loading => loading_state(
                 "right-browser-loading",
                 "Browser",
                 "Opening the page",
                 "The webview is being attached.",
             ),
+            BrowserPlaceholder::Closed => closed_browser_state(),
         },
         RightKind::Diff => match project {
             Some((root, _)) => match cache.git_for(&root) {
@@ -599,7 +626,12 @@ impl Harness {
             self.overrides.get(session_id).and_then(|meta| meta.right.clone()).unwrap_or_default();
         right.open = true;
         right.kind = RightKind::Browser;
-        self.set_override(session_id, |meta| meta.right = Some(right), cx);
+        // B7: agent navigation state is not searchable either — the cheap
+        // debounced write, never the session-list settle.
+        self.store_right_state_cheap(session_id, right, cx);
+        // B7fix2: the foreground open builds the webview on a deferred task
+        // with the window — never as a render side effect.
+        self.defer_browser_prewarm(cx);
         self.refresh_right_now(cx);
         cx.notify();
     }
@@ -641,6 +673,19 @@ fn reveal_in_finder(path: &Path) {
 /// with a baselined settled state.
 fn loading_state(id: &'static str, pane: &'static str, heading: &'static str, detail: &'static str) -> AnyElement {
     empty_state(id, pane, heading, detail)
+}
+
+/// The closed Browser pane (B7): the last page snapshot stays in the
+/// native view while the column slides out, so gpui draws this still
+/// marker underneath — never the "Opening the page" loading placeholder.
+/// Carries the same role and label as every pane state.
+fn closed_browser_state() -> AnyElement {
+    empty_state(
+        "right-browser-closed",
+        "Browser",
+        "Browser",
+        "The browser pane is closed.",
+    )
 }
 
 /// A labelled placeholder: never a blank pane, always a role and a label.
@@ -1942,6 +1987,35 @@ mod tests {
         assert!(super::agent_open_flips_visible_pane(Some("a"), "a"));
         assert!(!super::agent_open_flips_visible_pane(Some("a"), "b"));
         assert!(!super::agent_open_flips_visible_pane(None, "b"));
+    }
+
+    #[test]
+    fn closing_the_browser_never_draws_the_loading_placeholder() {
+        // B7: without a live webview the open pane shows the loading
+        // placeholder while attaching — but a closed pane never does.
+        // The live page (or its snapshot) owns the close; the placeholder
+        // would flash over it while sliding out.
+        use super::{browser_placeholder_for, BrowserPlaceholder};
+        assert_eq!(
+            browser_placeholder_for(true, true),
+            BrowserPlaceholder::Page,
+            "an open pane with a webview shows the page"
+        );
+        assert_eq!(
+            browser_placeholder_for(false, true),
+            BrowserPlaceholder::Page,
+            "a closing pane keeps its live webview — the snapshot slides out, not a placeholder"
+        );
+        assert_eq!(
+            browser_placeholder_for(true, false),
+            BrowserPlaceholder::Loading,
+            "an open pane still attaching shows the loading placeholder"
+        );
+        assert_eq!(
+            browser_placeholder_for(false, false),
+            BrowserPlaceholder::Closed,
+            "a closed pane with no webview draws the closed marker, never the loading placeholder"
+        );
     }
 
     use super::*;
