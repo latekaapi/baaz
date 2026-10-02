@@ -389,6 +389,24 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether running this command would touch the right pane or the
+    /// terminal dock: the four pane kinds plus the two dock commands.
+    /// While the Settings page stands open these are ignored with no state
+    /// change (B11b) instead of exiting Settings and acting.
+    pub(crate) fn is_pane_or_terminal(&self) -> bool {
+        matches!(
+            self,
+            Command::RightBrowser
+                | Command::RightDiff
+                | Command::RightGit
+                | Command::RightFiles
+                | Command::Terminal
+                | Command::NewTerminalCmd
+        )
+    }
+}
+
+impl Command {
     /// Every command, in the order the menu lists them.
     ///
     /// The six window-level commands sit together just before `Help`: the

@@ -339,6 +339,11 @@ impl Harness {
     /// where nothing happened (a known verb that silently does nothing
     /// reports success). Free: no turn, no wire.
     pub(crate) fn step_right(&mut self, rest: &str, cx: &mut Context<Self>) {
+        // Ignored while the Settings page stands open (B11b), like the
+        // keys: a capture aid must not flip hidden pane state either.
+        if self.settings_page.open {
+            return;
+        }
         let slug = rest.trim();
         if slug.is_empty() {
             self.toggle_right(cx);
@@ -392,6 +397,11 @@ impl Harness {
     /// instead of capturing a window where nothing happened. Free: no
     /// turn, no wire.
     pub(crate) fn step_files_select(&mut self, rest: &str, cx: &mut Context<Self>) {
+        // Ignored while the Settings page stands open (B11b): it opens the
+        // pane on Files, a pane-kind command.
+        if self.settings_page.open {
+            return;
+        }
         let id = rest.trim();
         if id.is_empty() {
             record_step_failure("files-select:");
