@@ -937,7 +937,7 @@ impl SessionView {
         let workspace = PathBuf::from(&self.workspace);
         let path = resolve_link_path(&workspace, raw);
         match std::fs::metadata(&path) {
-            Ok(_) => cx.open_with_system(&path),
+            Ok(_) => open_externally(&path, cx),
             Err(_) => self.toast("Link", format!("No such file: {path_part}"), cx),
         }
     }
@@ -2745,8 +2745,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("probe dir");
         std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").expect("probe file");
         let vc = cx.add_empty_window();
-        let seen: Rc<RefCell<Vec<(PathBuf, Option<std::ops::Range<u32>>)>>> =
-            Rc::new(RefCell::new(Vec::new()));
+        type Reveals = Vec<(PathBuf, Option<std::ops::Range<u32>>)>;
+        let seen: Rc<RefCell<Reveals>> = Rc::new(RefCell::new(Vec::new()));
         let record = Rc::clone(&seen);
         let view = vc.update(|window, cx| {
             let overlays = cx.new(|_| crate::overlays::Overlays::default());
@@ -2779,6 +2779,8 @@ mod tests {
                 "a plain click reveals with its lines; the ⌘-click emits nothing"
             );
         });
+        let opened = OPENED_EXTERNALLY.with(|opened| opened.borrow().clone());
+        assert_eq!(opened, vec![root.join("src").join("main.rs")], "the ⌘-click opens in the default app");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3521,4 +3523,23 @@ mod tests {
         assert!(!plus, "opening the picker closed the `+` menu");
         assert!(mode, "the picker still opened");
     }
+}
+
+
+/// Hand a path to the OS default app / Finder. Tests record it instead: the
+/// gpui test platform does not implement `open_with_system`.
+fn open_externally(path: &std::path::Path, cx: &mut gpui::App) {
+    #[cfg(test)]
+    {
+        OPENED_EXTERNALLY.with(|opened| opened.borrow_mut().push(path.to_path_buf()));
+        let _ = cx;
+    }
+    #[cfg(not(test))]
+    cx.open_with_system(path);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Paths a test asked the OS to open (see [`open_externally`]).
+    pub(crate) static OPENED_EXTERNALLY: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
