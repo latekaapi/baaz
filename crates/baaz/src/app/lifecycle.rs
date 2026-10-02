@@ -1821,6 +1821,11 @@ impl Harness {
             terminal_host: Some(self.terminal_host.clone()),
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), None, host, window, cx));
+        let fold_on = self.layout.fold_finished_turns;
+        view.update(cx, |view, cx| {
+            view.fold_finished_turns = fold_on;
+            cx.notify();
+        });
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, false, window, cx);
         // No row exists for a draft, so the empty state and the later
@@ -2141,6 +2146,11 @@ impl Harness {
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), client.clone(), host, window, cx));
+        let fold_on = self.layout.fold_finished_turns;
+        view.update(cx, |view, cx| {
+            view.fold_finished_turns = fold_on;
+            cx.notify();
+        });
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
         self.adopt_session_project(&session_id, cx);
@@ -2493,6 +2503,11 @@ impl Harness {
         };
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
+        });
+        let fold_on = self.layout.fold_finished_turns;
+        view.update(cx, |view, cx| {
+            view.fold_finished_turns = fold_on;
+            cx.notify();
         });
         // A disabled open lands readable with the quiet banner instead of
         // a live child: the view above rides the scripted lane, so there
@@ -4190,8 +4205,67 @@ impl Harness {
                     });
                 }));
             }
+            // B12: a transcript card's "Open full text": the card's whole
+            // text in the Files pane's read-only doc view.
+            SessionEvent::OpenFullText { title, text } => {
+                self.open_text_doc_for(title.clone(), text.clone(), cx);
+            }
+            // B12: a turn fold's `+N −M` chip: Changes for the session.
+            // Per-turn checkpoints do not exist yet, so the chip opens the
+            // session-scoped surface rather than pretending a scope. The
+            // id is kept for that filter — read here so the shape stays.
+            SessionEvent::OpenTurnChanges { turn_id } => {
+                let _ = turn_id.as_str();
+                self.select_right(crate::layout::RightKind::Changes, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// B12fix `transcript:fold`: flip the persisted "Fold finished
+    /// turns" switch (Settings → General, default on) and apply it live
+    /// to every open view — the same backing as the settings row, so the
+    /// probe, the palette and the switch never disagree. Registered in
+    /// [`crate::steps::WINDOW_VERBS`]; any other payload records a step
+    /// failure instead of toggling something nobody asked for.
+    pub(crate) fn step_transcript_fold(
+        &mut self,
+        rest: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = window;
+        if rest.trim() != "fold" {
+            crate::steps::record_step_failure(&format!("transcript:{rest}"));
+            return;
+        }
+        let on = !self.layout.fold_finished_turns;
+        crate::settings::apply_setting(&mut self.layout, "fold_finished_turns", on);
+        crate::layout::write(&self.layout);
+        self.apply_fold_to_views(on, cx);
+        self.invalidate_list();
+        cx.notify();
+    }
+
+    /// Push the persisted "Fold finished turns" switch into every open
+    /// session view (active and parked) and rebuild their row mappings,
+    /// so the transcript re-folds from the next frame. Shared with
+    /// [`Harness::flip_setting`](crate::settings::Harness::flip_setting).
+    pub(crate) fn apply_fold_to_views(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(view) = self.active.clone() {
+            view.update(cx, |view, cx| {
+                view.fold_finished_turns = on;
+                view.refresh_render_cache();
+                cx.notify();
+            });
+        }
+        for (_, view) in self.session_cache.clone() {
+            view.update(cx, |view, cx| {
+                view.fold_finished_turns = on;
+                view.refresh_render_cache();
+                cx.notify();
+            });
+        }
     }
 
     /// A failed command that the application, rather than a session, issued.

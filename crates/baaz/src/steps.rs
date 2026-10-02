@@ -117,6 +117,7 @@
 //! | `group-chevron` | flip the group-row chevron flag |
 //! | `auto-title` | flip the automatic session-naming switch |
 //! | `auto-summary` | flip the sidebar-summaries switch |
+//! | `transcript:fold` | flip the persisted "Fold finished turns" switch and apply it live to every open view |
 //! | `title-pending` | capture aid: the open session reads as if its title generation were in flight (`Naming this session…`), free |
 //! | `title-timeout` | capture aid: stand that generation down through the watchdog's own path, so the row falls back to the first prompt, free |
 //! | `title-land:<text>` | capture aid: land `<text>` as the open session's generated title, so the row and the crumb update — after `title-timeout`, like a late answer would — free |
@@ -330,6 +331,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
+    WindowVerb {
+        verb: "transcript",
+        run: |this, rest, window, cx| this.step_transcript_fold(rest, window, cx),
+    },
 ];
 
 impl Harness {

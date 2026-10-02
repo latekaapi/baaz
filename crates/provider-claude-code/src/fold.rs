@@ -59,6 +59,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
+use std::time::Instant;
 
 use aui_protocol::{
     ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
@@ -268,6 +269,9 @@ fn past_verb(kind: &ToolKind, open: &str) -> String {
         (ToolKind::Shell, "Run") => "Ran",
         (ToolKind::Write, "Write") => "Wrote",
         (ToolKind::Edit, "Edit") => "Edited",
+        (ToolKind::Search, "Search") => "Searched",
+        (ToolKind::Web, "Fetch") => "Fetched",
+        (ToolKind::Web, "Search") => "Searched",
         (ToolKind::Mcp { .. }, "Run") => "Ran",
         (ToolKind::SubAgent, "Delegate") => "Delegated",
         _ => open,
@@ -293,6 +297,16 @@ fn finish_tool_block(
     // body, and the exit code is the status (D51).
     if verb == TERMINAL_RUNNING_VERB {
         return finish_terminal_block(target, params, tool_use_id, result);
+    }
+    // B12fix: the Artifact tool completes to its one-line summary card
+    // regardless of the stand-in kind the opening carried — the body
+    // never inlines.
+    if name == "Artifact" {
+        return Block::Generic {
+            kind: name.to_owned(),
+            status: if result.is_error { "error".into() } else { "completed".into() },
+            text: artifact_detail(params, &result.text),
+        };
     }
     let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
     let done = past_verb(kind, verb);
@@ -344,11 +358,77 @@ fn finish_tool_block(
             body: ToolBody::Read { lines: read_line_count(result) },
             diff_stat: None,
         },
+        ToolKind::Search => {
+            // The header stays the one line it opened as; a ToolSearch
+            // names how many tools it loaded when the detail counts them.
+            let target = tool_search_target(name, target, result);
+            Block::ToolCall {
+                id: tool_use_id.to_owned(),
+                kind: kind.clone(),
+                verb: done,
+                target,
+                status,
+                duration_ms: None,
+                body: ToolBody::None,
+                diff_stat: None,
+            }
+        }
+        ToolKind::Web => Block::ToolCall {
+            id: tool_use_id.to_owned(),
+            kind: kind.clone(),
+            verb: done,
+            target: target.to_owned(),
+            status,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        },
         _ => Block::Generic {
             kind: name.to_owned(),
             status: if result.is_error { "error".into() } else { "completed".into() },
-            text: result.text.clone(),
+            // B12: the generic dump becomes one line — the full text opens
+            // in the pane on demand, never inline.
+            text: one_line(&result.text),
         },
+    }
+}
+
+/// B12: a ToolSearch header with its count ("query · 3 tools") when the
+/// result detail counts the matches; anything else keeps its target.
+fn tool_search_target(name: &str, target: &str, result: &ToolResult) -> String {
+    if name != "ToolSearch" {
+        return target.to_owned();
+    }
+    let count = result
+        .detail
+        .as_ref()
+        .and_then(|detail| {
+            ["matches", "tools", "results"]
+                .iter()
+                .filter_map(|key| detail.get(key))
+                .filter_map(serde_json::Value::as_array)
+                .map(Vec::len)
+                .next()
+        })
+        .unwrap_or(0);
+    if count == 0 {
+        target.to_owned()
+    } else {
+        format!("{target} · {count} tools")
+    }
+}
+
+/// B12: the generic card's text: the result's first line, capped — the
+/// whole text opens in the pane, never inline.
+fn one_line(text: &str) -> String {
+    const CAP: usize = 160;
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= CAP {
+        first.to_owned()
+    } else {
+        let mut short: String = first.chars().take(CAP).collect();
+        short.push('…');
+        short
     }
 }
 
@@ -609,6 +689,24 @@ struct AgentCard {
     flushed: bool,
 }
 
+/// B12: one thinking block waiting on its duration: whose turn, which
+/// block, what it said, and when it started — the line's `timestamp` on
+/// replay, the arrival clock live. The next frame resolves it, so the
+/// header reads real elapsed instead of a frozen zero.
+#[derive(Clone, Debug)]
+struct ThinkingSite {
+    turn_id: String,
+    block_index: usize,
+    text: String,
+    start_ms: Option<u64>,
+    start_instant: Instant,
+}
+
+/// B12: wall-clock milliseconds since `start`, saturating at `u64`.
+fn wall_ms_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: one assistant turn per CLI
@@ -681,6 +779,13 @@ pub struct ClaudeFold {
     /// `tool_use` id → `request_id`, the join a result needs to settle the
     /// approval whose tool just answered. Same lifetime as `approval_sites`.
     tool_approvals: HashMap<String, String>,
+    /// B12: the open thinking block waiting on its duration: the turn, its
+    /// block index, its text, and when it started — the line's `timestamp`
+    /// on replay, the arrival clock live. The next frame resolves it.
+    thinking_pending: Option<ThinkingSite>,
+    /// B12: `request_id` → when the approval was asked, for the settled
+    /// card's real duration. Wall clock: exact live, ~0 on a fast replay.
+    approval_started: HashMap<String, Instant>,
     /// The session cwd from the `init` frame: what a pending approval card
     /// names as where the tool would run. Empty until `init` arrives.
     session_cwd: String,
@@ -854,7 +959,7 @@ impl ClaudeFold {
                 self.session_cwd = init.cwd.clone();
                 Vec::new()
             }
-            Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, .. } => {
+            Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, at_ms, .. } => {
                 // Nested (sub-agent) blocks buffer into their `Agent` card,
                 // never the turn: they open nothing and footer nothing (as
                 // before — their usage is the sub-agent's request, not the
@@ -897,7 +1002,18 @@ impl ClaudeFold {
                         }
                     }
                 }
-                deltas.extend(self.apply_blocks(&turn_id, blocks));
+                // B12: the turn's own open thinking (if any) ends where
+                // this frame begins — its duration is the gap, from the
+                // lines' own timestamps on replay or the arrival clock
+                // live — never a frozen zero. Another turn's tail
+                // thinking is dropped unknown rather than timed against
+                // this turn's clock.
+                if self.thinking_pending.as_ref().is_some_and(|site| site.turn_id == turn_id) {
+                    self.resolve_open_thinking(*at_ms, &mut deltas);
+                } else {
+                    self.thinking_pending = None;
+                }
+                deltas.extend(self.apply_blocks(&turn_id, blocks, *at_ms));
                 deltas
             }
             Frame::UserResult { results, parent_tool_use_id, .. } => {
@@ -941,6 +1057,12 @@ impl ClaudeFold {
                     cached_tokens: 0,
                 };
                 let mut deltas = Vec::new();
+                // B12: the turn's tail thinking resolves against the
+                // arrival clock here — the only end clock a live turn
+                // ever has. On replay the lines carry timestamps, so a
+                // half-known pair stays unknown instead (see
+                // `resolve_open_thinking`).
+                self.resolve_open_thinking(None, &mut deltas);
                 // Async sub-agents may still be streaming when the turn
                 // ends: flush whatever they buffered into their cards
                 // before the finish, or their work vanishes silently.
@@ -1094,7 +1216,37 @@ impl ClaudeFold {
         message_id.to_owned()
     }
 
-    fn apply_blocks(&mut self, turn_id: &str, blocks: &[ContentBlock]) -> Vec<Delta> {
+    /// B12: resolve the open thinking block (if any) against `at_ms`:
+    /// the gap between the thinking line and this frame, from the lines'
+    /// own timestamps when both carry them, or the arrival clock when
+    /// neither does (the live path). B12fix: a half-known pair falls back
+    /// to the wall clock rather than a frozen zero — mixed clocks never
+    /// meet, so the arrival clock is the only honest span left.
+    /// Zero-length gaps resolve to nothing — the card keeps its zero
+    /// honestly.
+    fn resolve_open_thinking(&mut self, at_ms: Option<u64>, deltas: &mut Vec<Delta>) {
+        let Some(site) = self.thinking_pending.take() else { return };
+        let elapsed = match (site.start_ms, at_ms) {
+            (Some(start), Some(end)) => end.saturating_sub(start),
+            (None, None) => wall_ms_since(site.start_instant),
+            (Some(_), None) | (None, Some(_)) => wall_ms_since(site.start_instant),
+        };
+        if elapsed == 0 {
+            return;
+        }
+        deltas.push(Delta::BlockUpdated {
+            turn_id: site.turn_id,
+            block_index: site.block_index,
+            block: Block::Thinking {
+                text: site.text,
+                elapsed_ms: elapsed,
+                summary: None,
+                state: ThinkingState::Done,
+            },
+        });
+    }
+
+    fn apply_blocks(&mut self, turn_id: &str, blocks: &[ContentBlock], at_ms: Option<u64>) -> Vec<Delta> {
         let mut deltas = Vec::new();
         for block in blocks.iter() {
             let block_index = self.emitted.get(turn_id).copied().unwrap_or(0);
@@ -1105,12 +1257,31 @@ impl ClaudeFold {
                 // it folds to nothing — the billed count still reaches the
                 // footer through `reasoning_tokens`.
                 ContentBlock::Thinking { text } if text.trim().is_empty() => None,
-                ContentBlock::Thinking { text } => Some(Block::Thinking {
-                    text: text.clone(),
-                    elapsed_ms: 0,
-                    summary: None,
-                    state: ThinkingState::Done,
-                }),
+                ContentBlock::Thinking { text } => {
+                    // B12: the duration lands on the next frame
+                    // (`resolve_open_thinking`); the card opens at zero and
+                    // is corrected in place, so no text is ever re-emitted.
+                    // A second thinking block in one frame first resolves
+                    // the first against this frame's own clock.
+                    if self.thinking_pending.as_ref().is_some_and(|site| site.turn_id == turn_id) {
+                        self.resolve_open_thinking(at_ms, &mut deltas);
+                    }
+                    if self.thinking_pending.is_none() {
+                        self.thinking_pending = Some(ThinkingSite {
+                            turn_id: turn_id.to_owned(),
+                            block_index,
+                            text: text.clone(),
+                            start_ms: at_ms,
+                            start_instant: Instant::now(),
+                        });
+                    }
+                    Some(Block::Thinking {
+                        text: text.clone(),
+                        elapsed_ms: 0,
+                        summary: None,
+                        state: ThinkingState::Done,
+                    })
+                }
                 ContentBlock::Text { text } => {
                     Some(Block::Text { text: text.clone(), streaming: false })
                 }
@@ -1333,7 +1504,10 @@ impl ClaudeFold {
                 ToolKind::Shell => parse_exit_code(&result.text).unwrap_or(i32::from(result.is_error)),
                 _ => i32::from(result.is_error),
             };
-            let state = ApprovalState::AllowedOnce { exit_code, duration_ms: 0 };
+            let state = ApprovalState::AllowedOnce {
+                exit_code,
+                duration_ms: self.approval_duration_ms(&request_id),
+            };
             if result.is_error {
                 self.update_approval_state(&request_id, state, &mut deltas);
             } else {
@@ -1645,6 +1819,11 @@ impl ClaudeFold {
         if !request.tool_use_id.is_empty() {
             self.tool_approvals.insert(request.tool_use_id.clone(), request.request_id.clone());
         }
+        // B12: the ask time for the settled card's real duration.
+        // Bounded: a request that never settles must not grow the fold.
+        if self.approval_started.len() < 256 {
+            self.approval_started.insert(request.request_id.clone(), Instant::now());
+        }
         // The gated call has not run: its open card (when the `tool_use`
         // arrived first) drops from Running to Pending, so no spinner ever
         // reads done beside the waiting approval.
@@ -1694,8 +1873,16 @@ impl ClaudeFold {
     /// Settle one carded approval to its decided state: the only thing that
     /// ever moves the card after the press. A repeat resolution for an
     /// already-settled id is a no-op.
+    /// B12: wall-clock milliseconds since the approval was asked: the
+    /// settled card's real duration. Zero when the ask was never timed
+    /// (an old replay), never a guess.
+    fn approval_duration_ms(&self, request_id: &str) -> u64 {
+        self.approval_started.get(request_id).map(|start| wall_ms_since(*start)).unwrap_or(0)
+    }
+
     fn resolve_approval_card(&mut self, request_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
         let Some(site) = self.approval_sites.remove(request_id) else { return };
+        self.approval_started.remove(request_id);
         if !site.tool_use_id.is_empty() {
             self.tool_approvals.remove(&site.tool_use_id);
         }
@@ -2267,6 +2454,61 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             diff_stat: None,
         };
         ToolCard { kind: ToolKind::Shell, verb: TERMINAL_RUNNING_VERB.into(), target, params, block }
+    } else if matches!(name, "Grep" | "Glob" | "ToolSearch") {
+        // B12: one-line search cards instead of the generic dump: the
+        // header names the query and the body stays header-only (chevron),
+        // never the result listing.
+        let target = input
+            .get("pattern")
+            .or_else(|| input.get("query"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(name)
+            .to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::Search,
+            verb: "Search".into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::Search, verb: "Search".into(), target, params, block }
+    } else if name == "WebFetch" || name == "WebSearch" {
+        // B12: one-line web cards: the header names the URL or query, and
+        // the page text never inlines — it opens in the pane on demand.
+        let key = if name == "WebFetch" { "url" } else { "query" };
+        let verb = if name == "WebFetch" { "Fetch" } else { "Search" };
+        let target =
+            input.get(key).and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::Web,
+            verb: verb.into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::Web, verb: verb.into(), target, params, block }
+    } else if name == "NotebookEdit" {
+        // B12: a notebook edit is an edit: the header names the file, and
+        // the result's detail (when structured) completes the diff.
+        let target =
+            input.get("file_path").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
+        let block = Block::ToolCall {
+            id: id.to_owned(),
+            kind: ToolKind::Edit,
+            verb: "Edit".into(),
+            target: target.clone(),
+            status: ToolStatus::Running,
+            duration_ms: None,
+            body: ToolBody::None,
+            diff_stat: None,
+        };
+        ToolCard { kind: ToolKind::Edit, verb: "Edit".into(), target, params, block }
     } else if let Some((server, tool)) = mcp_split(name) {
         let target = format!("{server} · {tool}");
         let block = Block::ToolCall {
@@ -2286,6 +2528,24 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             params,
             block,
         }
+    } else if name == "Artifact" {
+        // B12fix: the Artifact tool reads as a one-line summary card,
+        // never the generic dump: the opening names the titled thing, or
+        // nothing until the result lands. The transcript formats the
+        // detail (`Artifact · published …`); the body never inlines.
+        let detail = ["title", "url", "id"]
+            .iter()
+            .filter_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+            .find(|value| !value.trim().is_empty())
+            .unwrap_or("")
+            .to_owned();
+        ToolCard {
+            kind: ToolKind::Search,
+            verb: String::new(),
+            target: String::new(),
+            params: Vec::new(),
+            block: Block::Generic { kind: name.to_owned(), status: "running".into(), text: detail },
+        }
     } else {
         let text = if params.is_empty() {
             format!("{name} called")
@@ -2302,6 +2562,22 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             block: Block::Generic { kind: name.to_owned(), status: "running".into(), text },
         }
     }
+}
+
+/// B12fix: the Artifact tool's raw detail for its one-line summary card:
+/// the titled thing its params named (title, url, id), else the result's
+/// first line. The transcript formats it (`Artifact · published …` or
+/// `Artifact · quickstart`); the artifact body never inlines.
+fn artifact_detail(params: &[(String, String)], result_text: &str) -> String {
+    if let Some(named) = ["title", "url", "id"]
+        .iter()
+        .filter_map(|key| params.iter().find(|(name, _)| name == key))
+        .map(|(_, value)| value.trim())
+        .find(|value| !value.is_empty())
+    {
+        return named.to_owned();
+    }
+    one_line(result_text)
 }
 
 /// Rebuild an open tool card in its gated state: `Pending` with its opening
@@ -3445,17 +3721,16 @@ mod tests {
             }
         }
         assert_eq!(mcps, ["baazprobe::baaz_ping"]);
-        // ToolSearch is not a code search: it renders through the Generic
-        // fallback, never as a richer card.
-        let generics = deltas
+        // B12: ToolSearch is a one-line search card (header names the
+        // query), never the generic dump.
+        let searches = deltas
             .iter()
             .filter(|delta| matches!(
                 delta,
-                Delta::BlockAdded { block: Block::Generic { kind, .. }, .. }
-                if kind == "ToolSearch"
+                Delta::BlockAdded { block: Block::ToolCall { kind: ToolKind::Search, .. }, .. }
             ))
             .count();
-        assert_eq!(generics, 1);
+        assert_eq!(searches, 1);
     }
 
     /// A `terminal_run` tool_use opens a shell card naming the command —
@@ -4245,5 +4520,167 @@ mod tests {
         // Without a skill name the card names the tool, never a guess.
         let card = tool_card("t-2", "Skill", &serde_json::json!({}));
         assert_eq!(card.target, "Skill");
+    }
+
+    /// B12: an `isMeta` skill body never becomes a user bubble and never
+    /// splits the assistant turn: the `Skill` call's quiet row is the
+    /// whole story, and the turn stays one.
+    #[test]
+    fn an_ismeta_skill_body_is_a_chip_not_a_bubble() {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"tool_use","id":"toolu-skill","name":"Skill","input":{"skill":"plan"}}]},"uuid":"u-1","session_id":"s"}"#.to_owned(),
+            r##"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"# Skill: plan\nDo the thing."}]},"uuid":"u-2","session_id":"s","isMeta":true}"##.to_owned(),
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"On it."}]},"uuid":"u-3","session_id":"s"}"#.to_owned(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        let bubbles: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::User { text, .. }, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(bubbles.is_empty(), "no user bubble for the skill body: {bubbles:?}");
+        let _ = fold;
+        let assistant_starts = deltas
+            .iter()
+            .filter(|delta| matches!(delta, Delta::TurnStarted { turn: Turn::Assistant { .. }, .. }))
+            .count();
+        assert_eq!(assistant_starts, 1, "one assistant turn, never split");
+        assert!(
+            deltas.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockAdded { block: Block::ToolCall { verb, .. }, .. } if verb == "Loaded skill"
+            )),
+            "the quiet skill row still lands: {deltas:?}"
+        );
+    }
+
+    /// B12: unmodelled tools get one-line summaries, not the generic dump:
+    /// Grep/ToolSearch search, WebFetch fetches, and the fallback keeps
+    /// the result's first line only.
+    #[test]
+    fn unmodelled_tools_get_one_line_summaries() {
+        let card = tool_card("g-1", "Grep", &serde_json::json!({"pattern": "fold_finished"}));
+        assert_eq!(card.kind, ToolKind::Search);
+        assert_eq!((card.verb.as_str(), card.target.as_str()), ("Search", "fold_finished"));
+        let card = tool_card("w-1", "WebFetch", &serde_json::json!({"url": "https://example.com"}));
+        assert_eq!(card.kind, ToolKind::Web);
+        assert_eq!((card.verb.as_str(), card.target.as_str()), ("Fetch", "https://example.com"));
+        let finished = finish_tool_block(
+            &ToolKind::Web,
+            "Fetch",
+            "https://example.com",
+            "WebFetch",
+            &[],
+            "w-1",
+            &ToolResult {
+                tool_use_id: "w-1".to_owned(),
+                text: "the page".to_owned(),
+                is_error: false,
+                detail: None,
+            },
+        );
+        assert!(
+            matches!(&finished, Block::ToolCall { kind: ToolKind::Web, verb, .. } if verb == "Fetched"),
+            "past tense on completion: {finished:?}"
+        );
+        let finished = finish_tool_block(
+            &ToolKind::Search,
+            "Search",
+            "mcp",
+            "ToolSearch",
+            &[],
+            "t-1",
+            &ToolResult {
+                tool_use_id: "t-1".to_owned(),
+                text: "tools".to_owned(),
+                is_error: false,
+                detail: Some(serde_json::json!({"matches": [1, 2, 3]})),
+            },
+        );
+        assert!(
+            matches!(&finished, Block::ToolCall { target, .. } if target == "mcp · 3 tools"),
+            "the count lands on the header: {finished:?}"
+        );
+        assert_eq!(one_line("first\nsecond\nthird"), "first");
+        assert!(one_line(&"x".repeat(200)).ends_with('…'));
+    }
+
+    /// B12fix: the Artifact tool folds to a one-line summary, never the
+    /// generic dump: the opening names the titled input, the completion
+    /// names the result, and the body never inlines.
+    #[test]
+    fn artifact_tools_fold_to_a_one_line_summary() {
+        let card = tool_card("a-1", "Artifact", &serde_json::json!({"title": "My Launch Post"}));
+        match card.block {
+            Block::Generic { kind, text, .. } => {
+                assert_eq!(kind, "Artifact");
+                assert_eq!(text, "My Launch Post");
+            }
+            block => panic!("an Artifact call folded to {block:?}"),
+        }
+        let finished = finish_tool_block(
+            &ToolKind::Search,
+            "",
+            "",
+            "Artifact",
+            &[],
+            "a-1",
+            &ToolResult {
+                tool_use_id: "a-1".to_owned(),
+                text: "https://example.com/a\n<the whole artifact>".to_owned(),
+                is_error: false,
+                detail: None,
+            },
+        );
+        match finished {
+            Block::Generic { kind, text, .. } => {
+                assert_eq!(kind, "Artifact");
+                assert_eq!(text, "https://example.com/a");
+            }
+            block => panic!("an Artifact result folded to {block:?}"),
+        }
+        assert_eq!(artifact_detail(&[], ""), "");
+    }
+
+    /// B12: a thinking line's duration is the gap to the next line's
+    /// timestamp (5 ms here), not a frozen zero. (`thinking.jsonl`
+    /// cannot carry this: its thinking text is empty, so it correctly
+    /// folds to nothing — the redacted kind — and the gap is built from
+    /// two timestamped lines instead.)
+    #[test]
+    fn thinking_elapsed_comes_from_fixture_timings() {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"thinking","thinking":"weigh the moves","signature":"sig"}]},"uuid":"u-1","session_id":"s","timestamp":"2026-09-26T13:52:50.742Z"}"#.to_owned(),
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"DONE"}]},"uuid":"u-2","session_id":"s","timestamp":"2026-09-26T13:52:50.747Z"}"#.to_owned(),
+        ];
+        let (_, deltas) = fold_lines(&lines);
+        let resolved: Vec<u64> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::Thinking { elapsed_ms, .. }, .. } => {
+                    Some(*elapsed_ms)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolved, [5], "the 5 ms gap between the fixture's lines: {resolved:?}");
+    }
+
+    /// B12: the timestamp parser reads the wire's own clock — checked
+    /// against independently computed Unix milliseconds.
+    #[test]
+    fn timestamps_parse_to_unix_milliseconds() {
+        use crate::frame::timestamp_ms;
+        let at = |stamp: &str| {
+            timestamp_ms(&serde_json::json!({"timestamp": stamp})).expect("parses")
+        };
+        assert_eq!(at("2026-09-26T13:53:14.384Z"), 1_790_430_794_384);
+        assert_eq!(at("2026-09-26T16:23:38.909Z"), 1_790_439_818_909);
+        assert_eq!(at("2026-01-01T00:00:00Z"), 1_767_225_600_000);
+        assert_eq!(at("2026-09-26T13:53:14+02:00"), 1_790_423_594_000);
+        assert_eq!(timestamp_ms(&serde_json::json!({})), None);
+        assert_eq!(timestamp_ms(&serde_json::json!({"timestamp": "not-a-time"})), None);
     }
 }
