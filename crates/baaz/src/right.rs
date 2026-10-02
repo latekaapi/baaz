@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use aui::data::button;
 use aui::transcript::code_block;
 use aui::workbench::{
-    doc_pane, file_card, file_tree, git_changes, pr_form, ArtifactKind, DocBlock, DocPage, FileNode,
+    doc_pane, file_card, file_tree, pr_form, ArtifactKind, DocBlock, DocPage, FileNode,
     FileTreeAction, GitAction, PrAction, PrDescription,
 };
 use aui_icons::FileType;
@@ -1022,17 +1022,18 @@ pub(crate) fn unified_text(diff: &Diff) -> String {
     out
 }
 
-/// B8b: whether a working-tree path is one of the session's edited paths: an
-/// exact match, or the edit target ending in `/` plus the working-tree path
+/// B8c: whether a working-tree path is one of the session's edited paths: an
+/// exact match, or the edit target made relative to `root` matching exactly
 /// (fold targets may be absolute while `git status` paths are root-relative).
-fn edit_covers(status_path: &str, edit: &str) -> bool {
+/// Whole paths only: a root-level `a.rs` never claims an edit to
+/// `/work/src/a.rs` — the old `ends_with("/<status path>")` did.
+fn edit_covers(status_path: &str, edit: &str, root: &Path) -> bool {
     if status_path == edit {
         return true;
     }
-    let mut suffixed = String::with_capacity(edit.len() + 1);
-    suffixed.push('/');
-    suffixed.push_str(status_path);
-    edit.ends_with(&suffixed)
+    let relative =
+        Path::new(edit).strip_prefix(root).ok().map(|relative| relative.to_string_lossy().into_owned());
+    relative.as_deref().is_some_and(|relative| !relative.is_empty() && status_path == relative)
 }
 
 /// B8b: working-tree files with their staged flags, as [`GitStatus`] carries
@@ -1042,10 +1043,13 @@ pub(crate) type ChangeFiles = Vec<(FileChange, bool)>;
 /// B8b: split the working tree into this session's files first, everything
 /// else below. Session files follow the session's edit order; the rest keep
 /// the status order. A status file matches at most one edit, so a repeated
-/// edit target cannot duplicate a row.
+/// edit target cannot duplicate a row. Matching is exact (see
+/// [`edit_covers`]): absolute edit targets are relativized against `root`,
+/// the project root the status paths are relative to.
 pub(crate) fn partition_session_files(
     files: &[(FileChange, bool)],
     session_edits: &[String],
+    root: &Path,
 ) -> (ChangeFiles, ChangeFiles) {
     let mut taken = vec![false; files.len()];
     let mut session = Vec::new();
@@ -1056,7 +1060,7 @@ pub(crate) fn partition_session_files(
         }
         let mut found = None;
         for (index, (change, _)) in files.iter().enumerate() {
-            if !taken[index] && edit_covers(&change.path, edit) {
+            if !taken[index] && edit_covers(&change.path, edit, root) {
                 found = Some(index);
                 break;
             }
@@ -2289,15 +2293,34 @@ fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harn
 
 /// One section heading inside the merged Changes view: a labelled row, so
 /// the two halves read as sections rather than two panes glued together.
-fn changes_heading(id: &'static str, label: &'static str) -> AnyElement {
+fn changes_heading(id: &'static str, label: SharedString) -> AnyElement {
     div()
         .id(id)
         .role(gpui::Role::Label)
-        .aria_label(label)
+        .aria_label(label.clone())
         .px(px(16.0))
         .pt(px(12.0))
         .child(label)
         .into_any_element()
+}
+
+/// B8c: the "Other changes" section heading, carrying its file count: the one
+/// heading for the section. The old `git_changes` card drew its own
+/// "Changes N" sub-header right below "Other changes" — one heading too
+/// many — so the count rides here and the card is gone.
+pub(crate) fn other_changes_label(count: usize) -> String {
+    format!("Other changes · {count}")
+}
+
+/// B8c: the empty "This session" line. The old "no edits yet" text only fits
+/// a session with no edit blocks at all; when its edits are all committed or
+/// reverted — edit blocks, but nothing still changed — it says so instead.
+pub(crate) fn session_empty_text(has_session_edits: bool) -> &'static str {
+    if has_session_edits {
+        "No uncommitted edits from this session."
+    } else {
+        "No edits in this session yet."
+    }
 }
 
 /// B8b: one "This session" file row: a labelled button naming the whole
@@ -2327,35 +2350,30 @@ fn session_file_row(
         .into_any_element()
 }
 
-/// B8b: the notes row under an expanded session file: an "Add note" control
-/// and the "Send to Claude Code" handoff, both inert by owner decision like
-/// every other unwired Changes verb.
-fn session_file_notes(path: &str, notify: &ToastSink) -> AnyElement {
-    let note_notify = notify.clone();
-    let note_path = path.to_owned();
-    let send_notify = notify.clone();
-    h_flex()
-        .id(format!("right-changes-notes:{path}"))
-        .role(gpui::Role::Group)
-        .aria_label(format!("Notes for {path}"))
-        .w_full()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .py(px(4.0))
-        .child(
-            button(format!("right-changes-add-note:{path}"), "Add note")
-                .accessibility_label(format!("Add note on {path}"))
-                .on_click(move |_, _, cx| {
-                    inert("Changes", &format!("AddNote {note_path}"), &note_notify, cx);
-                }),
-        )
-        .child(
-            button(format!("right-changes-send:{path}"), "Send to Claude Code")
-                .accessibility_label(format!("Send {path} to Claude Code"))
-                .on_click(move |_, _, cx| {
-                    inert("Changes", "Send", &send_notify, cx);
-                }),
-        )
+/// B8c: one "Other changes" file row: the status letter, the whole path and
+/// its `+N −M` counts, like a session row but never expanding. A press
+/// reaches [`git_handler`] — inert like every other unwired Changes verb.
+fn other_file_row(change: &FileChange, notify: &ToastSink) -> AnyElement {
+    let path = change.path.clone();
+    let toggle = path.clone();
+    let notify = notify.clone();
+    let delta = file_delta(change);
+    let shown = middle_truncate(&path, CHANGES_PATH_CHARS);
+    let letter = match change.change {
+        ChangeKind::Added => "A",
+        ChangeKind::Deleted => "D",
+        ChangeKind::Modified => "M",
+    };
+    let text = if delta.is_empty() { format!("{letter} {shown}") } else { format!("{letter} {shown}  {delta}") };
+    button(format!("right-changes-other:{path}"), text)
+        .accessibility_label(format!("Toggle {path}"))
+        .on_click(move |_, window, cx| {
+            git_handler(notify.clone())(
+                GitAction::Toggle(SharedString::from(toggle.clone())),
+                window,
+                cx,
+            );
+        })
         .into_any_element()
 }
 
@@ -2396,7 +2414,8 @@ pub(crate) struct ChangesPane<'a> {
 
 fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
     let status = pane_in.status;
-    let (session_files, other_files) = partition_session_files(&status.files, pane_in.session_edits);
+    let (session_files, other_files) =
+        partition_session_files(&status.files, pane_in.session_edits, pane_in.root);
     let diffs: HashMap<&str, &Diff> = pane_in
         .parsed
         .as_ref()
@@ -2408,7 +2427,7 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
         .aria_label("Changes")
         .size_full()
         .overflow_y_scroll()
-        .child(changes_heading("right-changes-session-heading", "This session"));
+        .child(changes_heading("right-changes-session-heading", "This session".into()));
     if pane_in.parsed.as_ref().is_some_and(|parsed| parsed.truncated) {
         pane = pane.child(
             div()
@@ -2429,7 +2448,7 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                 .role(gpui::Role::Label)
                 .aria_label("No session edits")
                 .p(px(16.0))
-                .child("No edits in this session yet."),
+                .child(session_empty_text(!pane_in.session_edits.is_empty())),
         );
     }
     for (change, _) in &session_files {
@@ -2446,10 +2465,12 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                     .language("diff".to_owned())
                     .into_any_element(),
             );
-            pane = pane.child(session_file_notes(&change.path, pane_in.notify));
         }
     }
-    pane = pane.child(changes_heading("right-changes-tree-heading", "Other changes"));
+    pane = pane.child(changes_heading(
+        "right-changes-tree-heading",
+        other_changes_label(other_files.len()).into(),
+    ));
     if other_files.is_empty() {
         pane = pane.child(
             div()
@@ -2460,11 +2481,19 @@ fn changes_pane_from(pane_in: &ChangesPane) -> AnyElement {
                 .child("No other changes."),
         );
     } else {
+        for (change, _) in &other_files {
+            pane = pane.child(other_file_row(change, pane_in.notify));
+        }
+        // The sync row the old `git_changes` card carried below its rows:
+        // branch plus ahead/behind, text-only (its Push reached `inert`).
         pane = pane.child(
-            git_changes("right-changes-tree", other_files, "", status.ahead, status.behind)
-                .flush()
-                .branch(status.branch.clone())
-                .on_action(git_handler(pane_in.notify.clone())),
+            div()
+                .id("right-changes-sync")
+                .role(gpui::Role::Label)
+                .aria_label("Branch sync status")
+                .px(px(16.0))
+                .py(px(4.0))
+                .child(format!("{} ↑{} ↓{}", status.branch, status.ahead, status.behind)),
         );
     }
     let commit_root = pane_in.root.to_path_buf();
@@ -2648,13 +2677,14 @@ mod tests {
     fn session_files_come_first_in_edit_order_and_others_stay_below() {
         // B8b: a session with two Edit blocks lists those two files first
         // (in edit order) and every other working-tree file below.
+        let root = std::path::Path::new("/work/tree");
         let files = vec![
             status_file("docs/guide.md", 2, 1),
             status_file("src/b.rs", 8, 3),
             status_file("src/a.rs", 5, 0),
         ];
         let edits = vec!["src/b.rs".to_owned(), "src/a.rs".to_owned()];
-        let (session, other) = partition_session_files(&files, &edits);
+        let (session, other) = partition_session_files(&files, &edits, root);
         let session_paths: Vec<&str> = session.iter().map(|(change, _)| change.path.as_str()).collect();
         let other_paths: Vec<&str> = other.iter().map(|(change, _)| change.path.as_str()).collect();
         assert_eq!(session_paths, vec!["src/b.rs", "src/a.rs"]);
@@ -2663,25 +2693,57 @@ mod tests {
 
     #[test]
     fn absolute_edit_targets_still_match_relative_status_paths() {
+        let root = std::path::Path::new("/work/tree");
         let files = vec![status_file("src/a.rs", 1, 1)];
         let edits = vec!["/work/tree/src/a.rs".to_owned()];
-        let (session, other) = partition_session_files(&files, &edits);
+        let (session, other) = partition_session_files(&files, &edits, root);
         assert_eq!(session.len(), 1);
         assert!(other.is_empty());
         // An edit the tree does not contain matches nothing, and a repeat
         // never duplicates a row.
         let edits = vec!["nope.rs".to_owned(), "/work/tree/src/a.rs".to_owned(), "src/a.rs".to_owned()];
-        let (session, other) = partition_session_files(&files, &edits);
+        let (session, other) = partition_session_files(&files, &edits, root);
         assert_eq!(session.len(), 1);
         assert!(other.is_empty());
     }
 
     #[test]
-    fn an_empty_session_leaves_the_whole_tree_for_other_changes() {
-        let files = vec![status_file("src/a.rs", 1, 1)];
-        let (session, other) = partition_session_files(&files, &[]);
+    fn a_suffix_only_edit_never_matches() {
+        // B8c: the old `ends_with("/<status path>")` let a root-level `a.rs`
+        // claim an edit to `/work/src/a.rs`. Matching is exact now: the
+        // edit relativized against the root must equal the whole status path.
+        let root = std::path::Path::new("/work");
+        let files = vec![status_file("a.rs", 1, 1)];
+        let edits = vec!["/work/src/a.rs".to_owned()];
+        let (session, other) = partition_session_files(&files, &edits, root);
         assert!(session.is_empty());
         assert_eq!(other.len(), 1);
+        // An edit outside the root matches nothing either.
+        let edits = vec!["/elsewhere/a.rs".to_owned()];
+        let (session, other) = partition_session_files(&files, &edits, root);
+        assert!(session.is_empty());
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_session_leaves_the_whole_tree_for_other_changes() {
+        let root = std::path::Path::new("/work/tree");
+        let files = vec![status_file("src/a.rs", 1, 1)];
+        let (session, other) = partition_session_files(&files, &[], root);
+        assert!(session.is_empty());
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn the_changes_headings_name_their_counts_once() {
+        // B8c: one "Other changes · N" heading, never "Other changes" plus a
+        // "Changes N" sub-header.
+        assert_eq!(other_changes_label(5), "Other changes · 5");
+        assert_eq!(other_changes_label(0), "Other changes · 0");
+        // The empty "This session" line names the committed-or-reverted
+        // case; only a session with no edits at all keeps the old text.
+        assert_eq!(session_empty_text(false), "No edits in this session yet.");
+        assert_eq!(session_empty_text(true), "No uncommitted edits from this session.");
     }
 
     #[test]
@@ -3307,18 +3369,6 @@ mod tests {
         assert!(cache.changes_commit_open_for(&root));
         assert!(!cache.flip_changes_commit(&root));
         assert!(!cache.changes_commit_open_for(&root));
-    }
-
-    #[test]
-    fn expanded_file_notes_stay_inert() {
-        // B8b: the notes row an expanded file carries ("Add note", "Send to
-        // Claude Code") reaches `inert` like every other unwired Changes
-        // verb — the row wires these exact action names.
-        assert_eq!(
-            inert_text("Changes", "AddNote src/a.rs"),
-            "right pane: Changes action AddNote src/a.rs is not wired yet"
-        );
-        assert_eq!(inert_text("Changes", "Send"), "right pane: Changes action Send is not wired yet");
     }
 
     /// B9: `expand_to` stands every ancestor — and the folder itself —

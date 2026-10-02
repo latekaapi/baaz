@@ -703,6 +703,15 @@ pub struct SessionView {
     /// clone the choices on every frame; now the scan runs once per fold
     /// change and every reader borrows this.
     cached_pending_approval: Option<(String, Vec<aui_protocol::ApprovalChoice>)>,
+    /// B8c: the Changes pane's "This session" edit list, cached on the view:
+    /// [`session_edited_paths`](crate::transcript::session_edited_paths) walks
+    /// every block, so the shell render only pays for it when
+    /// [`Self::refresh_session_edits`] finds the
+    /// [`edited_paths_cache_key`](crate::transcript::edited_paths_cache_key)
+    /// moved. Transient view state, never persisted.
+    cached_session_edits: Vec<String>,
+    /// B8c: the key [`Self::cached_session_edits`] was built for, if ever.
+    cached_session_edits_key: Option<(usize, usize)>,
     /// Set by every event that changed the transcript; the next frame consumes
     /// it and scrolls to the tail if the reader was already there.
     follow: bool,
@@ -1062,6 +1071,8 @@ impl SessionView {
             cached_turns: Rc::new(Vec::new()),
             cached_full_output: Rc::new(HashMap::new()),
             cached_pending_approval: None,
+            cached_session_edits: Vec::new(),
+            cached_session_edits_key: None,
             follow: true,
             span_held: Rc::new(HashMap::new()),
             span_sessions: HashMap::new(),
@@ -1148,6 +1159,34 @@ impl SessionView {
     /// The folded transcript, once anything has arrived.
     pub fn session(&self) -> Option<&Session> {
         self.fold.session(&self.session_id)
+    }
+
+    /// B8c: the cached Changes-pane edit list when it is still fresh — `Some`
+    /// when the turns have not moved under it — so the shell render pays no
+    /// block scan on a steady frame. `None` means the caller must
+    /// [`Self::refresh_session_edits`] under update.
+    pub fn fresh_session_edits(&self) -> Option<Vec<String>> {
+        let key = match self.session() {
+            Some(session) => crate::transcript::edited_paths_cache_key(&session.turns),
+            None => crate::transcript::edited_paths_cache_key(&[]),
+        };
+        (self.cached_session_edits_key == Some(key)).then(|| self.cached_session_edits.clone())
+    }
+
+    /// B8c: recompute the Changes-pane edit list, store it with its key, and
+    /// return it. Call only when [`Self::fresh_session_edits`] reports stale;
+    /// with no session open this stores (and returns) the empty list.
+    pub fn refresh_session_edits(&mut self) -> Vec<String> {
+        let (key, edits) = match self.session() {
+            Some(session) => (
+                crate::transcript::edited_paths_cache_key(&session.turns),
+                crate::transcript::session_edited_paths(&session.turns),
+            ),
+            None => (crate::transcript::edited_paths_cache_key(&[]), Vec::new()),
+        };
+        self.cached_session_edits = edits.clone();
+        self.cached_session_edits_key = Some(key);
+        edits
     }
 
     /// The last view cursor the fold observed, which is what a reconnect's
