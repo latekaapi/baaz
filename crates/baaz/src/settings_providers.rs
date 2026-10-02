@@ -547,8 +547,10 @@ impl Harness {
             gpui::div().text_color(p.ink).ui(scale::FS_13).semibold().child(SharedString::from(title)),
         ).child(
             gpui::div().text_color(p.ink_3).ui(scale::FS_12).child(
-                "Baaz's own sessions still live in the owner's homes. Moving keeps resume working; \
-                 nothing is deleted. Codex for Mac may keep listing moved threads until archived there.",
+                "Sessions you started in Baaz before this update still sit in your Claude and Codex \
+                 folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them \
+                 resumable here; nothing is deleted. Codex for Mac may keep stale entries until you \
+                 archive them there.",
             ),
         );
         if self.migration_paths_expanded {
