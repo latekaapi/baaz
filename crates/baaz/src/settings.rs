@@ -63,7 +63,7 @@ use crate::providers::ProviderId;
 pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     match id {
         "group_chevron" => layout.group_chevron = on,
-        "group_bar" => layout.group_bar = on,
+        "compact_rows" => layout.compact_rows = on,
         "group_branch" => layout.group_branch = on,
         "auto_title" => layout.auto_title = on,
         "auto_summary" => layout.auto_summary = on,
@@ -179,7 +179,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
         "auto_title" | "auto_summary" | "handoff_model_summary" => Some("general"),
-        "group_chevron" | "group_bar" | "group_branch" => Some("sidebar"),
+        "group_chevron" | "compact_rows" | "group_branch" => Some("sidebar"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
         _ if id.starts_with("shortcut:") || parse_shortcut_row_id(id).is_some() => Some("shortcuts"),
@@ -230,10 +230,12 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             on: layout.group_chevron,
         },
         SettingsRow::Switch {
-            id: SharedString::from("group_bar"),
-            label: SharedString::from("Current-project bar"),
-            detail: Some(SharedString::from("Mark the open session's project with an accent bar")),
-            on: layout.group_bar,
+            id: SharedString::from("compact_rows"),
+            label: SharedString::from("Compact rows"),
+            detail: Some(SharedString::from(
+                "Row density: one line per session (title only). Off keeps the comfortable two-line rows.",
+            )),
+            on: layout.compact_rows,
         },
         SettingsRow::Switch {
             id: SharedString::from("group_branch"),
@@ -348,7 +350,7 @@ pub(crate) fn terminal_taken_keys() -> Vec<&'static str> {
 
 impl Harness {
     /// Every section's rows, built from state each frame: General (the
-    /// three model-spending switches), Sidebar (chevron/bar/branch),
+    /// three model-spending switches), Sidebar (chevron/density/branch),
     /// Providers (enable switches), Shortcuts (live keymap). Archived has
     /// no switches — its page lists sessions.
     ///
@@ -566,6 +568,7 @@ impl Harness {
         if !apply_setting(&mut self.layout, id, on) {
             return;
         }
+        crate::sidebar::set_compact_rows(self.layout.compact_rows);
         crate::layout::write(&self.layout);
         self.invalidate_list();
         cx.notify();
@@ -934,8 +937,10 @@ impl Harness {
         v_flex().w_full().gap(px(scale::SP_4)).child(self.settings_group("Model housekeeping", rows, cx)).into_any_element()
     }
 
-    /// Sidebar: chevron, current-project bar, branch name — plus the note
-    /// that grouping and sort live in the sidebar's view menu.
+    /// Sidebar: chevron, row density, branch name — plus the note
+    /// that grouping and sort live in the sidebar's view menu. The active
+    /// session's project marks itself with an accent bar in every mode; no
+    /// switch gates it anymore.
     fn settings_sidebar_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let rows = vec![
@@ -947,10 +952,10 @@ impl Harness {
                 cx,
             ),
             self.settings_switch_row(
-                "group_bar",
-                "Current-project bar",
-                "Mark the open session's project with an accent bar.",
-                self.layout.group_bar,
+                "compact_rows",
+                "Row density: compact (1 line) / comfortable (2 lines)",
+                "One line per session shows the title only; two add the context line. Comfortable is the default.",
+                self.layout.compact_rows,
                 cx,
             ),
             self.settings_switch_row(
@@ -1651,8 +1656,10 @@ mod tests {
         let mut layout = Layout::default();
         assert!(apply_setting(&mut layout, "group_chevron", true));
         assert!(layout.group_chevron);
-        assert!(apply_setting(&mut layout, "group_bar", true));
-        assert!(layout.group_bar);
+        assert!(apply_setting(&mut layout, "compact_rows", true));
+        assert!(layout.compact_rows);
+        assert!(apply_setting(&mut layout, "compact_rows", false));
+        assert!(!layout.compact_rows);
         assert!(apply_setting(&mut layout, "group_branch", true));
         assert!(layout.group_branch);
         assert!(apply_setting(&mut layout, "auto_title", false));
@@ -1905,7 +1912,7 @@ mod tests {
         assert_eq!(normalize_settings_target("providers/nope", ""), "general");
         // A row id opens its home page.
         assert_eq!(normalize_settings_target("auto_title", ""), "general");
-        assert_eq!(normalize_settings_target("group_bar", ""), "sidebar");
+        assert_eq!(normalize_settings_target("compact_rows", ""), "sidebar");
         assert_eq!(normalize_settings_target("provider-enabled:codex", ""), "providers");
         assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "providers");
         assert_eq!(normalize_settings_target("shortcut:NewSession", ""), "shortcuts");
@@ -2017,7 +2024,7 @@ mod tests {
             "auto_summary",
             "handoff_model_summary",
             "group_chevron",
-            "group_bar",
+            "compact_rows",
             "group_branch",
         ] {
             assert!(seen.contains_key(id), "{id} renders somewhere");

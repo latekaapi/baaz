@@ -139,6 +139,68 @@ fn next_reveal_unknown_streak(current: Option<(String, u32)>, reveal_id: &str) -
     }
 }
 
+/// Whether a missed reveal stays armed: only while its id is the open
+/// session's and the window holds no row for it yet (a brand-new session
+/// before its first send). Pure, so tests pin the boundary without a
+/// window; [`Harness::reveal_sidebar_row`] reads it on every miss.
+pub(crate) fn rowless_reveal_stays_armed(
+    active_id: Option<&str>,
+    reveal_id: &str,
+    known: bool,
+) -> bool {
+    active_id == Some(reveal_id) && !known
+}
+
+/// The group head (or header) row for a session with no session row: a
+/// closed group holds its sessions out of the flattened model. Pure — the
+/// [`Harness`] method below passes its own stores — so tests drive each
+/// trigger's scroll target without a window.
+///
+/// A rowless session still names its project: the override Baaz files for
+/// a draft before its first send, then the provider-lane record, then the
+/// current project (a new session starts in it) — before giving up. The
+/// head is revealed, never auto-expanded.
+pub(crate) fn reveal_head_row(
+    sessions: &[SessionEntry],
+    overrides: &crate::sessions::Overrides,
+    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
+    current_project: Option<&str>,
+    rows: &[SidebarRow],
+    grouping: &Grouping,
+    reveal_id: &str,
+) -> Option<usize> {
+    match grouping {
+        Grouping::Project(groups) => {
+            let project = crate::sidebar::rowless_session_project(
+                reveal_id,
+                sessions,
+                overrides,
+                provider_sessions,
+            )
+            .or_else(|| current_project.map(str::to_owned))?;
+            let group = groups.iter().position(|g| g.id.as_ref() == project)?;
+            rows.iter().position(|row| matches!(row, SidebarRow::ProjectHead { group: g } if *g == group))
+        }
+        Grouping::Date(groups) => {
+            let bucket = groups
+                .iter()
+                .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
+            let pinned = groups[bucket].sessions.iter().all(|s| s.pinned);
+            rows.iter().position(|row| match row {
+                SidebarRow::DateHeader { group: g, .. } if *g == bucket => true,
+                SidebarRow::PinnedHeader if pinned => true,
+                _ => false,
+            })
+        }
+        Grouping::Status(groups) => {
+            let group = groups
+                .iter()
+                .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
+            rows.iter().position(|row| matches!(row, SidebarRow::StatusHeader { group: g } if *g == group))
+        }
+    }
+}
+
 /// Sidebar drains actually applied since process start:
 /// one per frame that had accumulated travel, against one offset write per
 /// event before. Drained per `sidebar-wheel:` line, like `take_wheel_scroll_bys`.
@@ -1043,13 +1105,15 @@ impl Harness {
     /// least distance that shows its row whole: the row
     /// itself when the flattened model has one — folds rescue held-back
     /// rows for the pending target, so no expansion dance — else its group
-    /// head for a closed group (never auto-expanded, like before), else
-    /// wait for an id with no row yet (a draft before its first send, a
-    /// fork before `load_sessions`'s reply lands) up to
+    /// head for a closed group (never auto-expanded, like before) or for a
+    /// rowless session whose project resolves past the rows (a draft before
+    /// its first send reveals its project head), else wait for an id with
+    /// no row yet (a fork before `load_sessions`'s reply lands) up to
     /// [`REVEAL_UNKNOWN_FRAMES`] attempts, else clear a flag with nowhere
     /// to go (a *known* session that still has no landing row gives up
     /// on the first miss, same as before — only an unrecognised id gets
-    /// the grace period). A sidebar
+    /// the grace period; the rowless *active* session never gives up while
+    /// it stays open). A sidebar
     /// click never sets the flag; wheel and resize disarm it. Called on
     /// selection change and the frames after, until the row reports visible
     /// once the rows have settled (`sessions_loaded`): before the first
@@ -1066,6 +1130,18 @@ impl Harness {
         let target = row_index_for_session(rows, grouping, &wanted)
             .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
         let Some(ix) = target else {
+            // The rowless active session keeps its arm: a brand-new session
+            // has no row until its first send, and the reveal falls back to
+            // its project head only once the head resolves — disarming here
+            // would strand the scroll-follow before the row is born. Any
+            // other miss disarms or streaks as before; a later switch, a
+            // quiet click or a user scroll still clears the arm.
+            let active_id = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+            let known = self.sessions.iter().any(|e| e.id == reveal_id);
+            if rowless_reveal_stays_armed(active_id.as_deref(), reveal_id, known) {
+                self.reveal_unknown = None;
+                return;
+            }
             if self.sessions.iter().any(|e| e.id == reveal_id) {
                 // A known session with nowhere to go: a
                 // waiting flag outlives its activation and can move a list
@@ -1137,31 +1213,15 @@ impl Harness {
     /// closed group holds its sessions out of the flattened model. Mirrors
     /// the old current-group fallback — reveal the head, never auto-expand.
     fn reveal_head_row(&self, rows: &[SidebarRow], grouping: &Grouping, reveal_id: &str) -> Option<usize> {
-        match grouping {
-            Grouping::Project(groups) => {
-                let entry = self.sessions.iter().find(|e| e.id == reveal_id)?;
-                let project = entry.project.as_deref()?;
-                let group = groups.iter().position(|g| g.id.as_ref() == project)?;
-                rows.iter().position(|row| matches!(row, SidebarRow::ProjectHead { group: g } if *g == group))
-            }
-            Grouping::Date(groups) => {
-                let bucket = groups
-                    .iter()
-                    .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
-                let pinned = groups[bucket].sessions.iter().all(|s| s.pinned);
-                rows.iter().position(|row| match row {
-                    SidebarRow::DateHeader { group: g, .. } if *g == bucket => true,
-                    SidebarRow::PinnedHeader if pinned => true,
-                    _ => false,
-                })
-            }
-            Grouping::Status(groups) => {
-                let group = groups
-                    .iter()
-                    .position(|group| group.sessions.iter().any(|s| s.id.as_ref() == reveal_id))?;
-                rows.iter().position(|row| matches!(row, SidebarRow::StatusHeader { group: g } if *g == group))
-            }
-        }
+        reveal_head_row(
+            &self.sessions,
+            &self.overrides,
+            &self.provider_sessions,
+            self.current_project.as_deref(),
+            rows,
+            grouping,
+            reveal_id,
+        )
     }
 
     /// Dismiss an open group-row project menu, if any. The header menu
@@ -2599,7 +2659,7 @@ mod tests {
             .collect();
         let closed = HashSet::new();
         let expanded: HashSet<String> = [ids[7].clone()].into_iter().collect();
-        let view = GroupView { closed: &closed, expanded: &expanded, active: Some("p6-s12"), pending: None };
+        let view = GroupView { closed: &closed, expanded: &expanded, active: Some("p6-s12"), active_project: None, pending: None };
         let grouping = grouping_by_project(&entries, &projects, &HashMap::new(), &view, &Layout::default(), now);
         let rows = flatten_sidebar(&grouping, false);
         let total = rows.len();
@@ -2772,6 +2832,261 @@ mod tests {
         }
         let (_, streak) = state.expect("streak recorded");
         assert!(streak > REVEAL_UNKNOWN_FRAMES, "streak {streak} did not pass the bound");
+    }
+
+    /// Only the rowless open session keeps a missed reveal armed: any
+    /// other miss disarms or streaks as before, so a quiet click (which
+    /// arms nothing) can never move the list.
+    #[test]
+    fn only_the_rowless_open_session_keeps_its_missed_reveal() {
+        assert!(rowless_reveal_stays_armed(Some("s"), "s", false));
+        assert!(!rowless_reveal_stays_armed(Some("s"), "s", true), "a known row resolves");
+        assert!(!rowless_reveal_stays_armed(Some("other"), "s", false));
+        assert!(!rowless_reveal_stays_armed(None, "s", false));
+    }
+
+    /// Two projects on disk for the scroll-target tests below.
+    fn scroll_projects(tag: &str) -> (Vec<String>, Projects) {
+        let mut projects = Projects::default();
+        let ids: Vec<String> = (0..2)
+            .map(|i| {
+                let dir =
+                    std::env::temp_dir().join(format!("baaz-scroll-{tag}-{i}-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).expect("temp root");
+                projects.add(&dir).id.clone()
+            })
+            .collect();
+        (ids, projects)
+    }
+
+    /// One turned row in `project`, built the way the stress test builds
+    /// its entries.
+    fn scroll_entry(id: &str, project: &str) -> SessionEntry {
+        SessionEntry {
+            id: id.to_owned(),
+            label: "x".into(),
+            updated: crate::clock::now_local(),
+            running: false,
+            turns: 1,
+            hidden: false,
+            pinned: false,
+            archived: false,
+            description: String::new(),
+            replayed: false,
+            provider: None,
+            named: false,
+            needs_title: false,
+            side_marker: false,
+            title_pending: false,
+            last_ask: None,
+            local: false,
+            provisional: false,
+            workspace: None,
+            project: Some(project.to_owned()),
+            project_name: None,
+            attention: Vec::new(),
+            approval_command: None,
+            pending_question: None,
+            turn_started: None,
+            last_error: None,
+            branch: None,
+            terminals_running: 0,
+        }
+    }
+
+    /// The project grouping over `entries`, flattened for the target
+    /// lookups.
+    fn scroll_rows(entries: &[SessionEntry], projects: &Projects) -> (crate::sidebar::Grouping, Vec<SidebarRow>) {
+        let closed = HashSet::new();
+        let expanded = HashSet::new();
+        let view = GroupView { closed: &closed, expanded: &expanded, active: None, active_project: None, pending: None };
+        let grouping =
+            grouping_by_project(entries, projects, &HashMap::new(), &view, &Layout::default(), crate::clock::now_local());
+        let rows = flatten_sidebar(&grouping, false);
+        (grouping, rows)
+    }
+
+    /// The head row index of `project` in a flattened model.
+    fn project_head_ix(grouping: &crate::sidebar::Grouping, rows: &[SidebarRow], project: &str) -> usize {
+        let crate::sidebar::Grouping::Project(groups) = grouping else {
+            panic!("project grouping must yield project groups");
+        };
+        let group = groups.iter().position(|g| g.id.as_ref() == project).expect("the group");
+        rows.iter()
+            .position(|row| matches!(row, SidebarRow::ProjectHead { group: g } if *g == group))
+            .expect("the head row")
+    }
+
+    /// Opening (or switching to) a listed session steers to its own row.
+    #[test]
+    fn open_and_switch_scroll_to_the_existing_row() {
+        let (ids, projects) = scroll_projects("open");
+        let entries = vec![scroll_entry("s-row", &ids[0])];
+        let (grouping, rows) = scroll_rows(&entries, &projects);
+        let wanted: SharedString = "s-row".into();
+        let ix = row_index_for_session(&rows, &grouping, &wanted).expect("the row lists");
+        assert!(matches!(rows[ix], SidebarRow::Session { .. }), "open steers to the row, not a head");
+    }
+
+    /// A first send inserts the row, and the re-armed reveal lands on it.
+    #[test]
+    fn first_send_scrolls_to_the_just_born_row() {
+        let (ids, projects) = scroll_projects("first");
+        let entries = vec![scroll_entry("s-row", &ids[0]), scroll_entry("s-born", &ids[1])];
+        let (grouping, rows) = scroll_rows(&entries, &projects);
+        let wanted: SharedString = "s-born".into();
+        let ix = row_index_for_session(&rows, &grouping, &wanted).expect("the born row lists");
+        assert!(matches!(rows[ix], SidebarRow::Session { .. }), "first send steers to the new row");
+    }
+
+    /// A brand-new session has no row: the reveal falls back to its
+    /// project head — filed by override first, then by provider record,
+    /// then by the current project — and gives up past all three.
+    #[test]
+    fn new_session_scrolls_to_its_project_head() {
+        let (ids, projects) = scroll_projects("new");
+        let entries = vec![scroll_entry("s-row", &ids[0])];
+        let (grouping, rows) = scroll_rows(&entries, &projects);
+        let records = crate::provider_sessions::ProviderSessionStore::new();
+        // Filed by override: a draft's project before its first send.
+        let mut overrides = crate::sessions::Overrides::new();
+        overrides.insert(
+            "s-new".to_owned(),
+            crate::sessions::SessionMeta { project: Some(ids[1].clone()), ..Default::default() },
+        );
+        assert_eq!(
+            reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-new"),
+            Some(project_head_ix(&grouping, &rows, &ids[1])),
+            "the override files the rowless session"
+        );
+        // Filed by provider record.
+        let overrides = crate::sessions::Overrides::new();
+        let mut records = crate::provider_sessions::ProviderSessionStore::new();
+        records.insert(
+            "s-lane".to_owned(),
+            crate::provider_sessions::ProviderSessionRecord {
+                provider: "codex".to_owned(),
+                session_id: "s-lane".to_owned(),
+                workspace: None,
+                project: Some(ids[1].clone()),
+                created_ms: 0,
+                updated_ms: 0,
+                turns: 0,
+                title: None,
+                first_prompt: None,
+                handoff_to: None,
+                handoff_from: None,
+                handoff_from_provider: None,
+                handoff_title: None,
+                display_texts: HashMap::new(),
+            },
+        );
+        assert_eq!(
+            reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-lane"),
+            Some(project_head_ix(&grouping, &rows, &ids[1])),
+            "the provider record files the rowless session"
+        );
+        // Filed by the current project: a new session starts in it.
+        assert_eq!(
+            reveal_head_row(&entries, &overrides, &records, Some(ids[0].as_str()), &rows, &grouping, "s-unknown"),
+            Some(project_head_ix(&grouping, &rows, &ids[0])),
+            "the current project files an otherwise unknown session"
+        );
+        // Past all three: nowhere to go.
+        assert_eq!(reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-unknown"), None);
+    }
+
+    /// An open view on `session_id`, the way a draft opens before its
+    /// first send: no child, no wire, offline throughout.
+    fn active_view(vc: &mut gpui::VisualTestContext, workspace: &str, session_id: &str) -> Entity<crate::session::SessionView> {
+        let workspace = workspace.to_owned();
+        let session_id = session_id.to_owned();
+        vc.update(|window, cx| {
+            cx.new(|cx| {
+                crate::session::SessionView::new(
+                    session_id,
+                    None,
+                    crate::session::SessionHost {
+                        provider_id: "muse".to_owned(),
+                        workspace,
+                        overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                        capture: crate::shot::CaptureToken::default(),
+                        terminal_host: None,
+                    },
+                    window,
+                    cx,
+                )
+            })
+        })
+    }
+
+    /// The selected row and the current group the sidebar draws, read the
+    /// way the frame reads them.
+    fn selected_and_current(
+        baaz: &Entity<Harness>,
+        vc: &mut gpui::VisualTestContext,
+    ) -> (Option<String>, Option<String>) {
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let selected = SidebarKey::current(h, cx).selected;
+            let grouping = h.sidebar_grouping(cx);
+            let crate::sidebar::Grouping::Project(groups) = &*grouping else {
+                panic!("two adoptions group by project");
+            };
+            let current = groups.iter().find(|g| g.current).map(|g| g.id.to_string());
+            (selected, current)
+        })
+    }
+
+    /// The active session's row is selected and its project group current:
+    /// first for a session with a row, then for a brand-new session with
+    /// none (its project resolves past the rows through the override).
+    #[gpui::test]
+    fn active_row_selected_and_project_current_for_existing_and_new(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("active");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let ids: Vec<String> = vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                (0..2)
+                    .map(|i| {
+                        let root = dir.join(format!("proj-{i}"));
+                        std::fs::create_dir_all(&root).expect("temp root");
+                        h.projects.add(&root).id.clone()
+                    })
+                    .collect()
+            })
+        });
+        // One turned row in the first project, open in the window; the
+        // list has landed.
+        let workspace = dir.to_string_lossy().into_owned();
+        let open = active_view(vc, &workspace, "s-row");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.sessions.push(scroll_entry("s-row", &ids[0]));
+                h.sessions_loaded = true;
+                h.index_loaded = true;
+                h.active = Some(open.clone());
+                h.invalidate_list();
+            })
+        });
+        let (selected, current) = selected_and_current(&baaz, vc);
+        assert_eq!(selected.as_deref(), Some("s-row"), "the open session's row is selected");
+        assert_eq!(current.as_deref(), Some(ids[0].as_str()), "its project group is current");
+        // Brand-new: no row yet, filed in the second project by override.
+        let draft = active_view(vc, &workspace, "s-new");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.set_override("s-new", |m| m.project = Some(ids[1].clone()), cx);
+                h.active = Some(draft.clone());
+                h.invalidate_list();
+            })
+        });
+        let (selected, current) = selected_and_current(&baaz, vc);
+        assert_eq!(selected.as_deref(), Some("s-new"), "a new session still names its selection");
+        assert_eq!(current.as_deref(), Some(ids[1].as_str()), "its project group is current");
+        b3c_teardown(&dir, guard, old);
     }
 
     /// B3c: one date-bucket summary, pinned on request.
