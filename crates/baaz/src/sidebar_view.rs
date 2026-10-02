@@ -3206,7 +3206,7 @@ mod tests {
         // The first send reveals it: `first_send_update` marks the row
         // running (`sidebar.rs:939`), which fails `is_empty` on its own.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
+            baaz.update(cx, |h, _cx| {
                 let row = h.sessions.iter_mut().find(|entry| entry.id == "s-fresh").expect("fresh row");
                 assert!(
                     crate::sidebar::first_send_update(row, Some("Fix the header"), chrono::Local::now(), false),
