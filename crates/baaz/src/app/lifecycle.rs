@@ -3061,6 +3061,14 @@ impl Harness {
     /// `close_replaced` in the same update instead, so no frame renders
     /// without a session.
     pub(crate) fn close_view(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // A destination that closes before it acknowledged the pack never
+        // sends `HandoffPackFailed`: fail its still-Prepared run here, so
+        // the links roll back instead of lingering with it.
+        self.fail_handoff_for_lost_destination(
+            session_id,
+            "the destination session closed before it acknowledged the pack".to_owned(),
+            cx,
+        );
         // Closing a view while a provider switch is pending cancels the
         // switch: the in-flight open lands stale (child shut down, nothing
         // parked or persisted) and the close proceeds normally.
@@ -3549,7 +3557,17 @@ impl Harness {
                 });
             }
             // The child's exit already reached `route`, which owns the reconnect.
-            SessionEvent::Closed => {}
+            // A destination that errors out before it acknowledged the pack
+            // never sends `HandoffPackFailed`: fail its still-Prepared run
+            // here, so the links roll back instead of lingering with it.
+            SessionEvent::Closed => {
+                let closed_id = view.read(cx).session_id.clone();
+                self.fail_handoff_for_lost_destination(
+                    &closed_id,
+                    "the destination session closed before it acknowledged the pack".to_owned(),
+                    cx,
+                );
+            }
             // The backfill's first page applied: pin the tail while later
             // pages land. Anything but the open view is a parked chain
             // warming the cache, and its own completion already pinned it.
@@ -4213,9 +4231,10 @@ impl Harness {
         // something over the extractive pack (see
         // [`crate::handoff::should_model_summary`]) — and it never delays
         // the destination: the run opens below with the extractive pack
-        // either way, and a summary that arrives in time upgrades the
-        // pack the acknowledgement snapshots. Cancel during the wait
-        // abandons the side session; a late answer lands on nothing.
+        // either way. Landing stands the wait down (the submitted pack is
+        // already fixed), so a summary arriving later is dropped, never
+        // applied. Cancel during the wait abandons the side session; a
+        // late answer lands on nothing.
         let summary_prompt = self
             .handoffs
             .get(&source)
@@ -4291,6 +4310,10 @@ impl Harness {
         }
         let mut run = run;
         run.note_prepared(dest.clone());
+        // Landing stands the summary wait down (the submitted pack is
+        // already the extractive one), so the side session's jobs leave
+        // with it: a late answer lands on nothing.
+        self.drop_handoff_summary_jobs(&pending.source_session, pending.epoch);
         // The destination names its model once the lane reports it; until
         // then the card keeps the provider default the open used.
         if !model.is_empty() {
@@ -4490,12 +4513,13 @@ impl Harness {
         cx.notify();
     }
 
-    /// The pack never landed — or it landed and its turn ended failed:
-    /// the run fails with the reason (before or after activation, never a
-    /// silent Active), the source stays usable (a Failed card sends
-    /// again), the chain links roll back, and the destination row reads
-    /// "Hand-off failed: <reason>". An event for an unknown destination
-    /// is ignored — it belongs to no run.
+    /// The pack never landed — or its pack turn terminally failed while
+    /// still Prepared: the run fails with the reason, the source stays
+    /// usable (a Failed card sends again), the chain links roll back,
+    /// and the destination row reads "Hand-off failed: <reason>". Past
+    /// Prepared the move owns its state and this is a no-op (see
+    /// [`crate::handoff::HandoffRun::fail_pack_turn`]). An event for an
+    /// unknown destination is ignored — it belongs to no run.
     pub(super) fn fail_handoff(&mut self, dest: String, reason: String, cx: &mut Context<Self>) {
         let source = self
             .handoffs
@@ -4548,11 +4572,13 @@ impl Harness {
     }
 
     /// A pack turn settled on a handoff destination: when the
-    /// destination's folded transcript shows its pack turn failed, the
-    /// run fails with the turn's reason — before or after activation, so
-    /// the card and the row read "Hand-off failed: <reason>" instead of a
-    /// silent Active. Runs without a destination, settled runs, and
-    /// destinations whose pack turn answered all pass through untouched.
+    /// destination's folded transcript shows its pack turn terminally
+    /// failed — the reply's last word is an error card, not a recoverable
+    /// card inside a reply that answered past it — the run fails with the
+    /// turn's reason instead of going silently Active. Only a Prepared
+    /// run can fail here: once the move leaves Prepared (acknowledged and
+    /// activated, failed, cancelled) reconciling stops for it, so a later
+    /// failed turn never fails an active handoff or unlinks its chain.
     /// Called after every settled turn on either lane (the muse lane's
     /// `turn/completed` lands in `maybe_rewrite_byline`, the provider
     /// lane's `TurnFinished` in its own arm); a no-op without a handoff.
@@ -4562,10 +4588,7 @@ impl Harness {
             .iter()
             .filter(|(_, run)| {
                 run.destination_session.is_some()
-                    && !matches!(
-                        run.state,
-                        aui_protocol::HandoffState::Failed { .. } | aui_protocol::HandoffState::Cancelled
-                    )
+                    && matches!(run.state, aui_protocol::HandoffState::Prepared)
             })
             .filter_map(|(_, run)| {
                 let dest = run.destination_session.clone()?;
@@ -4578,6 +4601,33 @@ impl Harness {
         }
     }
 
+    /// Drop a handoff run's summary side-session jobs: the wait is over
+    /// (landed, cancelled, or never opened), so a late side-session
+    /// answer must land on nothing. The paid-for turn itself is simply
+    /// abandoned — never retried, never harvested.
+    fn drop_handoff_summary_jobs(&mut self, source: &str, epoch: u64) {
+        self.title_jobs
+            .retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
+    }
+
+    /// The handoff destination went away before it acknowledged the pack
+    /// — its view closed, or its session errored — with no
+    /// `HandoffPackFailed` to say so: fail the still-Prepared run with a
+    /// reason and roll the chain links back, so neither a Prepared run
+    /// nor its links linger forever. Runs past Prepared own their state:
+    /// acknowledged/activated moves stay, failed/cancelled ones keep
+    /// their reason. A session that holds no Prepared run passes through
+    /// untouched.
+    fn fail_handoff_for_lost_destination(&mut self, dest: &str, reason: String, cx: &mut Context<Self>) {
+        let prepared = self.handoffs.iter().any(|(_, run)| {
+            run.destination_session.as_deref() == Some(dest)
+                && matches!(run.state, aui_protocol::HandoffState::Prepared)
+        });
+        if prepared {
+            self.fail_handoff(dest.to_owned(), reason, cx);
+        }
+    }
+
     /// "Cancel" on a handoff card: aborts while cancellable and shuts the
     /// opened destination down. Past Acknowledged the move is done and
     /// the press is ignored.
@@ -4586,7 +4636,10 @@ impl Harness {
         if run.card_id != card_id || !run.cancellable() {
             return;
         }
+        let epoch = run.epoch;
         let opened = run.cancel();
+        // The wait is over: a late side-session answer lands on nothing.
+        self.drop_handoff_summary_jobs(&source, epoch);
         if opened {
             if let Some(dest) = run.destination_session.clone() {
                 self.clear_handoff_links(&source, &dest, cx);
@@ -4615,6 +4668,9 @@ impl Harness {
         if run.epoch != pending.epoch {
             return;
         }
+        // The wait is over with the open: a late side-session answer lands
+        // on nothing.
+        self.drop_handoff_summary_jobs(&pending.source_session, pending.epoch);
         run.fail(reason.clone());
         let card = run.card();
         let card_id = run.card_id.clone();
@@ -7408,6 +7464,444 @@ mod tests {
                 assert!(
                     !sidebar::is_handoff_dest(
                         "dest-m",
+                        &harness.provider_sessions,
+                        &harness.overrides
+                    ),
+                    "the links roll back"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3fix: landing stands the summary wait down, and anything arriving
+    /// late lands on nothing — the card never sticks on "Summarising…"
+    /// and the pack stays extractive. Driven through the app: the real
+    /// watchdog handler while waiting, land itself, the real ack, then a
+    /// late side-session harvest and the watchdog again after activation.
+    #[gpui::test]
+    fn a_late_summary_after_ack_leaves_the_extractive_pack(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3fix-late-summary");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let dest = open_b3_destination(vc, &baaz);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                // The checkpoint path armed the summary wait.
+                let mut run = harness.handoffs.get("b3-src").cloned().expect("the run");
+                run.note_summary_pending();
+                harness.handoffs.insert("b3-src".to_owned(), run.clone());
+                if let aui_protocol::Block::Handoff { carried, .. } = run.card() {
+                    assert_eq!(
+                        carried[0].detail.as_deref(),
+                        Some("Summarising…"),
+                        "the card waits on the summary"
+                    );
+                } else {
+                    panic!("not a handoff card");
+                }
+                // The watchdog while still waiting: the real handler keeps
+                // the extractive text and stands the wait down.
+                harness.handoff_summary_timeout("b3-src", 1, cx);
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(!run.summarising, "the watchdog stands the wait down");
+                assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(crate::handoff::SummaryKind::Extractive));
+                // Re-arm the wait the way a still-flying side session
+                // leaves it, then land: landing stands it down, because
+                // the submitted pack is already fixed.
+                let mut run = run.clone();
+                run.note_summary_pending();
+                harness.handoffs.insert("b3-src".to_owned(), run);
+                harness.land_handoff_destination(dest.clone(), cx);
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Prepared),
+                    "landing marks Prepared, state is {:?}",
+                    run.state
+                );
+                assert!(!run.summarising, "landing stands the summary wait down");
+                assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(crate::handoff::SummaryKind::Extractive));
+                if let aui_protocol::Block::Handoff { carried, .. } = run.card() {
+                    assert_eq!(
+                        carried[0].detail.as_deref(),
+                        Some("extractive summary"),
+                        "the landed card names the extractive summary"
+                    );
+                } else {
+                    panic!("not a handoff card");
+                }
+                // The ack activates; the card stays clean.
+                harness.acknowledge_handoff(dest.clone(), cx);
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(matches!(run.state, aui_protocol::HandoffState::Activated));
+                if let aui_protocol::Block::Handoff { carried, .. } = run.card() {
+                    assert_ne!(
+                        carried[0].detail.as_deref(),
+                        Some("Summarising…"),
+                        "the settled card never reads Summarising…"
+                    );
+                } else {
+                    panic!("not a handoff card");
+                }
+                // A side-session answer landing after the ack: the harvest
+                // finds no waiting run and drops it.
+                harness.title_jobs.insert(
+                    "side-late".to_owned(),
+                    crate::app::titles::TitleJob {
+                        real_id: "b3-src".to_owned(),
+                        tries: 1,
+                        first_message: String::new(),
+                        handoff_epoch: Some(1),
+                    },
+                );
+                harness.harvest_title("side-late", cx);
+                assert!(
+                    !harness.title_jobs.contains_key("side-late"),
+                    "the late harvest drops its job"
+                );
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(crate::handoff::SummaryKind::Extractive));
+                // And the watchdog after activation is a no-op on the same
+                // clean state.
+                harness.handoff_summary_timeout("b3-src", 1, cx);
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(matches!(run.state, aui_protocol::HandoffState::Activated));
+                assert!(!run.summarising);
+                if let aui_protocol::Block::Handoff { carried, .. } = run.card() {
+                    assert_ne!(
+                        carried[0].detail.as_deref(),
+                        Some("Summarising…"),
+                        "the watchdog after ack leaves the card clean"
+                    );
+                } else {
+                    panic!("not a handoff card");
+                }
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3fix: a pack reply that completes — even one the model answered —
+    /// never fails the handoff: reconciling finds nothing to fail, and
+    /// the ack activates with the chain intact. A later turn settling
+    /// failed after activation stays that turn's business.
+    #[gpui::test]
+    fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::TestAppContext) {
+        use muse_client::MuseEvent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3fix-pack-ok");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let pack_full = "Continuing a session handed off from Claude Code. Context follows.\n\n## Original goal\nChart the ferry routes";
+        // A muse destination with the pack submitted: the run is Prepared,
+        // the row exists, the chain links are in place.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.open("dest-m2".to_owned(), false, false, window, cx);
+                let view = harness.active.clone().expect("the destination is open");
+                view.update(cx, |view, cx| {
+                    view.note_handoff_pack(
+                        pack_full.to_owned(),
+                        "Handed off from Claude Code: Chart the ferry routes".to_owned(),
+                        cx,
+                    );
+                });
+                let mut session =
+                    aui_protocol::Session::new("src-m2", aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                session.turns.push(aui_protocol::Turn::User {
+                    id: "u1".to_owned(),
+                    text: "Chart the ferry routes".to_owned(),
+                    attachments: vec![],
+                    mentions: vec![],
+                    timestamp: None,
+                });
+                let pack = crate::handoff::build_pack(&session, "/tmp/ws");
+                let mut run = crate::handoff::HandoffRun::request(
+                    "src-m2".to_owned(),
+                    1,
+                    ProviderId::ClaudeCode,
+                    ProviderId::Muse,
+                    "claude".to_owned(),
+                    String::new(),
+                    false,
+                    false,
+                    false,
+                )
+                .expect("fresh request starts");
+                run.note_quiescing();
+                run.note_checkpointed(pack);
+                run.note_prepared("dest-m2".to_owned());
+                harness.handoffs.insert("src-m2".to_owned(), run);
+                harness.sessions.push(sidebar::local_started_row(
+                    "dest-m2",
+                    "Chart the ferry routes".to_owned(),
+                    None,
+                    Some("/tmp/ws".to_owned()),
+                    crate::clock::now_local(),
+                ));
+                harness.set_override("src-m2", |meta| meta.handoff_to = Some("dest-m2".to_owned()), cx);
+                harness.set_override("dest-m2", |meta| {
+                    meta.handoff_from = Some("src-m2".to_owned());
+                    meta.handoff_from_provider = Some("claude-code".to_owned());
+                    meta.handoff_title = Some("Chart the ferry routes".to_owned());
+                }, cx);
+            });
+        });
+        // The pack turn completes cleanly: reconcile finds no failure.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the destination is open");
+                let event = |method: &str, params: serde_json::Value| MuseEvent::Notification {
+                    method: method.to_owned(),
+                    params,
+                    cursor: None,
+                    session_id: Some("dest-m2".to_owned()),
+                };
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event("session/started", serde_json::json!({"session": {"sessionId": "dest-m2"}})),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx)
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "item/completed",
+                            serde_json::json!({"item": {
+                                "itemId": "m-1",
+                                "turnId": "t-1",
+                                "kind": "userMessage",
+                                "status": "completed",
+                                "revision": 1,
+                                "text": pack_full,
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "item/completed",
+                            serde_json::json!({"item": {
+                                "itemId": "m-2",
+                                "turnId": "t-1",
+                                "kind": "agentMessage",
+                                "status": "completed",
+                                "revision": 1,
+                                "text": "Got it — picking up the ferry routes.",
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event("turn/completed", serde_json::json!({"turnId": "t-1", "terminal": "completed"})),
+                        cx,
+                    )
+                });
+                harness.maybe_rewrite_byline(cx);
+                let run = harness.handoffs.get("src-m2").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Prepared),
+                    "a completed pack turn fails nothing, state is {:?}",
+                    run.state
+                );
+                // The ack activates with the chain intact.
+                harness.acknowledge_handoff("dest-m2".to_owned(), cx);
+                let run = harness.handoffs.get("src-m2").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Activated),
+                    "the ack activates, state is {:?}",
+                    run.state
+                );
+                assert!(
+                    sidebar::is_handoff_dest("dest-m2", &harness.provider_sessions, &harness.overrides),
+                    "the links survive the ack"
+                );
+                // A later turn settling failed: the destination owns its
+                // turns now, so the active handoff stays active and linked.
+                view.update(cx, |view, cx| {
+                    view.apply(event("turn/started", serde_json::json!({"turnId": "t-2"})), cx)
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "item/completed",
+                            serde_json::json!({"item": {
+                                "itemId": "m-3",
+                                "turnId": "t-2",
+                                "kind": "userMessage",
+                                "status": "completed",
+                                "revision": 1,
+                                "text": "Keep going",
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| {
+                    view.apply(
+                        event(
+                            "turn/completed",
+                            serde_json::json!({"turnId": "t-2", "terminal": "failed", "error": {
+                                "kind": "modelError",
+                                "message": "the model was overloaded",
+                            }}),
+                        ),
+                        cx,
+                    )
+                });
+                harness.maybe_rewrite_byline(cx);
+                let run = harness.handoffs.get("src-m2").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Activated),
+                    "a later failed turn never fails an active handoff, state is {:?}",
+                    run.state
+                );
+                assert!(
+                    sidebar::is_handoff_dest("dest-m2", &harness.provider_sessions, &harness.overrides),
+                    "a later failed turn never unlinks the chain"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3fix: the destination view closing before the ack fails the
+    /// still-Prepared run with a reason and rolls the chain links back —
+    /// no `HandoffPackFailed` needed, nothing lingers.
+    #[gpui::test]
+    fn a_destination_closed_before_ack_fails_the_handoff(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3fix-dest-closed");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let dest = open_b3_destination(vc, &baaz);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.land_handoff_destination(dest.clone(), cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _cx| {
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(matches!(run.state, aui_protocol::HandoffState::Prepared));
+                assert!(
+                    sidebar::is_handoff_dest(&dest, &harness.provider_sessions, &harness.overrides),
+                    "the links land with the prefix"
+                );
+            });
+        });
+        // The destination view dies with no pack outcome in flight.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| harness.close_view(&dest, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _cx| {
+                let run = harness.handoffs.get("b3-src").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
+                    "a lost destination fails the handoff, state is {:?}",
+                    run.state
+                );
+                assert_eq!(
+                    run.reason.as_deref(),
+                    Some("the destination session closed before it acknowledged the pack")
+                );
+                assert!(
+                    !sidebar::is_handoff_dest(&dest, &harness.provider_sessions, &harness.overrides),
+                    "the links roll back"
+                );
+                // The close itself removes the never-sent destination's
+                // row with its view (the usual unsent-draft close); the
+                // run's Failed card on the source is what names the
+                // reason.
+                assert!(
+                    harness.sessions.iter().all(|entry| entry.id != dest),
+                    "the closed destination leaves no row behind"
+                );
+            });
+        });
+        vc.run_until_parked();
+        lane_restore(state);
+    }
+
+    /// B3fix: the destination session erroring out before the ack fails
+    /// the still-Prepared run the same way — the `Closed` event carries
+    /// no pack outcome, so the harness reads the run off the view.
+    #[gpui::test]
+    fn a_destination_error_before_ack_fails_the_handoff(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b3fix-dest-error");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        // A muse destination with the pack submitted but never acked.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.open("dest-me".to_owned(), false, false, window, cx);
+                let view = harness.active.clone().expect("the destination is open");
+                view.update(cx, |view, cx| {
+                    view.note_handoff_pack(
+                        "Continuing a session handed off from Claude Code. Context follows.".to_owned(),
+                        "Handed off from Claude Code: Chart the ferry routes".to_owned(),
+                        cx,
+                    );
+                });
+                let mut session =
+                    aui_protocol::Session::new("src-me", aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                session.turns.push(aui_protocol::Turn::User {
+                    id: "u1".to_owned(),
+                    text: "Chart the ferry routes".to_owned(),
+                    attachments: vec![],
+                    mentions: vec![],
+                    timestamp: None,
+                });
+                let pack = crate::handoff::build_pack(&session, "/tmp/ws");
+                let mut run = crate::handoff::HandoffRun::request(
+                    "src-me".to_owned(),
+                    1,
+                    ProviderId::ClaudeCode,
+                    ProviderId::Muse,
+                    "claude".to_owned(),
+                    String::new(),
+                    false,
+                    false,
+                    false,
+                )
+                .expect("fresh request starts");
+                run.note_quiescing();
+                run.note_checkpointed(pack);
+                run.note_prepared("dest-me".to_owned());
+                harness.handoffs.insert("src-me".to_owned(), run);
+                harness.set_override("src-me", |meta| meta.handoff_to = Some("dest-me".to_owned()), cx);
+                harness.set_override("dest-me", |meta| {
+                    meta.handoff_from = Some("src-me".to_owned());
+                    meta.handoff_from_provider = Some("claude-code".to_owned());
+                    meta.handoff_title = Some("Chart the ferry routes".to_owned());
+                }, cx);
+            });
+        });
+        // The session errors out with no pack outcome in flight.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the destination is open");
+                harness.on_session_event(view, &crate::session::SessionEvent::Closed, cx);
+                let run = harness.handoffs.get("src-me").expect("the run");
+                assert!(
+                    matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
+                    "an errored destination fails the handoff, state is {:?}",
+                    run.state
+                );
+                assert!(
+                    !sidebar::is_handoff_dest(
+                        "dest-me",
                         &harness.provider_sessions,
                         &harness.overrides
                     ),

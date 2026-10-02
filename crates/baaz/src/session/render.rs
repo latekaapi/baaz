@@ -3149,6 +3149,120 @@ mod tests {
         );
     }
 
+    /// An error card the pack reply answers past is a recoverable card
+    /// inside a successful reply, not a failed pack turn: only a reply
+    /// whose last word is the error counts.
+    #[gpui::test]
+    fn an_error_card_inside_a_completed_reply_reports_no_failure(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-recoverable", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session(
+                    "dest-recoverable",
+                    aui_protocol::Provider::Codex,
+                    "gpt-5",
+                    "/tmp/ws",
+                );
+                view.fold.apply_deltas(
+                    "dest-recoverable",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![
+                                    aui_protocol::Block::Text {
+                                        text: "Got it — picking up the ferry routes.".to_owned(),
+                                        streaming: false,
+                                    },
+                                    aui_protocol::Block::Error {
+                                        title: "Tool error".to_owned(),
+                                        detail: "the shell helper stumbled, retrying".to_owned(),
+                                        retryable: true,
+                                    },
+                                    aui_protocol::Block::Text {
+                                        text: "Recovered — ready to continue.".to_owned(),
+                                        streaming: false,
+                                    },
+                                ],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::TurnFinished {
+                            turn_id: "a-pack".to_owned(),
+                            meta: Default::default(),
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            None,
+            "a reply that answers past its error card completed; it did not fail"
+        );
+    }
+
+    /// A pack reply that ends on its error — even past partial answering
+    /// text — is a terminal failure: the turn never completed around it.
+    #[gpui::test]
+    fn a_pack_reply_ending_on_its_error_reports_its_reason(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = handoff_destination(vc, "dest-terminal", "codex");
+        let pack = "Continuing a session handed off from Claude Code. Context follows.";
+        let reason = "model `gpt-6-astra` does not exist or you lack access";
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.fold.ensure_session(
+                    "dest-terminal",
+                    aui_protocol::Provider::Codex,
+                    "gpt-5",
+                    "/tmp/ws",
+                );
+                view.fold.apply_deltas(
+                    "dest-terminal",
+                    vec![
+                        aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
+                        aui_protocol::Delta::TurnStarted {
+                            turn: aui_protocol::Turn::Assistant {
+                                id: "a-pack".to_owned(),
+                                blocks: vec![
+                                    aui_protocol::Block::Text {
+                                        text: "Starting on the ferry".to_owned(),
+                                        streaming: false,
+                                    },
+                                    aui_protocol::Block::Error {
+                                        title: "Model error".to_owned(),
+                                        detail: reason.to_owned(),
+                                        retryable: false,
+                                    },
+                                ],
+                                meta: Default::default(),
+                                timestamp: None,
+                            },
+                        },
+                        aui_protocol::Delta::TurnFinished {
+                            turn_id: "a-pack".to_owned(),
+                            meta: Default::default(),
+                        },
+                    ],
+                );
+            });
+            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+        });
+        assert_eq!(
+            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            Some(reason.to_owned()),
+            "a reply ending on its error failed, even past partial text"
+        );
+    }
+
     /// B6: opening the `+` menu closes any overlay menu first, so the two
     /// never stack. Without the close the old toggle left both open.
     #[gpui::test]

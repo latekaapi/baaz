@@ -427,13 +427,14 @@ impl Harness {
 /// pack's goal + transcript excerpt
 /// ([`crate::handoff::summary_prompt`]). The card reads "Summarising…"
 /// until the side session's `turn/completed` harvests into the pack's
-/// summary field or the 8 s watchdog keeps the extractive text — and the
-/// destination opens beside the wait either way, never after it.
-/// Timeout, wire error, empty reply and signed-out all keep the
-/// extractive summary with one log line, never a dialog, never a retry.
-/// Cancel during the wait abandons the hidden side session: the run is
-/// already Cancelled, so the harvest and the watchdog drop their
-/// answers.
+/// summary field, the 8 s watchdog keeps the extractive text, or the
+/// destination lands — landing stands the wait down, because the pack
+/// submits at land with the extractive summary and a later answer
+/// would never reach the destination model. Timeout, wire error, empty
+/// reply and signed-out all keep the extractive summary with one log
+/// line, never a dialog, never a retry. Cancel during the wait abandons
+/// the hidden side session: the run is already Cancelled, so the
+/// harvest and the watchdog drop their answers.
 impl Harness {
     /// Start the checkpoint's summary side session. Called once from the
     /// handoff checkpoint path, after the run went Checkpointed with its
@@ -574,9 +575,9 @@ impl Harness {
     }
 
     /// Whether the summary side session may still land: the run exists
-    /// under this epoch, is still waiting, and has not acknowledged yet
-    /// (Checkpointed, or Prepared when the destination beat the summary
-    /// open and the pack it snapshots can still take the upgrade).
+    /// under this epoch and is still waiting. Landing stands the wait
+    /// down, so in practice this only ever holds while Checkpointed —
+    /// but the flag, not the state, is the guard.
     fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
         self.handoffs.get(source).is_some_and(|run| {
             run.epoch == epoch
@@ -589,10 +590,15 @@ impl Harness {
     }
 
     /// Settle the summary wait. `Some` harvested text upgrades the pack
-    /// to a model summary; `None` keeps the extractive one. The
+    /// to a model summary while still Checkpointed, and is dropped
+    /// otherwise; `None` keeps the extractive one. Either way the wait
+    /// ends in every state — a late harvest after acknowledge,
+    /// activation, failure, landing or cancel stands a stuck card down
+    /// without touching the pack (see
+    /// [`crate::handoff::HandoffRun::apply_model_summary`]). The
     /// destination already opened beside the wait, so this only refreshes
     /// the card — it never opens. A run that stopped waiting meanwhile
-    /// (cancelled, superseded, failed, acknowledged) is left alone.
+    /// (flag already down, or a superseding epoch) only drops its jobs.
     fn resolve_handoff_summary(
         &mut self,
         source: String,
@@ -601,13 +607,11 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
-        if run.epoch != epoch
-            || !run.summarising
-            || !matches!(
-                &run.state,
-                aui_protocol::HandoffState::Checkpointed | aui_protocol::HandoffState::Prepared
-            )
-        {
+        if run.epoch != epoch {
+            self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
+            return;
+        }
+        if !run.summarising {
             self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
             return;
         }
@@ -637,9 +641,10 @@ impl Harness {
     }
 
     /// The watchdog fired: still waiting means the summary did not arrive
-    /// in time — keep the extractive text and open the destination. A late
-    /// answer afterwards finds no waiting run and is dropped.
-    fn handoff_summary_timeout(&mut self, source: &str, epoch: u64, cx: &mut Context<Self>) {
+    /// in time — keep the extractive text. A late answer afterwards finds
+    /// no waiting run and is dropped. `pub(crate)` so lifecycle tests can
+    /// drive the real handler after acknowledge.
+    pub(crate) fn handoff_summary_timeout(&mut self, source: &str, epoch: u64, cx: &mut Context<Self>) {
         if !self.handoff_summary_waiting(source, epoch) {
             return;
         }
