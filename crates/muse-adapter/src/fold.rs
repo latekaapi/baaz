@@ -1,6 +1,7 @@
 //! `MuseFold` — MSP view events in, `aui_protocol::Delta`s out.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use aui_protocol::{
     ActivityState, ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalScope, ApprovalStage,
@@ -15,6 +16,14 @@ use serde_json::Value;
 
 use crate::side::{QueuedTurn, SideState};
 use crate::slots::{Slot, Slots, TurnKey};
+
+/// B12: first sighting of a reasoning item, for its thinking elapsed.
+struct ReasoningStart {
+    /// The wire's `recordedAt` on first sighting, when it carried one.
+    at_ms: Option<u64>,
+    /// The arrival clock, for traces the wire never times.
+    instant: Instant,
+}
 
 /// One Muse session, folded.
 struct Folded {
@@ -35,6 +44,11 @@ struct Folded {
     /// ("when the turn started"). Live and backfill therefore converge no
     /// matter what order items arrive in (finding F3).
     turn_stamps: HashMap<TurnKey, HashMap<String, u64>>,
+    /// B12: `itemId` → first sighting of a reasoning item, for its
+    /// thinking elapsed: the wire's `recordedAt` when it carried one,
+    /// else the arrival clock — the same two clocks Claude/Codex resolve
+    /// between, kept side by side so a half-known pair never mixes them.
+    reasoning_first: HashMap<String, ReasoningStart>,
     /// The `itemId` of a `userMessage`'s `Turn::User` → its handle, so a
     /// later revision of the same message re-stamps the turn it made.
     user_keys: HashMap<String, TurnKey>,
@@ -508,6 +522,7 @@ impl Folded {
             slots: Slots::default(),
             revisions: HashMap::new(),
             turn_stamps: HashMap::new(),
+            reasoning_first: HashMap::new(),
             user_keys: HashMap::new(),
             user_text: HashMap::new(),
             turn_keys: Vec::new(),
@@ -1138,8 +1153,12 @@ impl Folded {
                 self.update_block(slot, block)
             }
             ApprovalState::Approving => {
-                *state =
-                    ApprovalState::AllowedOnce { exit_code: i32::from(failed), duration_ms: 0 };
+                // B12: the gated item's own duration when the wire timed
+                // the run, so the settled card reads real elapsed.
+                *state = ApprovalState::AllowedOnce {
+                    exit_code: i32::from(failed),
+                    duration_ms: item.duration_ms.unwrap_or(0),
+                };
                 self.update_block(slot, block)
             }
             ApprovalState::AllowedOnce { exit_code, .. } if failed && *exit_code == 0 => {
@@ -1267,6 +1286,12 @@ impl Folded {
         {
             self.break_groups();
             return self.tool_todo(item);
+        }
+        // B12: first sighting of a reasoning trace, for its thinking
+        // elapsed — recorded before the fold so the block carries the
+        // span from this revision on.
+        if matches!(item.kind, msp::ItemKind::Reasoning) {
+            self.note_reasoning_first(item);
         }
         let Some(block) = self.block_for(item, terminal) else { return Vec::new() };
         // Decision points and failures end the open run: they never join a
@@ -1601,7 +1626,11 @@ impl Folded {
                 };
                 Block::Thinking {
                     text,
-                    elapsed_ms: 0,
+                    // B12: the wire's own `duration_ms` when it timed the
+                    // trace, else the `recordedAt` span from first sighting
+                    // to this revision, else the arrival clock — real
+                    // elapsed per lane, never a frozen zero.
+                    elapsed_ms: item.duration_ms.unwrap_or_else(|| self.reasoning_elapsed(item)),
                     summary: item.summary.as_ref().and_then(|parts| parts.first().cloned()),
                     state: if terminal { ThinkingState::Done } else { ThinkingState::Thinking },
                 }
@@ -1942,6 +1971,29 @@ impl Folded {
         let key = self.ensure_assistant_turn(&turn_id, deltas);
         self.stamp_item(key, item);
         key
+    }
+
+    /// B12: remember a reasoning trace's first sighting, for its thinking
+    /// elapsed. First wins — revisions arrive in increasing order, so the
+    /// entry is the trace's start on both paths, live and backfilled.
+    fn note_reasoning_first(&mut self, item: &msp::Item) {
+        self.reasoning_first.entry(item.item_id.clone()).or_insert_with(|| ReasoningStart {
+            at_ms: recorded_at_ms(item),
+            instant: Instant::now(),
+        });
+    }
+
+    /// B12: a reasoning trace's thinking elapsed: the `recordedAt` span
+    /// from first sighting to this revision, or the arrival clock when
+    /// the wire carried no clock at all. A half-known pair stays zero
+    /// rather than mixing clocks — unknown, never measured.
+    fn reasoning_elapsed(&self, item: &msp::Item) -> u64 {
+        let Some(first) = self.reasoning_first.get(&item.item_id) else { return 0 };
+        match (first.at_ms, recorded_at_ms(item)) {
+            (Some(start), Some(end)) => end.saturating_sub(start),
+            (None, None) => u64::try_from(first.instant.elapsed().as_millis()).unwrap_or(u64::MAX),
+            (Some(_), None) | (None, Some(_)) => 0,
+        }
     }
 
     /// Record an item's wire clock (`recorded_at`, RFC3339) on its turn. The
@@ -3356,6 +3408,48 @@ mod tests {
         let session = &fold.sessions["s"].session;
         let turn = session.turns.iter().find(|turn| turn.id() == "t-1").expect("assistant turn");
         assert_eq!(turn.timestamp(), Some(1_788_938_599_200));
+    }
+
+    /// B12: a reasoning trace reads real elapsed — the `recordedAt` span
+    /// from first sighting to the terminal revision — not a frozen zero.
+    #[test]
+    fn reasoning_elapsed_comes_from_item_timings() {
+        let mut fold = MuseFold::new();
+        started(&mut fold, "s");
+        for (method, revision, at) in [
+            ("item/started", 1, "2026-09-09T07:23:19.000000Z"),
+            ("item/completed", 2, "2026-09-09T07:23:24.000000Z"),
+        ] {
+            let params = serde_json::json!({
+                "item": {
+                    "itemId": "r-1",
+                    "turnId": "t-1",
+                    "kind": "reasoning",
+                    "status": "completed",
+                    "revision": revision,
+                    "text": "thinking it over",
+                    "recordedAt": at,
+                }
+            });
+            fold.apply(MuseEvent::Notification {
+                method: method.to_owned(),
+                params,
+                cursor: None,
+                session_id: Some("s".to_owned()),
+            });
+        }
+        let session = &fold.sessions["s"].session;
+        let mut elapsed = Vec::new();
+        for turn in &session.turns {
+            if let Turn::Assistant { blocks, .. } = turn {
+                for block in blocks {
+                    if let Block::Thinking { elapsed_ms, .. } = block {
+                        elapsed.push(*elapsed_ms);
+                    }
+                }
+            }
+        }
+        assert_eq!(elapsed, [5_000], "the 5 s span between the revisions: {elapsed:?}");
     }
 
     #[test]

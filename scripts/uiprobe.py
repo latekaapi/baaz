@@ -272,6 +272,19 @@ ENTRIES = {
     "transcript-markdown":  {"idle": ["--bench", "fixtures/msp/synthetic-markdown.jsonl"]},
     "transcript-toolshapes": {"idle": ["--bench", "fixtures/msp/synthetic-toolshapes.jsonl"]},
     "transcript-stress":    {"idle": ["--bench", "fixtures/msp/synthetic-stress-300.jsonl"]},
+    # B12: the quiet transcript, both states, off the small toolgroup
+    # fixture (25 events — terminates). `transcript-folded` replays to
+    # rest: settled turns fold behind one TurnFold row (the last turn's
+    # three bash calls and answer fold; the first turn's approval and
+    # error stay visible). `transcript-live` holds the last turn open
+    # (`--bench-open-turn` stops before its `turn/completed`): the
+    # open-turn chrome with a running turn. Under BAAZ_DETERMINISTIC
+    # every turn draws settled rows, so true live-row pixels are checked
+    # on real sessions, never claimed from these captures. No baselines:
+    # generate on main after merge, never to silence a finding.
+    "transcript-folded":    {"idle": ["--bench", "fixtures/msp/synthetic-toolgroup.jsonl"]},
+    "transcript-live":      {"idle": ["--bench", "--bench-open-turn",
+                                      "fixtures/msp/synthetic-toolgroup.jsonl"]},
     # Y5: the first-run Connect your providers screen, offline with scripted
     # statuses (`BAAZ_PROVIDER_STATUS_SCRIPT` — the only statuses a
     # deterministic run reports). `connect-first-run` is mixed rows

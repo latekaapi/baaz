@@ -62,6 +62,7 @@
 //!   deltas. Everything else: no deltas.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use aui_protocol::{
     ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
@@ -312,13 +313,23 @@ fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
         _ => "Ran",
     };
     let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
+    // B12: the wire's own duration when reported, so the pill reads real
+    // elapsed instead of a missing clock.
+    let duration_ms = item.command_duration_ms();
+    // B12: a read-only command folds to a read/search card off its
+    // `commandActions` — "Read notes.txt", "Searched for gamma" — never
+    // a shell card for work that never shelled. Mixed commands stay
+    // shell: one card per command.
+    if let Some(block) = read_search_block(item, status, duration_ms) {
+        return (block, status, exit_code);
+    }
     let block = Block::ToolCall {
         id: item.id().to_owned(),
         kind: ToolKind::Shell,
         verb: verb.into(),
         target: display_command(item.command()),
         status,
-        duration_ms: None,
+        duration_ms,
         body: ToolBody::Shell {
             output_lines: item
                 .aggregated_output()
@@ -330,6 +341,69 @@ fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
         diff_stat: None,
     };
     (block, status, exit_code)
+}
+
+/// B12: wall-clock milliseconds since `start`, saturating at `u64`.
+fn wall_ms_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// B12: a read-only `commandExecution` as a read/search card, from its
+/// `commandActions`: all reads (or listings) read, all searches search.
+/// Anything else — mixed, unknown, action-less, or a failed or denied
+/// run — stays shell (`None`): a failure keeps its error card with the
+/// run's output, never a quiet label over lost stderr.
+fn read_search_block(item: &Item, status: ToolStatus, duration_ms: Option<u64>) -> Option<Block> {
+    if !matches!(status, ToolStatus::Success | ToolStatus::Running) {
+        return None;
+    }
+    let actions = item.command_actions();
+    if actions.is_empty() {
+        return None;
+    }
+    let mut reads = 0;
+    let mut searches = 0;
+    for action in actions {
+        match action.action_type.as_str() {
+            "read" | "listFiles" => reads += 1,
+            "search" => searches += 1,
+            _ => return None,
+        }
+    }
+    let (kind, verb) = if searches == 0 && reads > 0 {
+        (ToolKind::Read, "Read")
+    } else if reads == 0 && searches > 0 {
+        let verb = match status {
+            ToolStatus::Running => "Search",
+            _ => "Searched",
+        };
+        (ToolKind::Search, verb)
+    } else {
+        return None;
+    };
+    let non_empty = |field: &str| (!field.trim().is_empty()).then(|| field.to_owned());
+    let target = if matches!(kind, ToolKind::Read) {
+        actions
+            .iter()
+            .find_map(|action| non_empty(&action.path))
+            .or_else(|| actions.iter().find_map(|action| non_empty(&action.name)))
+    } else {
+        actions
+            .iter()
+            .find_map(|action| non_empty(&action.query))
+            .or_else(|| actions.iter().find_map(|action| non_empty(&action.path)))
+    }
+    .unwrap_or_else(|| display_command(item.command()));
+    Some(Block::ToolCall {
+        id: item.id().to_owned(),
+        kind,
+        verb: verb.into(),
+        target,
+        status,
+        duration_ms,
+        body: ToolBody::None,
+        diff_stat: None,
+    })
 }
 
 fn display_command(command: &str) -> String {
@@ -939,6 +1013,10 @@ pub struct CodexFold {
     /// elicitation approval names as its cwd, since the gated tool runs
     /// there and the request itself names none.
     workspace: Option<String>,
+    /// B12: reasoning item id → when its `item/started` arrived: the
+    /// arrival clock for traces the wire never times. Bounded like
+    /// `running_commands`; dropped when the item completes.
+    reasoning_started: HashMap<String, Instant>,
 }
 
 impl CodexFold {
@@ -1712,6 +1790,11 @@ impl CodexFold {
         if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
             self.file_changes.insert(item.id().to_owned(), changes.to_owned());
         }
+        // B12: the arrival clock for reasoning the wire never times.
+        // Bounded like every other per-item map here.
+        if item.kind() == "reasoning" && self.reasoning_started.len() < 64 {
+            self.reasoning_started.insert(item.id().to_owned(), Instant::now());
+        }
         Vec::new()
     }
 
@@ -1766,12 +1849,22 @@ impl CodexFold {
                 if item.text().is_empty() {
                     return deltas;
                 }
+                // B12: the wire's own elapsed when it timed both ends;
+                // else the arrival clock from `item/started`; else
+                // unknown — never a frozen zero claimed as measured.
+                let elapsed_ms = item.reasoning_elapsed_ms().unwrap_or_else(|| {
+                    self.reasoning_started
+                        .get(item.id())
+                        .map(|start| wall_ms_since(*start))
+                        .unwrap_or(0)
+                });
+                self.reasoning_started.remove(item.id());
                 self.ensure_assistant(turn_id, &mut deltas);
                 self.push_block(
                     turn_id,
                     Block::Thinking {
                         text: item.text().to_owned(),
-                        elapsed_ms: 0,
+                        elapsed_ms,
                         summary: None,
                         state: ThinkingState::Done,
                     },
@@ -1815,10 +1908,13 @@ impl CodexFold {
                     self.running_commands.remove(item.id());
                     let state = match status {
                         ToolStatus::Cancelled => ApprovalState::Denied,
+                        // B12: the approved run's own duration when the
+                        // wire reported one — the card reads what the
+                        // command took, never a frozen zero beside it.
                         _ => ApprovalState::AllowedOnce {
                             exit_code: exit_code
                                 .unwrap_or(i32::from(matches!(status, ToolStatus::Error))),
-                            duration_ms: 0,
+                            duration_ms: item.command_duration_ms().unwrap_or(0),
                         },
                     };
                     self.resolve_approval(item.id(), state, &mut deltas);
@@ -4223,5 +4319,75 @@ mod tests {
         assert_eq!(shells[0].0, ToolStatus::Success);
         assert_eq!(shells[0].2, Some(0));
         assert!(shells[0].1.contains("baaz_probe_write.txt"), "target: {}", shells[0].1);
+    }
+
+    /// B12: `commandActions` label read-only commands. All reads (or
+    /// listings) fold to a Read card naming the path; all searches to a
+    /// Search card naming the query; mixed or action-less commands stay
+    /// shell — one card per command either way.
+    #[test]
+    fn read_only_commands_fold_off_command_actions() {
+        use crate::frame::CommandAction;
+        fn action(action_type: &str, name: &str, path: &str, query: &str) -> CommandAction {
+            CommandAction {
+                action_type: action_type.to_owned(),
+                command: String::new(),
+                name: name.to_owned(),
+                path: path.to_owned(),
+                query: query.to_owned(),
+            }
+        }
+        fn execution(actions: Vec<CommandAction>) -> Item {
+            Item::CommandExecution {
+                id: "exec-1".to_owned(),
+                command: "/bin/zsh -lc 'rg gamma'".to_owned(),
+                status: "completed".to_owned(),
+                exit_code: Some(0),
+                aggregated_output: None,
+                duration_ms: Some(120),
+                actions,
+            }
+        }
+        fn face(item: &Item) -> (ToolKind, String, String) {
+            match command_execution_block(item) {
+                (Block::ToolCall { kind, verb, target, .. }, _, _) => (kind, verb, target),
+                (block, _, _) => panic!("a command folds to a tool card: {block:?}"),
+            }
+        }
+        let (kind, verb, target) = face(&execution(vec![
+            action("read", "notes.txt", "/tmp/work/notes.txt", ""),
+            action("listFiles", "", "/tmp/work", ""),
+        ]));
+        assert_eq!(kind, ToolKind::Read);
+        assert_eq!(verb, "Read");
+        assert_eq!(target, "/tmp/work/notes.txt");
+        let (kind, verb, target) = face(&execution(vec![action("search", "", "", "gamma")]));
+        assert_eq!(kind, ToolKind::Search);
+        assert_eq!(verb, "Searched");
+        assert_eq!(target, "gamma");
+        let (kind, verb, _) = face(&execution(vec![
+            action("read", "notes.txt", "/tmp/work/notes.txt", ""),
+            action("search", "", "", "gamma"),
+        ]));
+        assert_eq!(kind, ToolKind::Shell, "mixed commands stay shell");
+        assert_eq!(verb, "Ran");
+        let (kind, verb, _) = face(&execution(Vec::new()));
+        assert_eq!(kind, ToolKind::Shell, "action-less commands stay shell");
+        assert_eq!(verb, "Ran");
+        // A failed listing keeps its shell error card with the run's
+        // output — never a quiet read label over lost stderr
+        // (`error.jsonl`: `ls` on a missing dir).
+        let failed = Item::CommandExecution {
+            id: "exec-9".to_owned(),
+            command: "/bin/zsh -lc 'ls /nonexistent-dir-xyz-123'".to_owned(),
+            status: "failed".to_owned(),
+            exit_code: None,
+            aggregated_output: Some("ls: No such file".to_owned()),
+            duration_ms: None,
+            actions: vec![action("listFiles", "", "nonexistent-dir-xyz-123", "")],
+        };
+        let (kind, _, target) = face(&failed);
+        assert_eq!(kind, ToolKind::Shell, "failures keep their error card");
+        assert!(target.contains("ls"), "the failed command stays titled: {target}");
     }
 }

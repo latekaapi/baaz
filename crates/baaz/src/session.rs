@@ -276,6 +276,23 @@ pub enum SessionEvent {
         /// The skill name, as the quiet row's card target carried it.
         name: String,
     },
+    /// B12: a transcript card's "Open full text" (generic cards,
+    /// search/MCP open-in-pane rows): show the whole text in the right
+    /// pane's read-only doc view. The session cannot act on the window,
+    /// so the application opens the pane, like the skill tap above.
+    OpenFullText {
+        /// The doc view's title: the card's kind or `verb target`.
+        title: String,
+        /// The whole text, never truncated.
+        text: String,
+    },
+    /// B12: a turn fold's `+N −M` chip: open Changes for that turn (or
+    /// the session without a per-turn checkpoint). Window-level, like
+    /// the skill tap above.
+    OpenTurnChanges {
+        /// The folded turn's id.
+        turn_id: String,
+    },
     /// `session/fork` succeeded: open the new session as the active one.
     Forked {
         /// The new session's id. Its resume envelope has already been served.
@@ -585,6 +602,12 @@ pub struct SessionView {
     /// toggle is rare: the frame clones a refcount, `toggle_fold` clones the
     /// set once with `Rc::make_mut` (finding `performance-3`).
     toggled: Rc<HashSet<String>>,
+    /// B12: "Fold finished turns" (Settings → General; default on): a
+    /// settled assistant turn folds its work behind one header row, while
+    /// the final answer stays out. The persisted switch belongs to the
+    /// settings store; this view flag is its per-frame backing, so the
+    /// transcript reads folded from the first frame.
+    pub fold_finished_turns: bool,
     /// Virtualized transcript list (gpui `list()`, top-aligned, one item
     /// per turn) and the item count it was last synced to. Only visible rows
     /// are built and laid out per frame; `splice` keeps indices stable across
@@ -610,6 +633,10 @@ pub struct SessionView {
     rehint: bool,
     /// The `(turn id, row count)` list the virtual list was last synced to.
     synced_counts: Vec<(String, usize)>,
+    /// B12: the busyness the row mapping was last built against: a settle
+    /// flips the tail from live rows to the fold with no new turn, so the
+    /// cache rebuilds on the flip.
+    synced_busy: bool,
     /// Wheel events applied since the last traced paint, and when the last
     /// one landed (`BAAZ_FRAME_TRACE`, the hand-gesture instrument).
     /// Counted by the capture handler, drained by the next
@@ -981,6 +1008,7 @@ impl SessionView {
             composer,
             overlays,
             toggled: Rc::new(HashSet::new()),
+            fold_finished_turns: true,
             list_state: ListState::new(
                 0,
                 // Top, not Bottom: a short transcript starts at the top
@@ -1001,6 +1029,7 @@ impl SessionView {
             list_width: None,
             rehint: false,
             synced_counts: Vec::new(),
+            synced_busy: false,
             trace_wheel_pending: 0,
             trace_last_wheel: None,
             trace_rehint: false,
