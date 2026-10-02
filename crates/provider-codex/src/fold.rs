@@ -2424,28 +2424,41 @@ mod tests {
         assert_eq!(thinking, ["plannedtrace"], "summary plus content, joined");
     }
 
+    /// Final shell-card state under the running-card change: `item/started`
+    /// adds the card as running and the completion updates it in place
+    /// (`BlockUpdated`), so the final face is the last add-or-update per
+    /// card id — one entry per card, never one per delta.
     fn shell_cards(deltas: &[Delta]) -> Vec<(ToolStatus, String, Vec<String>, Option<i32>)> {
-        deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                Delta::BlockAdded {
-                    block:
-                        Block::ToolCall {
-                            kind: ToolKind::Shell,
-                            status,
-                            target,
-                            body: ToolBody::Shell { output_lines, exit_code, .. },
-                            ..
-                        },
-                    ..
-                } => Some((
-                    *status,
-                    target.clone(),
-                    output_lines.clone(),
-                    *exit_code,
-                )),
-                _ => None,
-            })
+        use std::collections::HashMap;
+        let mut order: Vec<String> = Vec::new();
+        let mut final_state: HashMap<String, (ToolStatus, String, Vec<String>, Option<i32>)> =
+            HashMap::new();
+        for delta in deltas {
+            let block = match delta {
+                Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => block,
+                _ => continue,
+            };
+            if let Block::ToolCall {
+                id,
+                kind: ToolKind::Shell,
+                status,
+                target,
+                body: ToolBody::Shell { output_lines, exit_code, .. },
+                ..
+            } = block
+            {
+                if !final_state.contains_key(id) {
+                    order.push(id.clone());
+                }
+                final_state.insert(
+                    id.clone(),
+                    (*status, target.clone(), output_lines.clone(), *exit_code),
+                );
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|id| final_state.remove(&id))
             .collect()
     }
 
@@ -3012,9 +3025,13 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1, "settling updates the card, never cards twice");
         assert!(
-            rest.iter().any(|delta| matches!(
+            ask.iter().chain(rest.iter()).any(|delta| matches!(
                 delta,
                 Delta::BlockAdded {
+                    block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
+                    ..
+                }
+                | Delta::BlockUpdated {
                     block: Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, .. },
                     ..
                 }
@@ -3883,26 +3900,38 @@ mod tests {
     #[test]
     fn command_executions_fold_to_shell_cards() {
         let (_, deltas) = replay("approval.jsonl");
-        let shells: Vec<(&ToolStatus, _)> = deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                Delta::BlockAdded {
-                    block:
-                        Block::ToolCall {
-                            kind: ToolKind::Shell,
-                            status,
-                            target,
-                            body: ToolBody::Shell { exit_code, .. },
-                            ..
-                        },
-                    ..
-                } => Some((status, (target.clone(), *exit_code))),
-                _ => None,
-            })
+        // Final state per card: the start adds it running, the completion
+        // updates it in place — so read the last add-or-update per card id.
+        let mut order: Vec<String> = Vec::new();
+        let mut final_state: std::collections::HashMap<String, (ToolStatus, String, Option<i32>)> =
+            std::collections::HashMap::new();
+        for delta in &deltas {
+            let block = match delta {
+                Delta::BlockAdded { block, .. } | Delta::BlockUpdated { block, .. } => block,
+                _ => continue,
+            };
+            if let Block::ToolCall {
+                id,
+                kind: ToolKind::Shell,
+                status,
+                target,
+                body: ToolBody::Shell { exit_code, .. },
+                ..
+            } = block
+            {
+                if !final_state.contains_key(id) {
+                    order.push(id.clone());
+                }
+                final_state.insert(id.clone(), (*status, target.clone(), *exit_code));
+            }
+        }
+        let shells: Vec<(ToolStatus, String, Option<i32>)> = order
+            .into_iter()
+            .filter_map(|id| final_state.remove(&id))
             .collect();
         assert_eq!(shells.len(), 1, "one executed command, one card");
-        assert_eq!(shells[0].0, &ToolStatus::Success);
-        assert_eq!(shells[0].1.1, Some(0));
-        assert!(shells[0].1.0.contains("baaz_probe_write.txt"), "target: {}", shells[0].1.0);
+        assert_eq!(shells[0].0, ToolStatus::Success);
+        assert_eq!(shells[0].2, Some(0));
+        assert!(shells[0].1.contains("baaz_probe_write.txt"), "target: {}", shells[0].1);
     }
 }
