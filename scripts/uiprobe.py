@@ -141,6 +141,14 @@ ENTRIES = {
     # after merge, never to silence a finding.
     "right-file-preview":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files;files-select:uiprobe.json"]},
+    # B9: a folder link's reveal (ancestors expanded, the folder selected
+    # and scrolled into view, no preview) and a Rust file's preview (the
+    # same tree-click path, syntax-highlighted with tree-sitter on).
+    # Offline steps only, no baselines — capture and look.
+    "right-files-reveal":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:files;files-reveal:crates/baaz/src"]},
+    "right-file-preview-rs":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:files;files-select:crates/baaz/src/main.rs"]},
     "right-closed":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files;right:off"]},
     # The ⌘K palette, open. It had no coverage at all, which is why a list

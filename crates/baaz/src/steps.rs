@@ -90,6 +90,7 @@
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty records a step failure, free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
+//! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
 //! | `resize-begin:<x>` | start a scripted resize drag through the real divider handler, logging `baaz: rsdrag` with the width, the sidebar offset, the reveal arm, the scrolled flag and the drag |
@@ -285,6 +286,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
     WindowVerb { verb: "browse", run: |this, rest, window, cx| this.step_browse(rest, window, cx) },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
+    WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
@@ -388,6 +390,32 @@ impl Harness {
                 crate::baaz_log!("unknown right pane kind `{rest}`; known kinds are {}", known.join(", "));
             }
         }
+    }
+
+    /// `files-reveal:<path>`: reveal the project-relative file or folder
+    /// `path` in the Files pane through the link's own path (B9) — a
+    /// folder selects with every ancestor expanded and no preview, a file
+    /// previews banded on the optional `#L…`/`:line` suffix the payload
+    /// carries. Empty or project-less fails, free.
+    pub(crate) fn step_files_reveal(&mut self, rest: &str, cx: &mut Context<Self>) {
+        // Ignored while the Settings page stands open (B11b): it opens the
+        // pane on Files, a pane-kind command.
+        if self.settings_page.open {
+            return;
+        }
+        let raw = rest.trim();
+        if raw.is_empty() {
+            record_step_failure("files-reveal:");
+            return;
+        }
+        let Some((root, _)) = self.right_project() else {
+            record_step_failure(&format!("files-reveal:{rest}"));
+            return;
+        };
+        let highlight = crate::session::render::parse_link_lines(raw);
+        let abs = crate::session::render::resolve_link_path(&root, raw);
+        let is_dir = std::fs::metadata(&abs).ok().map(|meta| meta.is_dir());
+        self.reveal_link_path(&root, &abs, is_dir, highlight, cx);
     }
 
     /// `files-select:<path>`: preview the project-relative file `path` in
