@@ -131,10 +131,16 @@ ENTRIES = {
     # the entry captures deterministically like `right-browser` does.
     "right-browser-page":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:browser;browse:https://example.com"]},
+    # The merged Changes view (B8): this session's edits on top, the rest
+    # of the working tree below. `right-diff` and `right-git` stay as
+    # aliases of `right-changes` (same steps), so old invocations keep
+    # capturing the merged view. No baselines: capture and look.
+    "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:changes"]},
     "right-diff":           {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "right-width:400;right:diff"]},
+                                      "--steps", "right-width:400;right:changes"]},
     "right-git":            {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "right-width:400;right:git"]},
+                                      "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
     # The Files pane previewing a small file: the same preview a tree

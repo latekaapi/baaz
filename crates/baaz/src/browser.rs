@@ -353,7 +353,7 @@ impl Harness {
     }
 
     /// Prepare the active session's webview ahead of the pane animating
-    /// (B7): `toggle_right`/`show_right` call this when they land open on
+    /// (B7): `toggle_right`/`select_right` call this when they land open on
     /// Browser, so the opening frame shows the page instead of paying the
     /// construction cost inside `render`. Only the scripted backend can be
     /// prepared without a window — see [`Self::prewarm_browser_in`] for the
@@ -430,7 +430,7 @@ impl Harness {
     /// every other kind never create a webview as a side effect; the
     /// `browse:` step and agent tools create through [`Self::browser_for`]
     /// directly instead. Focus rides only on the person's own open: render
-    /// consumes one armed `show_right`/`toggle_right` onto a blank page,
+    /// consumes one armed `select_right`/`toggle_right` onto a blank page,
     /// and a restore leaves the composer's keyboard alone.
     pub(crate) fn ensure_browser_person(
         &mut self,

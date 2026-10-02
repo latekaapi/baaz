@@ -5501,7 +5501,7 @@ mod tests {
         let baaz = lane_harness(vc, &state.2);
         let carried = crate::sessions::RightState {
             open: true,
-            kind: crate::layout::RightKind::Diff,
+            kind: crate::layout::RightKind::Changes,
             ..Default::default()
         };
         vc.update(|_, cx| {

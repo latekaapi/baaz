@@ -34,10 +34,11 @@ pub enum GroupBy {
 pub enum RightKind {
     /// An embedded browser.
     Browser,
-    /// A diff review surface.
-    Diff,
-    /// The uncommitted changes.
-    Git,
+    /// The merged changes view (B8): this session's edits on top, the
+    /// rest of the working tree below. Old `diff`/`git` layouts read as
+    /// this through the serde aliases.
+    #[serde(alias = "diff", alias = "git")]
+    Changes,
     /// The workspace file tree.
     Files,
 }
@@ -51,36 +52,59 @@ impl Default for RightKind {
 
 impl RightKind {
     /// Every kind, for the toggle-all-kinds test and T3's palette rows.
-    pub const ALL: [RightKind; 4] =
-        [RightKind::Browser, RightKind::Diff, RightKind::Git, RightKind::Files];
+    pub const ALL: [RightKind; 3] = [RightKind::Changes, RightKind::Files, RightKind::Browser];
 
-    /// The user-visible name: the right header's title, and T3's ⌘K labels.
+    /// The user-visible name: the header tab label, and T3's ⌘K labels.
     pub fn label(self) -> &'static str {
         match self {
             RightKind::Browser => "Browser",
-            RightKind::Diff => "Diff review",
-            RightKind::Git => "Changes",
+            RightKind::Changes => "Changes",
             RightKind::Files => "Files",
         }
     }
 
-    /// The machine name: T4's `right:<kind>` verb parses these back.
+    /// The machine name: T4's `right:<kind>` verb parses these back, and
+    /// the header tab strip uses them as tab ids.
     pub fn slug(self) -> &'static str {
         match self {
             RightKind::Browser => "browser",
-            RightKind::Diff => "diff",
-            RightKind::Git => "git",
+            RightKind::Changes => "changes",
             RightKind::Files => "files",
         }
     }
 
     /// The inverse of [`RightKind::slug`]: `None` for an unknown string.
+    /// The old `diff`/`git` slugs stay as aliases of `changes`, so old
+    /// captures and persisted steps keep opening the merged view.
     pub fn parse(s: &str) -> Option<RightKind> {
         match s {
             "browser" => Some(RightKind::Browser),
-            "diff" => Some(RightKind::Diff),
-            "git" => Some(RightKind::Git),
+            "changes" | "diff" | "git" => Some(RightKind::Changes),
             "files" => Some(RightKind::Files),
+            _ => None,
+        }
+    }
+
+    /// The header tab id: the same machine name as [`RightKind::slug`].
+    pub fn tab_id(self) -> &'static str {
+        self.slug()
+    }
+
+    /// The header tab strip position: Changes · Files · Browser.
+    pub fn tab_index(self) -> usize {
+        match self {
+            RightKind::Changes => 0,
+            RightKind::Files => 1,
+            RightKind::Browser => 2,
+        }
+    }
+
+    /// The inverse of [`RightKind::tab_index`]: `None` for an unknown id.
+    pub fn from_tab_id(id: &str) -> Option<RightKind> {
+        match id {
+            "changes" => Some(RightKind::Changes),
+            "files" => Some(RightKind::Files),
+            "browser" => Some(RightKind::Browser),
             _ => None,
         }
     }
@@ -185,8 +209,9 @@ pub struct Layout {
     /// set one. `None` is "never resized": the default width.
     #[serde(rename = "rightWidth", default, skip_serializing_if = "Option::is_none")]
     pub right_width: Option<f32>,
-    /// Which of the four right-pane kinds was last shown, so reopening
-    /// restores it. `None` is "never opened": [`RightKind::Files`].
+    /// Which of the three right-pane kinds was last shown, so reopening
+    /// restores it. `None` is "never opened": [`RightKind::Files`]. Old
+    /// `diff`/`git` values read as [`RightKind::Changes`].
     #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none")]
     pub right_kind: Option<RightKind>,
     /// The two inherit-owner-servers opt-ins, owned by the Settings →
@@ -362,7 +387,7 @@ mod tests {
             terminal_height: Some(300.0),
             right_open: true,
             right_width: Some(420.0),
-            right_kind: Some(RightKind::Diff),
+            right_kind: Some(RightKind::Changes),
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
         };
         let text = serde_json::to_string(&stored).unwrap();
@@ -377,7 +402,7 @@ mod tests {
         assert!(text.contains("\"terminalHeight\":300.0"));
         assert!(text.contains("\"rightOpen\":true"));
         assert!(text.contains("\"rightWidth\":420.0"));
-        assert!(text.contains("\"rightKind\":\"diff\""));
+        assert!(text.contains("\"rightKind\":\"changes\""));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back.group_by, Some(GroupBy::Project));
@@ -391,7 +416,7 @@ mod tests {
         assert_eq!(back.terminal_height, Some(300.0));
         assert!(back.right_open);
         assert_eq!(back.right_width, Some(420.0));
-        assert_eq!(back.right_kind, Some(RightKind::Diff));
+        assert_eq!(back.right_kind, Some(RightKind::Changes));
         assert!(back.use_own_mcp.codex);
         assert!(!back.use_own_mcp.claude_code);
         // An old file with only a width still reads, taking the new defaults.
@@ -455,6 +480,37 @@ mod tests {
         assert_eq!(RightKind::parse("nope"), None);
         assert_eq!(RightKind::parse(""), None);
         assert_eq!(RightKind::parse("DIFF"), None);
+    }
+
+    /// B8: persisted layouts holding `diff` or `git` load as `changes`.
+    #[test]
+    fn old_diff_and_git_kinds_migrate_to_changes() {
+        let diff: Layout = serde_json::from_str("{\"rightKind\":\"diff\"}").unwrap();
+        assert_eq!(diff.right_kind, Some(RightKind::Changes));
+        let git: Layout = serde_json::from_str("{\"rightKind\":\"git\"}").unwrap();
+        assert_eq!(git.right_kind, Some(RightKind::Changes));
+        assert_eq!(right_kind(&diff), RightKind::Changes);
+        assert_eq!(right_kind(&git), RightKind::Changes);
+        // The old step slugs are aliases too.
+        assert_eq!(RightKind::parse("diff"), Some(RightKind::Changes));
+        assert_eq!(RightKind::parse("git"), Some(RightKind::Changes));
+        assert_eq!(RightKind::parse("changes"), Some(RightKind::Changes));
+    }
+
+    /// B8: the three header tabs map to kinds and back, in Changes ·
+    /// Files · Browser order.
+    #[test]
+    fn the_three_tabs_map_to_kinds() {
+        assert_eq!(RightKind::ALL.len(), 3);
+        for kind in RightKind::ALL {
+            assert_eq!(RightKind::from_tab_id(kind.tab_id()), Some(kind));
+            assert_eq!(RightKind::from_tab_id(kind.slug()), Some(kind));
+        }
+        assert_eq!(RightKind::Changes.tab_index(), 0);
+        assert_eq!(RightKind::Files.tab_index(), 1);
+        assert_eq!(RightKind::Browser.tab_index(), 2);
+        assert_eq!(RightKind::from_tab_id("nope"), None);
+        assert_eq!(RightKind::from_tab_id("diff"), None);
     }
 
     #[test]
