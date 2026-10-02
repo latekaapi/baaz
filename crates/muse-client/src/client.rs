@@ -418,6 +418,40 @@ impl MuseClient {
     /// directory plus the existing fallback dirs, so the `muse` wrapper and
     /// the tools muse runs work from that same minimal launch.
     pub fn spawn(config: &MuseConfig) -> Result<Self> {
+        Self::spawn_with_env(config, &[], &[])
+    }
+
+    /// Spawn `muse serve` with per-child environment removals and
+    /// overrides: one `env_remove` per `env_remove` entry (applied first,
+    /// so an override below can still set a removed name on purpose), then
+    /// one `env` per `env_set` entry. Additive: [`spawn`](Self::spawn)
+    /// delegates with both lists empty. The provider host passes the
+    /// desktop-agent scrub as `env_remove`, so the child never inherits
+    /// Baaz's launch session — without touching this process's env.
+    pub fn spawn_with_env(
+        config: &MuseConfig,
+        env_remove: &[String],
+        env_set: &[(String, String)],
+    ) -> Result<Self> {
+        let mut command = Self::serve_command(config, env_remove, env_set)?;
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        Ok(Self::from_pipes(child, stdin, stdout, stderr))
+    }
+
+    /// The `muse serve` [`Command`] for `config`, before the stdio pipes:
+    /// the same PATH repair [`spawn`](Self::spawn) always did, plus the
+    /// per-child removals and overrides. Pure builder apart from the PATH
+    /// probes — no process spawned, no process env touched — so tests
+    /// assert the removals on the built command via `get_envs`.
+    pub fn serve_command(
+        config: &MuseConfig,
+        env_remove: &[String],
+        env_set: &[(String, String)],
+    ) -> Result<Command> {
         let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).collect())
             .unwrap_or_default();
@@ -429,6 +463,12 @@ impl MuseClient {
                 fallbacks.iter().filter(|dir| dir.is_dir()).cloned().collect();
             command.env("PATH", child_path_value(&path_dirs, &program, &existing));
         }
+        for name in env_remove {
+            command.env_remove(name);
+        }
+        for (name, value) in env_set {
+            command.env(name, value);
+        }
         command.arg("serve");
         if config.trust_workspace {
             command.arg("--trust-workspace");
@@ -437,12 +477,7 @@ impl MuseClient {
             command.arg("--no-session-log");
         }
         command.args(&config.extra_args);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        Ok(Self::from_pipes(child, stdin, stdout, stderr))
+        Ok(command)
     }
 
     fn from_pipes(child: Child, stdin: ChildStdin, stdout: ChildStdout, stderr: ChildStderr) -> Self {
@@ -1052,5 +1087,52 @@ fn start_gap_fill(inner: &Arc<Inner>, params: &Value) {
     // (finding `client-adapter-7`).
     if let Ok(handle) = handle {
         tracker.gap.lock().expect("gap mutex").fills.push(handle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_serve_command_carries_removals_and_overrides() {
+        let dir = std::env::temp_dir().join(format!(
+            "muse-client-serve-cmd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let program = dir.join("muse");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("fake muse");
+        let config = MuseConfig {
+            program: program.clone(),
+            trust_workspace: true,
+            no_session_log: false,
+            extra_args: Vec::new(),
+        };
+        let command = MuseClient::serve_command(
+            &config,
+            &["CLAUDECODE".to_owned(), "ANTHROPIC_BASE_URL".to_owned()],
+            &[("MUSE_PROBE".to_owned(), "1".to_owned())],
+        )
+        .expect("explicit program file resolves");
+        for name in ["CLAUDECODE", "ANTHROPIC_BASE_URL"] {
+            assert!(
+                command.get_envs().any(|(key, value)| key == name && value.is_none()),
+                "the serve command removes {name}: {:?}",
+                command.get_envs().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "MUSE_PROBE" && value == Some(std::ffi::OsStr::new("1"))),
+            "overrides ride the same command"
+        );
+        assert_eq!(command.get_program(), program.as_os_str(), "the resolved program spawns");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

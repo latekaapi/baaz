@@ -23,6 +23,7 @@ pub mod controls;
 pub mod fold;
 pub mod frame;
 pub mod history;
+pub mod home;
 pub mod terminal;
 
 use std::path::PathBuf;
@@ -110,6 +111,7 @@ pub struct ClaudeCodeAdapter {
     sent_control: Mutex<Vec<String>>,
     workspace: Mutex<Option<PathBuf>>,
     home_override: Option<PathBuf>,
+    config_override: Mutex<Option<PathBuf>>,
     connected: Mutex<bool>,
     version: Mutex<Option<String>>,
     /// Where the terminal relay lives, set by the host before the session
@@ -215,6 +217,7 @@ impl ClaudeCodeAdapter {
             sent_control: Mutex::new(Vec::new()),
             workspace: Mutex::new(None),
             home_override: None,
+            config_override: Mutex::new(None),
             connected: Mutex::new(false),
             version: Mutex::new(None),
             terminal: Mutex::new(None),
@@ -337,6 +340,22 @@ impl ClaudeCodeAdapter {
         self
     }
 
+    /// Pin the Claude config dir for history lookup and child env
+    /// (tests, and the host after ensuring the Baaz home). Wins over
+    /// `$CLAUDE_CONFIG_DIR`, which wins over the defaults below.
+    pub fn with_config_dir(self, dir: PathBuf) -> Self {
+        self.set_config_dir(dir);
+        self
+    }
+
+    /// Pin the Claude config dir after construction: the host ensures
+    /// the Baaz-owned home and pins it here, so history and children
+    /// resolve through it even when this process's own env names
+    /// another config dir.
+    pub fn set_config_dir(&self, dir: PathBuf) {
+        *self.config_override.lock().expect("config mutex") = Some(dir);
+    }
+
     /// Override the session workspace cwd for stored-history lookup
     /// (tests). Production sets this from `OpenSession.workspace` in
     /// [`Self::spawn_launch`]; it is what [`history::stored_transcript_path`]
@@ -346,11 +365,41 @@ impl ClaudeCodeAdapter {
         self
     }
 
-    fn home(&self) -> Option<PathBuf> {
-        match &self.home_override {
-            Some(home) => Some(home.clone()),
-            None => std::env::var_os("HOME").map(PathBuf::from),
+    /// The Claude config dir this adapter reads history through and
+    /// spawns children with: the pinned dir first, then
+    /// `$CLAUDE_CONFIG_DIR` when set non-empty, then the test stand-in's
+    /// `.claude`, then the Baaz-owned home under this run's state dir
+    /// (which honours `BAAZ_STATE_DIR`). Infallible: every branch names
+    /// a dir, even when `HOME` is unset.
+    fn resolved_config_dir(&self) -> PathBuf {
+        if let Some(dir) = self.config_override.lock().expect("config mutex").clone() {
+            return dir;
         }
+        if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+            return PathBuf::from(dir);
+        }
+        match &self.home_override {
+            Some(home) => home.join(".claude"),
+            None => crate::home::default_home(),
+        }
+    }
+
+    /// Best-effort home upkeep before a spawn: re-run the absent-only
+    /// owner links over the resolved Baaz home, so entries the owner
+    /// created after adapter setup (`skills/`, `agents/`, …) are linked
+    /// on the next spawn instead of waiting for a restart. Cheap stat
+    /// checks only ([`provider::child_env::ensure_linked_dir`]); errors
+    /// are ignored — the spawn below reports an unusable home honestly.
+    fn prepare_home(&self) {
+        let home = self.resolved_config_dir();
+        let owner_root = match &self.home_override {
+            Some(owner) => crate::home::owner_config_dir(owner),
+            None => std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|owner| crate::home::owner_config_dir(&owner))
+                .unwrap_or_else(crate::home::default_home),
+        };
+        let _ = provider::child_env::ensure_linked_dir(&home, &owner_root, crate::home::LINKED_ENTRIES);
     }
 
     /// Mint a host→child control `request_id`. One sequence for every
@@ -474,9 +523,12 @@ impl ClaudeCodeAdapter {
                     .into(),
             });
         }
-        let running = RunningChild::spawn(&self.program, launch, &self.hub).map_err(|error| {
-            ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
-        })?;
+        let config = self.resolved_config_dir();
+        self.prepare_home();
+        let running =
+            RunningChild::spawn(&self.program, launch, &self.hub, &config).map_err(|error| {
+                ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
+            })?;
         *child = Some(running);
         // The guard drops here: `send_initialize` locks the child again to
         // write, and holding both would hang the open forever.
@@ -667,9 +719,12 @@ impl ClaudeCodeAdapter {
         // Requests the old child never answered die with it (Y1b review).
         self.hub.forget_pending();
         let launch = self.with_mcp_config(launch.clone())?;
-        let running = RunningChild::spawn(&self.program, &launch, &self.hub).map_err(|error| {
-            ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
-        })?;
+        let config = self.resolved_config_dir();
+        self.prepare_home();
+        let running =
+            RunningChild::spawn(&self.program, &launch, &self.hub, &config).map_err(|error| {
+                ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
+            })?;
         *self.child.lock().expect("child mutex") = Some(running);
         // A relaunched child restates the whole session, catalog included.
         self.send_initialize();
@@ -743,10 +798,10 @@ impl ClaudeCodeAdapter {
         // callers answer honest unavailable. Never scan other directories
         // when the workspace is known: that would serve one workspace's
         // transcript inside another.
-        let home = self.home()?;
+        let config = self.resolved_config_dir();
         let workspace = self.workspace.lock().expect("workspace mutex").clone();
         match workspace {
-            Some(workspace) => history::stored_transcript_path(&workspace, session_id, Some(&home))
+            Some(workspace) => history::transcript_path_for_config(&workspace, session_id, &config)
                 .filter(|candidate| candidate.is_file()),
             // A fresh adapter after a restart holds no workspace (resume
             // carries no cwd): fall back to an exact-id scan over every
@@ -754,18 +809,18 @@ impl ClaudeCodeAdapter {
             // the exact `<id>.jsonl` filename — zero or several matches
             // still refuse — so this locates the session's own file
             // without ever serving a neighbor's.
-            None => Self::scan_stored(&home, session_id),
+            None => Self::scan_stored(&config, session_id),
         }
     }
 
     /// The stored transcript for `session_id` by exact filename, over
-    /// every slug directory under `~/.claude/projects`. `Some` only on
+    /// every slug directory under `<config>/projects`. `Some` only on
     /// exactly one match: none — or two files claiming one id — refuses.
-    fn scan_stored(home: &std::path::Path, session_id: &str) -> Option<PathBuf> {
+    fn scan_stored(config: &std::path::Path, session_id: &str) -> Option<PathBuf> {
         if session_id.is_empty() || session_id.contains('/') {
             return None;
         }
-        let projects = home.join(".claude").join("projects");
+        let projects = config.join("projects");
         let entries = std::fs::read_dir(&projects).ok()?;
         let file_name = format!("{session_id}.jsonl");
         let mut hits = Vec::new();
@@ -886,10 +941,15 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         // parser tolerates that trailer. The child's `PATH` is the
         // login-shell `PATH` with the program's own directory first, so a
         // Dock launch still runs a home install and its `env`-shebang
-        // neighbours. No other env var is changed.
-        let output = std::process::Command::new(&self.program)
+        // neighbours; the inherited desktop-agent env is scrubbed (see
+        // [`provider::child_env`]). No Baaz home is set: a version check
+        // reads no store.
+        let mut version_command = std::process::Command::new(&self.program);
+        version_command
             .arg("--version")
-            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)))
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)));
+        provider::child_env::scrub_command(&mut version_command);
+        let output = version_command
             .output()
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not ask claude its version: {error}"),
@@ -978,10 +1038,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 self.spawn_launch(&launch)
             }
             Command::ListSessions { workspace, .. } => {
-                let home = self.home().ok_or_else(|| ProviderError::Unavailable {
-                    reason: "no home directory to look for stored sessions under".into(),
-                })?;
-                let projects = home.join(".claude").join("projects");
+                let projects = self.resolved_config_dir().join("projects");
                 let mut ids = Vec::new();
                 match workspace {
                     Some(workspace) => {
@@ -1668,6 +1725,8 @@ mod tests {
         // from it. The text echo's uuid marks; the tool-result frame (no
         // bubble) and the torn line mark nothing. Unknown workspace marks
         // nothing — honest unavailable, never a guess.
+        let _guard = crate::history::tests::lock_config_env();
+        let _cleared = crate::history::tests::SavedConfigDir::clear();
         let home = std::env::temp_dir().join("cc-seed-test-home");
         let workspace = std::env::temp_dir().join("cc-seed-test-work");
         let _ = std::fs::remove_dir_all(&home);
@@ -1728,6 +1787,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&other_workspace);
+    }
+
+    #[test]
+    fn the_pinned_config_dir_wins_over_home_and_env() {
+        use std::path::PathBuf;
+        let _guard = crate::history::tests::lock_config_env();
+        let pinned = PathBuf::from("/tmp/baaz-state/claude-home");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_home(PathBuf::from("/tmp/owner-home"))
+            .with_config_dir(pinned.clone());
+        // The pin wins even with the env var set.
+        let _saved =
+            crate::history::tests::SavedConfigDir::set(&PathBuf::from("/tmp/env-config"));
+        assert_eq!(adapter.resolved_config_dir(), pinned, "the pin wins over the env");
+        // Without the pin, the env var wins over the test home.
+        let unpinned =
+            ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(PathBuf::from("/tmp/owner-home"));
+        assert_eq!(
+            unpinned.resolved_config_dir(),
+            PathBuf::from("/tmp/env-config"),
+            "the env wins over the home"
+        );
+    }
+
+    #[test]
+    fn without_pin_or_env_history_reads_the_test_home_then_the_baaz_home() {
+        use std::path::PathBuf;
+        let _guard = crate::history::tests::lock_config_env();
+        let _cleared = crate::history::tests::SavedConfigDir::clear();
+        let adapter =
+            ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(PathBuf::from("/tmp/owner-home"));
+        assert_eq!(
+            adapter.resolved_config_dir(),
+            PathBuf::from("/tmp/owner-home/.claude"),
+            "a test home resolves through its own .claude"
+        );
+        let bare = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        assert_eq!(
+            bare.resolved_config_dir(),
+            crate::home::default_home(),
+            "production resolves through the Baaz-owned home"
+        );
+    }
+
+    #[test]
+    fn a_late_created_owner_dir_is_linked_on_the_next_spawn() {
+        let root = std::env::temp_dir().join(format!(
+            "cc-prepare-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        // The owner has settings but no skills dir yet: adapter setup
+        // links only what exists.
+        std::fs::create_dir_all(owner.join(".claude")).expect("owner claude dir");
+        std::fs::write(owner.join(".claude").join("settings.json"), "{}").expect("owner settings");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_home(owner.clone())
+            .with_config_dir(state.join("claude-home"));
+        adapter.prepare_home();
+        let home = state.join("claude-home");
+        assert!(
+            std::fs::symlink_metadata(home.join("settings.json")).expect("meta").file_type().is_symlink(),
+            "what exists at setup is linked"
+        );
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).is_err(),
+            "an absent source links nothing"
+        );
+        // The owner creates skills/ later: the next spawn's re-ensure
+        // picks it up without a restart.
+        std::fs::create_dir_all(owner.join(".claude").join("skills")).expect("late owner skills");
+        adapter.prepare_home();
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink(),
+            "a late-created owner dir is linked on the next spawn"
+        );
+        assert!(home.join("skills").is_dir(), "the linked dir reads as a dir");
+        // Idempotent: a third run changes nothing.
+        adapter.prepare_home();
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

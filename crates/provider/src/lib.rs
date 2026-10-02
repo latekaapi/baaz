@@ -40,6 +40,7 @@
 
 mod ack;
 mod capability;
+pub mod child_env;
 mod command;
 pub mod env_path;
 mod error;
