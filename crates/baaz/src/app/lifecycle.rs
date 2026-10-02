@@ -4575,29 +4575,34 @@ impl Harness {
     /// destination's folded transcript shows its pack turn terminally
     /// failed — the reply's last word is an error card, not a recoverable
     /// card inside a reply that answered past it — the run fails with the
-    /// turn's reason instead of going silently Active. Only a Prepared
-    /// run can fail here: once the move leaves Prepared (acknowledged and
-    /// activated, failed, cancelled) reconciling stops for it, so a later
+    /// turn's reason instead of going silently Active. The pack is acked
+    /// when its turn STARTS, so this judges it in Prepared, Acknowledged or
+    /// Activated — once: after the pack turn is judged (completed or
+    /// failed), reconciling stops for that run, so a later
     /// failed turn never fails an active handoff or unlinks its chain.
     /// Called after every settled turn on either lane (the muse lane's
     /// `turn/completed` lands in `maybe_rewrite_byline`, the provider
     /// lane's `TurnFinished` in its own arm); a no-op without a handoff.
     pub(crate) fn reconcile_pack_turns(&mut self, cx: &mut Context<Self>) {
-        let failures: Vec<(String, String)> = self
+        let pending: Vec<(String, String)> = self
             .handoffs
             .iter()
-            .filter(|(_, run)| {
-                run.destination_session.is_some()
-                    && matches!(run.state, aui_protocol::HandoffState::Prepared)
-            })
-            .filter_map(|(_, run)| {
-                let dest = run.destination_session.clone()?;
-                let reason = self.find_view(&dest, cx)?.read(cx).pack_turn_failed_reason()?;
-                Some((dest, reason))
-            })
+            .filter(|(_, run)| run.pack_turn_can_fail())
+            .filter_map(|(source, run)| Some((source.clone(), run.destination_session.clone()?)))
             .collect();
-        for (dest, reason) in failures {
-            self.fail_handoff(dest, reason, cx);
+        for (source, dest) in pending {
+            let Some(outcome) = self.find_view(&dest, cx).and_then(|view| view.read(cx).pack_turn_outcome())
+            else {
+                continue;
+            };
+            match outcome {
+                Some(reason) => self.fail_handoff(dest, reason, cx),
+                None => {
+                    if let Some(run) = self.handoffs.get_mut(&source) {
+                        run.note_pack_completed();
+                    }
+                }
+            }
         }
     }
 
@@ -7342,7 +7347,7 @@ mod tests {
         let baaz = lane_harness(vc, &state.2);
         let reason = "model `gpt-6-astra` does not exist or you lack access";
         let pack_full = "Continuing a session handed off from Claude Code. Context follows.\n\n## Original goal\nChart the ferry routes";
-        // A muse destination with the pack submitted: the run is Prepared,
+        // A muse destination with the pack submitted and acknowledged: the run is Active,
         // the row exists, the chain links are in place.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
@@ -7380,6 +7385,10 @@ mod tests {
                 run.note_quiescing();
                 run.note_checkpointed(pack);
                 run.note_prepared("dest-m".to_owned());
+                // The real order: the pack is acknowledged when its turn
+                // STARTS, so the run is already Active when the turn fails.
+                assert!(run.acknowledge(1), "the pack ack lands");
+                run.activate();
                 harness.handoffs.insert("src-m".to_owned(), run);
                 harness.sessions.push(sidebar::local_started_row(
                     "dest-m",

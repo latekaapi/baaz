@@ -509,6 +509,12 @@ pub struct HandoffRun {
     /// is already the extractive one). Every transition out of the wait
     /// clears this, so a settled card never reads "Summarising…".
     pub summarising: bool,
+    /// The destination's pack turn has reached its terminal state and been
+    /// judged, once. Until then a failed pack turn fails the move in any
+    /// live state — the ack arrives when the turn STARTS, so a pack that
+    /// fails at its model ("model … does not exist") lands after
+    /// activation. After it, a later failed turn is the destination's own.
+    pub pack_settled: bool,
     /// The fresh destination session, once it exists.
     pub destination_session: Option<String>,
     /// The failure or refusal reason, on Failed/Refused.
@@ -554,6 +560,7 @@ impl HandoffRun {
             to_model,
             pack: None,
             summarising: false,
+            pack_settled: false,
             destination_session: None,
             reason: None,
         })
@@ -580,6 +587,7 @@ impl HandoffRun {
             to_model: String::new(),
             pack: None,
             summarising: false,
+            pack_settled: false,
             destination_session: None,
             reason: Some(refusal.to_string()),
         }
@@ -688,20 +696,38 @@ impl HandoffRun {
         }
     }
 
-    /// The destination's pack turn reached its terminal failed state
-    /// before the handoff activated: the handoff fails with the turn's
-    /// reason instead of going silently Active. A no-op once the move
-    /// left Prepared — cancelled, failed, acknowledged or already
-    /// active: after activation the destination owns its turns, and a
-    /// later failure there never unlinks the chain. An already-failed
-    /// run keeps its first reason.
+    /// The destination's pack turn reached its terminal failed state: the
+    /// handoff fails with the turn's reason instead of going silently
+    /// Active. The pack is acknowledged when its turn starts, so this
+    /// applies from Prepared through Activated — exactly once, while the
+    /// pack turn is unjudged ([`Self::pack_settled`]). Cancelled, refused
+    /// and already-failed runs keep their state and first reason.
     pub fn fail_pack_turn(&mut self, reason: String) {
-        if !matches!(self.state, HandoffState::Prepared) {
+        if self.pack_settled || !self.pack_turn_can_fail() {
             return;
         }
+        self.pack_settled = true;
         self.summarising = false;
         self.reason = Some(reason.clone());
         self.state = HandoffState::Failed { reason };
+    }
+
+    /// The pack turn finished without failing: judge it once, so no later
+    /// turn on the destination can fail the move.
+    pub fn note_pack_completed(&mut self) {
+        self.pack_settled = true;
+    }
+
+    /// Whether a pack-turn failure can still fail this move: it has a
+    /// destination, its pack is unjudged, and it is live (Prepared,
+    /// Acknowledged or Activated).
+    pub fn pack_turn_can_fail(&self) -> bool {
+        !self.pack_settled
+            && self.destination_session.is_some()
+            && matches!(
+                self.state,
+                HandoffState::Prepared | HandoffState::Acknowledged | HandoffState::Activated
+            )
     }
 
     /// Cancel before Acknowledged aborts cleanly. Returns whether a
@@ -1287,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_turn_failure_after_activation_never_unlinks_the_chain() {
+    fn a_pack_turn_that_fails_after_activation_fails_the_handoff_once() {
         let mut run = run();
         run.note_quiescing();
         run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
@@ -1295,15 +1321,26 @@ mod tests {
         assert!(run.acknowledge(7));
         run.activate();
         assert!(matches!(run.state, HandoffState::Activated));
-        // A pack turn settling failed after activation is the
-        // destination's business, never the handoff's: the move stays
-        // Active and keeps no failure reason.
+        // The ack came when the pack turn STARTED; the owner's real case
+        // (a model that does not exist) fails after it. That still fails
+        // the move, with the turn's reason.
         run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
-        assert!(
-            matches!(run.state, HandoffState::Activated),
-            "an active handoff stays active, state is {:?}",
-            run.state
-        );
+        assert!(matches!(run.state, HandoffState::Failed { .. }), "state is {:?}", run.state);
+        assert_eq!(run.reason.as_deref(), Some("model `gpt-6-astra` does not exist or you lack access"));
+        assert!(!run.pack_turn_can_fail(), "judged once");
+    }
+
+    #[test]
+    fn a_later_failed_turn_never_fails_a_handoff_whose_pack_completed() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_prepared("dst".to_owned());
+        assert!(run.acknowledge(7));
+        run.activate();
+        run.note_pack_completed();
+        run.fail_pack_turn("a later turn failed".to_owned());
+        assert!(matches!(run.state, HandoffState::Activated), "state is {:?}", run.state);
         assert_eq!(run.reason, None);
     }
 
