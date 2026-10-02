@@ -1227,6 +1227,7 @@ pub fn live_statuses() -> Vec<ProviderStatus> {
 /// Whether the account menu's usage refresh is due: at most every
 /// [`USAGE_REFRESH_THROTTLE`] per provider. Marks the refresh when due,
 /// so the caller that goes ahead owns exactly one refresh per window.
+#[cfg(test)]
 pub fn note_usage_refresh() -> bool {
     !note_usage_refresh_for(&ProviderId::all()).is_empty()
 }
@@ -1331,6 +1332,7 @@ pub fn mark_usage_pending(id: ProviderId) {
 }
 
 /// The lanes with a reading still to persist (see [`mark_usage_pending`]).
+#[cfg(test)]
 pub fn usage_pending() -> Vec<ProviderId> {
     live_service().usage_pending.iter().copied().collect()
 }
@@ -1398,12 +1400,6 @@ pub fn record_muse_snapshot_at(
     save_cache_in_background(statuses);
 }
 
-/// Persist the Muse snapshot beside a tier answer: the weekly fraction
-/// under the tier's own label, so the menu shows the newest reading
-/// with its true age rather than the last menu-open peek.
-pub fn record_muse_snapshot(plan: Option<String>, used_fraction: Option<f64>) {
-    record_muse_snapshot_at(plan, used_fraction, None);
-}
 
 /// Persist a background probe's usage reading (today the Codex
 /// app-server probe's): only the usage is taken, never the probe's

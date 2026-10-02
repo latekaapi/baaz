@@ -255,8 +255,8 @@ mod tests {
         let mut found = session_sources(&owner, "sess-1");
         found.sort_by(|a, b| a.rel.cmp(&b.rel));
         assert_eq!(found.len(), 2, "transcript plus companion: {found:?}");
-        assert!(found.iter().any(|entry| entry.rel == PathBuf::from("projects/-work/sess-1.jsonl") && !entry.is_dir));
-        assert!(found.iter().any(|entry| entry.rel == PathBuf::from("projects/-work/sess-1") && entry.is_dir));
+        assert!(found.iter().any(|entry| entry.rel == *"projects/-work/sess-1.jsonl" && !entry.is_dir));
+        assert!(found.iter().any(|entry| entry.rel == *"projects/-work/sess-1" && entry.is_dir));
         for entry in &found {
             assert_eq!(baaz_target(&root.join("state"), &entry.rel), root.join("state").join("claude-home").join(&entry.rel));
         }

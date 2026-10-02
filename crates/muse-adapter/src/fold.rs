@@ -4300,7 +4300,7 @@ mod tests {
         started(&mut fold, "s");
         let deltas = approve_shell(&mut fold);
         assert!(
-            approval_states(&deltas).iter().any(|state| *state == ApprovalState::Approving),
+            approval_states(&deltas).contains(&ApprovalState::Approving),
             "the person's allow reads Approving"
         );
         // The tool starts, then completes, all before the turn ends.
@@ -4322,7 +4322,7 @@ mod tests {
             "the card reads allowed mid-turn: {latest:?}"
         );
         assert!(
-            !approval_states(&done).iter().any(|state| *state == ApprovalState::Approving),
+            !approval_states(&done).contains(&ApprovalState::Approving),
             "nothing still Approving after the tool finished"
         );
     }
@@ -4351,7 +4351,7 @@ mod tests {
         );
         let states = approval_states(&finished);
         assert!(
-            !states.iter().any(|state| *state == ApprovalState::Approving),
+            !states.contains(&ApprovalState::Approving),
             "a failed turn end settles nothing back to Approving: {states:?}"
         );
         let session = fold.session("s").expect("session");
@@ -4374,7 +4374,7 @@ mod tests {
         approve_shell(&mut fold);
         let done = notify(&mut fold, "item/completed", gated_tool_item("cancelled", 1));
         assert!(
-            approval_states(&done).iter().any(|state| *state == ApprovalState::Denied),
+            approval_states(&done).contains(&ApprovalState::Denied),
             "the cancelled completion denies the card, never fails it: {done:?}"
         );
         assert!(
@@ -4394,7 +4394,7 @@ mod tests {
             serde_json::json!({"turnId": "t-1", "terminal": "cancelled"}),
         );
         assert!(
-            approval_states(&finished).iter().any(|state| *state == ApprovalState::Denied),
+            approval_states(&finished).contains(&ApprovalState::Denied),
             "the cancelled turn end denies the card: {finished:?}"
         );
     }

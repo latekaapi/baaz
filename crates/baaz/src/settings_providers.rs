@@ -539,7 +539,7 @@ impl Harness {
             return None;
         }
         let p = cx.aui().colors;
-        let (n_claude, n_codex) = crate::session_migration::counts(&plan);
+        let (n_claude, n_codex) = crate::session_migration::counts(plan);
         let title = crate::session_migration::prompt_title(n_claude, n_codex);
         let paths_label = if self.migration_paths_expanded { "Hide paths" } else { "Show paths" };
         let paths_toggle_label = format!("{paths_label} ({} files)", plan.len());
@@ -555,7 +555,7 @@ impl Harness {
         );
         if self.migration_paths_expanded {
             let mut list = v_flex().gap(px(scale::SP_1)).pt(px(scale::SP_1));
-            for path in crate::session_migration::row_paths(&plan) {
+            for path in crate::session_migration::row_paths(plan) {
                 list = list.child(
                     gpui::div()
                         .text_color(p.ink_3)

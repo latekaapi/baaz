@@ -95,6 +95,7 @@ impl SessionView {
     /// Remember the pack's texts when it submits, so the view can hide the
     /// destination's first user turn (the divider stands for it) live and
     /// after a replay, where the bubble shows the summary instead.
+    #[cfg(test)]
     pub(crate) fn note_handoff_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
         self.handoff_pack_full = Some(pack);
         self.handoff_pack_display = Some(display);
@@ -156,7 +157,7 @@ impl SessionView {
             (Some(full), display) => (full.as_str(), display.as_ref().map(String::as_str)),
             _ => return None,
         };
-        let Some(session) = self.fold.session(&self.session_id) else { return None };
+        let session = self.fold.session(&self.session_id)?;
         let mut turns = session.turns.iter();
         for turn in turns.by_ref() {
             let is_pack = match turn {
