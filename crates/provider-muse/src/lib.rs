@@ -426,13 +426,23 @@ impl Drop for MuseAdapter {
 /// view events at all (`docs/01-transport.md` §4), so an app that wants a
 /// transcript may never set it.
 ///
+/// The child spawns with the shared scrubbed env
+/// ([`provider::child_env`]): that crate's `Command` lives inside
+/// `muse-client`, out of reach here, so the scrub holds for the spawn call
+/// and restores afterwards (see
+/// [`provider::child_env::with_scrubbed_env`]). Title and summary side
+/// sessions ride this same child over the wire — no new process — so they
+/// are covered by this one scrub.
+///
 /// Blocking: run it on the background executor.
 pub fn spawn(program: &str) -> Result<MuseClient, ProviderError> {
-    MuseClient::spawn(&MuseConfig {
-        program: program.into(),
-        trust_workspace: true,
-        no_session_log: false,
-        extra_args: Vec::new(),
+    provider::child_env::with_scrubbed_env(|| {
+        MuseClient::spawn(&MuseConfig {
+            program: program.into(),
+            trust_workspace: true,
+            no_session_log: false,
+            extra_args: Vec::new(),
+        })
     })
     .map_err(translate::transport_error)
 }

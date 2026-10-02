@@ -424,14 +424,18 @@ pub fn binary_path(id: ProviderId) -> Option<PathBuf> {
 ///
 /// The child's `PATH` is the login-shell `PATH` with the program's own
 /// directory first, so a Dock launch (minimal `PATH`) still runs a home
-/// install and its `env`-shebang neighbours. No other env var is changed.
+/// install and its `env`-shebang neighbours; the inherited desktop-agent
+/// env is scrubbed (see [`provider::child_env`]). No Baaz home is set:
+/// probes read the owner's home, exactly what they verify.
 fn real_run(program: &str, args: &[String], timeout: Duration) -> RunOutcome {
-    let mut child = match std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    provider::child_env::scrub_command(&mut command);
+    let mut child = match command.spawn()
     {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

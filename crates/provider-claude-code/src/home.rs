@@ -1,0 +1,206 @@
+//! Baaz's own Claude home: `CLAUDE_CONFIG_DIR` for every claude child.
+//!
+//! Baaz used to write into the owner's `~/.claude` (`projects/`,
+//! `sessions/`), which is exactly the store Claude for Mac scans — and a
+//! Baaz launched from a desktop agent session stamped its transcripts as
+//! the desktop's own. Children now run with
+//! `CLAUDE_CONFIG_DIR=<state dir>/claude-home` plus an empty
+//! `CLAUDE_SECURESTORAGE_CONFIG_DIR` (empty, not unset: only the empty form
+//! keeps the shared `Claude Code-credentials` Keychain item instead of a
+//! suffixed one that does not exist).
+//!
+//! The home holds symlinks to the owner's `settings.json`, `skills/` and
+//! `plugins/` (plus `CLAUDE.md`, `agents/` and `commands/` when they
+//! exist): hooks, permissions, skills and plugins keep applying, while
+//! `projects/` and `sessions/` stay private to Baaz. Links are created only
+//! when absent — never copied, never overwritten — and nothing is ever
+//! written inside the owner's `~/.claude`.
+
+use std::path::{Path, PathBuf};
+
+/// The Baaz-owned Claude home's name under the state dir.
+pub const HOME_DIR_NAME: &str = "claude-home";
+
+/// Owner entries symlinked into the Baaz home when they exist.
+pub const LINKED_ENTRIES: &[&str] =
+    &["settings.json", "skills", "plugins", "CLAUDE.md", "agents", "commands"];
+
+/// `<state_dir>/claude-home`.
+pub fn home_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join(HOME_DIR_NAME)
+}
+
+/// The default Baaz-owned home for this run: under
+/// [`provider::child_env::state_dir`], so `BAAZ_STATE_DIR` redirects it.
+/// Env-only: creates nothing.
+pub fn default_home() -> PathBuf {
+    home_dir(&provider::child_env::state_dir())
+}
+
+/// The owner's Claude root: `~/.claude` under `owner_home`.
+pub fn owner_config_dir(owner_home: &Path) -> PathBuf {
+    owner_home.join(".claude")
+}
+
+/// Ensure the Baaz home exists with its owner symlinks: creates
+/// `<state_dir>/claude-home` and links every [`LINKED_ENTRIES`] entry
+/// whose source exists in the owner's `~/.claude` and whose target is
+/// absent. Idempotent; never overwrites a real file, never copies, never
+/// writes inside the owner's home. Returns the home path.
+pub fn ensure_home(owner_home: &Path, state_dir: &Path) -> std::io::Result<PathBuf> {
+    let home = home_dir(state_dir);
+    provider::child_env::ensure_linked_dir(&home, &owner_config_dir(owner_home), LINKED_ENTRIES)?;
+    Ok(home)
+}
+
+/// The child environment additions for a claude child rooted at `home`:
+/// `CLAUDE_CONFIG_DIR` naming the Baaz home plus an empty
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` so the child keeps the owner's
+/// existing Keychain login. Applied on top of the
+/// [`provider::child_env`] scrub — never instead of it.
+pub fn child_env(home: &Path) -> Vec<(String, String)> {
+    vec![
+        ("CLAUDE_CONFIG_DIR".to_owned(), home.to_string_lossy().into_owned()),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(), String::new()),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "provider-cc-home-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp root");
+        root
+    }
+
+    #[test]
+    fn the_home_lives_under_the_given_state_dir() {
+        let state = PathBuf::from("/tmp/baaz-state");
+        assert_eq!(home_dir(&state), PathBuf::from("/tmp/baaz-state/claude-home"));
+    }
+
+    #[test]
+    fn links_reach_the_owner_files_and_skip_what_is_absent() {
+        let root = temp_root("links");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        std::fs::create_dir_all(owner.join(".claude").join("skills")).expect("owner skills");
+        std::fs::create_dir_all(owner.join(".claude").join("plugins")).expect("owner plugins");
+        std::fs::write(owner.join(".claude").join("settings.json"), "{\"model\":\"sonnet\"}")
+            .expect("owner settings");
+        // `CLAUDE.md`, `agents/` and `commands/` absent: linked nothing.
+
+        let home = ensure_home(&owner, &state).expect("ensure");
+        assert_eq!(home, state.join("claude-home"));
+        for name in ["settings.json", "skills", "plugins"] {
+            let dst = home.join(name);
+            assert!(
+                std::fs::symlink_metadata(&dst).expect("linked").file_type().is_symlink(),
+                "{name} is a link, not a copy"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.join("settings.json")).expect("reads through"),
+            "{\"model\":\"sonnet\"}"
+        );
+        for name in ["CLAUDE.md", "agents", "commands"] {
+            assert!(
+                std::fs::symlink_metadata(home.join(name)).is_err(),
+                "absent source links nothing: {name}"
+            );
+        }
+        // The owner's tree gained nothing.
+        assert!(
+            std::fs::symlink_metadata(owner.join(".claude").join("projects")).is_err(),
+            "nothing is written inside the owner's home"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn link_creation_is_idempotent_and_never_overwrites_a_real_file() {
+        let root = temp_root("idempotent");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        std::fs::create_dir_all(owner.join(".claude")).expect("owner claude dir");
+        std::fs::write(owner.join(".claude").join("settings.json"), "{}").expect("owner settings");
+
+        ensure_home(&owner, &state).expect("first ensure");
+        ensure_home(&owner, &state).expect("second ensure is a no-op");
+        let home = state.join("claude-home");
+        assert!(std::fs::symlink_metadata(home.join("settings.json")).expect("meta").file_type().is_symlink());
+
+        // A real file in the way survives re-ensures.
+        std::fs::remove_file(home.join("settings.json")).expect("unlink");
+        std::fs::write(home.join("settings.json"), "mine").expect("a real file in the way");
+        ensure_home(&owner, &state).expect("re-ensure");
+        assert_eq!(
+            std::fs::read_to_string(home.join("settings.json")).expect("reads"),
+            "mine",
+            "a real file is never overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_claude_child_env_names_the_home_and_blanks_secure_storage() {
+        let home = PathBuf::from("/tmp/baaz-state/claude-home");
+        let env = child_env(&home);
+        assert!(
+            env.contains(&(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/tmp/baaz-state/claude-home".to_owned()
+            )),
+            "the child writes to the Baaz home: {env:?}"
+        );
+        assert!(
+            env.contains(&("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(), String::new())),
+            "empty, not unset — the shared Keychain item: {env:?}"
+        );
+    }
+
+    #[test]
+    fn the_claude_child_env_carries_none_of_the_scrubbed_vars() {
+        // The full child env is the scrubbed parent plus the two home
+        // vars: compose both halves here and assert the whole.
+        let parent = [
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "claude-desktop"),
+            ("CLAUDE_CODE_SESSION_ID", "s-1"),
+            ("CLAUDE_AGENT_SDK_VERSION", "1"),
+            ("CLAUDE_PID", "1"),
+            ("CLAUDE_EFFORT", "high"),
+            ("ANTHROPIC_BASE_URL", "http://desktop:2000"),
+            ("ANTHROPIC_API_KEY", "owner-key"),
+            ("PATH", "/usr/bin:/bin"),
+        ];
+        let entrypoint = true;
+        let mut full: Vec<(String, String)> = parent
+            .iter()
+            .filter(|(name, _)| !provider::child_env::should_scrub(name, entrypoint))
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        full.extend(child_env(Path::new("/tmp/baaz-state/claude-home")));
+        for (name, _) in &full {
+            assert!(
+                !provider::child_env::should_scrub(name, entrypoint),
+                "no scrubbed var survives: {name}"
+            );
+        }
+        let names: Vec<&str> = full.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"CLAUDE_CONFIG_DIR"));
+        assert!(names.contains(&"CLAUDE_SECURESTORAGE_CONFIG_DIR"));
+        assert!(names.contains(&"ANTHROPIC_API_KEY"), "owner auth survives");
+        assert!(names.contains(&"PATH"), "PATH survives");
+    }
+}

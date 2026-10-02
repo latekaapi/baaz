@@ -151,6 +151,22 @@ pub fn deterministic_script(nonce: &str) -> Vec<ScriptChunk> {
 }
 
 
+/// Extra env for every terminal PTY shell: the identity markers plus the
+/// shared env scrub ([`provider::child_env`]) as blanked values. The PTY
+/// backend only adds vars, never removes them, so each scrubbed var the
+/// parent carries is set to `""` — empty is falsy for the node CLIs that
+/// read these, which behave as if unset. Deliberately no Baaz homes: a
+/// shell the person drives keeps the owner's own `~/.claude` / `~/.codex`,
+/// only the inherited desktop-agent vars go.
+pub fn pty_extra_env() -> Vec<(String, String)> {
+    let mut env = vec![
+        ("BAAZ_TERMINAL".to_owned(), "1".to_owned()),
+        ("CLICOLOR".to_owned(), "1".to_owned()),
+    ];
+    env.extend(provider::child_env::scrub_overrides());
+    env
+}
+
 /// A tab title from a command line: the first line, without a leading
 /// `$ ` prompt, capped at 32 characters.
 pub fn title_from_command(command: &str) -> String {
@@ -306,9 +322,12 @@ impl TerminalHost {
         // capability is the library's job; deciding that this terminal's
         // tools should use it is the host's, so it is set here. A user who
         // wants it off can unset it in their rc, which runs after this.
-        let config = aui_terminal::PtyConfig::login(cwd)
-            .with_env("BAAZ_TERMINAL", "1")
-            .with_env("CLICOLOR", "1");
+        // The scrub rides along ([`pty_extra_env`]): the inherited
+        // desktop-agent vars blank, the owner's homes untouched.
+        let mut config = aui_terminal::PtyConfig::login(cwd);
+        for (key, value) in pty_extra_env() {
+            config = config.with_env(key, value);
+        }
         let nonce = config.nonce().to_owned();
         let mut pty = aui_terminal::Pty::new();
         let _ = pty.spawn_config(&config);
@@ -515,6 +534,81 @@ mod tests {
         assert_eq!(title_from_command("pnpm vitest"), "pnpm vitest");
         assert_eq!(title_from_command("$ git status -sb"), "git status -sb");
         assert_eq!(title_from_command(""), "shell");
+    }
+
+    /// Serialize the tests that mutate the scrubbed env names: the
+    /// runner shares one environment across threads.
+    static SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct SavedScrubEnv {
+        vars: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl SavedScrubEnv {
+        fn save(names: &[&str]) -> Self {
+            Self { vars: names.iter().map(|name| ((*name).to_owned(), std::env::var_os(name))).collect() }
+        }
+    }
+
+    impl Drop for SavedScrubEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pty_shells_keep_markers_and_blank_the_desktop_inheritance() {
+        let _guard = SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _saved = SavedScrubEnv::save(&[
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_SESSION_ID",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+        ]);
+        std::env::set_var("CLAUDECODE", "1");
+        std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "claude-desktop");
+        std::env::set_var("CLAUDE_CODE_SESSION_ID", "s-desktop");
+        std::env::set_var("ANTHROPIC_BASE_URL", "http://desktop:2000");
+        std::env::set_var("ANTHROPIC_API_KEY", "owner-key");
+
+        let env = pty_extra_env();
+        // The markers that make the terminal Baaz's and colourful.
+        assert!(env.contains(&("BAAZ_TERMINAL".to_owned(), "1".to_owned())));
+        assert!(env.contains(&("CLICOLOR".to_owned(), "1".to_owned())));
+        // The inherited desktop vars blank — never the homes.
+        for name in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "ANTHROPIC_BASE_URL"] {
+            assert!(
+                env.contains(&(name.to_owned(), String::new())),
+                "scrubbed vars blank: {name}"
+            );
+        }
+        assert!(
+            !env.iter().any(|(name, _)| name == "CLAUDE_CONFIG_DIR" || name == "CODEX_HOME"),
+            "PTY shells keep the owner's homes: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|(name, _)| name == "ANTHROPIC_API_KEY"),
+            "owner auth is untouched: {env:?}"
+        );
+    }
+
+    #[test]
+    fn pty_shells_keep_an_owner_base_url_off_a_plain_launch() {
+        let _guard = SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _saved = SavedScrubEnv::save(&["CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_BASE_URL"]);
+        std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://owner-proxy:8443");
+        let env = pty_extra_env();
+        assert!(
+            !env.iter().any(|(name, _)| name == "ANTHROPIC_BASE_URL"),
+            "an owner-set value on a plain launch survives: {env:?}"
+        );
     }
 
     /// A rerun goes through [`pick_tab`] with the originating tab as the

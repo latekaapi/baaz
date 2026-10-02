@@ -325,6 +325,13 @@ fn open_provider(id: ProviderId, socket: &Path) -> Result<Provider, ProviderErro
             let adapter = provider_claude_code::ClaudeCodeAdapter::new(&program);
             adapter.set_terminal_relay(claude_terminal_relay(socket));
             adapter.set_use_own_mcp(use_own_mcp.claude_code);
+            // The Baaz-owned Claude home: ensured here, pinned on the
+            // adapter, so every child this adapter spawns writes to
+            // `<state>/claude-home` (never the owner's `~/.claude`) and
+            // history resolves through the same dir. Best-effort: on
+            // failure the adapter still resolves to the same path, and
+            // the spawn reports an unusable home honestly.
+            pin_claude_home(&adapter);
             Provider::new(adapter)
         }
         ProviderId::Codex => {
@@ -335,6 +342,11 @@ fn open_provider(id: ProviderId, socket: &Path) -> Result<Provider, ProviderErro
             let adapter = provider_codex::CodexAdapter::new(&program);
             adapter.set_terminal_relay(codex_terminal_relay(socket));
             adapter.set_use_own_mcp(use_own_mcp.codex);
+            // The Baaz-owned Codex home: ensured here, pinned on the
+            // adapter, so every app-server this adapter spawns runs with
+            // `CODEX_HOME=<state>/codex-home`. The rotating `auth.json`
+            // link is re-checked before each spawn by the adapter itself.
+            pin_codex_home(&adapter);
             Provider::new(adapter)
         }
         ProviderId::Muse => {
@@ -364,6 +376,32 @@ pub(crate) fn codex_terminal_relay(socket: &Path) -> provider_codex::TerminalRel
     provider_codex::TerminalRelay {
         bridge: crate::terminal::relay::bridge_path(),
         socket: terminal_socket_path(socket),
+    }
+}
+
+/// Ensure the Baaz-owned Claude home and pin it on `adapter`, so its
+/// children and its history resolve through `<state>/claude-home` even
+/// when this process's own env names another config dir. Best-effort: a
+/// failure is logged and the adapter keeps its default resolution (the
+/// same path), so the open still proceeds.
+fn pin_claude_home(adapter: &provider_claude_code::ClaudeCodeAdapter) {
+    let state = crate::store::support_dir();
+    let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+    match provider_claude_code::home::ensure_home(&owner, &state) {
+        Ok(home) => adapter.set_config_dir(home),
+        Err(error) => eprintln!("baaz: could not prepare the Baaz Claude home: {error}"),
+    }
+}
+
+/// Ensure the Baaz-owned Codex home and pin its state dir on `adapter`,
+/// so its app-servers run with `CODEX_HOME=<state>/codex-home`. Same
+/// best-effort rule as [`pin_claude_home`].
+fn pin_codex_home(adapter: &provider_codex::CodexAdapter) {
+    let state = crate::store::support_dir();
+    let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+    match provider_codex::home::ensure_home(&owner, &state) {
+        Ok(_) => adapter.set_state_dir(state),
+        Err(error) => eprintln!("baaz: could not prepare the Baaz Codex home: {error}"),
     }
 }
 

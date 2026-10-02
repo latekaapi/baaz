@@ -856,9 +856,27 @@ impl RunningChild {
     /// The fold is shared with the adapter (for `ReadAccount`) and locked
     /// one line at a time, never for the whole stream.
     /// Blocking: run it on the background executor.
+    /// Spawn `codex app-server` reading the owner's home: the status
+    /// probe and the sign-in/out flows, which verify or change the
+    /// owner's own login. The inherited desktop-agent env is still
+    /// scrubbed ([`provider::child_env`]); only the home stays the
+    /// owner's. Session children use [`Self::spawn_with_env`].
     pub fn spawn(
         program: &str,
         extra_args: &[String],
+        fold: Arc<Mutex<CodexFold>>,
+        events: Sender<ProviderEvent>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_env(program, extra_args, &[], fold, events)
+    }
+
+    /// Spawn `codex app-server` for a session: `env` — the Baaz-owned
+    /// `CODEX_HOME` from the caller — rides on top of the scrub, so Baaz
+    /// threads never land in the owner's `~/.codex` listing.
+    pub fn spawn_with_env(
+        program: &str,
+        extra_args: &[String],
+        env: &[(String, String)],
         fold: Arc<Mutex<CodexFold>>,
         events: Sender<ProviderEvent>,
     ) -> std::io::Result<Self> {
@@ -867,15 +885,21 @@ impl RunningChild {
         // they are process-scoped — this child's config only. The child's
         // `PATH` is the login-shell `PATH` with the program's own directory
         // first, so a Dock launch still runs a home install and its
-        // `env`-shebang neighbours. No other env var is changed.
-        let mut child = Command::new(program)
+        // `env`-shebang neighbours. The inherited desktop-agent env is
+        // scrubbed ([`provider::child_env`]).
+        let mut command = Command::new(program);
+        command
             .arg("app-server")
             .args(extra_args)
             .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        provider::child_env::scrub_command(&mut command);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
         let stdin_raw = child.stdin.take().expect("stdin piped");
         let stdin = Arc::new(Mutex::new(stdin_raw));
