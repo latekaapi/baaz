@@ -52,7 +52,7 @@ pub(crate) struct BrowserVisibility {
     pub kind_browser: bool,
     /// This webview's session is the active one.
     pub session_active: bool,
-    /// The Settings dialog or the Providers sheet stands open.
+    /// The Settings page stands open.
     pub settings_open: bool,
     /// The ⌘K palette (any list) stands open.
     pub palette_open: bool,
@@ -512,7 +512,7 @@ impl Harness {
         // shows its session's Browser kind with nothing over it.
         let overlays = self.overlays.read(cx);
         let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
-        let settings_open = overlays.settings.is_some() || self.muse_sheet;
+        let settings_open = self.settings_open() || self.muse_sheet;
         let palette_open = overlays.palette.is_some();
         let menu_open = menu_kind.is_some_and(|kind| kind != MenuKind::Account)
             || overflow
