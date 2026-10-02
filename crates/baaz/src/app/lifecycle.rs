@@ -1258,6 +1258,40 @@ impl Harness {
         provider_muse::terminal::attach_resume(params, &session_id, &spec.command, &spec.args);
     }
 
+    /// The cached muse `model/list` ids across the open and parked views:
+    /// what a muse start checks its stored default against. Empty means
+    /// nothing is known yet — never a reason to drop.
+    fn muse_catalog_ids(&self, cx: &gpui::App) -> Vec<String> {
+        let mut catalog: Vec<String> = Vec::new();
+        if let Some(active) = self.active.clone() {
+            catalog.extend(active.read(cx).cached_muse_catalog_ids());
+        }
+        for (_, cached) in &self.session_cache {
+            catalog.extend(cached.read(cx).cached_muse_catalog_ids());
+        }
+        catalog
+    }
+
+    /// The `session/start` params for a new session in `project`: the
+    /// project's root and defaults through the one guarded helper, so a
+    /// new session and a handoff destination to muse filter alike, and a
+    /// Codex or Claude Code default never meets the muse catalog. `None`
+    /// when there is no such project — the caller's cue to start nothing.
+    fn new_session_params(
+        &self,
+        project: Option<&str>,
+        cx: &gpui::App,
+    ) -> Option<muse_client::schema::SessionStartParams> {
+        let catalog = self.muse_catalog_ids(cx);
+        projects::checked_start_params(
+            &self.projects,
+            project,
+            &self.new_provider,
+            &catalog,
+            self.args.approval_mode.clone(),
+        )
+    }
+
     pub(crate) fn new_session_in(
         &mut self,
         project: Option<String>,
@@ -1375,9 +1409,7 @@ impl Harness {
         // different thing, and on this server it does not reach
         // `promptUnmatched`. The params carry the project's root and its
         // defaults, with the command line's approval mode winning.
-        let Some(mut params) =
-            projects::start_params(&self.projects, current.as_deref(), &self.new_provider, self.args.approval_mode.clone())
-        else {
+        let Some(mut params) = self.new_session_params(current.as_deref(), cx) else {
             if current.is_none() {
                 // No project to start in, which is an ordinary state and not
                 // a failure: the session goes to the default workspace, so a
@@ -1398,21 +1430,12 @@ impl Harness {
             crate::baaz_log!("new: current project is unavailable; starting nothing");
             return;
         };
-        // The stored muse default rides only when the cached muse
-        // `model/list` still names it: a foreign pick kept through
-        // migration would otherwise fail the turn. An empty cache means
-        // nothing is known yet, never a reason to drop (see
-        // `projects::muse_start_model`, which logs the drop once).
-        if params.model_id.is_some() {
-            let mut catalog: Vec<String> = Vec::new();
-            if let Some(active) = self.active.clone() {
-                catalog.extend(active.read(cx).cached_muse_catalog_ids());
-            }
-            for (_, cached) in &self.session_cache {
-                catalog.extend(cached.read(cx).cached_muse_catalog_ids());
-            }
-            params.model_id = projects::muse_start_model(params.model_id, &catalog);
-        }
+        // `new_session_params` already ran the guarded muse catalog
+        // check above: the stored muse default rides only when the cached
+        // muse `model/list` still names it, so a foreign pick kept through
+        // migration starts on the server default instead of failing the
+        // turn. A handoff destination to muse lands here too — it opens
+        // through `new_session` — so it filters alike.
         let effort = current
             .as_deref()
             .and_then(|id| self.projects.find(id))
@@ -5770,6 +5793,154 @@ mod tests {
                 );
             });
         }
+        lane_restore(state);
+    }
+
+    /// Adopt the harness workspace as a project holding `defaults`
+    /// (per-provider model ids), park a muse view with `catalog` loaded as
+    /// the active view, and point `new_provider` at `provider`: everything
+    /// `new_session_params` reads in the B2fix tests below.
+    fn b2fix_project(
+        vc: &mut gpui::VisualTestContext,
+        baaz: &gpui::Entity<Harness>,
+        provider: &str,
+        defaults: &[(&str, &str)],
+        catalog: &[&str],
+    ) -> String {
+        let workspace = vc.update(|_, cx| baaz.read(cx).workspace());
+        let project = vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                let id = harness.projects.add(std::path::Path::new(&workspace)).id.clone();
+                let adopted =
+                    harness.projects.projects.iter_mut().find(|p| p.id == id).expect("just adopted");
+                for &(lane, model) in defaults {
+                    adopted.defaults.note_model(lane, model);
+                }
+                harness.new_provider = provider.to_owned();
+                id
+            })
+        });
+        vc.update(|window, cx| {
+            let view = cx.new(|cx| {
+                SessionView::new(
+                    "s-b2fix-catalog".to_owned(),
+                    None,
+                    SessionHost {
+                        provider_id: ProviderId::Muse.as_str().to_owned(),
+                        workspace: workspace.clone(),
+                        overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                        capture: crate::shot::CaptureToken::default(),
+                        terminal_host: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |view, _| view.seed_test_catalog(catalog));
+            baaz.update(cx, |harness, _| {
+                harness.active = Some(view);
+            });
+        });
+        project
+    }
+
+    /// B2fix: with a muse view's catalog loaded, a Codex default is never
+    /// checked against the muse catalog — the guarded helper filters muse
+    /// starts only. Without the provider guard the valid Codex default
+    /// drops to `None` whenever any muse view has listed models.
+    #[gpui::test]
+    fn a_codex_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b2fix-codex-kept");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let project = b2fix_project(vc, &baaz, "codex", &[("codex", "gpt-6-astra")], &["muse-spark-1.3"]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let params =
+                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                assert_eq!(
+                    params.model_id.as_deref(),
+                    Some("gpt-6-astra"),
+                    "a codex default never meets the muse catalog"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// B2fix: the same guard for the Claude Code lane.
+    #[gpui::test]
+    fn a_claude_code_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b2fix-claude-kept");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let project =
+            b2fix_project(vc, &baaz, "claude-code", &[("claude-code", "claude-opus-4")], &["muse-spark-1.3"]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let params =
+                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                assert_eq!(
+                    params.model_id.as_deref(),
+                    Some("claude-opus-4"),
+                    "a claude-code default never meets the muse catalog"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// B2fix: a handoff destination to muse with a foreign project default
+    /// starts on muse's own default — no model id is sent. The destination
+    /// opens through `open_handoff_destination`, which points the window at
+    /// muse and starts through `new_session`, so the params below are the
+    /// ones it sends; the pending handoff mirrors that state.
+    #[gpui::test]
+    fn a_handoff_destination_to_muse_drops_a_foreign_default(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b2fix-handoff-muse");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let project = b2fix_project(vc, &baaz, "muse", &[("muse", "gpt-6-astra")], &["muse-spark-1.3"]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.pending_handoff = Some(crate::handoff::PendingHandoff {
+                    source_session: "s-source".to_owned(),
+                    epoch: harness.switch_epoch,
+                });
+                let params =
+                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                assert_eq!(
+                    params.model_id, None,
+                    "a foreign default never rides a muse handoff destination"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// B2fix: a muse start whose stored default the catalog lists keeps it.
+    #[gpui::test]
+    fn a_muse_start_keeps_a_listed_model(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("b2fix-muse-kept");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let project =
+            b2fix_project(vc, &baaz, "muse", &[("muse", "muse-spark-1.3")], &["muse-spark-1.3"]);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let params =
+                    harness.new_session_params(Some(project.as_str()), cx).expect("params");
+                assert_eq!(
+                    params.model_id.as_deref(),
+                    Some("muse-spark-1.3"),
+                    "a listed muse default rides the start"
+                );
+            });
+        });
         lane_restore(state);
     }
 
