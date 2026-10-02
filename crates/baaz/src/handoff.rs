@@ -75,6 +75,11 @@ pub struct ContextPack {
     pub workspace: String,
     /// [`estimate_tokens`] over the whole pack text.
     pub tokens: u64,
+    /// How many verbatim-eligible turns the source held when the pack was
+    /// built (every non-empty user prompt and assistant reply). What
+    /// [`pack_covers_every_turn`] compares [`ContextPack::recent`] against:
+    /// a pack carrying all of them needs no model-written summary.
+    pub source_turns: usize,
 }
 
 /// The header every pack is submitted under, naming the source provider.
@@ -184,6 +189,7 @@ pub fn build_pack(session: &Session, workspace: &str) -> ContextPack {
         goal,
         summary,
         summary_kind: SummaryKind::Extractive,
+        source_turns: recent_all.len(),
         recent,
         todos,
         files,
@@ -239,9 +245,18 @@ pub fn display_text(pack: &ContextPack, from: ProviderId) -> String {
 }
 
 /// How long the checkpoint waits for the model-written summary before
-/// keeping the extractive one: 20 s. The side-session turn is already
-/// paid for, so a reply that lands later is dropped, never retried.
-pub const SUMMARY_TIMEOUT_SECS: u64 = 20;
+/// keeping the extractive one: 8 s. The side-session turn is already
+/// paid for, so a reply that lands later is dropped, never retried. The
+/// wait never delays the destination either way: it opens at once with
+/// the extractive pack, and a summary that arrives in time upgrades the
+/// pack before the acknowledgement snapshots it.
+pub const SUMMARY_TIMEOUT_SECS: u64 = 8;
+
+/// Below this many characters of summary input (the goal plus the pack's
+/// recent turns, as [`summary_input`] renders them), a model-written
+/// summary cannot add anything over the extractive pack the destination
+/// already opens with — so no side session starts.
+pub const SUMMARY_MIN_CHARS: usize = 2_000;
 
 /// The prompt input budget: the goal plus the transcript excerpt the
 /// summary side session reads, capped at ~12k characters — whole turns,
@@ -254,12 +269,27 @@ pub const SUMMARY_INPUT_CHARS: usize = 12_000;
 pub const SUMMARY_PROMPT_PREFIX: &str =
     "Summarise a handed-off chat session for the provider picking it up:";
 
+/// Whether the pack's recent turns already carry every turn of the
+/// source session verbatim (nothing was cut for the token budget): then a
+/// model-written summary cannot add anything, whatever the switch says.
+pub fn pack_covers_every_turn(pack: &ContextPack) -> bool {
+    pack.recent.len() >= pack.source_turns
+}
+
 /// Whether the checkpoint earns a model-written summary: the switch is on
-/// AND the app is signed in to Muse (the side session is a muse turn).
+/// AND the app is signed in to Muse (the side session is a muse turn)
+/// AND the summary could add something — the pack's recent turns leave
+/// out part of the source, and the excerpt is long enough to summarise.
 /// Otherwise the pack keeps its extractive summary and no side session
-/// starts.
-pub fn should_model_summary(switch_on: bool, signed_in: bool) -> bool {
-    switch_on && signed_in
+/// starts; the destination opens at once either way.
+pub fn should_model_summary(switch_on: bool, signed_in: bool, pack: &ContextPack) -> bool {
+    if !(switch_on && signed_in) {
+        return false;
+    }
+    if pack_covers_every_turn(pack) {
+        return false;
+    }
+    summary_input(pack).len() >= SUMMARY_MIN_CHARS
 }
 
 /// The summary side session's input: the goal plus the pack's recent
@@ -383,13 +413,19 @@ pub struct HandoffOrigin {
 /// A destination open in flight for a handoff run, held by the
 /// application and consumed when the fresh session lands (provider lane
 /// or muse) — then the pack submits onto it. The epoch is the run's
-/// owner-epoch: a landing from a superseded request never matches.
+/// owner-epoch: a landing from a superseded request never matches. The
+/// prefix is the source's visible turns at request time, applied on the
+/// destination before its first render, so no frame shows the empty
+/// destination waiting for the pack's acknowledgement.
 #[derive(Clone, Debug)]
 pub struct PendingHandoff {
     /// The session being left.
     pub source_session: String,
     /// The run's owner-epoch.
     pub epoch: u64,
+    /// The source's visible turns (the handoff card left out), oldest
+    /// first, to show above the divider from the very first frame.
+    pub prefix: Vec<Turn>,
 }
 
 /// The confirm dialog's frozen facts: the source, the destination backend
@@ -466,10 +502,10 @@ pub struct HandoffRun {
     /// The pack, from Checkpointed on.
     pub pack: Option<ContextPack>,
     /// A model-written summary is in flight for the checkpointed pack:
-    /// the run stays Checkpointed and the card's summary line reads
-    /// "Summarising…" until the side session answers or the watchdog
-    /// keeps the extractive text. Cancel works throughout (the hidden
-    /// side session is simply abandoned; the destination never opens).
+    /// the card's summary line reads "Summarising…" until the side
+    /// session answers or the watchdog keeps the extractive text. The
+    /// destination opens beside the wait, never after it. Cancel works
+    /// throughout (the hidden side session is simply abandoned).
     pub summarising: bool,
     /// The fresh destination session, once it exists.
     pub destination_session: Option<String>,
@@ -575,9 +611,12 @@ impl HandoffRun {
     /// The side session answered: the harvested text replaces the pack's
     /// extractive summary, the kind flips to model, and the wait ends. A
     /// no-op unless the run is still waiting (a cancelled or superseded
-    /// run keeps whatever it holds).
+    /// run keeps whatever it holds). The destination opens beside the
+    /// summary wait, so a summary that beats the acknowledgement still
+    /// upgrades the pack it snapshots.
     pub fn apply_model_summary(&mut self, summary: String) {
-        if !matches!(self.state, HandoffState::Checkpointed) || !self.summarising {
+        if !matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared) || !self.summarising
+        {
             return;
         }
         if let Some(pack) = self.pack.as_mut() {
@@ -589,10 +628,11 @@ impl HandoffRun {
     }
 
     /// The summary will not arrive (timeout, wire error, empty reply):
-    /// the pack keeps its extractive summary and the wait ends, so the
-    /// destination can open.
+    /// the pack keeps its extractive summary and the wait ends. The
+    /// destination already opened beside the wait, so this only stands
+    /// the card's "Summarising…" down.
     pub fn note_summary_fallback(&mut self) {
-        if matches!(self.state, HandoffState::Checkpointed) {
+        if matches!(self.state, HandoffState::Checkpointed | HandoffState::Prepared) {
             self.summarising = false;
         }
     }
@@ -631,6 +671,19 @@ impl HandoffRun {
             self.reason = Some(reason.clone());
             self.state = HandoffState::Failed { reason };
         }
+    }
+
+    /// The destination's pack turn ended failed: the handoff fails with
+    /// the turn's reason, whether the run is still opening (Prepared,
+    /// Acknowledged) or already Active — a pack that never reached any
+    /// model is never a silent Active. A no-op once cancelled; an
+    /// already-failed run keeps its first reason.
+    pub fn fail_pack_turn(&mut self, reason: String) {
+        if matches!(self.state, HandoffState::Cancelled | HandoffState::Failed { .. }) {
+            return;
+        }
+        self.reason = Some(reason.clone());
+        self.state = HandoffState::Failed { reason };
     }
 
     /// Cancel before Acknowledged aborts cleanly. Returns whether a
@@ -1056,10 +1109,166 @@ mod tests {
 
     #[test]
     fn the_model_summary_needs_the_switch_and_a_sign_in() {
-        assert!(should_model_summary(true, true));
-        assert!(!should_model_summary(false, true), "switch off starts no side session");
-        assert!(!should_model_summary(true, false), "signed out starts no side session");
-        assert!(!should_model_summary(false, false));
+        // A long session whose pack leaves turns out: worth summarising.
+        let pack = big_pack();
+        assert!(should_model_summary(true, true, &pack));
+        assert!(!should_model_summary(false, true, &pack), "switch off starts no side session");
+        assert!(!should_model_summary(true, false, &pack), "signed out starts no side session");
+        assert!(!should_model_summary(false, false, &pack));
+    }
+
+    /// A session long enough that the pack budget cuts turns: the recent
+    /// list is shorter than the source, and the excerpt tops 2k chars.
+    fn big_pack() -> ContextPack {
+        use aui_protocol::{Block as B, Turn as T};
+        let mut session = Session::new("s", aui_protocol::Provider::Muse, "m", "/tmp/proj");
+        for i in 0..60 {
+            session.turns.push(T::User {
+                id: format!("u{i}"),
+                text: format!("prompt {i} {}", "word ".repeat(200)),
+                attachments: vec![],
+                mentions: vec![],
+                timestamp: None,
+            });
+            session.turns.push(T::Assistant {
+                id: format!("a{i}"),
+                blocks: vec![B::Text { text: format!("reply {i} {}", "word ".repeat(200)), streaming: false }],
+                meta: Default::default(),
+                timestamp: None,
+            });
+        }
+        let pack = build_pack(&session, "/tmp/proj");
+        assert!(
+            !pack_covers_every_turn(&pack),
+            "the fixture really does cut turns ({} of {})",
+            pack.recent.len(),
+            pack.source_turns
+        );
+        pack
+    }
+
+    #[test]
+    fn a_pack_that_carries_every_turn_skips_the_model_summary() {
+        use aui_protocol::{Block as B, Turn as T};
+        let mut session = Session::new("s", aui_protocol::Provider::Muse, "m", "/tmp/proj");
+        session.turns.push(T::User {
+            id: "u1".to_owned(),
+            text: "Fix the login redirect".to_owned(),
+            attachments: vec![],
+            mentions: vec![],
+            timestamp: None,
+        });
+        session.turns.push(T::Assistant {
+            id: "a1".to_owned(),
+            blocks: vec![B::Text { text: "On it.".to_owned(), streaming: false }],
+            meta: Default::default(),
+            timestamp: None,
+        });
+        let pack = build_pack(&session, "/tmp/proj");
+        assert!(pack_covers_every_turn(&pack));
+        assert!(
+            !should_model_summary(true, true, &pack),
+            "every turn already rides verbatim: no side session, even with the switch on"
+        );
+    }
+
+    #[test]
+    fn a_short_excerpt_skips_the_model_summary() {
+        // The pack leaves most of a long source out — but the whole
+        // excerpt is a few words, so a model summary still adds nothing
+        // over the extractive pack the destination opens with.
+        let pack = ContextPack {
+            goal: "Fix it".to_owned(),
+            summary: "Did it.".to_owned(),
+            summary_kind: SummaryKind::Extractive,
+            recent: vec![("user".to_owned(), "hi".to_owned())],
+            todos: Vec::new(),
+            files: Vec::new(),
+            workspace: "/tmp/proj".to_owned(),
+            tokens: 10,
+            source_turns: 50,
+        };
+        assert!(!pack_covers_every_turn(&pack));
+        assert!(summary_input(&pack).len() < SUMMARY_MIN_CHARS);
+        assert!(!should_model_summary(true, true, &pack));
+        // …while a long excerpt from the same cut-down pack earns one.
+        let mut long = pack.clone();
+        long.recent = vec![("user".to_owned(), "word ".repeat(600))];
+        assert!(summary_input(&long).len() >= SUMMARY_MIN_CHARS);
+        assert!(should_model_summary(true, true, &long));
+    }
+
+    #[test]
+    fn handoff_summary_never_delays_the_destination_open() {
+        assert!(
+            SUMMARY_TIMEOUT_SECS <= 8,
+            "the watchdog is a backstop, not the open gate: {SUMMARY_TIMEOUT_SECS} s"
+        );
+        // The machine reaches Prepared while a summary is still in flight:
+        // nothing in the run gates the destination open on the summary.
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_summary_pending();
+        run.note_prepared("dst".to_owned());
+        assert!(
+            matches!(run.state, HandoffState::Prepared),
+            "Prepared while summarising — the open never waits, state is {:?}",
+            run.state
+        );
+        // And a summary that beats the acknowledgement still upgrades the
+        // pack the destination snapshots.
+        run.apply_model_summary("Did X. Decided Y.".to_owned());
+        assert_eq!(run.pack.as_ref().map(|pack| pack.summary_kind), Some(SummaryKind::Model));
+        assert!(!run.summarising);
+    }
+
+    #[test]
+    fn a_pack_turn_that_fails_fails_the_handoff() {
+        for activate_first in [false, true] {
+            let mut run = run();
+            run.note_quiescing();
+            run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+            run.note_prepared("dst".to_owned());
+            assert!(run.acknowledge(7));
+            if activate_first {
+                run.activate();
+                assert!(matches!(run.state, HandoffState::Activated));
+            }
+            // turn/started, then turn/completed{status: failed} on the
+            // destination: the pack never reached any model.
+            run.fail_pack_turn("model `gpt-6-astra` does not exist or you lack access".to_owned());
+            assert!(
+                matches!(run.state, HandoffState::Failed { .. }),
+                "a failed pack turn fails the handoff (activated first: {activate_first}), state is {:?}",
+                run.state
+            );
+            assert_eq!(
+                run.reason.as_deref(),
+                Some("model `gpt-6-astra` does not exist or you lack access")
+            );
+            let card = run.card();
+            if let Block::Handoff { state: HandoffState::Failed { reason }, .. } = card {
+                assert!(reason.contains("gpt-6-astra"), "the card names the reason: {reason}");
+            } else {
+                panic!("the card reads Failed, got {:?}", card);
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_pack_turn_never_revives_the_run() {
+        let mut run = run();
+        run.note_quiescing();
+        run.note_checkpointed(build_pack(&session_with_turns(), "/tmp/proj"));
+        run.note_prepared("dst".to_owned());
+        assert!(run.cancel());
+        run.fail_pack_turn("late failure".to_owned());
+        assert!(
+            matches!(run.state, HandoffState::Cancelled),
+            "a cancelled run stays cancelled, state is {:?}",
+            run.state
+        );
     }
 
     #[test]

@@ -421,17 +421,19 @@ impl Harness {
 /// A handoff checkpoint's model-written summary (Z8): the side-session
 /// driver, same shape as a title.
 ///
-/// At checkpoint, with the switch on and a Muse sign-in, the app starts
-/// one hidden side session on the cheapest model and sends the pack's
-/// goal + transcript excerpt ([`crate::handoff::summary_prompt`]). The
-/// run stays Checkpointed — the card reads "Summarising…" — until the
-/// side session's `turn/completed` harvests into the pack's summary field
-/// or the 20 s watchdog keeps the extractive text; only then does the
-/// destination open. Timeout, wire error, empty reply and signed-out all
-/// keep the extractive summary with one log line, never a dialog, never
-/// a retry. Cancel during the wait abandons the hidden side session: the
-/// run is already Cancelled, so the harvest and the watchdog drop their
-/// answers and no destination ever opens.
+/// At checkpoint, when the summary could add something over the
+/// extractive pack ([`crate::handoff::should_model_summary`]), the app
+/// starts one hidden side session on the cheapest model and sends the
+/// pack's goal + transcript excerpt
+/// ([`crate::handoff::summary_prompt`]). The card reads "Summarising…"
+/// until the side session's `turn/completed` harvests into the pack's
+/// summary field or the 8 s watchdog keeps the extractive text — and the
+/// destination opens beside the wait either way, never after it.
+/// Timeout, wire error, empty reply and signed-out all keep the
+/// extractive summary with one log line, never a dialog, never a retry.
+/// Cancel during the wait abandons the hidden side session: the run is
+/// already Cancelled, so the harvest and the watchdog drop their
+/// answers.
 impl Harness {
     /// Start the checkpoint's summary side session. Called once from the
     /// handoff checkpoint path, after the run went Checkpointed with its
@@ -520,10 +522,10 @@ impl Harness {
 
     /// A `turn/completed` on a summary side session: harvest its answer
     /// with a free `session/read`, then resolve the wait — model text in,
-    /// or the extractive text on an empty reply or a wire error — and open
-    /// the destination. A reply that lands after Cancel (or a supersede)
-    /// finds no waiting run and is dropped: the side session stays hidden,
-    /// nothing opens.
+    /// or the extractive text on an empty reply or a wire error. The
+    /// destination already opened beside the wait, so nothing opens here.
+    /// A reply that lands after Cancel (or a supersede) finds no waiting
+    /// run and is dropped: the side session stays hidden.
     fn harvest_handoff_summary(&mut self, side_id: &str, cx: &mut Context<Self>) {
         let Some(job) = self.title_jobs.get(side_id).cloned() else { return };
         let Some(epoch) = job.handoff_epoch else { return };
@@ -572,17 +574,25 @@ impl Harness {
     }
 
     /// Whether the summary side session may still land: the run exists
-    /// under this epoch, is still Checkpointed, and is still waiting.
+    /// under this epoch, is still waiting, and has not acknowledged yet
+    /// (Checkpointed, or Prepared when the destination beat the summary
+    /// open and the pack it snapshots can still take the upgrade).
     fn handoff_summary_waiting(&self, source: &str, epoch: u64) -> bool {
         self.handoffs.get(source).is_some_and(|run| {
-            run.epoch == epoch && run.summarising && matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
+            run.epoch == epoch
+                && run.summarising
+                && matches!(
+                    &run.state,
+                    aui_protocol::HandoffState::Checkpointed | aui_protocol::HandoffState::Prepared
+                )
         })
     }
 
-    /// Settle the summary wait and open the destination. `Some` harvested
-    /// text upgrades the pack to a model summary; `None` keeps the
-    /// extractive one. A run that stopped waiting meanwhile (cancelled,
-    /// superseded, failed) is left alone and nothing opens.
+    /// Settle the summary wait. `Some` harvested text upgrades the pack
+    /// to a model summary; `None` keeps the extractive one. The
+    /// destination already opened beside the wait, so this only refreshes
+    /// the card — it never opens. A run that stopped waiting meanwhile
+    /// (cancelled, superseded, failed, acknowledged) is left alone.
     fn resolve_handoff_summary(
         &mut self,
         source: String,
@@ -593,7 +603,10 @@ impl Harness {
         let Some(mut run) = self.handoffs.get(&source).cloned() else { return };
         if run.epoch != epoch
             || !run.summarising
-            || !matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
+            || !matches!(
+                &run.state,
+                aui_protocol::HandoffState::Checkpointed | aui_protocol::HandoffState::Prepared
+            )
         {
             self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
             return;
@@ -605,11 +618,6 @@ impl Harness {
         self.handoffs.insert(source.clone(), run);
         self.title_jobs.retain(|_, job| !(job.real_id == source && job.handoff_epoch == Some(epoch)));
         self.refresh_handoff_card(&source, cx);
-        // The destination opens on a window, like every other open: back
-        // through `update_in`, the way a window-less event reopens.
-        self.tasks.push(cx.spawn(async move |this, cx| {
-            let _ = this.update_in(cx, |this, window, cx| this.open_handoff_destination(source, epoch, window, cx));
-        }));
         cx.notify();
     }
 
@@ -639,50 +647,15 @@ impl Harness {
         self.resolve_handoff_summary(source.to_owned(), epoch, None, cx);
     }
 
-    /// Refresh the source's card from the run, when the source view is the
-    /// active one (it is: the destination has not opened yet). A parked
-    /// source heals at landing, which rebuilds its card from the run.
+    /// Refresh the source's card from the run, wherever the source view
+    /// is: the destination opens beside the summary wait, so the source
+    /// is usually parked (or retired) when the wait settles.
     fn refresh_handoff_card(&mut self, source: &str, cx: &mut Context<Self>) {
         let Some(run) = self.handoffs.get(source) else { return };
         let card = run.card();
         let card_id = run.card_id.clone();
-        if let Some(view) = self.active.clone() {
-            if view.read(cx).session_id == source {
-                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
-            }
-        }
-    }
-
-    /// Open the handoff destination after the summary settled: the
-    /// checkpoint path's own tail (`pending_handoff`, then the lane open),
-    /// rerun with the resolved pack. Guarded like the settle — a run that
-    /// stopped waiting meanwhile opens nothing.
-    fn open_handoff_destination(
-        &mut self,
-        source: String,
-        epoch: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(run) = self.handoffs.get(&source).cloned() else { return };
-        if run.epoch != epoch
-            || run.summarising
-            || !matches!(&run.state, aui_protocol::HandoffState::Checkpointed)
-        {
-            return;
-        }
-        let workspace = run.pack.map(|pack| pack.workspace).unwrap_or_default();
-        let to = run.to;
-        self.pending_handoff = Some(crate::handoff::PendingHandoff { source_session: source.clone(), epoch });
-        if to == crate::providers::ProviderId::Muse {
-            self.select_new_provider(crate::providers::ProviderId::Muse, cx);
-            self.session_switch_pending = true;
-            self.switch_claim = Some((source, self.switch_epoch));
-            self.new_session(window, cx);
-        } else {
-            let project =
-                self.projects.resolve_available(Some(&workspace), None).map(|p| p.id.clone());
-            self.open_on_provider(to, project, workspace, window, cx);
+        if let Some(view) = self.find_view(source, cx) {
+            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
         }
     }
 }
@@ -709,6 +682,11 @@ impl Harness {
     /// the pair changed, and the last start cooled down. One debounced side
     /// session, same mechanism as a title; never on a running turn.
     pub(super) fn maybe_rewrite_byline(&mut self, cx: &mut Context<Self>) {
+        // The muse lane's settled-turn hook doubles as the pack check: a
+        // pack turn that ended failed fails its handoff here, before any
+        // byline work and independent of the byline switch below. Runs
+        // first so an early return never skips it.
+        self.reconcile_pack_turns(cx);
         if !self.layout.auto_summary || self.client.is_none() {
             return;
         }
