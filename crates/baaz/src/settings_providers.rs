@@ -262,10 +262,25 @@ pub(crate) fn run_sign_out(id: ProviderId, commander: &dyn AuthCommander) -> Res
 /// it on the UI thread instead.)
 pub struct LiveCommander;
 
+/// The auth-subprocess [`std::process::Command`] (`claude auth logout`
+/// and its kin): a pure builder — no process spawned — so tests assert
+/// the scrub on the built command via `get_envs`.
+///
+/// Sign-out changes the owner's own account, so no Baaz
+/// `CLAUDE_CONFIG_DIR` is set: the child reads the owner's real
+/// `~/.claude`, exactly what the sign-out clears. The inherited
+/// desktop-agent env is still scrubbed per-`Command` (see
+/// [`provider::child_env`]).
+pub(crate) fn auth_command(program: &str, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    provider::child_env::scrub_command(&mut command);
+    command
+}
+
 impl AuthCommander for LiveCommander {
     fn run_shell(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        std::process::Command::new(program)
-            .args(args)
+        auth_command(program, args)
             .output()
             .map_err(|error| format!("could not run {program}: {error}"))
             .and_then(|output| {
@@ -1016,6 +1031,33 @@ mod tests {
         fn muse_logout(&self) {
             *self.muse.lock().unwrap() += 1;
         }
+    }
+
+    /// The sign-out shell carries the scrub and keeps the owner's home:
+    /// `CLAUDECODE` is an explicit removal on the built command, while no
+    /// Baaz `CLAUDE_CONFIG_DIR` is set — `claude auth logout` signs the
+    /// owner's real account out, not a Baaz shadow. (Codex's logout rides
+    /// `RunningChild::spawn`, scrubbed in `provider-codex`.)
+    #[test]
+    fn the_signout_shell_is_scrubbed_and_keeps_the_owner_home() {
+        let _lock = crate::connect::SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("CLAUDECODE");
+        std::env::set_var("CLAUDECODE", "1");
+        let command = auth_command("claude", &["auth", "logout"]);
+        if let Some(previous) = previous {
+            std::env::set_var("CLAUDECODE", previous);
+        } else {
+            std::env::remove_var("CLAUDECODE");
+        }
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter().any(|(name, value)| *name == "CLAUDECODE" && value.is_none()),
+            "sign-out removes the desktop inheritance: {envs:?}"
+        );
+        assert!(
+            !envs.iter().any(|(name, _)| *name == "CLAUDE_CONFIG_DIR" || *name == "CODEX_HOME"),
+            "one account per provider — the owner's home stands: {envs:?}"
+        );
     }
 
     #[test]

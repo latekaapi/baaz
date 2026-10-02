@@ -384,6 +384,24 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Best-effort home upkeep before a spawn: re-run the absent-only
+    /// owner links over the resolved Baaz home, so entries the owner
+    /// created after adapter setup (`skills/`, `agents/`, …) are linked
+    /// on the next spawn instead of waiting for a restart. Cheap stat
+    /// checks only ([`provider::child_env::ensure_linked_dir`]); errors
+    /// are ignored — the spawn below reports an unusable home honestly.
+    fn prepare_home(&self) {
+        let home = self.resolved_config_dir();
+        let owner_root = match &self.home_override {
+            Some(owner) => crate::home::owner_config_dir(owner),
+            None => std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|owner| crate::home::owner_config_dir(&owner))
+                .unwrap_or_else(crate::home::default_home),
+        };
+        let _ = provider::child_env::ensure_linked_dir(&home, &owner_root, crate::home::LINKED_ENTRIES);
+    }
+
     /// Mint a host→child control `request_id`. One sequence for every
     /// subtype — the child joins answers by id, never by kind.
     fn next_control_id(&self) -> String {
@@ -506,6 +524,7 @@ impl ClaudeCodeAdapter {
             });
         }
         let config = self.resolved_config_dir();
+        self.prepare_home();
         let running =
             RunningChild::spawn(&self.program, launch, &self.hub, &config).map_err(|error| {
                 ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
@@ -701,6 +720,7 @@ impl ClaudeCodeAdapter {
         self.hub.forget_pending();
         let launch = self.with_mcp_config(launch.clone())?;
         let config = self.resolved_config_dir();
+        self.prepare_home();
         let running =
             RunningChild::spawn(&self.program, &launch, &self.hub, &config).map_err(|error| {
                 ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
@@ -1809,6 +1829,52 @@ mod tests {
             crate::home::default_home(),
             "production resolves through the Baaz-owned home"
         );
+    }
+
+    #[test]
+    fn a_late_created_owner_dir_is_linked_on_the_next_spawn() {
+        let root = std::env::temp_dir().join(format!(
+            "cc-prepare-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        // The owner has settings but no skills dir yet: adapter setup
+        // links only what exists.
+        std::fs::create_dir_all(owner.join(".claude")).expect("owner claude dir");
+        std::fs::write(owner.join(".claude").join("settings.json"), "{}").expect("owner settings");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_home(owner.clone())
+            .with_config_dir(state.join("claude-home"));
+        adapter.prepare_home();
+        let home = state.join("claude-home");
+        assert!(
+            std::fs::symlink_metadata(home.join("settings.json")).expect("meta").file_type().is_symlink(),
+            "what exists at setup is linked"
+        );
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).is_err(),
+            "an absent source links nothing"
+        );
+        // The owner creates skills/ later: the next spawn's re-ensure
+        // picks it up without a restart.
+        std::fs::create_dir_all(owner.join(".claude").join("skills")).expect("late owner skills");
+        adapter.prepare_home();
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink(),
+            "a late-created owner dir is linked on the next spawn"
+        );
+        assert!(home.join("skills").is_dir(), "the linked dir reads as a dir");
+        // Idempotent: a third run changes nothing.
+        adapter.prepare_home();
+        assert!(
+            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

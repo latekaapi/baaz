@@ -29,6 +29,14 @@ use aui_icons::Provider as AuiProvider;
 use crate::providers::ProviderId;
 use crate::provider_status::{Auth, ProviderStatus};
 
+/// Serialize the tests that touch the scrubbed env names: the test
+/// runner shares one environment across threads in this binary. Every
+/// test module that sets a `CLAUDE_*` / `ANTHROPIC_*` name holds this
+/// while it does — including the PTY tests in
+/// [`crate::terminal::host`].
+#[cfg(test)]
+pub(crate) static SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ------------------------------------------------------------ launch
 
 /// What a launch shows first: the connect screen, or the shell immediately.
@@ -378,6 +386,25 @@ pub fn drive_codex_login(
     }
 }
 
+/// The `codex app-server` [`std::process::Command`] the login drives:
+/// a pure builder — no process spawned — so tests assert the scrub on the
+/// built command via `get_envs`.
+///
+/// The login verifies the owner's own account, so no Baaz `CODEX_HOME`
+/// is set: the child reads the owner's real `~/.codex`, exactly what the
+/// sign-in changes. The inherited desktop-agent env is still scrubbed
+/// per-`Command` (see [`provider::child_env`]).
+pub(crate) fn codex_login_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .arg("app-server")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    provider::child_env::scrub_command(&mut command);
+    command
+}
+
 /// Run the real Codex login against `program`'s short-lived app-server:
 /// opens `authUrl` in the browser and returns the terminal state (the
 /// caller applied the Waiting row before this started, and applies the
@@ -398,12 +425,7 @@ pub fn run_codex_login(program: &str, cancel: &AtomicBool) -> CodexLogin {
             self.lines.next()?.ok()
         }
     }
-    let spawned = std::process::Command::new(program)
-        .arg("app-server")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let spawned = codex_login_command(program).spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
@@ -839,6 +861,33 @@ mod tests {
         assert_eq!(terminal, CodexLogin::Cancelled);
         assert!(started.elapsed() < Duration::from_secs(5), "cancel took {:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The login's `app-server` carries the scrub and keeps the owner's
+    /// home: `CLAUDECODE` (scrubbed under either entrypoint flag) is an
+    /// explicit removal on the built command, while no Baaz `CODEX_HOME`
+    /// (or `CLAUDE_CONFIG_DIR`) is set — the sign-in reads and writes the
+    /// owner's real `~/.codex`.
+    #[test]
+    fn the_login_command_is_scrubbed_and_keeps_the_owner_home() {
+        let _lock = super::SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("CLAUDECODE");
+        std::env::set_var("CLAUDECODE", "1");
+        let command = codex_login_command("codex");
+        if let Some(previous) = previous {
+            std::env::set_var("CLAUDECODE", previous);
+        } else {
+            std::env::remove_var("CLAUDECODE");
+        }
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter().any(|(name, value)| *name == "CLAUDECODE" && value.is_none()),
+            "the login removes the desktop inheritance: {envs:?}"
+        );
+        assert!(
+            !envs.iter().any(|(name, _)| *name == "CODEX_HOME" || *name == "CLAUDE_CONFIG_DIR"),
+            "one account per provider — the owner's home stands: {envs:?}"
+        );
     }
     use super::*;
     use crate::provider_status::{Advisory, Headline, Installed};
