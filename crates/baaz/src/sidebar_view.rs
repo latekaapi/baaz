@@ -3028,7 +3028,7 @@ mod tests {
     ) -> (Option<String>, Option<String>) {
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let selected = SidebarKey::current(&h, cx).selected;
+            let selected = SidebarKey::current(h, cx).selected;
             let grouping = h.sidebar_grouping(cx);
             let crate::sidebar::Grouping::Project(groups) = &*grouping else {
                 panic!("two adoptions group by project");
