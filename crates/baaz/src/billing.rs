@@ -138,14 +138,77 @@ impl Harness {
     /// it — and so does a frame stamped before the installed credential: the
     /// wire carries no account identity, and a notification for a login that
     /// is no longer installed must not move the tier. Cached through
-    /// [`tier::remember`] exactly as a probe answer is.
+    /// [`tier::remember`] exactly as a probe answer is, and persisted
+    /// beside it as the Muse usage snapshot, so the account menu shows
+    /// the newest reading with its true age.
     pub(crate) fn apply_usage_changed(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
         if let Some(tier) = tier::tier_from_changed_current(params, tier::auth_mtime()) {
             tier::remember(&tier);
+            // The snapshot carries the notification's own arrival time,
+            // and a tier with no numbers never wipes the last good one:
+            // the rows keep it with "unavailable now" beside it.
+            if tier::tier_has_numbers(&tier) {
+                crate::provider_status::record_muse_snapshot_at(
+                    Some(tier.footer_label()),
+                    tier.usage_fraction().map(f64::from),
+                    tier::observed_secs_from_changed_params(params),
+                );
+            } else {
+                crate::provider_status::note_muse_unavailable_now();
+            }
             self.tier = Some(tier);
             self.push_tier(cx);
         }
         cx.notify();
+    }
+
+    /// A quiet Muse usage re-read for the account menu: the wire only
+    /// ([`tier::read_usage_value`]), never the pty scrape, never a toast.
+    /// A current observation replaces the tier and the stored Muse
+    /// snapshot; anything else — a cold host, a stale frame, a failed
+    /// read — keeps what the menu had. The caller marks Muse refreshing;
+    /// this clears it and repaints either way, so the "Refreshing…" row
+    /// always settles.
+    pub(crate) fn refresh_muse_usage(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        self.wire_call(
+            cx,
+            move || {
+                // A panic on the background path must never stick the row
+                // on "Refreshing…": the completion below still runs and
+                // clears it (and the 20 s guard bounds a hang).
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let value = client.as_ref().and_then(|client| tier::read_usage_value(client));
+                    let observed_at =
+                        value.as_ref().and_then(tier::observed_secs_from_read_value);
+                    value
+                        .and_then(|value| tier::tier_from_read_current(&value, tier::auth_mtime()))
+                        .map(|tier| (tier, observed_at))
+                }));
+                outcome.ok().flatten()
+            },
+            move |this, result, cx| {
+                match result {
+                    Some((tier, observed_at)) if tier::tier_has_numbers(&tier) => {
+                        tier::remember(&tier);
+                        crate::provider_status::record_muse_snapshot_at(
+                            Some(tier.footer_label()),
+                            tier.usage_fraction().map(f64::from),
+                            observed_at,
+                        );
+                        this.tier = Some(tier);
+                        this.push_tier(cx);
+                    }
+                    // A cold host, a stale frame, a failed read, or a tier
+                    // with no numbers: keep what the menu had (and, when a
+                    // good snapshot stands, say "unavailable now" beside
+                    // it) — either way the row settles.
+                    _ => crate::provider_status::note_muse_unavailable_now(),
+                }
+                crate::provider_status::clear_usage_refreshing(&[crate::providers::ProviderId::Muse]);
+                cx.notify();
+            },
+        );
     }
 }
 

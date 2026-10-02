@@ -9,6 +9,8 @@
 //! connection and tier when signed in, regardless of the `muse` binary
 //! lookup.
 
+use std::collections::HashSet;
+
 use aui::screens::{UsageRowData, UsageRowState, UsageWindow};
 use aui_icons::Provider as AuiProvider;
 
@@ -38,6 +40,21 @@ pub fn usage_rows(
     muse: Option<MuseFeed>,
     now: i64,
 ) -> Vec<UsageRowData> {
+    let refreshing: HashSet<ProviderId> =
+        crate::provider_status::usage_refreshing().into_iter().collect();
+    let muse_stale = crate::provider_status::muse_unavailable_now();
+    usage_rows_with(statuses, muse, now, &refreshing, muse_stale)
+}
+
+/// [`usage_rows`] with an explicit refreshing set and Muse staleness flag,
+/// so tests drive the in-flight reads without touching the live service.
+fn usage_rows_with(
+    statuses: &[ProviderStatus],
+    muse: Option<MuseFeed>,
+    now: i64,
+    refreshing: &HashSet<ProviderId>,
+    muse_stale: bool,
+) -> Vec<UsageRowData> {
     let mut rows = Vec::new();
     for id in ProviderId::all() {
         let Some(status) = statuses.iter().find(|status| status.provider == id) else {
@@ -46,9 +63,17 @@ pub fn usage_rows(
         if !status.enabled {
             continue;
         }
+        // An asynchronous read is in flight for this provider (the Muse
+        // wire re-read, the Codex probe): its row reads "Refreshing…" in
+        // place until the read lands and repaints it. Display-only rows,
+        // so no new interactive element and no new label to carry.
+        if refreshing.contains(&id) {
+            rows.push(refreshing_row(status));
+            continue;
+        }
         if id == ProviderId::Muse {
             if let Some(feed) = muse.as_ref() {
-                rows.push(muse_row(status, feed, now));
+                rows.push(muse_row(status, feed, now, muse_stale));
                 continue;
             }
         }
@@ -56,17 +81,34 @@ pub fn usage_rows(
             rows.push(unavailable_row(status));
             continue;
         }
-        rows.push(connected_row(status, now));
+        rows.push(connected_row(status, now, id == ProviderId::Muse && muse_stale));
     }
     rows
+}
+
+/// A provider's row while its usage read is in flight: the in-place
+/// "Refreshing…" line, keeping the plan beside it when one is known.
+fn refreshing_row(status: &ProviderStatus) -> UsageRowData {
+    let mut row = UsageRowData::new(
+        status.provider.icon(),
+        UsageRowState::Unavailable("Refreshing…".into()),
+    );
+    if let Some(plan) =
+        status.usage.as_ref().and_then(|snapshot| snapshot.plan.clone()).or_else(|| auth_plan(status))
+    {
+        row = row.plan(plan);
+    }
+    row
 }
 
 /// The Muse row while the app is signed in: a live usage read with an
 /// unexpired window wins over the tier probe (the binary lookup never
 /// gates either); otherwise the tier card's own windows draw — plan with
 /// the leading "Muse Code " dropped, "Current" and "Weekly" windows with
-/// the card's own reset clauses — then the snapshot's own words.
-fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData {
+/// the card's own reset clauses — then the snapshot's own words. When the
+/// last wire read carried no numbers (`muse_stale`), the kept snapshot's
+/// footnote says "unavailable now" beside its age.
+fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64, muse_stale: bool) -> UsageRowData {
     let snapshot = status.usage.as_ref();
     // The tier card is the richer source (both windows, their reset
     // clauses) and the app's own refresh derives the stored Muse snapshot
@@ -82,7 +124,7 @@ fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData 
             snapshot.windows.iter().any(|window| window.resets_at.is_none_or(|at| at > now))
         })
     {
-        return connected_row(status, now);
+        return connected_row(status, now, muse_stale);
     }
     match feed.tier.as_ref() {
         Some(Tier::Subscription { plan, current_pct, weekly_pct, resets, usage_unavailable, .. }) => {
@@ -110,7 +152,7 @@ fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData 
             }
             // A known plan with no numbers yet: the snapshot's own words,
             // still wearing the plan.
-            let mut row = snapshot_row(status, snapshot, now);
+            let mut row = snapshot_row(status, snapshot, now, muse_stale);
             if row.plan.is_none() {
                 row.plan = Some(plan.into());
             }
@@ -121,7 +163,7 @@ fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData 
             UsageRowState::Unavailable("Pay-as-you-go — turns bill API usage".into()),
         ),
         // A failed probe leaves the snapshot's own words standing.
-        Some(Tier::Unavailable(_)) => snapshot_row(status, snapshot, now),
+        Some(Tier::Unavailable(_)) => snapshot_row(status, snapshot, now, muse_stale),
         // Signed in but the probe has not answered yet.
         None => UsageRowData::new(AuiProvider::Muse, UsageRowState::Unavailable("Checking…".into())),
     }
@@ -130,13 +172,16 @@ fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64) -> UsageRowData 
 /// The Muse row without a usable tier answer: the snapshot's own words —
 /// its reset note when its windows all expired, else the no-reading
 /// reason. A snapshot never gates this; `None` reads the same reason.
+/// When the last wire read carried no numbers (`stale`), kept windows read
+/// "unavailable now" beside their age.
 fn snapshot_row(
     status: &ProviderStatus,
     snapshot: Option<&crate::provider_status::UsageSnapshot>,
     now: i64,
+    stale: bool,
 ) -> UsageRowData {
     if snapshot.is_some_and(|snapshot| !snapshot.windows.is_empty()) {
-        return connected_row(status, now);
+        return connected_row(status, now, stale);
     }
     UsageRowData::new(
         AuiProvider::Muse,
@@ -202,8 +247,11 @@ fn clause_instant(text: &str, now: i64) -> Option<i64> {
 /// reading as its reset note (never a stale percentage), and an empty
 /// reading as the provider's no-reading reason. A Claude Code reading
 /// whose windows all lacked a usable number carries the meter's status
-/// text where a plan would sit — the row reads it instead of a bar.
-fn connected_row(status: &ProviderStatus, now: i64) -> UsageRowData {
+/// text where a plan would sit — the row reads it instead of a bar. When
+/// the last Muse wire read carried no numbers (`stale`), the kept windows
+/// read "unavailable now" beside their age instead of pretending to be
+/// current.
+fn connected_row(status: &ProviderStatus, now: i64, stale: bool) -> UsageRowData {
     let provider = status.provider.icon();
     let snapshot = status.usage.as_ref();
     let windows = snapshot.map(|snapshot| snapshot.windows.as_slice()).unwrap_or(&[]);
@@ -230,7 +278,14 @@ fn connected_row(status: &ProviderStatus, now: i64) -> UsageRowData {
             UsageRowState::Unavailable(format!("{label} reset — no new reading yet").into()),
         );
     }
-    let as_of = snapshot.map(|snapshot| age_footnote(snapshot.as_of, now));
+    let as_of = snapshot.map(|snapshot| {
+        let age = age_text(snapshot.as_of, now);
+        if stale {
+            format!("{age} · unavailable now").into()
+        } else {
+            age.into()
+        }
+    });
     let bars: Vec<UsageWindow> = live
         .iter()
         .map(|window| {
@@ -442,6 +497,58 @@ mod tests {
         let rows = usage_rows(&[muse, claude], None, 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, AuiProvider::Muse);
+    }
+
+    #[test]
+    fn a_refreshing_provider_reads_in_place_until_its_read_lands() {
+        // While the menu's asynchronous read runs, the row reads
+        // "Refreshing…" in place (keeping its plan); once the read
+        // clears, the same row reads the landed result. Driven through
+        // the explicit set, so no test touches the live service.
+        let mut codex = status(ProviderId::Codex);
+        codex.usage = Some(snapshot("codex", 1700000000));
+        let refreshing: HashSet<ProviderId> = [ProviderId::Codex].into_iter().collect();
+        let rows = usage_rows_with(&[codex.clone()], None, 1700000000, &refreshing, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(unavailable_text(&rows[0]), "Refreshing…");
+        assert_eq!(rows[0].plan.as_deref(), Some("prolite"));
+        let rows = usage_rows_with(&[codex], None, 1700000000, &HashSet::new(), false);
+        match &rows[0].state {
+            UsageRowState::Windows(windows, _) => assert_eq!(windows.len(), 1),
+            other => panic!("expected the landed windows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stale_muse_reading_keeps_its_numbers_with_unavailable_now() {
+        // The last wire read carried no numbers while a good snapshot
+        // stands: the row keeps the old bars and their age, with
+        // "unavailable now" beside them — never a wiped snapshot.
+        let mut muse = status(ProviderId::Muse);
+        muse.usage = Some(snapshot("muse", 1700000000 - 600));
+        let feed = MuseFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
+        let rows = usage_rows_with(&[muse], Some(feed), 1700000000, &HashSet::new(), true);
+        assert_eq!(rows.len(), 1);
+        match &rows[0].state {
+            UsageRowState::Windows(windows, as_of) => {
+                assert_eq!(windows.len(), 1, "the kept numbers still bar");
+                let footnote = as_of.as_deref().expect("the age still footnotes");
+                assert!(footnote.contains("10m ago"), "their age stands: {footnote}");
+                assert!(footnote.contains("unavailable now"), "beside the staleness: {footnote}");
+            }
+            other => panic!("expected the kept windows, got {other:?}"),
+        }
+        // Without the flag the same row reads just its age.
+        let mut muse = status(ProviderId::Muse);
+        muse.usage = Some(snapshot("muse", 1700000000 - 600));
+        let feed = MuseFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
+        let rows = usage_rows_with(&[muse], Some(feed), 1700000000, &HashSet::new(), false);
+        match &rows[0].state {
+            UsageRowState::Windows(_, as_of) => {
+                assert_eq!(as_of.as_deref(), Some("10m ago"));
+            }
+            other => panic!("expected the kept windows, got {other:?}"),
+        }
     }
 
     #[test]

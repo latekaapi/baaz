@@ -89,6 +89,14 @@ pub fn humanize_status(status: &str) -> String {
 /// A `rateLimitType` in minutes, when the name is a known window length:
 /// the unified windows ride under these names, so the card can label the
 /// named window from its length instead of echoing the wire spelling.
+/// Unix seconds now. Best-effort: zero when the clock is unavailable.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn window_minutes(rate_limit_type: &str) -> Option<u64> {
     match rate_limit_type {
         "five_hour" => Some(300),
@@ -102,12 +110,23 @@ fn window_minutes(rate_limit_type: &str) -> Option<u64> {
 pub struct AccountSnapshot {
     /// The latest reading, when any `rate_limit_event` has been seen.
     pub latest: Option<RateLimitInfo>,
+    /// Unix time the latest reading arrived on the wire. Stamped when the
+    /// fold observes the event, so the store persists the reading with its
+    /// true age instead of the next turn's time.
+    pub observed_at: Option<i64>,
 }
 
 impl AccountSnapshot {
-    /// Record a reading.
+    /// Record a reading, stamping when it arrived on the wire.
     pub fn observe(&mut self, info: RateLimitInfo) {
         self.latest = Some(info);
+        self.observed_at = Some(now_secs());
+    }
+
+    /// Pin the wire-arrival stamp (tests drive the clock through this).
+    #[cfg(test)]
+    pub fn set_observed_at(&mut self, at: i64) {
+        self.observed_at = Some(at);
     }
 
     /// Whether the latest reading says turns are billing beyond the plan.
@@ -163,9 +182,10 @@ impl AccountSnapshot {
             return Some(provider::UsageReport {
                 plan: Some(humanize_status(&info.status)),
                 windows: Vec::new(),
+                observed_at: self.observed_at,
             });
         }
-        Some(provider::UsageReport { plan: None, windows })
+        Some(provider::UsageReport { plan: None, windows, observed_at: self.observed_at })
     }
 
     /// The display label for [`provider::Ack::Account`]: window, percentage,
