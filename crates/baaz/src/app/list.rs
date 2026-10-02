@@ -498,8 +498,9 @@ impl Harness {
         }
     }
 
-    /// The open session's id, which the empty filter never applies to: a
-    /// session just created has no turns yet and must stay visible.
+    /// The open session's id. A just-created session has no turns yet
+    /// and stays rowless until its first send reveals it; only a real
+    /// handoff head keeps its row while still empty.
     pub(crate) fn active_id(&self, cx: &gpui::App) -> Option<String> {
         self.active.as_ref().map(|a| a.read(cx).session_id.clone())
     }
@@ -507,8 +508,9 @@ impl Harness {
     /// The rows the sidebar should draw: hidden ones out unless asked for,
     /// archived ones out unless asked for, sessions with no turns out unless
     /// asked for. Text search lives in the search palette (⌘⇧F), never in a
-    /// sidebar field, so no needle applies here. The open session is always
-    /// drawn.
+    /// sidebar field, so no needle applies here. A still-empty open session
+    /// is out too — its row arrives with its first send — unless it heads a
+    /// real handoff chain.
     /// Cached: the clone and the sort run once per change, not once per
     /// caller per frame (finding `performance-5`). `render_sidebar`, the
     /// sidebar's empty states, the Resume palette and the search rows all read
@@ -616,11 +618,16 @@ impl Harness {
             &self.provider_sessions,
             &self.overrides,
         );
-        // One identity for selection: the active/pending head is never
-        // filtered as empty, so the destination row stays highlighted
-        // while the pack runs.
-        let active_head = active.as_deref().map(|id| index.head(id));
-        let pending_head = pending.as_deref().map(|id| index.head(id));
+        // One identity for selection: a real handoff head (a chain with
+        // at least two members) is never filtered as empty, so the
+        // destination row stays highlighted while the pack runs. A fresh
+        // session is its own head (`ChainIndex::head` returns the id
+        // itself when unlinked), so it gets no exemption here and has no
+        // row until its first send reveals it.
+        let active_head =
+            active.as_deref().map(|id| index.head(id)).filter(|head| index.members(head).len() >= 2);
+        let pending_head =
+            pending.as_deref().map(|id| index.head(id)).filter(|head| index.members(head).len() >= 2);
         let mut rows: Vec<SessionEntry> = collapsed
             .into_iter()
             .filter(|entry| self.show_hidden || !entry.hidden)

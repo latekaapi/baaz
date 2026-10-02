@@ -3129,4 +3129,131 @@ mod tests {
         });
         b3c_teardown(&dir, guard, old);
     }
+
+    /// B1: a new session gets no sidebar row until its first message is
+    /// sent — even while it is the open session. Runs `visible_sessions`
+    /// (not just `is_empty`): the fresh active zero-turn row stays out,
+    /// the first send reveals it, and a real handoff head with zero own
+    /// turns keeps its row.
+    #[gpui::test]
+    fn b1_fresh_active_session_has_no_row_until_its_first_send(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("b1-empty-row");
+        let workspace = dir.to_string_lossy().into_owned();
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        fn empty_entry(id: &str) -> SessionEntry {
+            SessionEntry {
+                id: id.into(),
+                label: crate::sidebar::UNNAMED.into(),
+                updated: chrono::Local::now(),
+                running: false,
+                turns: 0,
+                hidden: false,
+                pinned: false,
+                archived: false,
+                description: String::new(),
+                replayed: false,
+                provider: None,
+                named: false,
+                needs_title: false,
+                side_marker: false,
+                title_pending: false,
+                last_ask: None,
+                local: false,
+                provisional: false,
+                workspace: None,
+                project: None,
+                project_name: None,
+                attention: Vec::new(),
+                approval_command: None,
+                pending_question: None,
+                turn_started: None,
+                last_error: None,
+                branch: None,
+                terminals_running: 0,
+            }
+        }
+        // The open session, with no turns yet: the muse 1.3.0 shape, where
+        // `session/list` already lists the draft as a zero-turn wire row.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions.push(empty_entry("s-fresh"));
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".into(),
+                    workspace: workspace.clone(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view =
+                    cx.new(|cx| crate::session::SessionView::new("s-fresh".into(), None, host, window, cx));
+                h.active = Some(view);
+                h.invalidate_list();
+            });
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx)
+                .visible_sessions(cx)
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            !visible.contains(&"s-fresh".to_owned()),
+            "a fresh active zero-turn session has no row, got {visible:?}"
+        );
+        // The first send reveals it: `first_send_update` marks the row
+        // running (`sidebar.rs:939`), which fails `is_empty` on its own.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let row = h.sessions.iter_mut().find(|entry| entry.id == "s-fresh").expect("fresh row");
+                assert!(
+                    crate::sidebar::first_send_update(row, Some("Fix the header"), chrono::Local::now(), false),
+                    "the first send touches a zero-turn row"
+                );
+                h.invalidate_list();
+            });
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx)
+                .visible_sessions(cx)
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert!(visible.contains(&"s-fresh".to_owned()), "the row appears on the first send");
+        // A real handoff head with zero own turns keeps its row: the
+        // two-member chain exempts the head from the empty filter.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.sessions.push(empty_entry("h-src"));
+                h.sessions.push(empty_entry("h-dst"));
+                h.set_override("h-src", |meta| meta.handoff_to = Some("h-dst".into()), cx);
+                let host = crate::session::SessionHost {
+                    provider_id: "echo".into(),
+                    workspace: workspace.clone(),
+                    overlays: h.overlays.clone(),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view =
+                    cx.new(|cx| crate::session::SessionView::new("h-dst".into(), None, host, window, cx));
+                h.active = Some(view);
+                h.invalidate_list();
+            });
+        });
+        let visible = vc.update(|_, cx| {
+            baaz.read(cx)
+                .visible_sessions(cx)
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            visible.contains(&"h-dst".to_owned()),
+            "a real handoff head with zero own turns keeps its row, got {visible:?}"
+        );
+        b3c_teardown(&dir, guard, old);
+    }
 }
