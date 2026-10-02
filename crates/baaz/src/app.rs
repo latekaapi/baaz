@@ -733,6 +733,9 @@ pub struct Harness {
     /// names these sessions, so without this the sidebar forgets them on
     /// every restart (W5).
     pub(crate) provider_sessions: crate::provider_sessions::ProviderSessionStore,
+    /// Whether the Settings → Providers migration row shows its dry-run
+    /// path list (B4M). Pure view state: never persisted, defaults shut.
+    pub(crate) migration_paths_expanded: bool,
     /// Which provider each terminal bridge session answers for, by the id
     /// the bridge names (`--session`). A Codex open mints its thread id
     /// after the bridge is already registered under the request id, so
@@ -1150,6 +1153,7 @@ impl Harness {
             tier_probing: false,
             overrides: sessions::Overrides::new(),
             provider_sessions: crate::provider_sessions::read(),
+            migration_paths_expanded: false,
             terminal_providers: HashMap::new(),
             projects: Projects::default(),
             current_project: None,
@@ -1384,6 +1388,17 @@ impl Harness {
         if this.current_project.is_some() {
             this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
         }
+        // B4M's one-time prompt: deferred past construction (the hook runs
+        // inside `drain`, where touching the Harness re-enters it — the
+        // defer runs at the end of the effect cycle instead). The offer
+        // itself declines over a connect screen, a capture, a dismissal,
+        // an existing dialog, or an empty plan — building nothing.
+        let migration_harness = cx.entity();
+        cx.defer(move |cx| {
+            migration_harness.update(cx, |harness, cx| {
+                harness.maybe_offer_session_migration(cx);
+            });
+        });
         crate::log::boot_mark("harness-new-done");
         this
     }

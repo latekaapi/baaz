@@ -53,6 +53,79 @@ pub fn ensure_home(owner_home: &Path, state_dir: &Path) -> std::io::Result<PathB
     Ok(home)
 }
 
+/// One owner-side file the sessions migration (B4M) may move: its
+/// absolute source plus its path relative to the Claude config dir. The
+/// target keeps the same relative path under the Baaz home, so a moved
+/// transcript resumes where the CLI expects it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSource {
+    /// Absolute owner-side path (`~/.claude/projects/<slug>/…`).
+    pub source: PathBuf,
+    /// Path relative to the config dir (`projects/<slug>/…`).
+    pub rel: PathBuf,
+    /// Whether the source is a directory (the `<id>/` companion).
+    pub is_dir: bool,
+}
+
+/// Whether `session_id` is safe to match against file names: registry ids
+/// are Baaz-minted UUIDs, and anything carrying a separator is refused
+/// rather than walked — a hostile or corrupt id must never escape the
+/// projects tree.
+fn id_is_safe(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && !session_id.contains('/')
+        && !session_id.contains('\\')
+        && session_id != "."
+        && session_id != ".."
+}
+
+/// The owner-side Claude files for one registered session id: the
+/// `projects/<slug>/<id>.jsonl` transcript (the `<slug>` is whatever slug
+/// directory holds it — the registry never records it) plus the `<id>/`
+/// companion directory when present. Unregistered files are never listed:
+/// only this id is matched. Pure reads; creates nothing.
+pub fn session_sources(owner_home: &Path, session_id: &str) -> Vec<SessionSource> {
+    if !id_is_safe(session_id) {
+        return Vec::new();
+    }
+    let projects = owner_config_dir(owner_home).join("projects");
+    let Ok(slugs) = std::fs::read_dir(&projects) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for slug in slugs.flatten() {
+        if !slug.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let slug_name = slug.file_name();
+        let transcript = slug.path().join(format!("{session_id}.jsonl"));
+        if std::fs::symlink_metadata(&transcript).is_ok_and(|meta| meta.file_type().is_file()) {
+            out.push(SessionSource {
+                source: transcript,
+                rel: PathBuf::from("projects")
+                    .join(&slug_name)
+                    .join(format!("{session_id}.jsonl")),
+                is_dir: false,
+            });
+        }
+        let companion = slug.path().join(session_id);
+        if std::fs::symlink_metadata(&companion).is_ok_and(|meta| meta.file_type().is_dir()) {
+            out.push(SessionSource {
+                source: companion,
+                rel: PathBuf::from("projects").join(&slug_name).join(session_id),
+                is_dir: true,
+            });
+        }
+    }
+    out
+}
+
+/// The Baaz-home target for a [`SessionSource`] relative path: the same
+/// relative path under `<state_dir>/claude-home`.
+pub fn baaz_target(state_dir: &Path, rel: &Path) -> PathBuf {
+    home_dir(state_dir).join(rel)
+}
+
 /// The child environment additions for a claude child rooted at `home`:
 /// `CLAUDE_CONFIG_DIR` naming the Baaz home plus an empty
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` so the child keeps the owner's
@@ -167,6 +240,41 @@ mod tests {
             env.contains(&("CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(), String::new())),
             "empty, not unset — the shared Keychain item: {env:?}"
         );
+    }
+
+    #[test]
+    fn session_sources_lists_only_the_registered_id() {
+        let root = temp_root("sources");
+        let owner = root.join("owner-home");
+        let slug = owner.join(".claude").join("projects").join("-work");
+        std::fs::create_dir_all(&slug).expect("slug dir");
+        std::fs::write(slug.join("sess-1.jsonl"), "{}\n").expect("registered transcript");
+        std::fs::create_dir_all(slug.join("sess-1")).expect("companion dir");
+        std::fs::write(slug.join("other.jsonl"), "{}\n").expect("unregistered transcript");
+
+        let mut found = session_sources(&owner, "sess-1");
+        found.sort_by(|a, b| a.rel.cmp(&b.rel));
+        assert_eq!(found.len(), 2, "transcript plus companion: {found:?}");
+        assert!(found.iter().any(|entry| entry.rel == PathBuf::from("projects/-work/sess-1.jsonl") && !entry.is_dir));
+        assert!(found.iter().any(|entry| entry.rel == PathBuf::from("projects/-work/sess-1") && entry.is_dir));
+        for entry in &found {
+            assert_eq!(baaz_target(&root.join("state"), &entry.rel), root.join("state").join("claude-home").join(&entry.rel));
+        }
+        assert!(session_sources(&owner, "other-absent").is_empty(), "absent ids list nothing");
+        // The unregistered file is never attributed to the registered id.
+        assert!(!found.iter().any(|entry| entry.rel.to_string_lossy().contains("other")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_sources_refuses_ids_that_could_escape_the_tree() {
+        let root = temp_root("traversal");
+        let owner = root.join("owner-home");
+        std::fs::create_dir_all(owner.join(".claude").join("projects")).expect("projects dir");
+        for hostile in ["../x", "a/b", "..", "", "a\\b"] {
+            assert!(session_sources(&owner, hostile).is_empty(), "refused: {hostile:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

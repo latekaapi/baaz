@@ -161,6 +161,84 @@ fn relink_auth_at(owner_auth: &Path, home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// One owner-side file the sessions migration (B4M) may move: its
+/// absolute source plus its path relative to the Codex home. The target
+/// keeps the same relative path under the Baaz home, so a moved rollout
+/// resumes where the app-server expects it. Never a sqlite file: only
+/// `sessions/` rollouts are ever listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSource {
+    /// Absolute owner-side path (`~/.codex/sessions/…`).
+    pub source: PathBuf,
+    /// Path relative to the Codex home (`sessions/YYYY/MM/DD/…`).
+    pub rel: PathBuf,
+}
+
+/// Whether `session_id` is safe to match against file names: thread ids
+/// are server-minted, and anything carrying a separator is refused rather
+/// than walked — a hostile or corrupt id must never escape the sessions
+/// tree.
+fn id_is_safe(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && !session_id.contains('/')
+        && !session_id.contains('\\')
+        && session_id != "."
+        && session_id != ".."
+}
+
+/// Collect the rollout files whose name carries `session_id` under `dir`,
+/// recursing into date directories. The rollout name ends in
+/// `-<thread-id>.jsonl`, so the match is a filename suffix, never a
+/// substring of a directory.
+fn collect_rollouts(dir: &Path, session_id: &str, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let suffix = format!("{session_id}.jsonl");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_rollouts(&path, session_id, out);
+        } else if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(suffix.as_str()))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// The owner-side Codex rollouts for one registered thread id: every
+/// `sessions/**` file whose name ends in `-<id>.jsonl`. Unregistered
+/// rollouts are never listed: only this id is matched. The owner's
+/// `state_5.sqlite` is never touched — Baaz moves files, never the index.
+/// Pure reads; creates nothing.
+pub fn session_sources(owner_home: &Path, session_id: &str) -> Vec<SessionSource> {
+    if !id_is_safe(session_id) {
+        return Vec::new();
+    }
+    let root = owner_home_dir(owner_home);
+    let sessions = root.join("sessions");
+    let mut files = Vec::new();
+    collect_rollouts(&sessions, session_id, &mut files);
+    files
+        .into_iter()
+        .filter_map(|source| {
+            let rel = source.strip_prefix(&root).ok()?.to_path_buf();
+            Some(SessionSource { source, rel })
+        })
+        .filter(|entry| {
+            std::fs::symlink_metadata(&entry.source).is_ok_and(|meta| meta.file_type().is_file())
+        })
+        .collect()
+}
+
+/// The Baaz-home target for a [`SessionSource`] relative path: the same
+/// relative path under `<state_dir>/codex-home`.
+pub fn baaz_target(state_dir: &Path, rel: &Path) -> PathBuf {
+    home_dir(state_dir).join(rel)
+}
+
 /// The child environment addition for an app-server child rooted at
 /// `home`: `CODEX_HOME` naming the Baaz home. Applied on top of the
 /// [`provider::child_env`] scrub — never instead of it.
@@ -381,6 +459,45 @@ mod tests {
             "{\"token\":\"stale\"}",
             "the older token survives beside the link"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_sources_lists_only_the_registered_thread() {
+        let root = temp_root("sources");
+        let owner = root.join("owner-home");
+        let day = owner.join(".codex").join("sessions").join("2026").join("10").join("02");
+        std::fs::create_dir_all(&day).expect("date dir");
+        std::fs::write(day.join("rollout-2026-10-02-aaa-thread-1.jsonl"), "{}\n")
+            .expect("registered rollout");
+        std::fs::write(day.join("rollout-2026-10-02-bbb-thread-9.jsonl"), "{}\n")
+            .expect("unregistered rollout");
+        // A sqlite db beside the rollouts is never a source.
+        std::fs::write(owner.join(".codex").join("state_5.sqlite"), "db").expect("owner db");
+
+        let found = session_sources(&owner, "thread-1");
+        assert_eq!(found.len(), 1, "only the registered thread: {found:?}");
+        assert_eq!(
+            found[0].rel,
+            PathBuf::from("sessions/2026/10/02/rollout-2026-10-02-aaa-thread-1.jsonl")
+        );
+        assert_eq!(
+            baaz_target(&root.join("state"), &found[0].rel),
+            root.join("state").join("codex-home").join(&found[0].rel),
+            "the target keeps the same relative path under the Baaz home"
+        );
+        assert!(session_sources(&owner, "thread-absent").is_empty(), "absent ids list nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_sources_refuses_ids_that_could_escape_the_tree() {
+        let root = temp_root("traversal");
+        let owner = root.join("owner-home");
+        std::fs::create_dir_all(owner.join(".codex").join("sessions")).expect("sessions dir");
+        for hostile in ["../x", "a/b", "..", ""] {
+            assert!(session_sources(&owner, hostile).is_empty(), "refused: {hostile:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

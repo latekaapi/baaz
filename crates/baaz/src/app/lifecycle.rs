@@ -2765,6 +2765,17 @@ impl Harness {
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
+        // B4M's lazy move: a session that was never moved still has its
+        // transcript/rollout in the owner's home, where the Baaz-homed
+        // child cannot resume it — move it now through the same executor
+        // the prompt uses, so resume never silently breaks. Sessions with
+        // nothing owner-side (already moved, or never there) move nothing.
+        crate::session_migration::ensure_session_moved(
+            &crate::session_migration::owner_home(),
+            &crate::store::support_dir(),
+            &record.provider,
+            &record.session_id,
+        );
         // A disabled provider reopens with no child either: the scripted
         // resume below replays the stored transcript read-only, and the
         // landing view wears the quiet banner.
