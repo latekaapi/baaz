@@ -474,9 +474,11 @@ pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How often the wait checks on the child.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Run `program` with `args` in `dir`, bounded by [`TIMEOUT`]. `None` is
-/// every failure mode at once: not there, non-zero exit, hung, unreadable.
-fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Option<Vec<u8>> {
+/// The `muse skills …` [`Command`]: a pure builder — no process spawned
+/// — so tests assert the scrub on the built command via `get_envs`. The
+/// inherited desktop-agent env is scrubbed per-`Command` (see
+/// [`provider::child_env`]); nothing else is redirected.
+fn cli_command(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Command {
     let mut command = Command::new(program);
     command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(
         std::process::Stdio::piped(),
@@ -484,7 +486,14 @@ fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Optio
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
-    let mut child = command.spawn().ok()?;
+    provider::child_env::scrub_command(&mut command);
+    command
+}
+
+/// Run `program` with `args` in `dir`, bounded by [`TIMEOUT`]. `None` is
+/// every failure mode at once: not there, non-zero exit, hung, unreadable.
+fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Option<Vec<u8>> {
+    let mut child = cli_command(program, args, dir).spawn().ok()?;
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {
         match child.try_wait() {
@@ -1073,6 +1082,29 @@ mod tests {
         let body = "---\nname: demo\ndescription: Demo.\n---\n\n# Demo\n";
         assert_eq!(strip_frontmatter(body), "\n# Demo\n");
         assert_eq!(strip_frontmatter("# No frontmatter\n"), "# No frontmatter\n");
+    }
+
+    /// The skills CLI carries the scrub: `CLAUDECODE` (scrubbed under
+    /// either entrypoint flag) is an explicit removal on the built
+    /// command. The shared scrub-env lock serializes against the other
+    /// tests in this binary that touch these names.
+    #[test]
+    fn the_cli_command_is_scrubbed() {
+        let _lock =
+            crate::connect::SCRUB_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("CLAUDECODE");
+        std::env::set_var("CLAUDECODE", "1");
+        let command = cli_command("muse", &["skills", "list", "--json"], None);
+        if let Some(previous) = previous {
+            std::env::set_var("CLAUDECODE", previous);
+        } else {
+            std::env::remove_var("CLAUDECODE");
+        }
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter().any(|(name, value)| *name == "CLAUDECODE" && value.is_none()),
+            "the skills CLI removes the desktop inheritance: {envs:?}"
+        );
     }
 
     fn catalog_payload() -> serde_json::Value {

@@ -20,6 +20,7 @@ pub mod caps;
 pub mod child;
 pub mod fold;
 pub mod frame;
+pub mod home;
 pub mod probe;
 pub mod terminal;
 
@@ -71,6 +72,15 @@ pub struct CodexAdapter {
     /// the disables are skipped while the bridge still rides when a relay
     /// is set. Applies to sessions started after the change.
     use_own_mcp: Mutex<bool>,
+    /// The state dir the Baaz-owned Codex home lives under, pinned by the
+    /// host after ensuring it. `None` resolves through
+    /// [`provider::child_env::state_dir`] (which honours
+    /// `BAAZ_STATE_DIR`) — env-only, so tests never touch the real
+    /// Application Support dir unless they point there.
+    state_override: Mutex<Option<std::path::PathBuf>>,
+    /// Stand-in owner `$HOME` for home upkeep (tests): the dir whose
+    /// `.codex` is linked from. Production reads the real `HOME`.
+    home_override: Option<std::path::PathBuf>,
 }
 
 /// Where the terminal relay lives: the bridge to spawn and the socket to
@@ -104,7 +114,18 @@ impl CodexAdapter {
             version: Mutex::new(None),
             terminal: Mutex::new(None),
             use_own_mcp: Mutex::new(false),
+            state_override: Mutex::new(None),
+            home_override: None,
         }
+    }
+
+    /// Point home upkeep at a stand-in owner `$HOME` (tests): links are
+    /// read from `<home>/.codex`, and the Baaz home is still ensured
+    /// under the resolved state dir — so pin a temp state dir too and
+    /// the spawn touches nothing real.
+    pub fn with_home(mut self, home: std::path::PathBuf) -> Self {
+        self.home_override = Some(home);
+        self
     }
 
     /// Point the terminal relay at the bridge and socket before the
@@ -122,6 +143,48 @@ impl CodexAdapter {
     /// while the bridge still rides when a relay is set. Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {
         *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
+    }
+
+    /// Pin the state dir the Baaz-owned Codex home lives under: the host
+    /// ensures the home and pins it here, so children resolve through it
+    /// even when this process's own env names another `CODEX_HOME`.
+    /// Tests pin a temp dir instead of the real Application Support dir.
+    pub fn set_state_dir(&self, dir: std::path::PathBuf) {
+        *self.state_override.lock().expect("state mutex") = Some(dir);
+    }
+
+    /// The state dir for this adapter: the pin first, else this run's
+    /// state dir (which honours `BAAZ_STATE_DIR`).
+    fn resolved_state_dir(&self) -> std::path::PathBuf {
+        self.state_override.lock().expect("state mutex").clone().unwrap_or_else(provider::child_env::state_dir)
+    }
+
+    /// The Baaz-owned Codex home this adapter spawns children with.
+    /// Env-only: creates nothing (see [`Self::prepare_home`]).
+    fn resolved_home(&self) -> std::path::PathBuf {
+        crate::home::home_dir(&self.resolved_state_dir())
+    }
+
+    /// The `CODEX_HOME` env for a child of this adapter: the Baaz home,
+    /// applied on top of the [`provider::child_env`] scrub.
+    fn child_env(&self) -> Vec<(String, String)> {
+        crate::home::child_env(&self.resolved_home())
+    }
+
+    /// Best-effort home upkeep before a spawn: ensure the dir and its
+    /// owner links, then re-check the rotating `auth.json` link. Errors
+    /// are ignored — the spawn below reports an unusable home honestly,
+    /// and probes (which never call this) keep reading the owner's home.
+    fn prepare_home(&self) {
+        let state = self.resolved_state_dir();
+        let owner = match &self.home_override {
+            Some(owner) => Some(owner.clone()),
+            None => std::env::var_os("HOME").map(std::path::PathBuf::from),
+        };
+        if let Some(owner) = owner {
+            let _ = crate::home::ensure_home(&owner, &state);
+            let _ = crate::home::relink_auth(&owner, &state);
+        }
     }
 
     /// The `app-server` argv fragment for `session_id`: the bridge as a
@@ -200,10 +263,13 @@ impl CodexAdapter {
             });
         }
         let extra = self.spawn_args_for(open_id);
-        let running = RunningChild::spawn(&self.program, &extra, Arc::clone(&self.fold), self.tx.clone())
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("could not spawn codex: {error}"),
-            })?;
+        self.prepare_home();
+        let env = self.child_env();
+        let running =
+            RunningChild::spawn_with_env(&self.program, &extra, &env, Arc::clone(&self.fold), self.tx.clone())
+                .map_err(|error| ProviderError::Unavailable {
+                    reason: format!("could not spawn codex: {error}"),
+                })?;
         running
             .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
             .map_err(Self::unavailable)?;
@@ -322,10 +388,13 @@ impl CodexAdapter {
         // A resume names its session up front, so the bridge answers for
         // the stored id directly.
         let extra = self.spawn_args_for(session_id);
-        let running = RunningChild::spawn(&self.program, &extra, Arc::clone(&self.fold), self.tx.clone())
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("could not spawn codex: {error}"),
-            })?;
+        self.prepare_home();
+        let env = self.child_env();
+        let running =
+            RunningChild::spawn_with_env(&self.program, &extra, &env, Arc::clone(&self.fold), self.tx.clone())
+                .map_err(|error| ProviderError::Unavailable {
+                    reason: format!("could not spawn codex: {error}"),
+                })?;
         running
             .send_frame(initialize_request(running.next_request_id(), env!("CARGO_PKG_VERSION")))
             .map_err(Self::unavailable)?;
@@ -640,10 +709,15 @@ impl ProviderAdapter for CodexAdapter {
         // stripped before comparing (see `codex_version_supported`). The
         // child's `PATH` is the login-shell `PATH` with the program's own
         // directory first, so a Dock launch still runs a home install and
-        // its `env`-shebang neighbours. No other env var is changed.
-        let output = std::process::Command::new(&self.program)
+        // its `env`-shebang neighbours; the inherited desktop-agent env is
+        // scrubbed (see [`provider::child_env`]). No Baaz home is set: a
+        // version check reads no store.
+        let mut version_command = std::process::Command::new(&self.program);
+        version_command
             .arg("--version")
-            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)))
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(&self.program)));
+        provider::child_env::scrub_command(&mut version_command);
+        let output = version_command
             .output()
             .map_err(|error| ProviderError::Unavailable {
                 reason: format!("could not ask codex its version: {error}"),
@@ -1146,7 +1220,16 @@ with open(log, "w") as handle:
         let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
         let (script, log) = scripted_server();
         std::env::set_var("FAKE_CODEX_LOG", &log);
-        let mut adapter = CodexAdapter::new(&script.to_string_lossy());
+        // The open below spawns for real (scripted RPC) and upkeeps the
+        // Baaz home first: pin both the owner home and the state dir at
+        // temp dirs, so the spawn touches nothing real.
+        let scratch = script.parent().expect("fake lives in a temp dir").join("homes");
+        let owner_home = scratch.join("owner-home");
+        let state_dir = scratch.join("state");
+        std::fs::create_dir_all(owner_home.join(".codex")).expect("temp owner home");
+        let mut adapter =
+            CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home.clone());
+        adapter.set_state_dir(state_dir.clone());
         adapter
             .connect(&ConnectInfo::new("baaz", "0.0.0"))
             .expect("fake version clears the floor");
@@ -1159,6 +1242,18 @@ with open(log, "w") as handle:
             })
             .expect("fake handshake opens");
         assert!(matches!(ack, Ack::Session { .. }), "opened: {ack:?}");
+        // The spawn upkept the Baaz home under the pinned temp state
+        // dir — and the child env names it, never the owner's home.
+        assert_eq!(adapter.resolved_home(), state_dir.join("codex-home"));
+        assert!(state_dir.join("codex-home").is_dir(), "the spawn ensures the Baaz home");
+        assert_eq!(
+            adapter.child_env(),
+            vec![(
+                "CODEX_HOME".to_owned(),
+                state_dir.join("codex-home").to_string_lossy().into_owned()
+            )],
+            "the child writes to the Baaz home"
+        );
         // The folded answer behind `read_usage`: plan plus a weekly
         // window at 85% — the shape the account menu's card renders, not
         // a label string.
@@ -1173,6 +1268,22 @@ with open(log, "w") as handle:
         // unprompted), so the connect-time read is proven by the fold.
         drop(adapter);
         let _ = log;
+    }
+
+    #[test]
+    fn a_pinned_state_dir_redirects_the_codex_home() {
+        // No spawn, no filesystem: the pin only redirects resolution.
+        let adapter = CodexAdapter::new("codex-must-never-spawn");
+        adapter.set_state_dir(std::path::PathBuf::from("/tmp/baaz-state"));
+        assert_eq!(
+            adapter.resolved_home(),
+            std::path::PathBuf::from("/tmp/baaz-state/codex-home")
+        );
+        assert_eq!(
+            adapter.child_env(),
+            vec![("CODEX_HOME".to_owned(), "/tmp/baaz-state/codex-home".to_owned())],
+            "the child writes to the Baaz home, nothing else"
+        );
     }
 
     #[test]

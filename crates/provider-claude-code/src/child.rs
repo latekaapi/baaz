@@ -36,10 +36,17 @@ impl RunningChild {
         program: &str,
         launch: &SessionLaunch,
         hub: &std::sync::Arc<ControlHub>,
+        claude_home: &std::path::Path,
     ) -> std::io::Result<Self> {
         // The child's `PATH` is the login-shell `PATH` with the program's
         // own directory first, so a Dock launch still runs a home install
-        // and its `env`-shebang neighbours. No other env var is changed.
+        // and its `env`-shebang neighbours. The inherited desktop-agent
+        // env is scrubbed ([`provider::child_env`]) and the child writes
+        // to the Baaz-owned home ([`crate::home`]), never the owner's
+        // `~/.claude` — that is what keeps Baaz sessions out of the
+        // desktop app's listing. No filesystem work happens here: the
+        // adapter re-ensures the absent-only owner links before every
+        // spawn, so late-created owner dirs are linked without a restart.
         let mut command = Command::new(program);
         command
             .args(&launch.argv)
@@ -47,6 +54,10 @@ impl RunningChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        provider::child_env::scrub_command(&mut command);
+        for (key, value) in crate::home::child_env(claude_home) {
+            command.env(key, value);
+        }
         if let Some(cwd) = &launch.cwd {
             command.current_dir(cwd);
         }
