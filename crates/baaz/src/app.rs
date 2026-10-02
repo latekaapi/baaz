@@ -3692,10 +3692,13 @@ impl Harness {
         // only; never in tests or deterministic captures (the scripted page
         // needs no warmup and captures build nothing unasked); never
         // focused.
-        if !self.browser_idle_warmed && matches!(self.auth, Auth::SignedIn(_)) {
+        // Deferred, not built here: `on_frame` runs inside render, and the
+        // point is that no frame constructs a webview. Waits for an active
+        // session so it warms that session's browser, not a home one.
+        if !self.browser_idle_warmed && matches!(self.auth, Auth::SignedIn(_)) && self.active.is_some() {
             self.browser_idle_warmed = true;
             if !self.browser.fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
-                self.prewarm_browser_in(window, cx);
+                self.defer_browser_prewarm(cx);
             }
         }
         // A regained window focus re-probes the provider statuses (Y4):
