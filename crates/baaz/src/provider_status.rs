@@ -1178,7 +1178,19 @@ fn live_service() -> MutexGuard<'static, LiveService> {
 /// hook and the menu-open refresh both run on the UI thread, and the file
 /// write never blocks them. Best-effort like every store write.
 fn save_cache_in_background(statuses: Vec<ProviderStatus>) {
-    std::thread::spawn(move || write_cache(&statuses));
+    // Writes may be queued faster than they land: each carries a
+    // generation, and under one lock only the newest generation writes, so
+    // an older snapshot can never overwrite a newer one.
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static WRITER: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let mut written = WRITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if generation > *written && generation == GENERATION.load(std::sync::atomic::Ordering::SeqCst) {
+            write_cache(&statuses);
+            *written = generation;
+        }
+    });
 }
 
 /// Every status the live service holds, for an off-thread cache write.
