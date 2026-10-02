@@ -459,6 +459,14 @@ impl SessionView {
                         turn_id: turn_id.clone(),
                         meta: meta.clone(),
                     });
+                    // The turn may have carried a fresh usage reading (a
+                    // rate-limit frame, an account push): persist it now,
+                    // so the menu shows it with its true age even if this
+                    // view closes before the menu next opens. A peek only
+                    // — no wire call — and skipped while the lane is busy.
+                    if let Some(report) = self.lane_usage() {
+                        crate::provider_status::record_observed_usage(self.provider_kind(), &report);
+                    }
                 }
                 Delta::TurnRemoved { turn_id } => {
                     if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {

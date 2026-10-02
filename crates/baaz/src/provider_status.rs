@@ -14,7 +14,7 @@
 //! * No screens change here: [`boot`] only logs `baaz: providers → …` so
 //!   the next task can wire the UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1046,8 +1046,14 @@ struct LiveService {
     was_active: bool,
     /// The statuses boot probed, refreshed on focus regain.
     service: Service,
-    /// When the account menu last refreshed its usage cards.
-    last_usage_refresh: Option<Instant>,
+    /// When the account menu last refreshed each provider's usage card:
+    /// the 60 s throttle is per provider, so one provider's fresh read
+    /// never spends another's.
+    last_usage_refresh: HashMap<ProviderId, Instant>,
+    /// The providers with an asynchronous usage read in flight (the Muse
+    /// wire re-read, the Codex probe): their menu rows read "Refreshing…"
+    /// until the read lands.
+    usage_refreshing: HashSet<ProviderId>,
 }
 
 static LIVE: OnceLock<Mutex<LiveService>> = OnceLock::new();
@@ -1064,7 +1070,8 @@ fn live_service() -> MutexGuard<'static, LiveService> {
         Mutex::new(LiveService {
             was_active: false,
             service: seeded_live_service(),
-            last_usage_refresh: None,
+            last_usage_refresh: HashMap::new(),
+            usage_refreshing: HashSet::new(),
         })
     })
     .lock()
@@ -1094,18 +1101,111 @@ pub fn live_statuses() -> Vec<ProviderStatus> {
 }
 
 /// Whether the account menu's usage refresh is due: at most every
-/// [`USAGE_REFRESH_THROTTLE`]. Marks the refresh when due, so the caller
-/// that goes ahead owns exactly one refresh per window.
+/// [`USAGE_REFRESH_THROTTLE`] per provider. Marks the refresh when due,
+/// so the caller that goes ahead owns exactly one refresh per window.
 pub fn note_usage_refresh() -> bool {
+    !note_usage_refresh_for(&ProviderId::all()).is_empty()
+}
+
+/// The subset of `ids` whose account-menu usage refresh is due: each at
+/// most every [`USAGE_REFRESH_THROTTLE`], on its own clock — one
+/// provider's fresh read never spends another's. Due providers are
+/// marked, so the caller that goes ahead owns each one.
+pub fn note_usage_refresh_for(ids: &[ProviderId]) -> Vec<ProviderId> {
     let mut live = live_service();
     let now = Instant::now();
-    let due = live
-        .last_usage_refresh
-        .is_none_or(|at| now.duration_since(at) >= USAGE_REFRESH_THROTTLE);
-    if due {
-        live.last_usage_refresh = Some(now);
+    let due = usage_refresh_due(&live.last_usage_refresh, ids, now);
+    for id in &due {
+        live.last_usage_refresh.insert(*id, now);
     }
     due
+}
+
+/// The pure arm of [`note_usage_refresh_for`]: which of `ids` last
+/// refreshed at least [`USAGE_REFRESH_THROTTLE`] before `now` (never
+/// refreshed counts as due). Pure so tests drive the clocks without
+/// touching the live service.
+pub fn usage_refresh_due(
+    last: &HashMap<ProviderId, Instant>,
+    ids: &[ProviderId],
+    now: Instant,
+) -> Vec<ProviderId> {
+    ids.iter()
+        .filter(|id| {
+            last.get(id).is_none_or(|at| now.duration_since(*at) >= USAGE_REFRESH_THROTTLE)
+        })
+        .copied()
+        .collect()
+}
+
+/// Every enabled provider the account menu can read without a model
+/// turn: connected lanes peek live, Muse answers the free wire read,
+/// and Codex answers its read-only probe. Disabled providers are
+/// omitted, and so are providers that are not connected (and are not
+/// Muse): with no lane and no login there is nothing to read.
+pub fn usage_refresh_targets(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
+    ProviderId::all()
+        .into_iter()
+        .filter(|id| {
+            let Some(status) = statuses.iter().find(|status| status.provider == *id) else {
+                return false;
+            };
+            if !status.enabled {
+                return false;
+            }
+            status.headline() == Headline::Connected || *id == ProviderId::Muse
+        })
+        .collect()
+}
+
+/// Mark `ids` as asynchronously refreshing: their menu rows read
+/// "Refreshing…" until their read lands and clears them.
+pub fn mark_usage_refreshing(ids: &[ProviderId]) {
+    let mut live = live_service();
+    live.usage_refreshing.extend(ids.iter().copied());
+}
+
+/// Clear `ids` from the refreshing set: their menu rows read the landed
+/// result (or what was there before) on the next render.
+pub fn clear_usage_refreshing(ids: &[ProviderId]) {
+    let mut live = live_service();
+    for id in ids {
+        live.usage_refreshing.remove(id);
+    }
+}
+
+/// The providers with an asynchronous usage read in flight: what the
+/// menu rows check before rendering their readings.
+pub fn usage_refreshing() -> Vec<ProviderId> {
+    live_service().usage_refreshing.iter().copied().collect()
+}
+
+/// Persist one lane's usage reading the moment it arrives (a finished
+/// turn): the single store the rows render from, written to the cache,
+/// so the reading survives the view closing and restarts, and the menu
+/// shows it with its true age.
+pub fn record_observed_usage(id: ProviderId, report: &provider::UsageReport) {
+    let mut live = live_service();
+    live.service.record_lane_usage(id, report);
+    live.service.save_cache();
+}
+
+/// Persist the Muse snapshot beside a tier answer: the weekly fraction
+/// under the tier's own label, so the menu shows the newest reading
+/// with its true age rather than the last menu-open peek.
+pub fn record_muse_snapshot(plan: Option<String>, used_fraction: Option<f64>) {
+    let mut live = live_service();
+    live.service.record_muse_usage(plan, used_fraction, None);
+    live.service.save_cache();
+}
+
+/// Persist a background probe's usage reading (today the Codex
+/// app-server probe's): only the usage is taken, never the probe's
+/// headline or switch — those stay the live service's own.
+pub fn record_probed_snapshot(snapshot: UsageSnapshot) {
+    let mut live = live_service();
+    live.service.record_usage(snapshot);
+    live.service.save_cache();
 }
 
 /// Store lane and Muse readings the account menu just refreshed: one
@@ -1753,6 +1853,100 @@ mod tests {
         // throttle, so the first call here owns the window.
         assert!(note_usage_refresh(), "the first open refreshes");
         assert!(!note_usage_refresh(), "the second open rides the first");
+    }
+
+    #[test]
+    fn a_turn_reading_is_persisted_and_wins_over_an_older_one() {
+        // A reading that arrives with a turn reaches the cache file, and a
+        // newer turn reading replaces an older held one: the menu shows
+        // the newest reading with its true age.
+        let env = sandbox();
+        let mut service = Service::with_probes(Probes::never());
+        service.put(ProviderStatus {
+            provider: ProviderId::ClaudeCode,
+            installed: Installed::yes("2.1.276", "/bin/claude"),
+            auth: Auth::SignedIn { email: None, plan: None, method: None },
+            enabled: true,
+            advisory: Advisory::None,
+            checked_at: Some(1_700_000_000),
+            usage: Some(UsageSnapshot {
+                provider: "claude-code".into(),
+                plan: Some("Max".into()),
+                windows: vec![UsageWindow {
+                    label: "Weekly".into(),
+                    used_fraction: 0.10,
+                    resets_at: None,
+                }],
+                as_of: 1_700_000_000,
+            }),
+        });
+        let before = now_secs();
+        service.record_lane_usage(
+            ProviderId::ClaudeCode,
+            &provider::UsageReport {
+                plan: Some("Max".into()),
+                windows: vec![provider::UsageWindow {
+                    label: "Weekly".into(),
+                    used_fraction: 0.41,
+                    resets_at: None,
+                    window_minutes: Some(10080),
+                }],
+            },
+        );
+        service.save_cache();
+        let stored = service.status(ProviderId::ClaudeCode).usage.expect("the turn reading was stored");
+        assert!((before..=now_secs()).contains(&stored.as_of), "the reading carries its landing time");
+        assert!((stored.windows[0].used_fraction - 0.41).abs() < 1e-9, "the newer reading wins");
+        let cached: Vec<ProviderStatus> = read_cache();
+        let claude = cached.iter().find(|status| status.provider == ProviderId::ClaudeCode).expect("cached");
+        assert_eq!(claude.usage, Some(stored), "the turn reading survives a restart through the cache");
+        let _ = env;
+    }
+
+    #[test]
+    fn the_usage_throttle_is_per_provider_not_global() {
+        // Pure arm, no live state: a fresh refresh of one provider never
+        // spends another's window.
+        let now = Instant::now();
+        let all = ProviderId::all();
+        assert_eq!(usage_refresh_due(&HashMap::new(), &all, now), Vec::from(all), "never refreshed counts as due");
+        let mut last = HashMap::new();
+        last.insert(ProviderId::ClaudeCode, now);
+        assert!(usage_refresh_due(&last, &[ProviderId::ClaudeCode], now).is_empty(), "seconds later it rides");
+        assert_eq!(
+            usage_refresh_due(&last, &[ProviderId::Codex], now),
+            vec![ProviderId::Codex],
+            "another provider is still due"
+        );
+        assert_eq!(
+            usage_refresh_due(&last, &[ProviderId::ClaudeCode], now + Duration::from_secs(61)),
+            vec![ProviderId::ClaudeCode],
+            "past the minute it is due again"
+        );
+    }
+
+    #[test]
+    fn menu_open_requests_every_provider_readable_without_a_model_turn() {
+        // Three connected providers: all three are requested. Disabled and
+        // signed-out providers have nothing to read, so they are not.
+        let _env = sandbox();
+        let connected = |id| {
+            let mut status = ProviderStatus::checking(id);
+            status.installed = Installed::yes("1.0", "/bin/x");
+            status.auth = Auth::SignedIn { email: None, plan: None, method: None };
+            status.checked_at = Some(1_700_000_000);
+            status
+        };
+        let statuses = vec![connected(ProviderId::Muse), connected(ProviderId::ClaudeCode), connected(ProviderId::Codex)];
+        assert_eq!(usage_refresh_targets(&statuses), Vec::from(ProviderId::all()));
+        let mut disabled = connected(ProviderId::Codex);
+        disabled.enabled = false;
+        let statuses = vec![connected(ProviderId::Muse), connected(ProviderId::ClaudeCode), disabled];
+        assert!(!usage_refresh_targets(&statuses).contains(&ProviderId::Codex), "disabled is omitted");
+        let mut signed_out = connected(ProviderId::Codex);
+        signed_out.auth = Auth::SignedOut;
+        let statuses = vec![connected(ProviderId::Muse), connected(ProviderId::ClaudeCode), signed_out];
+        assert!(!usage_refresh_targets(&statuses).contains(&ProviderId::Codex), "signed out has nothing to read");
     }
 
     #[test]
