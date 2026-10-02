@@ -432,6 +432,43 @@ impl Harness {
     /// directly instead. Focus rides only on the person's own open: render
     /// consumes one armed `show_right`/`toggle_right` onto a blank page,
     /// and a restore leaves the composer's keyboard alone.
+    /// Open a link's URL in Baaz's Browser pane (B9): the non-toggling
+    /// open onto Browser, then the navigation. The scripted backend needs
+    /// no window, so it navigates at once; the real webview navigates on
+    /// the next render, when [`Self::ensure_browser_person`] consumes the
+    /// pending URL with the window at hand. Never arms URL-field focus: a
+    /// link is not the person's own open.
+    pub(crate) fn open_url_in_browser(&mut self, url: String, cx: &mut Context<Self>) {
+        self.open_right_on(RightKind::Browser, cx);
+        // A person's own open earns URL-field focus; a link never does —
+        // undo the arm `open_right_on` owes the person.
+        self.browser_url_focus_armed = false;
+        if self.browser.fake || cfg!(test) {
+            let key = self.browser_key(cx);
+            let state = if key == HOME_KEY {
+                self.browser.home.clone().or_else(|| {
+                    self.prewarm_browser_if_needed(cx);
+                    self.browser.home.clone()
+                })
+            } else {
+                self.browser.states.get(&key).cloned().or_else(|| {
+                    self.prewarm_browser_if_needed(cx);
+                    self.browser.states.get(&key).cloned()
+                })
+            };
+            if let Some(state) = state {
+                if state.read(cx).url().as_ref() != url.as_str() {
+                    state.update(cx, |state, _cx| state.navigate(&url));
+                }
+            } else {
+                self.browser_pending_url = Some(url);
+            }
+        } else {
+            self.browser_pending_url = Some(url);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn ensure_browser_person(
         &mut self,
         window: &mut Window,
@@ -454,6 +491,14 @@ impl Harness {
         if focus && existed && state.read(cx).url() == BLANK {
             let focus_handle = state.read(cx).focus_handle().clone();
             window.focus(&focus_handle, cx);
+        }
+        // A link's pending URL lands here on the next render (B9): the
+        // event had no window, so the navigation waited for one. Consumed
+        // once — later frames reuse the navigated page.
+        if let Some(url) = self.browser_pending_url.take() {
+            if state.read(cx).url().as_ref() != url.as_str() {
+                state.update(cx, |state, _cx| state.navigate(&url));
+            }
         }
         state
     }
