@@ -53,6 +53,37 @@ PROBE_ENV = {**os.environ, "BAAZ_DETERMINISTIC": "1"}
 # An entry that declares only one kind cannot answer the other verb, and says
 # so rather than pretending: relay records that as unverified, never as passed.
 
+def _migrate_fixture():
+    """The `migrate-sessions` fixture: a fake registry in a temp state dir
+    plus a fake owner home holding those sessions' files. Built once at
+    import; the entry below points baaz at both (offline, temp dirs only —
+    the real HOME, ~/.claude, ~/.codex and the real Baaz state dir are
+    never touched). No baselines: capture and look."""
+    state = tempfile.mkdtemp(prefix="uiprobe-migrate-state-")
+    owner = tempfile.mkdtemp(prefix="uiprobe-migrate-owner-")
+    now_ms = int(time.time() * 1000)
+    registry = {
+        "sess-probe-1": {"provider": "claude-code", "sessionId": "sess-probe-1",
+                         "createdMs": now_ms, "updatedMs": now_ms},
+        "thread-probe-1": {"provider": "codex", "sessionId": "thread-probe-1",
+                           "createdMs": now_ms, "updatedMs": now_ms},
+    }
+    with open(os.path.join(state, "provider-sessions.json"), "w") as f:
+        json.dump(registry, f)
+    slug = os.path.join(owner, ".claude", "projects", "-work")
+    os.makedirs(slug)
+    with open(os.path.join(slug, "sess-probe-1.jsonl"), "w") as f:
+        f.write('{"id":1}\n')
+    day = os.path.join(owner, ".codex", "sessions", "2026", "10", "02")
+    os.makedirs(day)
+    with open(os.path.join(day, "rollout-2026-10-02-x-thread-probe-1.jsonl"), "w") as f:
+        f.write('{}\n')
+    return state, owner
+
+
+_MIGRATE_STATE, _MIGRATE_OWNER = _migrate_fixture()
+
+
 def _usage_script():
     now = int(time.time())
     def status(provider, email, plan, usage):
@@ -237,6 +268,17 @@ ENTRIES = {
     "account-usage":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "account"],
                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script())}},
+    # Settings → Providers with one Claude Code and one Codex session
+    # still waiting in the fixture owner home: the page carries the B4M
+    # migration row (the "Move 2 …" prompt surface with its dry-run paths
+    # and Move button). Offline, deterministic, fixture only — no
+    # baseline yet, generate on main after merge, never to silence a
+    # finding. Capture and look.
+    "migrate-sessions":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:providers"],
+                             "env": {"BAAZ_STATE_DIR": _MIGRATE_STATE,
+                                     "BAAZ_MIGRATION_OWNER_HOME": _MIGRATE_OWNER,
+                                     "BAAZ_MIGRATION_FIXTURE": "1"}},
 }
 
 

@@ -123,6 +123,14 @@ impl Harness {
             overlays.dialog = None;
             overlays.settings = Some(Settings { section });
         });
+        // Settings → Providers recomputes the B4M plan off the UI thread:
+        // the row renders the cache (never the walker) and follows when
+        // the recompute lands.
+        if self.settings_sections().get(section).is_some_and(|selected| {
+            selected.id.as_ref() == crate::settings_providers::PROVIDERS_SECTION_ID
+        }) {
+            self.refresh_migration_cache(cx);
+        }
         cx.notify();
     }
 

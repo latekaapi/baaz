@@ -188,13 +188,14 @@ fn id_is_safe(session_id: &str) -> bool {
 
 /// Collect the rollout files whose name carries `session_id` under `dir`,
 /// recursing into date directories. The rollout name ends in
-/// `-<thread-id>.jsonl`, so the match is a filename suffix, never a
-/// substring of a directory.
+/// `-<thread-id>.jsonl`, so the match keeps that `-` boundary: without it
+/// an id that is a tail of another (`hread-1` of `thread-1`) would claim a
+/// rollout that is not its own.
 fn collect_rollouts(dir: &Path, session_id: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let suffix = format!("{session_id}.jsonl");
+    let suffix = format!("-{session_id}.jsonl");
     for entry in entries.flatten() {
         let path = entry.path();
         if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -498,6 +499,23 @@ mod tests {
         for hostile in ["../x", "a/b", "..", ""] {
             assert!(session_sources(&owner, hostile).is_empty(), "refused: {hostile:?}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_rollout_match_keeps_the_dash_boundary() {
+        let root = temp_root("boundary");
+        let owner = root.join("owner-home");
+        let day = owner.join(".codex").join("sessions").join("2026").join("10").join("02");
+        std::fs::create_dir_all(&day).expect("date dir");
+        std::fs::write(day.join("rollout-2026-10-02-aaa-thread-1.jsonl"), "{}\n")
+            .expect("registered rollout");
+
+        assert_eq!(session_sources(&owner, "thread-1").len(), 1, "the full id still matches");
+        assert!(
+            session_sources(&owner, "hread-1").is_empty(),
+            "an id that is only a dash-less tail of the thread id claims nothing"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
