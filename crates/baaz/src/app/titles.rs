@@ -425,20 +425,21 @@ impl Harness {
 /// extractive pack ([`crate::handoff::should_model_summary`]), the app
 /// starts one hidden side session on the cheapest model and sends the
 /// pack's goal + transcript excerpt
-/// ([`crate::handoff::summary_prompt`]). The card reads "Summarising…"
-/// until the side session's `turn/completed` harvests into the pack's
-/// summary field, the 8 s watchdog keeps the extractive text, or the
-/// destination lands — landing stands the wait down, because the pack
-/// submits at land with the extractive summary and a later answer
-/// would never reach the destination model. Timeout, wire error, empty
-/// reply and signed-out all keep the extractive summary with one log
-/// line, never a dialog, never a retry. Cancel during the wait abandons
-/// the hidden side session: the run is already Cancelled, so the
-/// harvest and the watchdog drop their answers.
+/// ([`crate::handoff::summary_prompt`]). The card's summary step reads
+/// Current (with its elapsed counter) until the side session's
+/// `turn/completed` harvests into the pack's summary field, the 8 s
+/// watchdog keeps the extractive text, or the destination lands —
+/// landing stands the wait down, because the pack submits at land with
+/// the extractive summary and a later answer would never reach the
+/// destination model. Timeout, wire error, empty reply and signed-out
+/// all keep the extractive summary with one log line, never a dialog,
+/// never a retry. Cancel during the wait abandons the hidden side
+/// session: the run is already Cancelled, so the harvest and the
+/// watchdog drop their answers.
 impl Harness {
     /// Start the checkpoint's summary side session. Called once from the
     /// handoff checkpoint path, after the run went Checkpointed with its
-    /// extractive pack and the card went "Summarising…".
+    /// extractive pack and the card's summary step went Current.
     pub(crate) fn start_handoff_summary(
         &mut self,
         source: String,
@@ -662,6 +663,34 @@ impl Harness {
         if let Some(view) = self.find_view(source, cx) {
             view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
         }
+    }
+
+    /// Arm the per-second card refresh behind the current step's elapsed
+    /// counter. The transcript re-derives the steps and the `"n s"`
+    /// detail from the block at render time, so the refresh itself is
+    /// what ticks the counter: one replace plus a notify, once a second.
+    /// The tick re-arms itself only while the run is still in flight
+    /// under this epoch — settled, superseded and missing runs own no
+    /// timer (see [`crate::handoff::handoff_tick_wanted`]).
+    pub(crate) fn arm_handoff_tick(&mut self, source: String, epoch: u64, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+            let _ = this.update(cx, |this, cx| this.handoff_tick(&source, epoch, cx));
+        });
+        self.wire_tasks().push(task);
+    }
+
+    /// One tick fired: still live means refresh and re-arm, anything else
+    /// means the chain ends here with no timer left behind.
+    fn handoff_tick(&mut self, source: &str, epoch: u64, cx: &mut Context<Self>) {
+        let live =
+            self.handoffs.get(source).is_some_and(|run| run.epoch == epoch && run.is_live());
+        if !live {
+            return;
+        }
+        self.refresh_handoff_card(source, cx);
+        self.arm_handoff_tick(source.to_owned(), epoch, cx);
+        cx.notify();
     }
 }
 
