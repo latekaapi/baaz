@@ -338,6 +338,68 @@ impl Harness {
         state
     }
 
+    /// The live webview for the key the pane shows, when one already
+    /// exists — never creating. The closing frame uses this: the page's
+    /// last snapshot stays on screen while the column slides out instead
+    /// of the "Opening the page" placeholder (B7).
+    pub(crate) fn existing_browser(&self, cx: &gpui::App) -> Option<Entity<WebviewState>> {
+        let key = self.browser_key(cx);
+        if key == HOME_KEY {
+            self.browser.home.clone()
+        } else {
+            self.browser.states.get(&key).cloned()
+        }
+    }
+
+    /// Prepare the active session's webview ahead of the pane animating
+    /// (B7): `toggle_right`/`show_right` call this when they land open on
+    /// Browser, so the opening frame shows the page instead of paying the
+    /// construction cost inside `render`. Only the scripted backend can be
+    /// prepared without a window — the real WKWebView needs one, so on a
+    /// real window the first open still creates lazily in `render` (noted
+    /// in the report); tests and captures prewarm here and never in
+    /// `render`. Never focuses: focus rides only on the person's own open
+    /// through [`Self::ensure_browser_person`].
+    pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+            return;
+        }
+        if !(self.browser.fake || cfg!(test)) {
+            return;
+        }
+        let key = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx).session_id.clone())
+            .unwrap_or_else(|| HOME_KEY.to_owned());
+        if key == HOME_KEY {
+            if self.browser.home.is_some() {
+                return;
+            }
+        } else if self.browser.states.contains_key(&key) {
+            return;
+        }
+        let stored = if key == HOME_KEY {
+            None
+        } else {
+            self.overrides.get(&key).and_then(|meta| meta.right.clone()).and_then(|right| right.browser_url)
+        };
+        let initial = initial_url(stored.as_deref()).to_owned();
+        let state = cx.new(|cx| {
+            let mut backend = FakeWebBackend::new();
+            if backend.url().as_ref() != initial.as_str() {
+                backend.navigate(&initial);
+            }
+            WebviewState::new(Box::new(backend), cx)
+        });
+        if key == HOME_KEY {
+            self.browser.home = Some(state.clone());
+        } else {
+            self.browser.states.insert(key.clone(), state.clone());
+        }
+        self.terminal_service.register_browser(&key, state);
+    }
+
     /// The webview the pane shows this frame, creating it on first use.
     /// The caller gates on pane-open-on-Browser, so activation, boot and
     /// every other kind never create a webview as a side effect; the
@@ -476,16 +538,10 @@ impl Harness {
                 .get(&key)
                 .and_then(|meta| meta.right.clone())
                 .and_then(|right| right.browser_url);
+            // B7: a navigation is not searchable, so it persists through
+            // the cheap debounced write — never the session-list settle.
             if should_remember(&current, stored.as_deref()) {
-                self.set_override(
-                    &key,
-                    |meta| {
-                        let mut right = meta.right.clone().unwrap_or_default();
-                        right.browser_url = Some(current.clone());
-                        meta.right = Some(right);
-                    },
-                    cx,
-                );
+                self.remember_browser_url_cheap(&key, current, cx);
             }
         }
         // A Screenshot whose bytes were not there yet attaches on arrival.
