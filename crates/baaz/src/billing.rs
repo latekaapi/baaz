@@ -150,7 +150,7 @@ impl Harness {
             if tier::tier_has_numbers(&tier) {
                 crate::provider_status::record_muse_snapshot_at(
                     Some(tier.footer_label()),
-                    tier.weekly_fraction().map(f64::from),
+                    tier.usage_fraction().map(f64::from),
                     tier::observed_secs_from_changed_params(params),
                 );
             } else {
@@ -193,7 +193,7 @@ impl Harness {
                         tier::remember(&tier);
                         crate::provider_status::record_muse_snapshot_at(
                             Some(tier.footer_label()),
-                            tier.weekly_fraction().map(f64::from),
+                            tier.usage_fraction().map(f64::from),
                             observed_at,
                         );
                         this.tier = Some(tier);

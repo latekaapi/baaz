@@ -261,6 +261,18 @@ impl Tier {
     /// `0..=1`, or `None` when the probe said nothing usable. This is the only
     /// place the weekly number is drawn — [`Self::footer_label`] above it
     /// names the plan and stops there (D5).
+    /// The fraction the usage snapshot records: the weekly window when the
+    /// card has it, otherwise the current (5-hour) window — a read with only
+    /// the current window still has numbers and must not read as unavailable.
+    pub fn usage_fraction(&self) -> Option<f32> {
+        match self {
+            Tier::Subscription { weekly_pct: Some(pct), .. } | Tier::Subscription { current_pct: Some(pct), .. } => {
+                Some((*pct as f32 / 100.0).clamp(0.0, 1.0))
+            }
+            _ => None,
+        }
+    }
+
     pub fn weekly_fraction(&self) -> Option<f32> {
         match self {
             Tier::Subscription { weekly_pct: Some(pct), .. } => Some((*pct as f32 / 100.0).clamp(0.0, 1.0)),
@@ -2701,4 +2713,23 @@ mod tests {
         assert_eq!(back.last_human_plan, None);
         assert_eq!(back.tier, None);
     }
+
+#[cfg(test)]
+mod usage_fraction_tests {
+    use super::*;
+
+    #[test]
+    fn a_current_window_only_read_still_has_a_usage_fraction() {
+        let tier = Tier::Subscription {
+            plan: "Power Usage".into(),
+            current_pct: Some(40),
+            weekly_pct: None,
+            resets: Vec::new(),
+            usage_unavailable: false,
+        };
+        assert_eq!(tier.weekly_fraction(), None);
+        assert_eq!(tier.usage_fraction(), Some(0.4));
+    }
+}
+
 }
