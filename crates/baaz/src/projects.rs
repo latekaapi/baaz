@@ -29,19 +29,116 @@ fn default_version() -> u32 {
 /// The per-project defaults a new session starts with (decision D35): the
 /// last-used model, effort and approval mode. `--approval-mode` still wins
 /// over the stored mode for the session it starts.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Model and effort are keyed by provider wire id (`"muse"`,
+/// `"claude-code"`, `"codex"`): a pick on one lane never becomes another
+/// lane's start model. Files written before the keying still read: a lone
+/// `modelId`/`effort` migrates onto the `muse` entry (a `modelId` that is
+/// obviously another lane's is dropped instead — see
+/// [`looks_foreign_to_muse`]), and serializing always writes the keyed
+/// shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDefaults {
-    /// The model id, as `session/start` spells it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    /// The reasoning effort, as MSP spells it (`"high"`, `"xhigh"` …; see
-    /// [`effort_string`] and [`parse_effort`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    /// The model id per provider, as `session/start` spells it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, String>,
+    /// The reasoning effort per provider, as MSP spells it (`"high"`,
+    /// `"xhigh"` …; see [`effort_string`] and [`parse_effort`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub efforts: std::collections::BTreeMap<String, String>,
     /// The approval mode new sessions start in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<muse_client::schema::ApprovalMode>,
+}
+
+/// The pre-keying shape of [`ProjectDefaults`]: what old `projects.json`
+/// files carry. Never written, only read for migration.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawProjectDefaults {
+    #[serde(default)]
+    models: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    efforts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    approval_mode: Option<muse_client::schema::ApprovalMode>,
+}
+
+impl<'de> Deserialize<'de> for ProjectDefaults {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawProjectDefaults::deserialize(deserializer)?;
+        let mut models = raw.models;
+        let mut efforts = raw.efforts;
+        if let Some(legacy) = raw.model_id.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
+            if !models.contains_key(crate::providers::ProviderId::Muse.as_str())
+                && !looks_foreign_to_muse(&legacy)
+            {
+                models.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
+            }
+        }
+        if let Some(legacy) = raw.effort.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
+            if !efforts.contains_key(crate::providers::ProviderId::Muse.as_str()) {
+                efforts.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
+            }
+        }
+        Ok(Self { models, efforts, approval_mode: raw.approval_mode })
+    }
+}
+
+/// Whether `id` is obviously another lane's model, never a muse one: the
+/// Codex `gpt-*` family and the `claude-*` aliases. Anything else migrates
+/// onto the `muse` entry, and the muse start path drops whatever its own
+/// cached catalog does not list (see [`muse_start_model`]).
+fn looks_foreign_to_muse(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    lower.starts_with("gpt-") || lower.starts_with("codex") || lower.starts_with("claude-")
+}
+
+impl ProjectDefaults {
+    /// This provider's stored model, if any. Empty spellings read as no
+    /// default, so no `--model` flag is ever implied by one.
+    pub fn model_for(&self, provider: &str) -> Option<String> {
+        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        self.models.get(key).filter(|id| !id.is_empty()).cloned()
+    }
+
+    /// This provider's stored effort, if any.
+    pub fn effort_for(&self, provider: &str) -> Option<String> {
+        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        self.efforts.get(key).filter(|id| !id.is_empty()).cloned()
+    }
+
+    /// Record a model pick under the view's provider.
+    pub fn note_model(&mut self, provider: &str, model_id: &str) {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return;
+        }
+        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        self.models.insert(key.to_owned(), model_id.to_owned());
+    }
+
+    /// Record an effort pick under the view's provider. `None` (`Default`)
+    /// clears the entry rather than storing a blank.
+    pub fn note_effort(&mut self, provider: &str, effort: Option<String>) {
+        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        match effort.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
+            Some(effort) => {
+                self.efforts.insert(key.to_owned(), effort);
+            }
+            None => {
+                self.efforts.remove(key);
+            }
+        }
+    }
 }
 
 /// One adopted workspace.
@@ -541,7 +638,10 @@ fn build_start_params(
 /// The `session/start` params for a new session in `project_id`: the
 /// project's root and defaults, with the command line's approval mode
 /// winning over the stored one. `None` when there is no such project, which
-/// is the caller's cue to start nothing (the hero owns that state).
+/// is the caller's cue to start nothing (the hero owns that state). The
+/// model is this provider's default only: a pick stored under another lane
+/// never rides along (see [`checked_start_params`] for the muse catalog
+/// check the start path applies on top).
 pub fn start_params(
     projects: &Projects,
     project_id: Option<&str>,
@@ -552,9 +652,62 @@ pub fn start_params(
     Some(build_start_params(
         &project.root,
         provider,
-        project.defaults.model_id.clone(),
+        project.defaults.model_for(provider),
         cli_approval.or_else(|| project.defaults.approval_mode.clone()),
     ))
+}
+
+/// The dropped-model ids already logged: the drop repeats every start
+/// until the person picks a listed model, and each distinct id logs once.
+static DROPPED_MUSE_MODELS_LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// Record `id` as logged for the drop line. `true` when this is the first
+/// sighting — the only one that logs. A poisoned lock never logs.
+fn note_dropped_muse_model(id: &str) -> bool {
+    DROPPED_MUSE_MODELS_LOGGED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .map(|mut logged| logged.insert(id.to_owned()))
+        .unwrap_or(false)
+}
+
+/// The model a muse `session/start` may carry: the stored muse default,
+/// unless a non-empty cached muse `model/list` names no such row — then
+/// `None`, so muse starts on its own default instead of failing the turn.
+/// An empty catalog means nothing is known yet, never a reason to drop.
+pub fn muse_start_model(model: Option<String>, catalog_ids: &[String]) -> Option<String> {
+    let model = model.filter(|id| !id.is_empty())?;
+    if catalog_ids.is_empty() || catalog_ids.iter().any(|id| id == &model) {
+        return Some(model);
+    }
+    if note_dropped_muse_model(&model) {
+        crate::baaz_log!(
+            "muse start: stored model {model} is not in the cached model/list; starting on the server default"
+        );
+    }
+    None
+}
+
+/// [`start_params`], plus the muse catalog check — applied only when
+/// `provider` parses to muse, through the same [`ProviderId`](crate::providers::ProviderId)
+/// parsing the defaults use. A Codex or Claude Code default is never
+/// dropped against the muse catalog; only a muse start consults it.
+/// Every muse `session/start` that carries a project default — a new
+/// session and a handoff destination alike — builds its params here, so
+/// the two cannot drift.
+pub fn checked_start_params(
+    projects: &Projects,
+    project_id: Option<&str>,
+    provider: &str,
+    catalog_ids: &[String],
+    cli_approval: Option<muse_client::schema::ApprovalMode>,
+) -> Option<muse_client::schema::SessionStartParams> {
+    let mut params = start_params(projects, project_id, provider, cli_approval)?;
+    if crate::providers::ProviderId::parse(provider) == crate::providers::ProviderId::Muse {
+        params.model_id = muse_start_model(params.model_id, catalog_ids);
+    }
+    Some(params)
 }
 
 /// The `session/start` params for a session in `root` that is not being
@@ -891,8 +1044,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let id = projects.add(&dir).id.clone();
         let project = projects.projects.iter_mut().find(|p| p.id == id).expect("added");
-        project.defaults.model_id = Some("muse-spark-1.3".into());
-        project.defaults.effort = Some("high".into());
+        project.defaults.note_model("muse", "muse-spark-1.3");
+        project.defaults.note_effort("muse", Some("high".into()));
         project.defaults.approval_mode = Some(ApprovalMode::OnRequest);
         // No project, no params: the caller starts nothing.
         assert!(start_params(&projects, None, "meta", None).is_none());
@@ -923,6 +1076,107 @@ mod tests {
         let params = start_params_for_root(&dir, "meta", Some(ApprovalMode::AllowAll));
         assert_eq!(params.approval_mode, Some(ApprovalMode::AllowAll));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_codex_model_pick_never_becomes_the_muse_start_model() {
+        let mut projects = Projects::default();
+        let dir = state_dir("per-provider-defaults");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let id = projects.add(&dir).id.clone();
+        let project = projects.projects.iter_mut().find(|p| p.id == id).expect("added");
+        // A Codex pick lands under the Codex key, exactly as
+        // `note_project_default` records it from the picking view.
+        project.defaults.note_model("codex", "gpt-6-astra");
+        project.defaults.note_effort("codex", Some("xhigh".into()));
+        // The muse start carries no model: Codex's pick never leaks lanes.
+        let params = start_params(&projects, Some(&id), "muse", None).expect("params");
+        assert_eq!(params.model_id, None, "a Codex pick must not start a muse session");
+        assert_eq!(params.provider_id.as_deref(), Some("muse"));
+        // The Codex start still reads its own default.
+        let params = start_params(&projects, Some(&id), "codex", None).expect("params");
+        assert_eq!(params.model_id.as_deref(), Some("gpt-6-astra"));
+        // And a muse pick later does not disturb the Codex entry.
+        projects
+            .projects
+            .iter_mut()
+            .find(|p| p.id == id)
+            .expect("added")
+            .defaults
+            .note_model("muse", "muse-spark-1.3");
+        let params = start_params(&projects, Some(&id), "codex", None).expect("params");
+        assert_eq!(params.model_id.as_deref(), Some("gpt-6-astra"));
+        let params = start_params(&projects, Some(&id), "muse", None).expect("params");
+        assert_eq!(params.model_id.as_deref(), Some("muse-spark-1.3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_params_drops_a_model_the_muse_catalog_does_not_list() {
+        let listed = vec!["muse-spark-1.3".to_owned(), "muse-everyday".to_owned()];
+        // A stored default the catalog names rides along.
+        assert_eq!(
+            muse_start_model(Some("muse-spark-1.3".to_owned()), &listed).as_deref(),
+            Some("muse-spark-1.3")
+        );
+        // A stored id the catalog omits (a foreign pick kept through
+        // migration) is dropped, so muse starts on its own default.
+        assert_eq!(muse_start_model(Some("gpt-6-astra".to_owned()), &listed), None);
+        // Nothing stored stays nothing.
+        assert_eq!(muse_start_model(None, &listed), None);
+        // An empty cache means nothing is known yet, never a reason to drop.
+        assert_eq!(
+            muse_start_model(Some("gpt-6-astra".to_owned()), &[]).as_deref(),
+            Some("gpt-6-astra")
+        );
+    }
+
+    #[test]
+    fn an_old_model_id_loads_as_the_muse_default_and_round_trips() {
+        // A pre-keying store: one project with a lone `modelId` + `effort`.
+        let text = serde_json::json!({
+            "version": 1,
+            "current": null,
+            "projects": [{
+                "id": "aaa",
+                "root": "/work/a",
+                "name": "a",
+                "colour": 1,
+                "pinned": false,
+                "addedAt": "2026-09-13T10:00:00Z",
+                "lastOpenedAt": "2026-09-13T10:00:00Z",
+                "defaults": {
+                    "modelId": "muse-spark-1.3",
+                    "effort": "high",
+                },
+            }],
+        });
+        let projects: Projects = serde_json::from_value(text).expect("old projects.json loads");
+        let defaults = &projects.projects.iter().find(|p| p.id == "aaa").expect("aaa").defaults;
+        assert_eq!(defaults.model_for("muse").as_deref(), Some("muse-spark-1.3"));
+        assert_eq!(defaults.model_for("codex"), None, "the old id never leaks to another lane");
+        assert_eq!(defaults.effort_for("muse").as_deref(), Some("high"));
+        // Round-trips in the keyed shape: no `modelId` is written back.
+        let back = serde_json::to_value(&projects).expect("serializes");
+        let written = back["projects"][0]["defaults"].clone();
+        assert_eq!(written["models"]["muse"], serde_json::Value::from("muse-spark-1.3"));
+        assert!(written.get("modelId").is_none(), "the legacy spelling is never rewritten");
+        let again: Projects = serde_json::from_value(back).expect("rewritten store loads");
+        assert_eq!(again, projects);
+        // A foreign `modelId` is not kept for muse at all.
+        let text = serde_json::json!({
+            "version": 1,
+            "projects": [{
+                "id": "bbb",
+                "root": "/work/b",
+                "name": "b",
+                "defaults": { "modelId": "gpt-6-astra" },
+            }],
+        });
+        let projects: Projects = serde_json::from_value(text).expect("foreign modelId loads");
+        let defaults = &projects.projects.iter().find(|p| p.id == "bbb").expect("bbb").defaults;
+        assert_eq!(defaults.model_for("muse"), None);
+        assert_eq!(defaults.model_for("codex"), None);
     }
 
     /// Two adoptions on disk, one whose root is gone: the store keeps both,
