@@ -118,12 +118,37 @@ ENTRIES = {
     # that never scrolls to its selection went unseen: nothing ever drew it.
     "palette":              {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "palette"]},
-    # The Settings dialog's Shortcuts section: the live keymap rows grouped
-    # by category. `settings:` is a window-only steps verb, so it runs with
-    # no session open. No baseline yet — generate on main after merge, never
-    # to silence a finding.
+    # The Settings page's Shortcuts section: the live keymap rows grouped
+    # by category with the Reserved group folded to one row. `settings:`
+    # is a window-only steps verb, so it runs with no session open. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
     "settings-shortcuts":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:shortcuts"]},
+    # The Settings page's General section (model housekeeping): offline,
+    # idempotent (`settings:` opens, never toggles). No baseline yet —
+    # generate on main after merge, never to silence a finding.
+    "settings-general":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:general"]},
+    # The Settings page's Archived section: offline, idempotent. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "settings-archived":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:archived"]},
+    # A Settings provider sub-page (Codex), on scripted statuses like
+    # `settings-providers`: offline, idempotent, deterministic. No
+    # baseline yet — generate on main after merge, never to silence a
+    # finding.
+    "settings-provider-codex": {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--steps", "settings:providers/codex"],
+                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":
+                                         '[{"provider":"muse","installed":{"Yes":{"version":"1.4.0","path":"/bin/muse"}},'
+                                         '"auth":{"SignedIn":{"email":"ada@example.com","plan":"Pro","method":"oauth"}},'
+                                         '"enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                         '{"provider":"claude-code","installed":{"Yes":{"version":"2.1.276","path":"/bin/claude"}},'
+                                         '"auth":"SignedOut","enabled":true,"advisory":"None","checked_at":1,"usage":null},'
+                                         '{"provider":"codex","installed":"No",'
+                                         '"auth":"Unknown","enabled":true,"advisory":"None","checked_at":1,"usage":null}]'}},
     # The composer's three pickers, each open over a fresh session. `new`
     # heads every script: offline no boot session opens, so a bare session
     # verb never becomes ready — and the head is what makes these start.

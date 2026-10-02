@@ -49,16 +49,20 @@ fn probe_entry_covers_several_states_offline() {
     }
 }
 
-/// The Settings rail has a Providers section whose page renders the
-/// cards: the library dialog only takes `SettingsRow`s, so the rail row
-/// opens a dedicated sheet (see `settings_providers`).
+/// The Settings page has a Providers section whose overview and sub-pages
+/// render the cards: the overview holds one row per provider into its
+/// sub-page, and each sub-page renders that provider's card.
 #[test]
 fn providers_section_renders_cards_not_dialog_rows() {
     let settings = read_repo("crates/baaz/src/settings.rs");
-    pin(&settings, "providers_section()", "settings sections");
-    pin(&settings, "render_providers_page", "providers page branch");
-    pin(&settings, "PROVIDERS_SECTION_ID", "providers section id");
+    pin(&settings, "settings_providers_overview", "providers overview page branch");
+    pin(&settings, "settings_provider_subpage", "provider sub-page with cards");
+    pin(&settings, "settings-card-", "cards render on the sub-page");
     pin(&settings, "parse_enabled_row", "enabled switch routing");
+    let module = read_repo("crates/baaz/src/settings_providers.rs");
+    pin(&module, "pub(crate) fn providers_section", "providers section");
+    pin(&module, "PROVIDERS_SECTION_ID", "providers section id");
+    pin(&module, "parse_enabled_row", "enabled switch routing");
 }
 
 /// The enabled switch persists, hides the menu row, stops probes, and
@@ -102,23 +106,41 @@ fn signin_starts_each_providers_own_flow() {
     pin(&module, "CodexBrowser", "codex browser flow");
 }
 
-/// The Providers page is a real modal: a scrim behind the card that
-/// closes on click (Esc still closes), the dialog chrome (1 px line
-/// border, radius, elevation shadow) with a header close button, and a
-/// "Set up providers…" row into the connect screen.
+/// The Providers overview is a page, not a modal: the centre header holds
+/// the breadcrumb plus the close button (Esc still closes), and a
+/// "Set up providers…" row opens the connect screen.
 #[test]
-fn providers_page_is_a_modal_with_close_and_setup_row() {
-    let module = read_repo("crates/baaz/src/settings_providers.rs");
-    pin(&module, "providers-scrim", "scrim behind the card");
-    pin(&module, "border_color(p.line_strong)", "1 px line border");
-    pin(&module, "shadow(p.shadow(3))", "elevation shadow");
-    pin(&module, "overflow_y_scroll", "scrolling body");
-    pin(&module, "Close providers", "close button label");
-    pin(&module, "Set up providers", "set-up row");
-    pin(&module, "open_connect_screen", "set-up row opens connect");
+fn providers_page_has_close_and_setup_row() {
+    let settings = read_repo("crates/baaz/src/settings.rs");
+    pin(&settings, "settings_breadcrumb", "breadcrumb in the header");
+    pin(&settings, "settings-close", "close button id");
+    pin(&settings, "Close settings", "close button label");
+    pin(&settings, "settings-providers-setup", "set-up row");
+    pin(&settings, "Set up providers", "set-up row label");
+    pin(&settings, "open_connect_screen", "set-up row opens connect");
     let connect = read_repo("crates/baaz/src/connect.rs");
     pin(&connect, "fn open_connect_screen", "connect open entry point");
     pin(&connect, "show_connect = true", "connect screen opens");
+}
+
+/// Every Settings page has a probe entry: General, Providers, one provider
+/// sub-page (Codex), Shortcuts and Archived.
+#[test]
+fn probe_entries_cover_every_settings_page() {
+    let probe = read_repo("scripts/uiprobe.py");
+    for needle in [
+        "\"settings-general\"",
+        "\"settings-providers\"",
+        "\"settings-provider-codex\"",
+        "\"settings-shortcuts\"",
+        "\"settings-archived\"",
+        "settings:general",
+        "settings:providers/codex",
+        "settings:shortcuts",
+        "settings:archived",
+    ] {
+        pin(&probe, needle, "settings probe entry");
+    }
 }
 
 /// Z5: each Claude Code / Codex card carries a "Use my own MCP

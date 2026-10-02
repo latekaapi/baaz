@@ -127,6 +127,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "SkillsEnter", keystroke: "enter", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Focus the skill detail" },
     KeymapEntry { action: "SkillsFind", keystroke: "cmd-f", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Search skills" },
     KeymapEntry { action: "SkillsClose", keystroke: "escape", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Leave the Skills page" },
+    KeymapEntry { action: "SettingsFind", keystroke: "cmd-f", context: Some(crate::app::SETTINGS_CONTEXT), category: "settings", label: "Search shortcuts" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
@@ -196,6 +197,7 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "SkillsEnter" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsEnter, context)),
         "SkillsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsFind, context)),
         "SkillsClose" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsClose, context)),
+        "SettingsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SettingsFind, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
@@ -639,6 +641,16 @@ pub fn clear_binding(action: &str, context: Option<&str>) -> Result<(), KeymapEr
     Ok(())
 }
 
+/// Forget every user-set binding, restoring the shipped defaults: the
+/// Shortcuts page's "Restore defaults". Removes the user file when one
+/// exists; `false` is "already default".
+pub fn restore_defaults() -> bool {
+    match std::fs::remove_file(path()) {
+        Ok(()) => true,
+        Err(_) => false,
+    }
+}
+
 /// Unbind an action in a context: write `null` at its current effective
 /// keystroke. Refuses when that keystroke is [`RESERVED`] — ⌘Q stays bound —
 /// and is a no-op when the action has no binding there.
@@ -688,6 +700,7 @@ pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapE
 
 /// One live binding: what the Settings Shortcuts section lists. A row with
 /// `editable: false` is [`RESERVED`] and `reserved_reason` says why.
+#[derive(Clone, Debug)]
 pub struct EffectiveBinding {
     /// The table action name.
     pub action: String,
