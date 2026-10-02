@@ -4211,16 +4211,34 @@ impl Render for Harness {
             } else {
                 None
             };
-            // B8b: the files the active session's folded transcript shows it
+            // B8c: the files the active session's folded transcript shows it
             // edited, oldest first — the Changes pane's "This session"
-            // section. Read off the view like every other render-path read
-            // of the active session; empty when no session is open.
-            let session_edits: Vec<String> = self
-                .active
-                .as_ref()
-                .and_then(|view| view.read(cx).session())
-                .map(|session| crate::transcript::session_edited_paths(&session.turns))
-                .unwrap_or_default();
+            // section. Computed only while the pane shows Changes (the walk
+            // is O(all blocks), so every other kind skips it) and cached on
+            // the session view keyed by (turn count, last turn's block
+            // count): a steady frame reuses the stored list with two reads
+            // and no scan, and the view is only updated when the key moved
+            // (so a steady frame never dirties it either). Empty when no
+            // session is open.
+            let shows_changes = right_open
+                && matches!(
+                    kind,
+                    layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git
+                );
+            let session_edits: Vec<String> = if shows_changes {
+                self.active
+                    .as_ref()
+                    .map(|view| {
+                        if let Some(fresh) = view.read(cx).fresh_session_edits() {
+                            fresh
+                        } else {
+                            view.update(cx, |view, _| view.refresh_session_edits())
+                        }
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let right = right::render(
                 kind,
                 &self.right_cache,
