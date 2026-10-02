@@ -723,10 +723,21 @@ impl Harness {
                 let expanded: std::collections::HashSet<String> =
                     self.layout.expanded_groups.iter().cloned().collect();
                 let active = self.active_id(cx);
+                // A brand-new session has no row yet: resolve its project
+                // past the rows so its group still counts as current.
+                let active_project = active.as_deref().and_then(|open| {
+                    sidebar::rowless_session_project(
+                        open,
+                        visible.as_slice(),
+                        &self.overrides,
+                        &self.provider_sessions,
+                    )
+                });
                 let view = sidebar::GroupView {
                     closed: &closed,
                     expanded: &expanded,
                     active: active.as_deref(),
+                    active_project: active_project.as_deref(),
                     pending: self.pending_id.as_deref(),
                 };
                 sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, &self.layout, now)
