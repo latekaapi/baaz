@@ -298,6 +298,16 @@ fn finish_tool_block(
     if verb == TERMINAL_RUNNING_VERB {
         return finish_terminal_block(target, params, tool_use_id, result);
     }
+    // B12fix: the Artifact tool completes to its one-line summary card
+    // regardless of the stand-in kind the opening carried — the body
+    // never inlines.
+    if name == "Artifact" {
+        return Block::Generic {
+            kind: name.to_owned(),
+            status: if result.is_error { "error".into() } else { "completed".into() },
+            text: artifact_detail(params, &result.text),
+        };
+    }
     let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
     let done = past_verb(kind, verb);
     match kind {
@@ -1209,15 +1219,17 @@ impl ClaudeFold {
     /// B12: resolve the open thinking block (if any) against `at_ms`:
     /// the gap between the thinking line and this frame, from the lines'
     /// own timestamps when both carry them, or the arrival clock when
-    /// neither does (the live path). A half-known pair stays unknown
-    /// rather than mixing clocks. Zero-length gaps resolve to nothing —
-    /// the card keeps its zero honestly.
+    /// neither does (the live path). B12fix: a half-known pair falls back
+    /// to the wall clock rather than a frozen zero — mixed clocks never
+    /// meet, so the arrival clock is the only honest span left.
+    /// Zero-length gaps resolve to nothing — the card keeps its zero
+    /// honestly.
     fn resolve_open_thinking(&mut self, at_ms: Option<u64>, deltas: &mut Vec<Delta>) {
         let Some(site) = self.thinking_pending.take() else { return };
         let elapsed = match (site.start_ms, at_ms) {
             (Some(start), Some(end)) => end.saturating_sub(start),
             (None, None) => wall_ms_since(site.start_instant),
-            (Some(_), None) | (None, Some(_)) => 0,
+            (Some(_), None) | (None, Some(_)) => wall_ms_since(site.start_instant),
         };
         if elapsed == 0 {
             return;
@@ -2516,6 +2528,24 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             params,
             block,
         }
+    } else if name == "Artifact" {
+        // B12fix: the Artifact tool reads as a one-line summary card,
+        // never the generic dump: the opening names the titled thing, or
+        // nothing until the result lands. The transcript formats the
+        // detail (`Artifact · published …`); the body never inlines.
+        let detail = ["title", "url", "id"]
+            .iter()
+            .filter_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+            .find(|value| !value.trim().is_empty())
+            .unwrap_or("")
+            .to_owned();
+        ToolCard {
+            kind: ToolKind::Search,
+            verb: String::new(),
+            target: String::new(),
+            params: Vec::new(),
+            block: Block::Generic { kind: name.to_owned(), status: "running".into(), text: detail },
+        }
     } else {
         let text = if params.is_empty() {
             format!("{name} called")
@@ -2532,6 +2562,22 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
             block: Block::Generic { kind: name.to_owned(), status: "running".into(), text },
         }
     }
+}
+
+/// B12fix: the Artifact tool's raw detail for its one-line summary card:
+/// the titled thing its params named (title, url, id), else the result's
+/// first line. The transcript formats it (`Artifact · published …` or
+/// `Artifact · quickstart`); the artifact body never inlines.
+fn artifact_detail(params: &[(String, String)], result_text: &str) -> String {
+    if let Some(named) = ["title", "url", "id"]
+        .iter()
+        .filter_map(|key| params.iter().find(|(name, _)| name == key))
+        .map(|(_, value)| value.trim())
+        .find(|value| !value.is_empty())
+    {
+        return named.to_owned();
+    }
+    one_line(result_text)
 }
 
 /// Rebuild an open tool card in its gated state: `Pending` with its opening
@@ -4559,6 +4605,43 @@ mod tests {
         );
         assert_eq!(one_line("first\nsecond\nthird"), "first");
         assert!(one_line(&"x".repeat(200)).ends_with('…'));
+    }
+
+    /// B12fix: the Artifact tool folds to a one-line summary, never the
+    /// generic dump: the opening names the titled input, the completion
+    /// names the result, and the body never inlines.
+    #[test]
+    fn artifact_tools_fold_to_a_one_line_summary() {
+        let card = tool_card("a-1", "Artifact", &serde_json::json!({"title": "My Launch Post"}));
+        match card.block {
+            Block::Generic { kind, text, .. } => {
+                assert_eq!(kind, "Artifact");
+                assert_eq!(text, "My Launch Post");
+            }
+            block => panic!("an Artifact call folded to {block:?}"),
+        }
+        let finished = finish_tool_block(
+            &ToolKind::Search,
+            "",
+            "",
+            "Artifact",
+            &[],
+            "a-1",
+            &ToolResult {
+                tool_use_id: "a-1".to_owned(),
+                text: "https://example.com/a\n<the whole artifact>".to_owned(),
+                is_error: false,
+                detail: None,
+            },
+        );
+        match finished {
+            Block::Generic { kind, text, .. } => {
+                assert_eq!(kind, "Artifact");
+                assert_eq!(text, "https://example.com/a");
+            }
+            block => panic!("an Artifact result folded to {block:?}"),
+        }
+        assert_eq!(artifact_detail(&[], ""), "");
     }
 
     /// B12: a thinking line's duration is the gap to the next line's
