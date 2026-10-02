@@ -629,6 +629,9 @@ impl Harness {
         // B7: agent navigation state is not searchable either — the cheap
         // debounced write, never the session-list settle.
         self.store_right_state_cheap(session_id, right, cx);
+        // B7fix2: the foreground open builds the webview on a deferred task
+        // with the window — never as a render side effect.
+        self.defer_browser_prewarm(cx);
         self.refresh_right_now(cx);
         cx.notify();
     }
