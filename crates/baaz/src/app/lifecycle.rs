@@ -4811,10 +4811,10 @@ impl Harness {
         let epoch = run.epoch;
         let opened = run.cancel();
         // The wait is over: a late side-session answer lands on nothing.
-        self.drop_handoff_summary_jobs(&source, epoch);
+        self.drop_handoff_summary_jobs(source, epoch);
         if opened {
             if let Some(dest) = run.destination_session.clone() {
-                self.clear_handoff_links(&source, &dest, cx);
+                self.clear_handoff_links(source, &dest, cx);
                 self.close_view(&dest, cx);
             }
         }

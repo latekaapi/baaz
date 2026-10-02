@@ -451,7 +451,7 @@ impl Harness {
             self.browser.states.contains_key(&key)
         };
         let state = self.browser_for(&key, focus, window, cx);
-        if focus && existed && state.read(cx).url().to_string() == BLANK {
+        if focus && existed && state.read(cx).url() == BLANK {
             let focus_handle = state.read(cx).focus_handle().clone();
             window.focus(&focus_handle, cx);
         }

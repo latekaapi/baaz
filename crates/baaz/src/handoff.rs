@@ -1249,10 +1249,7 @@ mod tests {
 
     #[test]
     fn handoff_summary_never_delays_the_destination_open() {
-        assert!(
-            SUMMARY_TIMEOUT_SECS <= 8,
-            "the watchdog is a backstop, not the open gate: {SUMMARY_TIMEOUT_SECS} s"
-        );
+        const { assert!(SUMMARY_TIMEOUT_SECS <= 8, "the watchdog is a backstop, not the open gate") };
         // The machine reaches Prepared while a summary is still in flight:
         // nothing in the run gates the destination open on the summary —
         // and landing stands the wait down, since the submitted pack is

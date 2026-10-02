@@ -400,9 +400,9 @@ fn clean_stale_staging(state_dir: &Path, moves: &[PlannedMove]) {
             continue;
         }
         eprintln!("baaz: migration: clearing stale staging {}", staging.display());
-        let _ = staging.is_dir().then(|| std::fs::remove_dir_all(&staging)).unwrap_or_else(|| {
+        let _ = if staging.is_dir() { std::fs::remove_dir_all(&staging) } else { {
             std::fs::remove_file(&staging).or_else(|_| std::fs::remove_dir_all(&staging))
-        });
+        } };
     }
 }
 

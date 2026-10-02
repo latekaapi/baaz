@@ -156,7 +156,7 @@ pub fn state_dir() -> PathBuf {
 /// `dir/name` when the source exists and the target is absent. Idempotent:
 /// a second run changes nothing. Never overwrites (an existing file, dir
 /// or link stays), never copies, never writes inside `owner_root`.
-pub fn ensure_linked_dir(dir: &PathBuf, owner_root: &PathBuf, names: &[&str]) -> std::io::Result<()> {
+pub fn ensure_linked_dir(dir: &PathBuf, owner_root: &std::path::Path, names: &[&str]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     for name in names {
         let src = owner_root.join(name);
@@ -188,7 +188,6 @@ pub fn ensure_linked_dir(dir: &PathBuf, owner_root: &PathBuf, names: &[&str]) ->
 /// spawn surface now carries its own per-`Command` removals
 /// ([`scrub_command`], [`scrubbed_removals`], [`scrub_overrides_for`]), so
 /// no shared state is ever touched.
-
 #[cfg(test)]
 mod tests {
     use super::*;
