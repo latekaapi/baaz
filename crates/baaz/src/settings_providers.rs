@@ -537,7 +537,7 @@ impl Harness {
             return None;
         }
         let p = cx.aui().colors;
-        let (n_claude, n_codex) = crate::session_migration::counts(plan);
+        let (n_claude, n_codex) = crate::session_migration::session_counts(plan);
         let title = crate::session_migration::prompt_title(n_claude, n_codex);
         let paths_label = if self.migration_paths_expanded { "Hide paths" } else { "Show paths" };
         let paths_toggle_label = format!("{paths_label} ({} files)", plan.len());
