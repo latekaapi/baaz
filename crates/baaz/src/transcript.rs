@@ -1417,7 +1417,7 @@ fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
     };
     let mut items = vec![
         meta.model.clone(),
-        format!("{:.1} s", meta.duration_ms as f64 / 1000.0),
+        if meta.duration_ms == 0 { String::new() } else { format!("{:.1} s", meta.duration_ms as f64 / 1000.0) },
         tokens,
     ];
     items.retain(|item| !item.is_empty());
