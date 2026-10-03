@@ -1833,7 +1833,7 @@ fn live_run_row(turn_id: &str, run: &LiveRun, open: bool, folds: &Folds) -> AnyE
     let id = ElementId::from(SharedString::from(format!("{turn_id}:live:{start}")));
     let toggle = folds.toggle.clone();
     let key = live_key(turn_id, start);
-    live_activity_row(id, run.verb.clone(), run.target.clone(), run.earlier, run.elapsed_ms)
+    live_activity_row(id, run.verb.clone(), run.target.clone(), run.earlier, run.elapsed_ms).running(run.running)
         .open(open)
         .on_toggle(move |_, window, cx| toggle(key.clone(), window, cx))
         .into_any_element()

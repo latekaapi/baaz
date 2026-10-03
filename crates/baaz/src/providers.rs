@@ -756,28 +756,6 @@ pub fn claude_code_model_label(id: &str) -> String {
     label
 }
 
-/// The model family a Claude Code id names (`opus`, `sonnet`, `haiku`,
-/// `fable`), found as a substring anywhere in the id — bare aliases
-/// (`opus`), full ids (`claude-opus-5[1m]`), dated ids
-/// (`claude-haiku-4-5-20251001`), legacy ids
-/// (`claude-3-5-sonnet-20241022`), even bare aliases with suffixes
-/// (`opusplan`). `None` when the id names no known family — never a
-/// guess.
-pub fn claude_code_model_family(id: &str) -> Option<&'static str> {
-    let lowered = id.trim().to_ascii_lowercase();
-    if lowered.contains("haiku") {
-        Some("haiku")
-    } else if lowered.contains("sonnet") {
-        Some("sonnet")
-    } else if lowered.contains("opus") {
-        Some("opus")
-    } else if lowered.contains("fable") {
-        Some("fable")
-    } else {
-        None
-    }
-}
-
 /// Whether a Claude Code id names the Haiku family anywhere in the id,
 /// like the provider lane's own check: the CLI runs its internal
 /// sub-calls on Haiku, so a Haiku report is the one report that can be
@@ -793,18 +771,6 @@ pub fn claude_code_is_haiku_model(id: &str) -> bool {
 pub fn claude_code_is_model_id(id: &str) -> bool {
     let id = id.trim();
     !id.is_empty() && !id.starts_with('<')
-}
-
-/// Whether two Claude Code model spellings name the same family, so a
-/// turn report can be checked against the person's pick without
-/// string-equal spellings: a full wire id still matches its alias
-/// (`claude-opus-5[1m]` ~ `opus`). Ids outside every known family only
-/// match themselves, case-insensitively — never a guess.
-pub fn claude_code_same_model_family(first: &str, second: &str) -> bool {
-    match (claude_code_model_family(first), claude_code_model_family(second)) {
-        (Some(family), Some(other)) => family == other,
-        _ => first.trim().eq_ignore_ascii_case(second.trim()),
-    }
 }
 
 /// Whether a Claude Code turn report is an internal sub-call's rather
@@ -1183,27 +1149,6 @@ mod tests {
         assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");
         assert_eq!(claude_code_model_label("future-model-9"), "future-model-9");
         assert_eq!(claude_code_model_label("claude-unknownthing"), "claude-unknownthing");
-    }
-
-    /// Q2b: the family is a substring match anywhere in the id, so
-    /// legacy ids (`claude-3-5-sonnet-20241022`) and suffixed aliases
-    /// (`opusplan`) still resolve — unknown ids resolve to nothing, never
-    /// a guess.
-    #[test]
-    fn claude_code_family_matches_across_spellings() {
-        assert_eq!(claude_code_model_family("opus"), Some("opus"));
-        assert_eq!(claude_code_model_family("claude-opus-5[1m]"), Some("opus"));
-        assert_eq!(claude_code_model_family("claude-haiku-4-5-20251001"), Some("haiku"));
-        assert_eq!(claude_code_model_family("claude-sonnet-4-5"), Some("sonnet"));
-        assert_eq!(claude_code_model_family("claude-3-5-sonnet-20241022"), Some("sonnet"));
-        assert_eq!(claude_code_model_family("opusplan"), Some("opus"));
-        assert_eq!(claude_code_model_family("Claude Opus"), Some("opus"));
-        assert_eq!(claude_code_model_family("future-model-9"), None);
-        assert!(claude_code_same_model_family("claude-opus-5[1m]", "opus"));
-        assert!(claude_code_same_model_family("claude-haiku-4-5-20251001", "haiku"));
-        assert!(!claude_code_same_model_family("claude-haiku-4-5-20251001", "opus"));
-        assert!(claude_code_same_model_family("hist-model", "hist-model"));
-        assert!(!claude_code_same_model_family("hist-model", "new-model"));
     }
 
     /// Q2b: only a Haiku report against a non-Haiku pick is a sub-call.

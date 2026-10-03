@@ -4084,7 +4084,7 @@ mod tests {
             "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
         })
         .to_string();
-        let (_, live) = live_fold_lines(&[line.clone()]);
+        let (_, live) = live_fold_lines(std::slice::from_ref(&line));
         let stamped = live
             .iter()
             .filter_map(|delta| match delta {

@@ -879,10 +879,10 @@ fn decode_result_model(value: &Value) -> Option<String> {
             continue;
         }
         let tokens = entry.as_object().map(output_tokens).unwrap_or(0);
-        if best.map_or(true, |(_, leader)| tokens > leader) {
+        if best.is_none_or(|(_, leader)| tokens > leader) {
             best = Some((id, tokens));
         }
-        if !is_haiku_model(id) && best_main.map_or(true, |(_, leader)| tokens > leader) {
+        if !is_haiku_model(id) && best_main.is_none_or(|(_, leader)| tokens > leader) {
             best_main = Some((id, tokens));
         }
     }
