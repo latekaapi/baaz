@@ -737,6 +737,11 @@ pub struct SessionView {
     /// Turn ids this view already saw complete. A `turn/started` for one of
     /// them is the re-attach replay, not new work, and never marks running.
     completed_turns: HashSet<String>,
+    /// Q1b: tool-call id → the wall time (epoch ms) its block first
+    /// appeared. Stamped in `refresh_render_cache` where applied deltas
+    /// materialise, read back through the transcript `Folds` so live run
+    /// rows tick from the run's first member start.
+    tool_first_seen: HashMap<String, u64>,
     /// A `turn/start` is in flight and no `turn/started` has arrived yet.
     submitting: bool,
     /// Optimistic user turns folded at send, oldest first, waiting on the
@@ -1080,6 +1085,7 @@ impl SessionView {
             last_tick_secs: None,
             running: None,
             completed_turns: HashSet::new(),
+            tool_first_seen: HashMap::new(),
             submitting: false,
             pending_optimistic: Vec::new(),
             loading_history: false,
