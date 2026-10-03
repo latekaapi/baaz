@@ -756,6 +756,50 @@ pub fn claude_code_model_label(id: &str) -> String {
     label
 }
 
+/// The model family a Claude Code id names (`opus`, `sonnet`, `haiku`,
+/// `fable`), across spellings: bare aliases (`opus`), full ids
+/// (`claude-opus-5[1m]`), dated ids (`claude-haiku-4-5-20251001`). `None`
+/// when the id names no known family — never a guess.
+pub fn claude_code_model_family(id: &str) -> Option<&'static str> {
+    let lowered = id.trim().to_ascii_lowercase();
+    let body = lowered.strip_prefix("claude-").unwrap_or(&lowered);
+    let family = body.split(|cell| cell == '-' || cell == '[').next().unwrap_or(body);
+    match family {
+        "opus" => Some("opus"),
+        "sonnet" => Some("sonnet"),
+        "haiku" => Some("haiku"),
+        "fable" => Some("fable"),
+        _ => None,
+    }
+}
+
+/// Whether two Claude Code model spellings name the same family, so a
+/// turn report can be checked against the person's pick without
+/// string-equal spellings: a full wire id still matches its alias
+/// (`claude-opus-5[1m]` ~ `opus`). Ids outside every known family only
+/// match themselves, case-insensitively — never a guess.
+pub fn claude_code_same_model_family(first: &str, second: &str) -> bool {
+    match (claude_code_model_family(first), claude_code_model_family(second)) {
+        (Some(family), Some(other)) => family == other,
+        _ => first.trim().eq_ignore_ascii_case(second.trim()),
+    }
+}
+
+/// Whether a Claude Code turn report may seed future sessions' chips:
+/// always, unless the session already knows its model and the report
+/// names another family — then the report is an internal sub-call's, not
+/// the session's, and persisting it would paint every future fresh chip
+/// with a model nobody picked. An empty report never seeds.
+pub fn claude_code_report_matches_session(report: &str, known: &str) -> bool {
+    if report.trim().is_empty() {
+        return false;
+    }
+    if known.trim().is_empty() {
+        return true;
+    }
+    claude_code_same_model_family(report, known)
+}
+
 // ------------------------------------------------- the last-chosen provider
 
 /// What the store remembers: the backend new sessions start on.
@@ -1101,6 +1145,34 @@ mod tests {
         assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");
         assert_eq!(claude_code_model_label("future-model-9"), "future-model-9");
         assert_eq!(claude_code_model_label("claude-unknownthing"), "claude-unknownthing");
+    }
+
+    /// Q2: turn reports check against the person's pick by family, across
+    /// spellings — a full wire id still matches its alias — so an
+    /// internal Haiku sub-call never passes for a picked Opus.
+    #[test]
+    fn claude_code_family_matches_across_spellings() {
+        assert_eq!(claude_code_model_family("opus"), Some("opus"));
+        assert_eq!(claude_code_model_family("claude-opus-5[1m]"), Some("opus"));
+        assert_eq!(claude_code_model_family("claude-haiku-4-5-20251001"), Some("haiku"));
+        assert_eq!(claude_code_model_family("claude-sonnet-4-5"), Some("sonnet"));
+        assert_eq!(claude_code_model_family("future-model-9"), None);
+        assert!(claude_code_same_model_family("claude-opus-5[1m]", "opus"));
+        assert!(claude_code_same_model_family("claude-haiku-4-5-20251001", "haiku"));
+        assert!(!claude_code_same_model_family("claude-haiku-4-5-20251001", "opus"));
+        assert!(claude_code_same_model_family("hist-model", "hist-model"));
+        assert!(!claude_code_same_model_family("hist-model", "new-model"));
+    }
+
+    /// Q2: a sub-call's report never seeds a future chip while the
+    /// session knows its model; with nothing known the report is the
+    /// best truth available, and an empty report never seeds.
+    #[test]
+    fn a_subcall_report_never_seeds_the_chip() {
+        assert!(claude_code_report_matches_session("claude-opus-5[1m]", "opus"));
+        assert!(!claude_code_report_matches_session("claude-haiku-4-5-20251001", "opus"));
+        assert!(claude_code_report_matches_session("claude-haiku-4-5-20251001", ""));
+        assert!(!claude_code_report_matches_session("", "opus"));
     }
 
     #[test]

@@ -757,6 +757,12 @@ pub struct ClaudeFold {
     /// The last stored line's model, in file order: the session's model
     /// when history exists, `None` on a stream-only fold.
     stored_model: Option<String>,
+    /// Main-thread assistant message model per turn (`message.model`):
+    /// the model that answered the turn. The `result` frame's `modelUsage`
+    /// also lists internal sub-call models, so the finished turn reads
+    /// this first and the result's decode only when no message named one.
+    /// Keyed by turn id, dropped as each turn finishes.
+    turn_model: HashMap<String, String>,
     model: Option<String>,
     session_id: Option<String>,
     account: AccountSnapshot,
@@ -1002,6 +1008,15 @@ impl ClaudeFold {
                         }
                     }
                 }
+                // The turn's answering model: the message's own `model`,
+                // remembered per turn so the `result` frame's `modelUsage`
+                // (which also lists internal sub-call models) cannot
+                // rename the turn when it finishes.
+                if let Some(model) = model {
+                    if !model.is_empty() {
+                        self.turn_model.insert(turn_id.clone(), model.clone());
+                    }
+                }
                 // B12: the turn's own open thinking (if any) ends where
                 // this frame begins — its duration is the gap, from the
                 // lines' own timestamps on replay or the arrival clock
@@ -1043,8 +1058,21 @@ impl ClaudeFold {
                 // bare `input_tokens` here would show 93 for a 30k prompt.
                 // The cache fields stay informational (never add them on
                 // top — that double-counts); the ledger reads `tokens_in`.
+                // The turn's model is the model that answered: the turn's
+                // own assistant message first, then the result's decode
+                // (already sub-call-safe), then the session's init model.
+                // The result never writes back into the session model —
+                // it only names the finished turn.
+                let answered = self
+                    .assistant_turn
+                    .clone()
+                    .or_else(|| self.open.last().cloned())
+                    .and_then(|turn| self.turn_model.get(&turn).cloned())
+                    .or_else(|| model.clone())
+                    .or_else(|| self.model.clone())
+                    .unwrap_or_default();
                 let meta = TurnMeta {
-                    model: model.clone().or_else(|| self.model.clone()).unwrap_or_default(),
+                    model: answered,
                     duration_ms: *duration_ms,
                     tokens_in: input_tokens
                         .saturating_add(cache_read_tokens.unwrap_or(0))
@@ -1140,6 +1168,7 @@ impl ClaudeFold {
                     .or_else(|| finishing.last().cloned());
                 for turn_id in finishing {
                     self.stored_meta.remove(&turn_id);
+                    self.turn_model.remove(&turn_id);
                     let finished = if Some(&turn_id) == owner.as_ref() {
                         meta.clone()
                     } else {
@@ -3864,6 +3893,24 @@ mod tests {
             assert!(meta.cost_usd > 0.0);
             assert!(meta.tokens_out > 0);
         }
+    }
+
+    /// Q2: the finished turn names the model that answered. The result's
+    /// `modelUsage` lists the Haiku sub-call first, but the assistant
+    /// message answered on Opus — so the turn's meta reads Opus, and the
+    /// session model is untouched by the result.
+    #[test]
+    fn finished_turn_names_the_answering_model_not_the_subcall() {
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"claude-opus-4-1-20250822","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":510},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":5,"outputTokens":500},"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#.to_owned(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(metas[0].model, "claude-opus-4-1-20250822");
+        assert_eq!(fold.model(), Some("opus"), "the result never rewrites the session model");
     }
 
     #[test]

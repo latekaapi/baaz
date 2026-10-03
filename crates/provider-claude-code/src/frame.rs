@@ -299,7 +299,10 @@ pub enum Frame {
         total_cost_usd: f64,
         /// Wall-clock time in milliseconds (`duration_ms`).
         duration_ms: u64,
-        /// Model id, from the first `modelUsage` key, when present.
+        /// The model that answered the turn: the frame's own `model` when it
+        /// names one, else the `modelUsage` entry with the most output
+        /// tokens — never a Haiku entry while a non-Haiku entry exists,
+        /// since Haiku rides along for the CLI's own internal sub-calls.
         model: Option<String>,
         /// After-the-fact denials (`permission_denials[]`): useful for the
         /// transcript, never a substitute for answering the request.
@@ -832,13 +835,51 @@ fn decode_approval(request_id: &str, request: Option<&Value>) -> ApprovalRequest
     }
 }
 
+/// Whether this model id names the Haiku family: the CLI runs its own
+/// internal sub-calls on Haiku and lists them in `modelUsage` beside the
+/// answering model, so a Haiku entry must never claim the turn while a
+/// non-Haiku entry exists.
+fn is_haiku_model(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("haiku")
+}
+
+/// The turn's answering model out of a `result` frame: the frame's own
+/// `model` when it names one, else the `modelUsage` entry with the most
+/// output tokens — never a Haiku entry while a non-Haiku entry exists.
+/// Wire order breaks output-token ties. `None` when the frame names no
+/// model at all.
+fn decode_result_model(value: &Value) -> Option<String> {
+    if let Some(model) =
+        value.get("model").and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty())
+    {
+        return Some(model.to_owned());
+    }
+    let usage = value.get("modelUsage")?.as_object()?;
+    let output_tokens = |entry: &serde_json::Map<String, Value>| {
+        entry
+            .get("outputTokens")
+            .or_else(|| entry.get("output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    let mut best: Option<(&String, u64)> = None;
+    let mut best_main: Option<(&String, u64)> = None;
+    for (id, entry) in usage {
+        let tokens = entry.as_object().map(output_tokens).unwrap_or(0);
+        if best.map_or(true, |(_, leader)| tokens > leader) {
+            best = Some((id, tokens));
+        }
+        if !is_haiku_model(id) && best_main.map_or(true, |(_, leader)| tokens > leader) {
+            best_main = Some((id, tokens));
+        }
+    }
+    best_main.or(best).map(|(id, _)| id.clone())
+}
+
 fn decode_turn_result(value: &Value) -> Frame {
     let usage = value.get("usage");
     let uint = |key: &str| usage.and_then(|usage| usage.get(key)).and_then(Value::as_u64);
-    let model = value
-        .get("modelUsage")
-        .and_then(Value::as_object)
-        .and_then(|usage| usage.keys().next().cloned());
+    let model = decode_result_model(value);
     let permission_denials = value
         .get("permission_denials")
         .and_then(Value::as_array)
@@ -1217,6 +1258,45 @@ mod tests {
                 tool_input: serde_json::json!({}),
             }]
         );
+    }
+
+    /// Q2: a result whose `modelUsage` lists the Haiku sub-call first and
+    /// the answering model second decodes to the answering model — even
+    /// when the sub-call wrote more tokens. The frame's own `model` still
+    /// wins when it names one, and a lone Haiku entry still reads Haiku:
+    /// a real Haiku turn is Haiku.
+    #[test]
+    fn result_names_the_answering_model_not_the_haiku_subcall() {
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":510},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":5,"outputTokens":500},"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-opus-4-1-20250822"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":"claude-opus-4-1-20250822","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":5,"outputTokens":500}}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-opus-4-1-20250822"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":5,"outputTokens":10}}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-haiku-4-5-20251001"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
     }
 
     #[test]
