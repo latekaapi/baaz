@@ -2879,12 +2879,17 @@ impl Harness {
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
         }
-        // Q4: the right pane follows the destination at the click — never
-        // the previous session's files/changes. The previous view stays in
+        // Q4c: the right pane stays neutral at the click — it describes
+        // neither session until the open lands. Restoring the
+        // destination's pane here would apply its files state onto the
+        // previous session's project root (`right_project` still reads
+        // the previous session) while the previous session's webview
+        // draws under the loading centre. The previous view stays in
         // `active` (unparked, draft intact) until `finish_provider_open`
-        // parks it or `fail_provider_open` parks it onto the inline
-        // failure; only the rendered centre and the pane move now.
-        self.restore_right_for_session(&record.session_id, cx);
+        // parks it and restores the destination's pane there, or
+        // `fail_provider_open` parks it onto the inline failure, or the
+        // switch is cancelled and the previous pane is restored as it
+        // was; only the rendered centre moves now.
         // A disabled provider reopens with no child either: the scripted
         // resume below replays the stored transcript read-only, and the
         // landing view wears the quiet banner.
@@ -3406,6 +3411,10 @@ impl Harness {
                 let id = view.read(cx).session_id.clone();
                 self.pending_id = Some(id.clone());
                 self.restore_right_for_session(&id, cx);
+                // Q4c: the click consumed the composer's focus arm — re-arm
+                // it for the restored view, like `activate` arms it for a
+                // landing view, so typing resumes where it was.
+                self.focus_composer = true;
             } else {
                 self.pending_id = None;
             }
@@ -3544,6 +3553,16 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Q4c: every landing invalidates any in-flight provider open. A
+        // new-session or fork open (`open_on_provider`,
+        // `open_forked_on_provider`) and a retry never set `pending_id`,
+        // so `cancel_pending_switch` never sees them — only the landing
+        // itself can retire them. The late `finish_provider_open` then
+        // lands stale (its child is shut down, nothing is parked or
+        // persisted) and never steals the centre. The provider open's own
+        // landing passes through here too, after its epoch check already
+        // admitted it, so the bump retires nothing of its own.
+        self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
         self.exit_settings_for_navigation(cx);
         self.overlay_was_open = false;
         // Whatever switch the scripts were waiting for has landed: session
@@ -6140,13 +6159,15 @@ mod tests {
 
     /// Q4: while a provider reopen is pending, `pending_switch_dest` names
     /// the destination — the exact value `render_centre` branches on for
-    /// the loading centre — and the right pane already follows the
-    /// destination. After the open lands the destination is active and the
-    /// previous session parks with its draft intact. The mid-switch asserts
-    /// pin that helper plus the click-time restore (removing the restore
-    /// in `reopen_provider` fails the pane assert); they never render, so
-    /// the render branch itself is pinned through its decision value here
-    /// and at the surrounding decision sites in the Q4b tests below.
+    /// the loading centre. Q4c: the right pane stays neutral at the click
+    /// — it describes neither session until the open lands — keeping its
+    /// width so the centre never resizes. After the open lands the
+    /// destination is active and the previous session parks with its draft
+    /// intact. The mid-switch asserts pin that helper plus the neutral
+    /// pane (restoring the destination's pane at the click fails the pane
+    /// assert); they never render, so the render branch itself is pinned
+    /// through its decision value here and at the surrounding decision
+    /// sites in the Q4b/Q4c tests below.
     #[gpui::test]
     fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -6210,8 +6231,20 @@ mod tests {
                     "the centre is the destination's loading state, not the previous view"
                 );
                 assert!(
-                    harness.layout.right_open,
-                    "the right pane already follows the destination at the click"
+                    harness.pending_right_neutral(cx),
+                    "the right pane is neutral while the switch is pending"
+                );
+                assert!(
+                    !harness.layout.right_open,
+                    "the pane keeps the previous session's closed state at the click, never the destination's"
+                );
+                assert!(
+                    harness
+                        .overrides
+                        .get("s-codex-old")
+                        .and_then(|meta| meta.right.clone())
+                        .is_some_and(|right| right.open),
+                    "the destination's stored pane is untouched until it lands"
                 );
                 assert_eq!(
                     active_id.read(cx).draft_text(cx),
@@ -6251,16 +6284,19 @@ mod tests {
         lane_restore(state);
     }
 
-    /// Q4b (a): a pane toggle while a provider reopen is pending saves onto
-    /// the destination — asserted at the `save_right_for_active` decision
-    /// site — and a navigation sync for the still-open session defers
-    /// instead of overwriting its stored URL. Before the fix both keyed on
-    /// the active view's id, so anything done during the load rewrote the
-    /// previous session's stored pane.
+    /// Q4c (c): while a provider reopen is pending the pane is neutral —
+    /// asserted at the `save_right_for_active` decision site (a toggle
+    /// changes neither session's stored [`RightState`](crate::sessions::RightState)),
+    /// at the navigation-sync site (neither session's URL persists), and
+    /// at the render site (one frame creates no webview for the
+    /// still-open session, so its page is never shown). Before the fix the
+    /// click restored the destination's pane, the toggle saved onto it,
+    /// and the frame built the old session's webview under the loading
+    /// centre.
     #[gpui::test]
-    fn q4b_pending_toggle_saves_onto_the_destination(cx: &mut gpui::TestAppContext) {
+    fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = lane_state("q4b-pane");
+        let state = lane_state("q4c-pane");
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         let (factory, _) = recording_resumable_factory();
@@ -6280,19 +6316,35 @@ mod tests {
         let first = vc.update(|_, cx| {
             baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
         });
-        let a_pane = crate::sessions::RightState {
-            open: false,
+        // The still-open session stands on an open Files pane with a
+        // stored URL; the live kind then moves to Browser with no webview
+        // built yet — the production path where the frame would build it.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.toggle_right(cx);
+                harness.remember_browser_url_cheap(
+                    &first,
+                    "https://a.example/".to_owned(),
+                    cx,
+                );
+                harness.layout.right_kind = Some(crate::layout::RightKind::Browser);
+            });
+        });
+        let a_pane = vc.update(|_, cx| {
+            baaz.read(cx).overrides.get(&first).and_then(|meta| meta.right.clone()).expect("A's pane stored")
+        });
+        assert!(a_pane.open, "A's stored pane stands open");
+        let b_pane = crate::sessions::RightState {
+            open: true,
             kind: crate::layout::RightKind::Files,
-            browser_url: Some("https://a.example/".to_owned()),
+            browser_url: Some("https://b.example/".to_owned()),
             ..Default::default()
         };
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| {
-                harness.set_override(&first, |meta| meta.right = Some(a_pane.clone()), cx);
-            });
-        });
-        vc.update(|_, cx| {
             baaz.update(cx, z4_seed_stored_codex);
+            baaz.update(cx, |harness, cx| {
+                harness.set_override("s-codex-old", |meta| meta.right = Some(b_pane.clone()), cx);
+            });
         });
         // The click on the stored session — observed before the reopen
         // lands, so no `run_until_parked` between this and the asserts.
@@ -6301,10 +6353,45 @@ mod tests {
         });
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
+                assert_eq!(
+                    harness.pending_switch_dest(cx),
+                    Some("s-codex-old".to_owned()),
+                    "the provider switch is pending"
+                );
+                assert!(
+                    harness.pending_right_neutral(cx),
+                    "the right pane is neutral while the switch is pending"
+                );
                 assert!(
                     harness.layout.right_open,
-                    "the live pane describes the destination at the click"
+                    "the live pane keeps its width instead of following the destination"
                 );
+                assert_eq!(
+                    harness.layout.right_kind,
+                    Some(crate::layout::RightKind::Browser),
+                    "the live kind is untouched at the click"
+                );
+            });
+        });
+        // One frame while pending: the neutral body builds no webview for
+        // the still-open session, so its page is never shown.
+        vc.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(1440.), gpui::px(900.)),
+            |_, _| baaz.clone().into_any_element(),
+        );
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(
+                    !harness.browser.states.contains_key(&first),
+                    "no webview is built for the still-open session while pending"
+                );
+                assert_eq!(
+                    harness.browser_builds, 0,
+                    "the pending frame builds no webview at all"
+                );
+                // A toggle flips only the live pane: neither session's
+                // stored pane moves.
                 harness.toggle_right(cx);
                 assert!(
                     !harness.layout.right_open,
@@ -6319,15 +6406,18 @@ mod tests {
                     harness
                         .overrides
                         .get("s-codex-old")
-                        .and_then(|meta| meta.right.clone())
-                        .map(|right| right.open),
-                    Some(false),
-                    "the toggle lands on the destination instead"
+                        .and_then(|meta| meta.right.clone()),
+                    Some(b_pane.clone()),
+                    "the destination's stored pane is untouched by the toggle"
                 );
-                // A navigation sync for the old session defers; the
-                // destination's own sync still writes.
+                // Navigation syncs for either session defer while pending.
                 harness.remember_browser_url_cheap(
                     &first,
+                    "https://changed.example/".to_owned(),
+                    cx,
+                );
+                harness.remember_browser_url_cheap(
+                    "s-codex-old",
                     "https://changed.example/".to_owned(),
                     cx,
                 );
@@ -6340,11 +6430,6 @@ mod tests {
                     Some("https://a.example/".to_owned()),
                     "no sync overwrites the old session's stored URL mid-switch"
                 );
-                harness.remember_browser_url_cheap(
-                    "s-codex-old",
-                    "https://b.example/".to_owned(),
-                    cx,
-                );
                 assert_eq!(
                     harness
                         .overrides
@@ -6352,7 +6437,7 @@ mod tests {
                         .and_then(|meta| meta.right.clone())
                         .and_then(|right| right.browser_url),
                     Some("https://b.example/".to_owned()),
-                    "the destination's own sync still writes"
+                    "no sync overwrites the destination's stored URL mid-switch"
                 );
             });
         });
@@ -6362,8 +6447,21 @@ mod tests {
                 let view = harness.active.clone().expect("the destination landed");
                 assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
                 assert!(
-                    !harness.layout.right_open,
-                    "the landed destination keeps the toggled pane"
+                    harness.pending_switch_dest(cx).is_none(),
+                    "no loading state outlives the landing"
+                );
+                assert!(
+                    !harness.pending_right_neutral(cx),
+                    "the pane leaves its neutral state with the landing"
+                );
+                assert!(
+                    harness.layout.right_open,
+                    "the landed destination restores its own open pane"
+                );
+                assert_eq!(
+                    harness.layout.right_kind,
+                    Some(crate::layout::RightKind::Files),
+                    "the landed destination restores its own kind, not the discarded toggle"
                 );
             });
         });
@@ -6481,11 +6579,15 @@ mod tests {
         lane_restore(state);
     }
 
-    /// Q4b (c): clicking another session while a reopen is pending
-    /// invalidates the in-flight open — asserted at the epoch decision
-    /// site — so when it lands late the newer session stays. Before the
-    /// fix the click never moved `provider_open_epoch`, and the late
-    /// landing stole the centre.
+    /// Q4b (c): clicking another stored session while its reopen is
+    /// pending supersedes it — asserted at the epoch decision site — so
+    /// when the first open lands late the newer session stays. Both clicks
+    /// run through `reopen_provider`, which always joined the epoch, so
+    /// this passed even before the Q4c fix; it does NOT cover a pending
+    /// new-session, fork, or retry open, which set no `pending_id` and so
+    /// moved no epoch on the next click. Those paths are pinned by the
+    /// Q4c tests below, where the landing itself (`activate`) retires the
+    /// in-flight open.
     #[gpui::test]
     fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -6557,8 +6659,9 @@ mod tests {
                 harness.provider_open_epoch
             })
         });
-        // The second click supersedes it: a newer epoch, the pane already
-        // on the newer destination, the old view still standing by.
+        // The second click supersedes it: a newer epoch, the pane neutral
+        // throughout (neither destination's pane applies at a click), the
+        // old view still standing by.
         let superseding_epoch = vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.resume_quiet("s-codex-second".into(), window, cx);
@@ -6569,8 +6672,20 @@ mod tests {
                     "the selection follows the newer click"
                 );
                 assert!(
+                    harness.pending_right_neutral(cx),
+                    "the pane stays neutral across the superseding click"
+                );
+                assert!(
                     !harness.layout.right_open,
-                    "the pane already follows the newer destination"
+                    "no click applied a destination pane: the live pane is still the first session's closed one"
+                );
+                assert!(
+                    harness
+                        .overrides
+                        .get("s-codex-old")
+                        .and_then(|meta| meta.right.clone())
+                        .is_some_and(|right| right.open),
+                    "the superseded destination's stored pane is untouched"
                 );
                 harness.provider_open_epoch
             })
@@ -6629,6 +6744,309 @@ mod tests {
             vec!["s-codex-old".to_owned(), "s-codex-second".to_owned()],
             "both opens ran — the first landed stale and stole nothing"
         );
+        lane_restore(state);
+    }
+
+    /// Q4c (a): a fork open pending (`open_forked_on_provider` sets no
+    /// `pending_id`, so `cancel_pending_switch` never sees it) still loses
+    /// to a cached session's landing — asserted at the `activate`
+    /// decision site, which retires every in-flight provider open. The
+    /// fork's late finish lands stale (its child shuts down, nothing
+    /// parks) and never steals the centre. Without the `activate` bump
+    /// the late landing takes the centre, so this fails on pre-fix code.
+    #[gpui::test]
+    fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4c-fork");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        // Two landed lanes: the second parks the first into the cache.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        // The fork starts — observed before it lands, so no
+        // `run_until_parked` between this and the click.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace();
+                harness.open_forked_on_provider(
+                    ProviderId::Codex,
+                    "s-fork".to_owned(),
+                    workspace,
+                    window,
+                    cx,
+                );
+            });
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(harness.session_switch_pending, "the fork is pending");
+                assert!(
+                    harness.pending_switch_dest(cx).is_none(),
+                    "a fork pending names no destination: the old centre still shows"
+                );
+            });
+        });
+        // The click on the parked lane lands synchronously and retires
+        // the fork.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the cached lane is open");
+                assert_eq!(
+                    view.read(cx).session_id,
+                    first,
+                    "the click lands on the cached lane"
+                );
+            });
+        });
+        // The fork lands late and steals nothing.
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("a session is open");
+                assert_eq!(
+                    view.read(cx).session_id, first,
+                    "the late fork never steals the centre"
+                );
+                assert!(!harness.session_switch_pending, "nothing is still opening");
+                assert!(
+                    harness.session_cache.iter().all(|(id, _)| id != "s-fork"),
+                    "the discarded fork parks no view"
+                );
+                assert!(harness.provider_open_error.is_none(), "no inline failure");
+            });
+        });
+        let resumes: Vec<String> = commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resumes,
+            vec!["s-codex-old".to_owned(), "s-fork".to_owned()],
+            "both resumes ran — the fork's finish landed stale and stole nothing"
+        );
+        lane_restore(state);
+    }
+
+    /// Q4c (b): a retried reopen pending (`retry_provider_open` re-runs
+    /// the failed open, which sets no `pending_id` while the inline
+    /// failure stands, so `cancel_pending_switch` never sees it) still
+    /// loses to a cached session's landing — asserted, like (a), at the
+    /// `activate` decision site. Without the `activate` bump the late
+    /// landing takes the centre, so this fails on pre-fix code.
+    #[gpui::test]
+    fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4c-retry");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        // The reopen fails for real: the window sits on the inline
+        // failure with the first lane parked.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = failing_factory("reopen down");
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _cx| {
+                assert!(
+                    harness.provider_open_error.is_some(),
+                    "the failed reopen stands inline"
+                );
+            });
+        });
+        // Retry re-runs the failed reopen — observed before it lands, so
+        // no `run_until_parked` between this and the click.
+        let (retry_factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = retry_factory;
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.retry_provider_open(window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(harness.session_switch_pending, "the retry is pending");
+                assert!(
+                    harness.pending_switch_dest(cx).is_none(),
+                    "a retry pending names no destination while the failure stands"
+                );
+            });
+        });
+        // The click on the parked lane lands synchronously and retires
+        // the retry.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx));
+        });
+        // The retry lands late and steals nothing.
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("a session is open");
+                assert_eq!(
+                    view.read(cx).session_id, first,
+                    "the late retry never steals the centre"
+                );
+                assert!(!harness.session_switch_pending, "nothing is still opening");
+                let cached: Vec<String> =
+                    harness.session_cache.iter().map(|(id, _)| id.clone()).collect();
+                assert_eq!(
+                    cached,
+                    vec!["s-codex-old".to_owned()],
+                    "only the failure-parked view remains: the discarded retry parks nothing new"
+                );
+            });
+        });
+        let resumes: Vec<String> = commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resumes,
+            vec!["s-codex-old".to_owned()],
+            "the retry ran — its finish landed stale and stole nothing"
+        );
+        lane_restore(state);
+    }
+
+    /// Q4c (d): cancelling a pending reopen back to the still-open
+    /// session re-arms its composer focus — asserted on the
+    /// `focus_composer` arm the click consumed — and restores its pane
+    /// exactly as it was. Without the re-arm the flag stays consumed, so
+    /// this fails on pre-fix code.
+    #[gpui::test]
+    fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4c-cancel");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.toggle_right(cx);
+            });
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // The click on the stored session — observed before the reopen
+        // lands, so no `run_until_parked` between this and the cancel.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _cx| {
+                assert!(harness.session_switch_pending, "the provider switch is pending");
+                assert!(!harness.focus_composer, "the click consumed the focus arm");
+            });
+        });
+        // Clicking the still-active session cancels back to it.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(!harness.session_switch_pending, "the loading state drops");
+                assert!(
+                    harness.focus_composer,
+                    "cancelling back re-arms the restored session's composer focus"
+                );
+                let view = harness.active.clone().expect("the session stays open");
+                assert_eq!(view.read(cx).session_id, first, "still the same view");
+                assert!(
+                    harness.layout.right_open,
+                    "the restored session's pane is exactly as it was"
+                );
+            });
+        });
+        // The discarded open lands stale only now.
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the session is still open");
+                assert_eq!(view.read(cx).session_id, first, "no switch ever landed");
+            });
+        });
         lane_restore(state);
     }
 
