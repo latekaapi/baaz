@@ -433,9 +433,17 @@ pub fn encode_control_allow(request_id: &str) -> String {
     .to_string()
 }
 
+/// The deny message sent when the person gave no reason.
+pub const DENY_WITHOUT_REASON: &str = "The user denied this tool call.";
+
 /// One host→child `control_response` line answering `request_id` with a
 /// deny, carrying the human's reason.
+///
+/// A blank reason is replaced: the CLI turns the message into the denied
+/// tool's error `tool_result`, and the API rejects an empty one ("content
+/// cannot be empty if is_error is true"), ending the whole turn.
 pub fn encode_control_deny(request_id: &str, message: &str) -> String {
+    let message = if message.trim().is_empty() { DENY_WITHOUT_REASON } else { message };
     serde_json::json!({
         "type": "control_response",
         "response": {

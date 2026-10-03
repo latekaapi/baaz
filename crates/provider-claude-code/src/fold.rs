@@ -4337,6 +4337,17 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("allow")
         );
+        // An empty reason (Deny, then Send with nothing typed) must never
+        // reach the CLI as an empty message: the API rejects the empty error
+        // tool_result and the turn dies with a 400.
+        for blank in [Some(""), Some("   ")] {
+            let line = decide_approval(&request, "deny", blank).expect("blank deny decides");
+            let written: serde_json::Value = serde_json::from_str(&line).expect("encodes JSON");
+            assert_eq!(
+                written.pointer("/response/response/message").and_then(serde_json::Value::as_str),
+                Some(crate::frame::DENY_WITHOUT_REASON)
+            );
+        }
         let deny = decide_approval(&request, "deny", Some("too risky")).expect("deny decides");
         let written: serde_json::Value = serde_json::from_str(&deny).expect("encodes JSON");
         assert_eq!(
