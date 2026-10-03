@@ -1436,6 +1436,18 @@ pub fn silent_reasoning_text(count: u64) -> String {
 /// silent turn carries no `assistant_turn(..).meta(..)` and gets this row
 /// instead — same cells, same order, same separators, same style. Keep in
 /// sync with the library.
+/// The footer model cell: a Claude Code wire id reads humanised
+/// (`claude-haiku-4-5-20251001` → `Haiku 4.5`), never raw. Only
+/// `claude-`-prefixed ids map — every other lane's model cells pass
+/// through exactly as before.
+fn footer_model_label(model: &str) -> String {
+    if model.starts_with("claude-") {
+        crate::providers::claude_code_model_label(model)
+    } else {
+        model.to_owned()
+    }
+}
+
 fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
     let tokens = meta.tokens_in + meta.tokens_out;
     // Zero is "the wire did not say", not "this turn was free" — dropped
@@ -1448,7 +1460,7 @@ fn silent_footer_items(meta: &TurnMeta, count: u64) -> Vec<String> {
         n => format!("{n} tokens"),
     };
     let mut items = vec![
-        meta.model.clone(),
+        footer_model_label(&meta.model),
         if meta.duration_ms == 0 { String::new() } else { format!("{:.1} s", meta.duration_ms as f64 / 1000.0) },
         tokens,
     ];
@@ -2021,7 +2033,11 @@ fn text_card(
         .actions_bottom(last);
     if let Some(meta) = meta {
         if last && !streaming && meta != &TurnMeta::default() {
-            turn = turn.meta(meta.clone());
+            // The library draws the footer from the meta as handed over,
+            // so the humanised label maps here in baaz — never a raw id.
+            let mut mapped = meta.clone();
+            mapped.model = footer_model_label(&mapped.model);
+            turn = turn.meta(mapped);
         }
     }
     // The how-long-ago cell at the end of the footer, beside the action
@@ -2875,6 +2891,28 @@ mod tests {
                 "59.2k tokens".to_owned(),
                 "419 reasoning".to_owned(),
             ]
+        );
+    }
+
+    /// Q2: a Claude Code wire id never reaches the footer raw — the
+    /// footer reads the humanised label, while other lanes' ids pass
+    /// through untouched.
+    #[test]
+    fn the_footer_humanises_a_claude_code_wire_id() {
+        assert_eq!(footer_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(footer_model_label("claude-opus-5[1m]"), "Opus 5 · 1M");
+        assert_eq!(
+            footer_model_label("muse-spark-1.3-contributor"),
+            "muse-spark-1.3-contributor"
+        );
+        let meta = TurnMeta {
+            model: "claude-haiku-4-5-20251001".to_owned(),
+            ..TurnMeta::default()
+        };
+        assert!(
+            silent_footer_items(&meta, 0).contains(&"Haiku 4.5".to_owned()),
+            "the silent footer reads the label, drew {:?}",
+            silent_footer_items(&meta, 0)
         );
     }
 

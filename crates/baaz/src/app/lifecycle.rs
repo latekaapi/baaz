@@ -3903,7 +3903,14 @@ impl Harness {
                 // `claude_code_seed_model`), persisted beside the other
                 // stores with their hermeticity rule.
                 if provider_kind == ProviderId::ClaudeCode && !meta.model.is_empty() {
-                    crate::providers::write_claude_code_last_reported_model(&meta.model);
+                    // ...except an internal sub-call's: when the session
+                    // already knows its model and the report names another
+                    // family, persisting it would paint every future fresh
+                    // chip with a model nobody picked.
+                    let known = view.read(cx).model_id();
+                    if crate::providers::claude_code_report_matches_session(&meta.model, &known) {
+                        crate::providers::write_claude_code_last_reported_model(&meta.model);
+                    }
                 }
                 let cursor =
                     view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
