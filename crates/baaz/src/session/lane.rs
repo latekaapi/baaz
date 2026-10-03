@@ -445,14 +445,18 @@ impl SessionView {
                     // as the next fresh session's display-only chip seed
                     // (see `ProviderTurnFinished`).
                     // A turn result never replaces the person's picked model
-                    // with an internal sub-call's: when a pick stands and
-                    // the finished turn names another family, the pick
-                    // stands and history keeps whatever it held.
+                    // with an internal sub-call's: a Haiku report while a
+                    // non-Haiku pick stands is the sub-call's, so the pick
+                    // stands and history keeps whatever it held. Any other
+                    // report — another family, a fallback — updates history
+                    // as before, and a placeholder (`<synthetic>`) never
+                    // claims the turn at all.
                     let subcall_report = self.provider_kind() == ProviderId::ClaudeCode
-                        && self.pending_model.as_deref().is_some_and(|picked| {
-                            !crate::providers::claude_code_same_model_family(picked, &meta.model)
-                        });
-                    if !meta.model.is_empty() && !subcall_report {
+                        && crate::providers::claude_code_is_subcall_report(
+                            &meta.model,
+                            self.pending_model.as_deref(),
+                        );
+                    if crate::providers::claude_code_is_model_id(&meta.model) && !subcall_report {
                         self.history_model = Some(meta.model.clone());
                     }
                     // Only the running turn's finish stands the lane down: a
@@ -2636,6 +2640,117 @@ mod tests {
                 None,
                 "nothing persisted Haiku"
             );
+        });
+    }
+
+    /// Q2b: a Sonnet fallback under a picked Opus updates history as
+    /// before Q2 — only a Haiku report is ever dropped. The chip still
+    /// reads the live pick while it stands; history carries the model
+    /// that answered, and the seed decision for it lives at the
+    /// lifecycle call site (see `should_seed_claude_code_model`).
+    #[gpui::test]
+    fn lane_sonnet_fallback_report_updates_history(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Delta, Turn, TurnMeta};
+
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lane-fallback-history");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.pending_model = Some("opus".to_owned());
+            });
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "a-1".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnFinished {
+                        turn_id: "a-1".to_owned(),
+                        meta: TurnMeta {
+                            model: "claude-sonnet-4-5-20250822".to_owned(),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.history_model.as_deref(),
+                Some("claude-sonnet-4-5-20250822"),
+                "a fallback report updates history, drew {:?}",
+                view.history_model
+            );
+            assert_eq!(
+                view.model().as_ref(),
+                "Claude Opus",
+                "the chip still reads the live pick while it stands"
+            );
+        });
+    }
+
+    /// Q2b: a Haiku pick's own Haiku report is the session's own — the
+    /// guard drops a Haiku report only when the pick is not Haiku.
+    #[gpui::test]
+    fn lane_haiku_pick_accepts_its_haiku_report(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Delta, Turn, TurnMeta};
+
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lane-haiku-pick");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.pending_model = Some("haiku".to_owned());
+            });
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "a-1".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnFinished {
+                        turn_id: "a-1".to_owned(),
+                        meta: TurnMeta {
+                            model: "claude-haiku-4-5-20251001".to_owned(),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.history_model.as_deref(),
+                Some("claude-haiku-4-5-20251001"),
+                "a Haiku pick's Haiku report is its own, drew {:?}",
+                view.history_model
+            );
+            assert_eq!(view.model().as_ref(), "Claude Haiku", "the chip reads the Haiku pick");
         });
     }
 

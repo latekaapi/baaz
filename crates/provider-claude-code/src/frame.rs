@@ -843,16 +843,26 @@ fn is_haiku_model(id: &str) -> bool {
     id.to_ascii_lowercase().contains("haiku")
 }
 
+/// Whether `id` can name a model at all: non-empty and not a `<...>`
+/// placeholder such as the `<synthetic>` the CLI emits on
+/// error/synthetic messages. Placeholders never claim the turn; the next
+/// source answers instead.
+pub fn is_model_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && !id.starts_with('<')
+}
+
 /// The turn's answering model out of a `result` frame: the frame's own
-/// `model` when it names one, else the `modelUsage` entry with the most
-/// output tokens — never a Haiku entry while a non-Haiku entry exists.
+/// `model` when it names a real model id, else the `modelUsage` entry
+/// with the most output tokens — never a Haiku entry while a non-Haiku
+/// entry exists. Placeholder ids (`<synthetic>`, anything starting with
+/// `<`) are skipped at both steps, falling back to the next source.
 /// Wire order breaks output-token ties. `None` when the frame names no
 /// model at all.
 fn decode_result_model(value: &Value) -> Option<String> {
-    if let Some(model) =
-        value.get("model").and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty())
+    if let Some(model) = value.get("model").and_then(Value::as_str).filter(|model| is_model_id(model))
     {
-        return Some(model.to_owned());
+        return Some(model.trim().to_owned());
     }
     let usage = value.get("modelUsage")?.as_object()?;
     let output_tokens = |entry: &serde_json::Map<String, Value>| {
@@ -865,6 +875,9 @@ fn decode_result_model(value: &Value) -> Option<String> {
     let mut best: Option<(&String, u64)> = None;
     let mut best_main: Option<(&String, u64)> = None;
     for (id, entry) in usage {
+        if !is_model_id(id) {
+            continue;
+        }
         let tokens = entry.as_object().map(output_tokens).unwrap_or(0);
         if best.map_or(true, |(_, leader)| tokens > leader) {
             best = Some((id, tokens));
@@ -1294,6 +1307,44 @@ mod tests {
         match frame {
             Frame::TurnResult { model, .. } => {
                 assert_eq!(model.as_deref(), Some("claude-haiku-4-5-20251001"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
+    }
+
+    /// Q2b: a `<...>` placeholder never claims the turn — the frame's own
+    /// `<synthetic>` model falls back to `modelUsage`, a placeholder
+    /// `modelUsage` key falls back to the next entry, and placeholders
+    /// everywhere decode to no model at all.
+    #[test]
+    fn result_placeholders_fall_back_to_the_next_source() {
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":"<synthetic>","modelUsage":{"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-opus-4-1-20250822"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"<synthetic>":{"inputTokens":5,"outputTokens":500},"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-opus-4-1-20250822"));
+            }
+            other => panic!("a result decodes to TurnResult, got {other:?}"),
+        }
+        let frame = decode_line(
+            r#"{"type":"result","session_id":"s","result":"oops","usage":{"input_tokens":10,"output_tokens":0},"total_cost_usd":0.0,"duration_ms":100,"model":"<synthetic>"}"#,
+        )
+        .expect("decodes");
+        match frame {
+            Frame::TurnResult { model, .. } => {
+                assert_eq!(model, None);
             }
             other => panic!("a result decodes to TurnResult, got {other:?}"),
         }
