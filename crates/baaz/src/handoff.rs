@@ -137,12 +137,17 @@ pub fn build_pack(session: &Session, workspace: &str) -> ContextPack {
                                 }
                             }
                         }
+                        // Only edits and writes touch a file. Commands, reads and
+                        // searches are not "files touched": counting them made a
+                        // read-only session report "Files touched · 11".
                         Block::ToolCall { .. } => {
                             if let Some(call) = block.as_tool_call() {
-                                let target = call.target.trim();
-                                if !target.is_empty() {
-                                    push_unique(&mut files, format!("{} {target}", call.verb.trim()));
-                                }
+                                push_touched(&mut files, &call);
+                            }
+                        }
+                        Block::ToolGroup { calls, .. } => {
+                            for call in calls {
+                                push_touched(&mut files, call);
                             }
                         }
                         _ => {}
@@ -958,6 +963,17 @@ pub fn handoff_card_started_ms(card_id: &str) -> Option<u64> {
     ms.parse().ok()
 }
 
+/// Records `call` as a touched file when it edited or wrote one.
+fn push_touched(files: &mut Vec<String>, call: &aui_protocol::ToolCall) {
+    if !matches!(call.kind, aui_protocol::ToolKind::Edit | aui_protocol::ToolKind::Write) {
+        return;
+    }
+    let target = call.target.trim();
+    if !target.is_empty() {
+        push_unique(files, format!("{} {target}", call.verb.trim()));
+    }
+}
+
 fn push_unique(out: &mut Vec<String>, item: String) {
     if !out.iter().any(|existing| existing == &item) {
         out.push(item);
@@ -1160,6 +1176,43 @@ mod tests {
         run.fail("the child would not start".to_owned());
         assert!(matches!(run.state, HandoffState::Failed { .. }));
         assert_eq!(run.reason.as_deref(), Some("the child would not start"));
+    }
+
+    #[test]
+    fn files_touched_counts_edits_and_writes_only() {
+        use aui_protocol::{ActivityState, Block as B, ToolBody, ToolCall, ToolKind, ToolStatus, Turn as T};
+        let call = |id: &str, kind: ToolKind, verb: &str, target: &str| ToolCall {
+            id: id.to_owned(),
+            kind,
+            verb: verb.to_owned(),
+            target: target.to_owned(),
+            status: ToolStatus::Success,
+            duration_ms: Some(1),
+            body: ToolBody::Read { lines: 1 },
+            diff_stat: None,
+        };
+        let mut session = Session::new("s", aui_protocol::Provider::Muse, "m", "/tmp/proj");
+        session.turns.push(T::Assistant {
+            id: "a1".to_owned(),
+            blocks: vec![
+                B::tool_call(call("1", ToolKind::Shell, "Ran", "git ls-files")),
+                B::tool_call(call("2", ToolKind::Read, "Read", "src/main.rs")),
+                B::tool_call(call("3", ToolKind::Search, "Searched", "fn main")),
+                B::tool_call(call("4", ToolKind::Edit, "Edited", "src/lib.rs")),
+                B::ToolGroup {
+                    calls: vec![
+                        call("5", ToolKind::Shell, "Ran", "ls"),
+                        call("6", ToolKind::Write, "Wrote", "notes.md"),
+                    ],
+                    summary: "2 calls".to_owned(),
+                    state: ActivityState::Done,
+                },
+            ],
+            meta: Default::default(),
+            timestamp: None,
+        });
+        let pack = build_pack(&session, "/tmp/proj");
+        assert_eq!(pack.files, vec!["Edited src/lib.rs".to_owned(), "Wrote notes.md".to_owned()]);
     }
 
     #[test]

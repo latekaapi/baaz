@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use aui::workbench::Annotation;
+use aui_tokens::ActiveAui;
 use aui_webview::{FakeWebBackend, WebBackend, WebviewIntent, WebviewState, WryBackend};
 use gpui::{AppContext as _, Bounds, Context, Entity, Pixels, Point, Window};
 
@@ -160,6 +161,14 @@ pub(crate) fn terminal_covers_browser(
 /// keyboard release below.
 pub(crate) fn browser_pane_showing(pane_open: bool, kind_browser: bool) -> bool {
     pane_open && kind_browser
+}
+
+/// Whether `key`'s native view may show as its session's page: only the
+/// active session's — and never while a provider switch is pending (Q4c).
+/// The centre is then the destination's loading state, so the previous
+/// session's page must neither draw nor hit-test under it.
+pub(crate) fn browser_session_active(key: &str, active_key: &str, pending_switch: bool) -> bool {
+    !pending_switch && key == active_key
 }
 
 /// Whether a window-coordinate mouse-down outside the browser page's rect
@@ -311,7 +320,17 @@ impl Harness {
                 }
                 WebviewState::new(Box::new(backend), cx)
             } else {
-                match WryBackend::new_at(&*window, &initial, (0.0, 0.0), (0.0, 0.0)) {
+                // WebKit paints white before and beneath a page; paint the
+                // pane's own surface instead, so about:blank is not a white slab.
+                let bg = gpui::Rgba::from(cx.aui().colors.surface_1);
+                let rgba = [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                match WryBackend::new_at_with_background(
+                    &*window,
+                    &initial,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                    (rgba[0], rgba[1], rgba[2], rgba[3]),
+                ) {
                     Ok(backend) => WebviewState::new(Box::new(backend), cx),
                     Err(error) => {
                         crate::baaz_log!("browser: no WKWebView ({error}); falling back to the scripted page");
@@ -720,11 +739,24 @@ impl Harness {
         if let Some(home) = self.browser.home.clone() {
             keys.push((HOME_KEY.to_owned(), home));
         }
+        // Q4c: while a provider switch is pending no session's page shows —
+        // `browser_key` still names the previous session, and its webview
+        // must neither draw nor hit-test under the loading centre.
+        let pending_switch = self.pending_right_neutral(cx);
         for (key, state) in keys {
-            let visible = browser_visible(BrowserVisibility {
-                session_active: key == active_key,
-                ..base
-            });
+            // A blank page stays hidden: WKWebView paints about:blank white
+            // over the dark pane, and making the view transparent instead
+            // would put the dark surface under every real page that sets no
+            // background of its own. The pane's own surface shows through
+            // until a navigation gives the page a URL.
+            // Before its first load the page reports an empty URL — just as
+            // blank, and showing it then is what lets a white frame through.
+            let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
+            let visible = !blank
+                && browser_visible(BrowserVisibility {
+                    session_active: browser_session_active(&key, &active_key, pending_switch),
+                    ..base
+                });
             state.update(cx, |state, _cx| state.set_obscured(!visible));
         }
     }
@@ -786,6 +818,11 @@ impl Harness {
         ) {
             return;
         }
+        // Q4c: while a provider switch is pending the pane is neutral — no
+        // webview shows — so ⌘L reaches nothing.
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         let key = self.browser_key(cx);
         let state = self.browser_for(&key, false, window, cx);
         if state.read(cx).is_editing() {
@@ -820,9 +857,10 @@ impl BrowserRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_visible, initial_url,
-        should_release_keyboard_on_mouse_down, should_remember, terminal_covers_browser, terminal_dock_bounds,
-        Annotation, BrowserVisibility, FakeWebBackend, WebviewState,
+        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_session_active,
+        browser_visible, initial_url, should_release_keyboard_on_mouse_down, should_remember,
+        terminal_covers_browser, terminal_dock_bounds, Annotation, BrowserVisibility, FakeWebBackend,
+        WebviewState,
     };
     use aui_webview::WebBackend as _;
     use std::collections::HashMap;
@@ -1063,6 +1101,23 @@ mod tests {
         assert!(browser_pane_showing(true, true));
         assert!(!browser_pane_showing(false, true), "a closed pane eats ⌘L");
         assert!(!browser_pane_showing(true, false), "another kind eats ⌘L");
+    }
+
+    #[test]
+    fn pending_switch_hides_every_session_page() {
+        assert!(
+            browser_session_active("a", "a", false),
+            "the active session's page shows outside a switch"
+        );
+        assert!(
+            !browser_session_active("b", "a", false),
+            "a parked session's page never shows"
+        );
+        assert!(
+            !browser_session_active("a", "a", true),
+            "no page shows under the pending loading centre — not even the still-active session's"
+        );
+        assert!(!browser_session_active("b", "a", true), "nor any other session's");
     }
 
     #[test]

@@ -192,7 +192,15 @@ impl ClaudeCodeAdapter {
     /// spawn — every test runs offline against the checked-in fixtures.
     pub fn new(program: &str) -> Self {
         let (tx, rx) = unbounded();
-        let fold = Arc::new(Mutex::new(ClaudeFold::new()));
+        // The stream fold: live wall-clock readings for tool starts and
+        // turn starts, so the transcript's live rows tick for real.
+        // Stored history folds through a fresh replay fold instead
+        // (see `stored_history`), keeping its filed zeros.
+        let fold = Arc::new(Mutex::new({
+            let mut fold = ClaudeFold::new();
+            fold.set_live(true);
+            fold
+        }));
         let model = Arc::new(Mutex::new(None));
         let effort = Arc::new(Mutex::new(None));
         let session_id = Arc::new(Mutex::new(None));
@@ -715,6 +723,9 @@ impl ClaudeCodeAdapter {
         }
         if known {
             let request = fold.take_approval(approval).expect("presence checked above");
+            if choice == "deny" {
+                fold.note_denied(approval);
+            }
             let line = fold::decide_approval(&request, choice, feedback)?;
             Ok(ClaimedApproval::Known(request, line))
         } else {

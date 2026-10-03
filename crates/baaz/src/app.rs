@@ -2329,6 +2329,14 @@ impl Harness {
         url: String,
         cx: &mut Context<Self>,
     ) {
+        // Q4c: while a provider switch is pending, every navigation sync
+        // is deferred — the pane is neutral and describes neither session,
+        // so persisting now would write pane activity onto a session the
+        // pane is not showing. The live webviews keep their URLs, so the
+        // next sync after the switch lands persists them then.
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         let entry = self.overrides.entry(session_id.to_owned()).or_default();
         let mut right = entry.right.clone().unwrap_or_default();
         if right.browser_url.as_deref() == Some(url.as_str()) {
@@ -2452,9 +2460,20 @@ impl Harness {
     ///
     /// B7: the persist is the cheap debounced write above — no `rejoin`,
     /// no search rebuild, no synchronous `sessions.json` write.
+    ///
+    /// Q4c: while a provider switch is pending the pane is neutral — it
+    /// describes neither session — so no gesture persists onto either
+    /// record. The destination's pane restores when it lands, the previous
+    /// session's on cancel. Every pane gesture funnels through here.
     pub(crate) fn save_right_for_active(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let session_id = view.read(cx).session_id.clone();
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
+        let Some(session_id) =
+            self.active.clone().map(|view| view.read(cx).session_id.clone())
+        else {
+            return;
+        };
         let (files_preview, files_selected, files_expanded) = match self.right_project() {
             Some((root, _)) => {
                 let preview = self.right_cache.preview_for(&root).map(|preview| preview.path.clone());
@@ -3423,6 +3442,66 @@ impl Harness {
         cx.notify();
     }
 
+    /// While a switch to another session is pending (Q4): the centre is the
+    /// destination's loading state — never the previous session's transcript
+    /// or composer draft. Muse opens already swap synchronously with
+    /// `mark_history_loading`, so this only ever names a provider reopen
+    /// whose child is still resuming; `replacing` (in-place provider
+    /// switch) and the inline failure keep their own views.
+    pub(crate) fn pending_switch_dest(&self, cx: &gpui::App) -> Option<String> {
+        if !self.session_switch_pending {
+            return None;
+        }
+        if self.replacing.is_some() {
+            return None;
+        }
+        if self.provider_open_error.is_some() {
+            return None;
+        }
+        let dest = self.pending_id.clone()?;
+        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == dest) {
+            return None;
+        }
+        Some(dest)
+    }
+
+    /// Whether the right pane must stay neutral this frame (Q4c): while a
+    /// provider switch is pending the centre is the destination's loading
+    /// state, so the pane keeps its width — the centre never resizes —
+    /// but shows nothing session-specific and no webview. Closing the pane
+    /// instead would grow the centre for the switch's duration and snap it
+    /// back on landing; the neutral body avoids that flicker. The render
+    /// and the browser sync both gate on this.
+    pub(crate) fn pending_right_neutral(&self, cx: &gpui::App) -> bool {
+        self.pending_switch_dest(cx).is_some()
+    }
+
+    /// The centre while a provider switch is pending: the same neutral
+    /// history-loading shape a Muse reopen shows (`loading_row` + the
+    /// "Loading history…" status) — an empty pane that keeps its height,
+    /// with no transcript and no composer, so no previous-session content
+    /// can paint. No interactive controls, so no control roles are needed.
+    fn render_pending_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        v_flex()
+            .size_full()
+            .child(div().w_full().flex_1().min_h(px(0.0)))
+            .child(
+                div()
+                    .w_full()
+                    .px(px(scale::SP_4))
+                    .pb(px(scale::SP_4))
+                    .child(
+                        div()
+                            .w_full()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child("Loading history…"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The one write left in the render tree, and it only ever fires on a
         // `--replay` window's first frame: `open_replay` starts a stream
@@ -3441,8 +3520,13 @@ impl Harness {
         // `render_no_session` stays inline — there is no view to cache on,
         // and the screen is static.
         // Route::Skills: the page replaces the transcript area while open.
+        // Q4: while a switch to another session is pending, the centre is
+        // the destination's loading state — never the previous transcript.
+        let pending_dest = self.pending_switch_dest(cx);
         let body = if self.skills.open {
             self.render_skills_page(window, cx)
+        } else if pending_dest.is_some() {
+            self.render_pending_switch(cx)
         } else {
             match self.active.clone() {
             Some(view) => {
@@ -3600,7 +3684,17 @@ impl Harness {
         context
     }
 
+    /// Run `f` on the open session — unless a provider switch is pending
+    /// (Q4b): the centre shows the destination's loading state while
+    /// `active` is still the old view, so every harness action routed here
+    /// (send, steer, stop-adjacent history/picker/approval keys) targets
+    /// nothing instead of acting on the hidden session. Session verbs
+    /// already wait out the switch through `steps_ready`; Muse sessions
+    /// swap synchronously and never trip this.
     pub(crate) fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| f(view, cx));
         }
@@ -3609,6 +3703,12 @@ impl Harness {
     /// ⌘V. An image on the clipboard becomes an attachment; anything else is
     /// the textarea's own paste, which is re-dispatched rather than reimplemented.
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Q4b: like `with_session` — no paste into the hidden session
+        // while its replacement loads, and no re-dispatch either: no
+        // composer is mounted to take it.
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         let handled = self
             .active
             .clone()
@@ -4119,7 +4219,14 @@ impl Harness {
         // A deterministic capture never takes keyboard focus: a focused
         // composer paints the textarea's blinking caret, which lands on a
         // different phase every run.
-        if std::mem::take(&mut self.focus_composer) && !crate::clock::deterministic() {
+        // Q4b: never re-focus the hidden session's composer while its
+        // replacement loads — the click consumed the arm, and this drops
+        // any arm raised mid-switch. The landing view arms its own focus
+        // through `activate`.
+        if std::mem::take(&mut self.focus_composer)
+            && !crate::clock::deterministic()
+            && self.pending_switch_dest(cx).is_none()
+        {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.focus_composer(window, cx));
             }
@@ -4192,6 +4299,11 @@ impl Render for Harness {
             // key/invalidation to avoid going stale — while the subtree
             // rebuild itself is cheap once the reads are gone.
             let right_project = self.right_project();
+            // Q4c: while a provider switch is pending the pane is neutral
+            // (see `pending_right_neutral`): no webview is created or
+            // shown for the still-active session, so its page can neither
+            // draw nor hit-test under the loading centre.
+            let pending_neutral = self.pending_right_neutral(cx);
             // Z7a2: the Browser kind draws the active session's live
             // webview (created lazily here, where the window is at
             // hand), every other kind draws from the read cache as
@@ -4202,7 +4314,9 @@ impl Render for Harness {
             // while closing (or while Settings hides the pane) the existing
             // webview passes through without creating, so the last page
             // snapshot slides out instead of the "Opening the page" placeholder.
-            let browser = if kind == layout::RightKind::Browser {
+            let browser = if pending_neutral {
+                None
+            } else if kind == layout::RightKind::Browser {
                 if right_open {
                     Some(self.ensure_browser_person(window, cx))
                 } else {
@@ -4221,6 +4335,7 @@ impl Render for Harness {
             // (so a steady frame never dirties it either). Empty when no
             // session is open.
             let shows_changes = right_open
+                && !pending_neutral
                 && matches!(
                     kind,
                     layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git
@@ -4239,15 +4354,23 @@ impl Render for Harness {
             } else {
                 Vec::new()
             };
-            let right = right::render(
-                kind,
-                &self.right_cache,
-                right_project,
-                &session_edits,
-                browser.as_ref(),
-                right_open,
-                cx,
-            );
+            // Q4c: the neutral body — an empty pane that keeps its width,
+            // so the centre never resizes mid-switch. `right_open` still
+            // rides the live layout into the shell, which is what holds
+            // the width steady.
+            let right = if pending_neutral {
+                v_flex().size_full().into_any_element()
+            } else {
+                right::render(
+                    kind,
+                    &self.right_cache,
+                    right_project,
+                    &session_edits,
+                    browser.as_ref(),
+                    right_open,
+                    cx,
+                )
+            };
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
@@ -4666,7 +4789,12 @@ impl Harness {
     }
 
     /// ⌃C, and Escape on an empty composer: stop and retract.
+    /// Q4b: a no-op while a provider switch is pending — the running turn,
+    /// if any, belongs to the hidden session, and ⌃C must not reach it.
     fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.interrupt(cx));
         }
