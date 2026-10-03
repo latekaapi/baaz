@@ -33,9 +33,6 @@ pub const CODEX_PROVIDER: &str = "codex";
 pub const JOURNAL_FILE_NAME: &str = "session-migration-journal.json";
 /// The one-time prompt's dismissal marker under the state dir.
 pub const DISMISSED_FILE_NAME: &str = "session-migration.dismissed";
-/// How many moved paths the prompt lists before folding the rest into a
-/// count: the full list is one toggle away on the Providers row.
-pub const MAX_LISTED_PATHS: usize = 12;
 
 /// One file (or companion directory) to move: its absolute owner-side
 /// source and its absolute Baaz-side target. The target keeps the source's
@@ -151,19 +148,6 @@ pub fn plan_single(
     session_id: &str,
 ) -> Vec<PlannedMove> {
     plan_one(owner_home, state_dir, provider, session_id)
-}
-
-/// How many planned moves belong to each provider: `(claude, codex)`.
-pub fn counts(moves: &[PlannedMove]) -> (usize, usize) {
-    let mut counts = (0usize, 0usize);
-    for planned in moves {
-        if planned.provider == CLAUDE_PROVIDER {
-            counts.0 += 1;
-        } else if planned.provider == CODEX_PROVIDER {
-            counts.1 += 1;
-        }
-    }
-    counts
 }
 
 // ---------------------------------------------------------------- journal
@@ -714,64 +698,50 @@ pub fn execute_plan(state_dir: &Path, moves: &[PlannedMove]) -> MigrationReport 
 
 // ---------------------------------------------------------------- prompt
 
-/// `"Move 2 Claude Code and 1 Codex sessions into Baaz"`: the one-time
-/// prompt's title (and the Providers row's) from the provider counts.
-pub fn prompt_title(n_claude: usize, n_codex: usize) -> String {
-    let mut parts = Vec::new();
-    if n_claude > 0 {
-        parts.push(format!("{n_claude} Claude Code"));
+/// How many distinct sessions each provider still waits with:
+/// `(claude, codex)`. Titles count sessions — what the person
+/// recognises — not files (a Claude session is a transcript plus its
+/// companion dir).
+pub fn session_counts(moves: &[PlannedMove]) -> (usize, usize) {
+    use std::collections::HashSet;
+    let mut claude = HashSet::new();
+    let mut codex = HashSet::new();
+    for planned in moves {
+        if planned.provider == CLAUDE_PROVIDER {
+            claude.insert(planned.session_id.as_str());
+        } else if planned.provider == CODEX_PROVIDER {
+            codex.insert(planned.session_id.as_str());
+        }
     }
-    if n_codex > 0 {
-        parts.push(format!("{n_codex} Codex"));
-    }
-    format!("Move {} sessions into Baaz", parts.join(" and "))
+    (claude.len(), codex.len())
 }
 
-/// The prompt's body: what moves, where it lands, the dry-run paths
-/// (first [`MAX_LISTED_PATHS`], then a count), and the two honest notes —
-/// Codex for Mac keeps stale index rows Baaz never touches (the owner
-/// archives them there), and nothing is ever deleted.
+/// `"Move 38 older sessions into Baaz?"`: the one-time prompt's title
+/// (and the Providers row's) from the per-provider session counts.
+pub fn prompt_title(n_claude: usize, n_codex: usize) -> String {
+    format!("Move {} older sessions into Baaz?", n_claude + n_codex)
+}
+
+/// The prompt's body, in the person's words: what moves, why, the two
+/// honest notes (the other apps stop listing them; nothing is ever
+/// deleted), and the file count behind the collapsed list — never the
+/// paths inline (those live under Settings → Providers).
 pub fn prompt_detail(moves: &[PlannedMove]) -> String {
-    let (listed, rest) = prompt_paths_preview(moves);
     let mut detail = String::from(
-        "Baaz's own sessions still live in the owner's Claude and Codex homes, where \
-         Baaz's re-homed children can no longer resume them. Moving keeps the same \
-         relative paths under Baaz's homes, so resume keeps working. Nothing is deleted.",
+        "Sessions you started in Baaz before this update are stored in your Claude and Codex \
+         folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them resumable \
+         here and takes them out of those apps. Nothing is deleted.",
     );
-    if !listed.is_empty() {
-        detail.push_str("\n\nMoves:\n");
-        for path in &listed {
-            detail.push_str("- ");
-            detail.push_str(path);
-            detail.push('\n');
-        }
-        if rest > 0 {
-            detail.push_str(&format!("…and {rest} more (see Settings → Providers).\n"));
-        }
-    }
+    detail.push_str(&format!("\n\nShow files ({})", moves.len()));
     detail.push_str(
-        "\nNote: Codex for Mac may keep listing moved threads until they are archived \
-         there — Baaz never writes the owner's Codex index, so archive them in that app.",
+        "\nThe full list is under Settings → Providers. \
+         Note: Codex for Mac may keep listing moved threads until they are archived there.",
     );
     detail
 }
 
-/// The dry-run path preview: the first [`MAX_LISTED_PATHS`] target paths
-/// (relative to the state dir, so the list reads the same on any Mac)
-/// plus how many more follow.
-pub fn prompt_paths_preview(moves: &[PlannedMove]) -> (Vec<String>, usize) {
-    let mut listed: Vec<String> = moves
-        .iter()
-        .take(MAX_LISTED_PATHS)
-        .map(|planned| preview_path(&planned.target))
-        .collect();
-    listed.sort();
-    let rest = moves.len().saturating_sub(listed.len());
-    (listed, rest)
-}
-
 /// Every planned target for the Providers row's expandable list, sorted
-/// and capped: the dry-run paths in full, not just the prompt's preview.
+/// and capped: the full dry-run list behind the row's toggle.
 pub fn row_paths(moves: &[PlannedMove]) -> Vec<String> {
     let mut paths: Vec<String> = moves.iter().map(|planned| preview_path(&planned.target)).collect();
     paths.sort();
@@ -816,6 +786,119 @@ pub fn dismiss(state_dir: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(dismissal_path(state_dir), "not-now\n");
+}
+
+// ---------------------------------------------------------------- consent
+
+/// The consent marker's name under the state dir: written when the
+/// person clicks Move — in the startup dialog or the Settings →
+/// Providers row — and never otherwise. Opening or resuming an old
+/// session must never create it.
+pub const CONSENT_FILE_NAME: &str = "session-migration.consented";
+
+/// The consent marker: the person's explicit click to move old
+/// sessions into Baaz's homes.
+pub fn consent_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(CONSENT_FILE_NAME)
+}
+
+/// Whether the person has confirmed the move.
+pub fn is_consented(state_dir: &Path) -> bool {
+    consent_path(state_dir).exists()
+}
+
+/// Record the confirmation: from here the lazy move-on-resume fallback
+/// may run. Best-effort: an unwritable marker only withholds the move.
+pub fn record_consent(state_dir: &Path) {
+    if let Some(parent) = consent_path(state_dir).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(consent_path(state_dir), "move-confirmed\n");
+}
+
+/// The owner's home a pre-consent resume reads: `Some` dir when the
+/// session id is registered for `provider`, its files still live only
+/// in the owner's home, and consent is not recorded — else `None` (the
+/// Baaz home answers, and after consent the lazy move may run). Pure
+/// over explicit dirs plus the registry; tests drive it with temp dirs.
+pub fn legacy_resume_dir(
+    owner_home: &Path,
+    state_dir: &Path,
+    registry: &crate::provider_sessions::ProviderSessionStore,
+    provider: &str,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let record = registry.get(session_id)?;
+    if record.provider != provider {
+        return None;
+    }
+    let consented = is_consented(state_dir);
+    if provider == CLAUDE_PROVIDER {
+        provider_claude_code::home::legacy_home_for(owner_home, state_dir, session_id, consented)
+    } else if provider == CODEX_PROVIDER {
+        provider_codex::home::legacy_home_for(owner_home, state_dir, session_id, consented)
+    } else {
+        None
+    }
+}
+
+/// What a resume may do about one session's owner-side files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumeGate {
+    /// An old (unmoved, registered) session before consent: resume from
+    /// its original location — pin the one child on the owner's home
+    /// and move nothing.
+    LegacyOwner,
+    /// Consent is recorded: the lazy move-on-resume fallback may run.
+    LazyMove,
+    /// Nothing owner-side waits (or an unknown provider): resume
+    /// Baaz-homed, moving nothing.
+    BaazHome,
+}
+
+/// The consent gate for one resume: the single decision both reopen
+/// paths run before touching any session file.
+pub fn gate_resume(
+    owner_home: &Path,
+    state_dir: &Path,
+    registry: &crate::provider_sessions::ProviderSessionStore,
+    provider: &str,
+    session_id: &str,
+) -> ResumeGate {
+    if legacy_resume_dir(owner_home, state_dir, registry, provider, session_id).is_some() {
+        ResumeGate::LegacyOwner
+    } else if is_consented(state_dir) {
+        ResumeGate::LazyMove
+    } else {
+        ResumeGate::BaazHome
+    }
+}
+
+/// Pin one admitted child on the owner's home for its resume: the
+/// [`ResumeGate::LegacyOwner`] arm. Unknown providers pin nothing.
+pub fn pin_legacy_resume(provider: &str, session_id: &str) {
+    if provider == CLAUDE_PROVIDER {
+        provider_claude_code::home::pin_legacy_resume(session_id);
+    } else if provider == CODEX_PROVIDER {
+        provider_codex::home::pin_legacy_resume(session_id);
+    }
+}
+
+/// Drop one session's legacy pin: the consented lazy move calls this
+/// after landing the session's files under the Baaz home.
+pub fn clear_legacy_resume(provider: &str, session_id: &str) {
+    if provider == CLAUDE_PROVIDER {
+        provider_claude_code::home::clear_legacy_resume(session_id);
+    } else if provider == CODEX_PROVIDER {
+        provider_codex::home::clear_legacy_resume(session_id);
+    }
+}
+
+/// Drop every legacy pin: consent itself calls this, so no later resume
+/// keeps reading the owner's home after the move was admitted.
+pub fn clear_all_legacy_resumes() {
+    provider_claude_code::home::clear_legacy_resumes();
+    provider_codex::home::clear_legacy_resumes();
 }
 
 // -------------------------------------------------------------------- lazy
@@ -926,11 +1009,12 @@ impl BaazHarness {
         self.refresh_migration_cache(cx);
     }
 
-    /// The one-time prompt's dialog for `plan`: the "Move N …" title, the
-    /// dry-run body, Move primary and Not-now secondary. Nothing moves
-    /// without the click — building the dialog moves nothing.
+    /// The one-time prompt's dialog for `plan`: the "Move N older …"
+    /// title, the dry-run body with the file count behind its collapsed
+    /// list, Move primary and Not-now secondary. Nothing moves without
+    /// the click — building the dialog moves nothing.
     pub(crate) fn migration_dialog(plan: &[PlannedMove]) -> Dialog {
-        let (n_claude, n_codex) = counts(plan);
+        let (n_claude, n_codex) = session_counts(plan);
         Dialog {
             title: prompt_title(n_claude, n_codex),
             detail: prompt_detail(plan),
@@ -971,14 +1055,22 @@ impl BaazHarness {
         self.set_dialog(cx, Self::migration_dialog(&plan));
     }
 
-    /// Run the prompt's Move: the cached plan through the journaling
-    /// executor on the background executor, then (back on the UI thread)
-    /// a toast with the honest counts (moved, already there, failed) and
-    /// a cache refresh so the Providers row follows. The prompt never
-    /// shows again afterwards. The click returns at once — nothing walks
-    /// or copies on the UI thread.
+    /// Run the prompt's Move (and the Providers row's Move — same
+    /// click): record the person's consent first, so the lazy
+    /// move-on-resume fallback is admitted from here on, then the
+    /// cached plan through the journaling executor on the background
+    /// executor, then (back on the UI thread) a toast with the honest
+    /// counts (moved, already there, failed) and a cache refresh so the
+    /// Providers row follows. The prompt never shows again afterwards.
+    /// The click returns at once — nothing walks or copies on the UI
+    /// thread.
     pub(crate) fn confirm_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         let state = crate::store::support_dir();
+        // Consent lands with the click, before any byte moves — and every
+        // legacy pin drains, so no later resume keeps reading the
+        // owner's home after the move was admitted.
+        record_consent(&state);
+        clear_all_legacy_resumes();
         let plan = self.migration_cached_plan();
         // A click that beats the background plan (cold start) plans now, in
         // the same background task, instead of moving nothing.
@@ -1018,7 +1110,8 @@ impl BaazHarness {
 
     /// The prompt's Not now: record the dismissal and close. The Providers
     /// row stays while moves remain, so the migration is always one click
-    /// away; resume lazily moves whatever is left.
+    /// away. Records no consent: resumes keep reading the owner's home
+    /// and move nothing until the person clicks Move.
     pub(crate) fn dismiss_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
         dismiss(&crate::store::support_dir());
         self.close_dialog(cx);
@@ -1277,20 +1370,101 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_names_counts_paths_and_the_codex_note() {
+    fn the_prompt_counts_sessions_and_hides_the_paths() {
         let _guard = serial();
         let homes = TempHomes::make("prompt");
-        homes.seed_claude("-work", "sess-1", false);
+        homes.seed_claude("-work", "sess-1", true);
         homes.seed_codex("thread-1");
         let plan = plan_migration(&homes.owner, &homes.state, &registry_with(&["sess-1"], &["thread-1"]));
-        let (n_claude, n_codex) = counts(&plan);
+        // Three files, two sessions: titles count what the person
+        // recognises.
+        assert_eq!(plan.len(), 3, "transcript, companion and rollout: {plan:?}");
+        let (n_claude, n_codex) = session_counts(&plan);
         assert_eq!((n_claude, n_codex), (1, 1));
-        assert_eq!(prompt_title(n_claude, n_codex), "Move 1 Claude Code and 1 Codex sessions into Baaz");
+        assert_eq!(prompt_title(n_claude, n_codex), "Move 2 older sessions into Baaz?");
+        assert_eq!(prompt_title(38, 0), "Move 38 older sessions into Baaz?");
         let detail = prompt_detail(&plan);
-        assert!(detail.contains("claude-home/projects/-work/sess-1.jsonl"), "dry-run paths: {detail}");
-        assert!(detail.contains("codex-home/sessions/"), "dry-run paths: {detail}");
-        assert!(detail.contains("archive"), "the Codex-for-Mac stale-entries note: {detail}");
+        assert!(
+            detail.contains("Sessions you started in Baaz before this update"),
+            "the person's body: {detail}"
+        );
         assert!(detail.contains("Nothing is deleted"), "the never-deletes note: {detail}");
+        assert!(detail.contains("archive"), "the Codex-for-Mac stale-entries note: {detail}");
+        assert!(
+            detail.contains(&format!("Show files ({})", plan.len())),
+            "the collapsed file count, not the list: {detail}"
+        );
+        assert!(!detail.contains(".jsonl"), "no inline path list: {detail}");
+        assert!(!detail.to_lowercase().contains("owner"), "no internal words: {detail}");
+        assert!(!detail.contains("re-homed"), "no internal words: {detail}");
+        // The full dry-run list still lives behind the Providers row.
+        let paths = row_paths(&plan);
+        assert_eq!(paths.len(), plan.len(), "the row keeps the reviewable list");
+        assert!(
+            paths.iter().any(|path| path.contains("sess-1.jsonl")),
+            "the row lists what the dialog only counts: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn the_gate_withholds_the_move_until_the_click() {
+        let _guard = serial();
+        let homes = TempHomes::make("gate");
+        homes.seed_claude("-work", "sess-1", true);
+        homes.seed_codex("thread-1");
+        let registry = registry_with(&["sess-1"], &["thread-1"]);
+
+        // Before consent an old registered session resumes legacy: the
+        // gate names it, and running the gate's arm moves nothing.
+        assert_eq!(
+            gate_resume(&homes.owner, &homes.state, &registry, CLAUDE_PROVIDER, "sess-1"),
+            ResumeGate::LegacyOwner,
+            "an unmoved registered session resumes from its original location"
+        );
+        assert_eq!(
+            gate_resume(&homes.owner, &homes.state, &registry, CODEX_PROVIDER, "thread-1"),
+            ResumeGate::LegacyOwner,
+        );
+        assert!(
+            legacy_resume_dir(&homes.owner, &homes.state, &registry, CLAUDE_PROVIDER, "sess-1")
+                .is_some_and(|dir| dir == homes.owner.join(".claude")),
+            "the legacy child reads the owner's home"
+        );
+        // Consent is recorded only by the click — never by the gate.
+        assert!(!is_consented(&homes.state), "no consent before the click");
+        assert!(
+            !consent_path(&homes.state).exists(),
+            "opening an old session writes no marker"
+        );
+
+        // After the click the lazy fallback runs as before.
+        record_consent(&homes.state);
+        assert!(is_consented(&homes.state), "Move records the consent");
+        assert_eq!(
+            gate_resume(&homes.owner, &homes.state, &registry, CLAUDE_PROVIDER, "sess-1"),
+            ResumeGate::LazyMove,
+            "after consent the lazy move owns the resume"
+        );
+        let moved = ensure_session_moved(&homes.owner, &homes.state, CLAUDE_PROVIDER, "sess-1");
+        assert_eq!(moved, 2, "transcript plus companion move on the consented resume");
+        assert!(
+            legacy_resume_dir(&homes.owner, &homes.state, &registry, CLAUDE_PROVIDER, "sess-1").is_none(),
+            "a moved session resumes under the Baaz home"
+        );
+
+        // Unregistered ids and unknown providers never route legacy —
+        // and gate Baaz-homed before consent, never as a move.
+        let fresh = TempHomes::make("gate-fresh");
+        assert_eq!(
+            gate_resume(&fresh.owner, &fresh.state, &registry, CLAUDE_PROVIDER, "probe-leftover"),
+            ResumeGate::BaazHome,
+            "unregistered leftovers stay where they are"
+        );
+        assert_eq!(
+            gate_resume(&fresh.owner, &fresh.state, &registry, "muse", "sess-1"),
+            ResumeGate::BaazHome,
+            "unknown providers move nothing"
+        );
     }
 
     #[test]
