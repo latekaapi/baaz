@@ -444,7 +444,15 @@ impl SessionView {
                     // The application also persists a Claude Code report
                     // as the next fresh session's display-only chip seed
                     // (see `ProviderTurnFinished`).
-                    if !meta.model.is_empty() {
+                    // A turn result never replaces the person's picked model
+                    // with an internal sub-call's: when a pick stands and
+                    // the finished turn names another family, the pick
+                    // stands and history keeps whatever it held.
+                    let subcall_report = self.provider_kind() == ProviderId::ClaudeCode
+                        && self.pending_model.as_deref().is_some_and(|picked| {
+                            !crate::providers::claude_code_same_model_family(picked, &meta.model)
+                        });
+                    if !meta.model.is_empty() && !subcall_report {
                         self.history_model = Some(meta.model.clone());
                     }
                     // Only the running turn's finish stands the lane down: a
@@ -2568,6 +2576,65 @@ mod tests {
                 view.model().as_ref(),
                 "new-model",
                 "the chip follows the latest finished turn"
+            );
+        });
+    }
+
+    /// Q2: a turn report naming an internal Haiku sub-call never claims
+    /// the chip or the seed. The person picked Opus; the finished turn's
+    /// meta carries the sub-call's raw Haiku id (what `modelUsage` used
+    /// to decode to) — the chip still reads the pick, history keeps
+    /// nothing of Haiku, and the last-reported file stays empty.
+    #[gpui::test]
+    fn a_haiku_subcall_report_claims_neither_chip_nor_seed(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{Delta, Turn, TurnMeta};
+
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lane-subcall-chip");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        vc.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.pending_model = Some("opus".to_owned());
+            });
+        });
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".to_owned()),
+                deltas: vec![
+                    Delta::TurnStarted {
+                        turn: Turn::Assistant {
+                            id: "a-1".to_owned(),
+                            blocks: Vec::new(),
+                            meta: TurnMeta::default(),
+                            timestamp: None,
+                        },
+                    },
+                    Delta::TurnFinished {
+                        turn_id: "a-1".to_owned(),
+                        meta: TurnMeta {
+                            model: "claude-haiku-4-5-20251001".to_owned(),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.model().as_ref(), "Claude Opus", "the chip still reads the pick");
+            assert!(
+                view.history_model.is_none(),
+                "history keeps nothing of the sub-call, drew {:?}",
+                view.history_model
+            );
+            assert_eq!(
+                crate::providers::read_claude_code_last_reported_model(),
+                None,
+                "nothing persisted Haiku"
             );
         });
     }
