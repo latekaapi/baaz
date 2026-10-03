@@ -749,7 +749,9 @@ impl Harness {
             // would put the dark surface under every real page that sets no
             // background of its own. The pane's own surface shows through
             // until a navigation gives the page a URL.
-            let blank = state.read(cx).url().as_ref() == BLANK;
+            // Before its first load the page reports an empty URL — just as
+            // blank, and showing it then is what lets a white frame through.
+            let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
             let visible = !blank
                 && browser_visible(BrowserVisibility {
                     session_active: browser_session_active(&key, &active_key, pending_switch),
