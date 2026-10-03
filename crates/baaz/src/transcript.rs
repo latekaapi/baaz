@@ -922,7 +922,19 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
     // state — the approval card stands for it. The command still counts
     // (it ran or was attempted), so the header stays honest; it takes
     // no folded or visible row, settled or live.
-    let covered = covered_tool_blocks(blocks);
+    let covers = approval_pairs(blocks);
+    let covered: HashSet<usize> = covers.iter().map(|(_, call)| *call).collect();
+    // An approval whose call then failed stays out of the fold: the call
+    // itself is hidden, so the card is the only place the failure shows.
+    let failed_cards: HashSet<usize> = covers
+        .iter()
+        .filter(|(_, call)| {
+            blocks[*call]
+                .as_tool_call()
+                .is_some_and(|tool| call_failed(&tool) && !recovered_failure(blocks, *call, &tool))
+        })
+        .map(|(card, _)| *card)
+        .collect();
     for (index, block) in blocks.iter().enumerate() {
         if Some(index) == plan.answer {
             continue;
@@ -985,7 +997,7 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
                 }
             }
             Block::Approval { state, .. } => {
-                if approval_folds(state) {
+                if approval_folds(state) && !failed_cards.contains(&index) {
                     plan.folded.push(index);
                 } else {
                     plan.visible.push(index);
@@ -1193,6 +1205,12 @@ fn shell_call_for(block: Option<&Block>, command: &str) -> bool {
 /// carries no tool-use id, so the text join is the whole join — but the
 /// 1:1 consumption is what stops the duplicates.
 fn covered_tool_blocks(blocks: &[Block]) -> HashSet<usize> {
+    approval_pairs(blocks).into_iter().map(|(_, call)| call).collect()
+}
+
+/// [`covered_tool_blocks`] as `(approval index, covered call index)` pairs,
+/// so the fold can tell which card stands for which call.
+fn approval_pairs(blocks: &[Block]) -> Vec<(usize, usize)> {
     let approvals: Vec<(usize, &str)> = blocks
         .iter()
         .enumerate()
@@ -1202,6 +1220,7 @@ fn covered_tool_blocks(blocks: &[Block]) -> HashSet<usize> {
         })
         .collect();
     let mut covered = HashSet::new();
+    let mut pairs = Vec::new();
     for (at, command) in approvals {
         let hit = (0..=at)
             .rev()
@@ -1212,9 +1231,10 @@ fn covered_tool_blocks(blocks: &[Block]) -> HashSet<usize> {
             });
         if let Some(index) = hit {
             covered.insert(index);
+            pairs.push((at, index));
         }
     }
-    covered
+    pairs
 }
 
 /// B12fix: partition one turn's blocks into live runs: maximal runs of
@@ -4334,6 +4354,38 @@ mod tests {
         assert_eq!(turn_mapped_rows(&turn, true, &off, false), 1);
         assert!(matches!(turn_slot_at(&turn, true, &off, false, 0), Some(TurnSlot::Block(1))));
         assert_slots_match_count(&turn, true, &off, false);
+    }
+
+    /// An approved command that then FAILED keeps its approval card out of
+    /// the closed fold: the call itself is hidden (the card stands for it),
+    /// so folding the card too would make the failure vanish.
+    #[test]
+    fn an_approved_command_that_failed_keeps_its_card_visible() {
+        let mut call = shell_call("Ran", "cargo test");
+        call.status = aui_protocol::ToolStatus::Error;
+        let turn = Turn::Assistant {
+            id: "turn-allowed-failed".to_owned(),
+            blocks: vec![
+                Block::tool_call(call),
+                Block::approval(
+                    "req-1",
+                    "Bash",
+                    "cargo test",
+                    "run the suite",
+                    "/tmp",
+                    Vec::new(),
+                    aui_protocol::ApprovalScope::ThisCommand,
+                    ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 9 },
+                    None,
+                ),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.visible, vec![1], "the failed command's card stays on screen");
+        assert!(plan.folded.is_empty());
+        assert_slots_match_count(&turn, true, &empty_toggled(), true);
     }
 
     /// B12fix: Artifact tools read as a one-line summary, never the
