@@ -972,6 +972,13 @@ impl ClaudeFold {
         let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
         let request = self.pending.remove(position);
         self.decided.insert(request_id.to_owned(), request.clone());
+        // Q1b: the gated command's measured time excludes the approval
+        // wait — the run starts when the person allows it, not when the
+        // `tool_use` arrived. A `tool_use` arriving after the decision
+        // stamps itself fresh on arrival, so only the waiting card moves.
+        if let Some(site) = self.tools.get_mut(&request.tool_use_id) {
+            site.started = Instant::now();
+        }
         Some(request)
     }
 
@@ -3983,6 +3990,82 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(completed, [None], "replay keeps the filed None: {completed:?}");
+    }
+
+    /// Q1b: an approved command's measured `duration_ms` excludes the
+    /// approval wait — the run starts at the decision, not at the
+    /// `tool_use`. A command approved after 3 minutes reads seconds,
+    /// never "3m 2s".
+    #[test]
+    fn approved_commands_measure_from_the_decision() {
+        let session = "q1b-approval-duration";
+        let tool_use = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "m", "id": "msg_1", "type": "message", "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "toolu_q1b",
+                    "name": "Bash",
+                    "input": {"command": "sleep 2"},
+                }],
+            },
+            "parent_tool_use_id": null, "session_id": session,
+            "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+        })
+        .to_string();
+        let result = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result", "tool_use_id": "toolu_q1b",
+                    "content": [{"type": "text", "text": "ok"}],
+                }],
+            },
+            "parent_tool_use_id": null, "session_id": session,
+            "uuid": "u-2", "timestamp": "2026-09-27T00:03:02.000Z",
+        })
+        .to_string();
+        let mut fold = ClaudeFold::new();
+        fold.set_live(true);
+        fold.apply(&decode_line(&tool_use).expect("decodes"));
+        // The person takes 3 minutes to approve: the card waited that long.
+        fold.tools.get_mut("toolu_q1b").expect("the tool_use cards").started =
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(180))
+                .expect("backdates");
+        fold.apply(&Frame::ControlRequest(ApprovalRequest {
+            request_id: "req-q1b".to_owned(),
+            tool_name: "Bash".to_owned(),
+            display_name: "Bash".to_owned(),
+            mcp_server: None,
+            input: serde_json::json!({"command": "sleep 2"}),
+            description: String::new(),
+            decision_reason: String::new(),
+            tool_use_id: "toolu_q1b".to_owned(),
+            suggestions: Vec::new(),
+        }));
+        fold.take_approval("req-q1b").expect("answerable");
+        let settled = fold.apply(&decode_line(&result).expect("decodes"));
+        let durations = settled
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(durations.len(), 1, "the result completes the card");
+        let measured = durations[0].expect("live measures the call");
+        assert!(measured < 60_000, "the 3-minute wait is excluded, got {measured} ms");
+        assert!(
+            settled.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the result still settles the decided card to allowed"
+        );
     }
 
     /// Q1: a live assistant turn starts stamped (its rows tick from

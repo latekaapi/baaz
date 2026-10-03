@@ -207,6 +207,38 @@ pub struct Folds {
     /// view scoped to that turn (or the session without a per-turn
     /// checkpoint). `None` draws the chip without its tap.
     pub open_turn_diff: Option<CardHandler>,
+    /// Q1b: tool-call id → the wall time (epoch ms) its block first
+    /// appeared, snapshotted once per frame by the session view. Live
+    /// run rows tick from the run's first member start, never from summed
+    /// durations; unknown ids fall back to the turn timestamp.
+    pub tool_starts: Rc<HashMap<String, u64>>,
+}
+
+/// Q1b: stamp first-seen wall times for every tool-call id in `turns`
+/// (group members included) and drop ids that left the transcript, so the
+/// map stays bounded by what is on screen. The session view calls this
+/// where applied deltas materialise, with the frame's own clock.
+pub fn refresh_tool_starts(turns: &[Rc<Turn>], starts: &mut HashMap<String, u64>, now_ms: u64) {
+    let mut seen = HashSet::new();
+    for turn in turns {
+        let Turn::Assistant { blocks, .. } = turn.as_ref() else { continue };
+        for block in blocks {
+            match block {
+                Block::ToolCall { id, .. } => {
+                    seen.insert(id.clone());
+                    starts.entry(id.clone()).or_insert(now_ms);
+                }
+                Block::ToolGroup { calls, .. } => {
+                    for call in calls {
+                        seen.insert(call.id.clone());
+                        starts.entry(call.id.clone()).or_insert(now_ms);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    starts.retain(|id, _| seen.contains(id));
 }
 
 /// B12: show a whole text elsewhere (the right pane's doc view): the
@@ -1137,24 +1169,58 @@ fn approval_covers(approval_command: &str, target: &str) -> bool {
     command == target || command == format!("Run in terminal · `{target}`")
 }
 
+/// Whether `block` is a shell call an approval for `command` stands for.
+fn shell_call_for(block: Option<&Block>, command: &str) -> bool {
+    block.and_then(|block| block.as_tool_call()).is_some_and(|call| {
+        call.kind == ToolKind::Shell && approval_covers(command, &call.target)
+    })
+}
+
+/// Q1b: the block indices of shell calls an approval card already shows —
+/// one call per approval, never more. Each approval covers a single call:
+/// the nearest matching call at or before the card (the live wire cards
+/// the `tool_use` before its `can_use_tool`) else the first matching call
+/// after it. A later re-run of the same command matches no unconsumed
+/// approval, so it keeps its own row. The protocol's approval block
+/// carries no tool-use id, so the text join is the whole join — but the
+/// 1:1 consumption is what stops the duplicates.
+fn covered_tool_blocks(blocks: &[Block]) -> HashSet<usize> {
+    let approvals: Vec<(usize, &str)> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            Block::Approval { command, .. } => Some((index, command.as_str())),
+            _ => None,
+        })
+        .collect();
+    let mut covered = HashSet::new();
+    for (at, command) in approvals {
+        let hit = (0..=at)
+            .rev()
+            .find(|index| !covered.contains(index) && shell_call_for(blocks.get(*index), command))
+            .or_else(|| {
+                ((at + 1)..blocks.len())
+                    .find(|index| !covered.contains(index) && shell_call_for(blocks.get(*index), command))
+            });
+        if let Some(index) = hit {
+            covered.insert(index);
+        }
+    }
+    covered
+}
+
 /// B12fix: partition one turn's blocks into live runs: maximal runs of
 /// consecutive joinable tool calls — quiet calls and quiet groups, even a
 /// lone one, which still earns the live row. Edits, failures,
 /// long-running commands and prose break the run and render as their own
 /// rows. Only live turns collapse; settled turns fold instead (see
 /// [`fold_plan`]).
-pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
+pub fn live_runs(turn: &Turn, now_ms: u64, starts: &HashMap<String, u64>) -> Vec<LiveRun> {
     let Turn::Assistant { blocks, timestamp, .. } = turn else { return Vec::new() };
-    // Q1: the commands the turn's approval cards already show. A shell
-    // call for one of these earns no live run row of its own — the card
-    // is the row — or every approved command doubles up.
-    let approved: Vec<&str> = blocks
-        .iter()
-        .filter_map(|block| match block {
-            Block::Approval { command, .. } => Some(command.as_str()),
-            _ => None,
-        })
-        .collect();
+    // Q1b: one covered call per approval card, hidden outright — the card
+    // is the row, never a second card beside it, and the hidden call
+    // splits no run around itself.
+    let covered = covered_tool_blocks(blocks);
     let mut runs = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let flush = |current: &mut Vec<usize>, runs: &mut Vec<LiveRun>| {
@@ -1162,14 +1228,11 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
             return;
         }
         let blocks_taken = std::mem::take(current);
-        // Q1: the run's own time — member calls' measured durations added
-        // up, with a call still in flight ticking from the turn's start
-        // (an unmeasured finished call contributes nothing). A run whose
-        // calls all finished reads its measured total, never the clock.
         let mut run_ms = 0u64;
         let mut running = false;
         let mut live_call: Option<ToolCall> = None;
         let mut last_call: Option<ToolCall> = None;
+        let mut first_id: Option<String> = None;
         for index in &blocks_taken {
             let member: Vec<ToolCall> = match blocks.get(*index) {
                 Some(Block::ToolCall { .. }) => {
@@ -1179,13 +1242,12 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
                 _ => Vec::new(),
             };
             for call in member {
-                run_ms = run_ms.saturating_add(match call.duration_ms {
-                    Some(ms) => ms,
-                    None if call.status == ToolStatus::Running => {
-                        timestamp.map(|sent| now_ms.saturating_sub(sent)).unwrap_or(0)
-                    }
-                    None => 0,
-                });
+                if first_id.is_none() {
+                    first_id = Some(call.id.clone());
+                }
+                // Q1b: a finished member contributes its measured duration;
+                // an unmeasured finished call contributes nothing.
+                run_ms = run_ms.saturating_add(call.duration_ms.unwrap_or(0));
                 if call.status == ToolStatus::Running {
                     running = true;
                     live_call = Some(call.clone());
@@ -1194,6 +1256,22 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
             }
         }
         let Some(last) = last_call else { return };
+        if running {
+            // Q1b: a run with anything still in flight ticks from the
+            // run's first member start — never the turn start plus
+            // measured durations, which reads older than the turn itself.
+            // Unknown ids fall back to the turn timestamp, and the tick
+            // never exceeds the turn's own age.
+            let first_start = first_id
+                .as_deref()
+                .and_then(|id| starts.get(id).copied())
+                .or(*timestamp)
+                .unwrap_or(now_ms);
+            run_ms = now_ms.saturating_sub(first_start);
+            if let Some(sent) = timestamp {
+                run_ms = run_ms.min(now_ms.saturating_sub(*sent));
+            }
+        }
         // The last call still in flight speaks for the row; all finished
         // reads the last call's settled (past-tense) verb.
         let (verb, target) = run_verb_target(&live_call.unwrap_or(last));
@@ -1207,18 +1285,20 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
         });
     };
     for (index, block) in blocks.iter().enumerate() {
+        // A covered call is no row at all: hidden like an empty Thinking
+        // block, splitting no run around itself.
+        if covered.contains(&index) {
+            continue;
+        }
         // An empty Thinking block takes no row and breaks no run: it is
         // not a row at all, so the run flows around it.
         if is_empty_thinking(block) {
             continue;
         }
         let joins = match block {
-            Block::ToolCall { .. } => block.as_tool_call().is_some_and(|call| {
-                // Q1: already shown by an approval card — no second row.
-                let covered = call.kind == ToolKind::Shell
-                    && approved.iter().any(|command| approval_covers(command, &call.target));
-                !covered && call_joins_run(&call)
-            }),
+            Block::ToolCall { .. } => {
+                block.as_tool_call().is_some_and(|call| call_joins_run(&call))
+            }
             Block::ToolGroup { calls, .. } => group_joins_run(calls),
             _ => false,
         };
@@ -1258,6 +1338,20 @@ fn shown_indices(blocks: &[Block]) -> Vec<usize> {
         .collect()
 }
 
+/// Q1b: the block indices that take rows on a LIVE turn: shown blocks
+/// minus the approval-covered calls, which render no row or card at all
+/// (the approval card stands for them). Settled turns keep
+/// [`shown_indices`] — the fold owns them, not the live mapping.
+fn live_shown_indices(blocks: &[Block]) -> Vec<usize> {
+    let covered = covered_tool_blocks(blocks);
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(index, block)| !covered.contains(index) && !is_empty_thinking(block))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// B12: how many rows a turn occupies under folding: the unfolded count
 /// ([`turn_rows`]) except for a settled turn with a fold plan (header +
 /// visible + answer, or header + everything when open) and a live turn
@@ -1285,11 +1379,14 @@ pub fn turn_mapped_rows(
         return shown + silent;
     }
     if !settled {
-        let runs = live_runs(turn, 0);
+        // Q1b: the live mapping hides covered calls outright, so it
+        // counts and walks the live-shown indices — never `shown`.
+        let live_shown = live_shown_indices(blocks).len();
+        let runs = live_runs(turn, 0, &HashMap::new());
         if runs.is_empty() {
-            return shown + silent;
+            return live_shown + silent;
         }
-        let mut rows = shown + silent;
+        let mut rows = live_shown + silent;
         for run in &runs {
             let open = toggled.contains(&live_key(id, run.blocks[0]));
             rows -= run.blocks.len();
@@ -1356,7 +1453,10 @@ pub fn turn_slot_at(
         return (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter);
     }
     if !settled {
-        let runs = live_runs(turn, 0);
+        // Q1b: covered calls take no row — the walk below is over the
+        // live-shown indices, in which every run member lines up.
+        let live_shown = live_shown_indices(blocks);
+        let runs = live_runs(turn, 0, &HashMap::new());
         if !runs.is_empty() {
             // Walk the shown blocks, collapsing closed runs to one row and
             // expanding open runs to header + members.
@@ -1366,8 +1466,8 @@ pub fn turn_slot_at(
                 run_at.insert(run.blocks[0], run);
             }
             let mut shown_at = 0usize;
-            while shown_at < shown.len() {
-                let index = shown[shown_at];
+            while shown_at < live_shown.len() {
+                let index = live_shown[shown_at];
                 if let Some(run) = run_at.get(&index) {
                     let open = toggled.contains(&live_key(id, run.blocks[0]));
                     if at == row {
@@ -1391,10 +1491,10 @@ pub fn turn_slot_at(
             }
             return (silent_here && at == row).then_some(TurnSlot::SilentFooter);
         }
-        if row < shown.len() {
-            return Some(TurnSlot::Block(shown[row]));
+        if row < live_shown.len() {
+            return Some(TurnSlot::Block(live_shown[row]));
         }
-        return (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter);
+        return (silent_here && row == live_shown.len()).then_some(TurnSlot::SilentFooter);
     }
     None
 }
@@ -1675,7 +1775,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 Some(TurnSlot::LiveRun(indices)) => {
                     let start = indices.first().copied().unwrap_or(0);
                     let open = folds.open(&live_key(id, start), false);
-                    match live_runs(turn, folds.now_ms)
+                    match live_runs(turn, folds.now_ms, &folds.tool_starts)
                         .into_iter()
                         .find(|run| run.blocks.first() == Some(&start))
                     {
@@ -3417,6 +3517,7 @@ mod tests {
             fold_finished_turns: true,
             open_full_text: None,
             open_turn_diff: None,
+            tool_starts: Rc::new(HashMap::new()),
         }
     }
 
@@ -3654,7 +3755,7 @@ mod tests {
             meta: TurnMeta::default(),
             timestamp: None,
         };
-        let runs = live_runs(&turn, 0);
+        let runs = live_runs(&turn, 0, &HashMap::new());
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].blocks, vec![0, 1, 2]);
         // Q1: every member finished, so the row reads past tense —
@@ -3698,7 +3799,7 @@ mod tests {
             meta: TurnMeta::default(),
             timestamp: None,
         };
-        let runs = live_runs(&turn, 0);
+        let runs = live_runs(&turn, 0, &HashMap::new());
         assert_eq!(runs.len(), 1);
         assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
     }
@@ -3887,7 +3988,7 @@ mod tests {
             meta: TurnMeta::default(),
             timestamp: None,
         };
-        let runs = live_runs(&turn, 0);
+        let runs = live_runs(&turn, 0, &HashMap::new());
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].blocks, vec![0, 1]);
         // Q1: the finished members read past tense with their measured
@@ -3910,7 +4011,7 @@ mod tests {
             meta: TurnMeta::default(),
             timestamp: None,
         };
-        let runs = live_runs(&turn, 5_000);
+        let runs = live_runs(&turn, 5_000, &HashMap::new());
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].verb, "Ran");
         assert_eq!(runs[0].target, "cargo test");
@@ -3918,84 +4019,196 @@ mod tests {
         assert_eq!(runs[0].elapsed_ms, 7_000);
     }
 
-    /// Q1: an in-flight call's elapsed is real — counted from the turn's
-    /// start, never a frozen zero.
+    /// Q1b: a run with anything still in flight ticks from the run's
+    /// FIRST member start — never measured durations plus the turn age
+    /// (a 60 s-old turn with a finished 10 s read and a running grep
+    /// read 70 s before this fix), and never more than the turn's age.
     #[test]
-    fn an_in_flight_call_ticks_from_the_turn_start() {
-        let mut flying = shell_call("Run", "cargo test");
-        flying.status = aui_protocol::ToolStatus::Running;
-        flying.duration_ms = None;
+    fn a_live_run_ticks_from_its_first_member_start() {
+        let mut read = read_call("a.rs");
+        if let Block::ToolCall { id, duration_ms, .. } = &mut read {
+            *id = "read-1".to_owned();
+            *duration_ms = Some(10_000);
+        } else {
+            panic!("a read card");
+        }
+        let mut flying = search_call("pattern");
+        if let Block::ToolCall { id, status, duration_ms, .. } = &mut flying {
+            *id = "grep-1".to_owned();
+            *status = aui_protocol::ToolStatus::Running;
+            *duration_ms = None;
+        } else {
+            panic!("a search card");
+        }
         let turn = Turn::Assistant {
-            id: "turn-shell-flying".to_owned(),
-            blocks: vec![Block::tool_call(flying)],
+            id: "turn-run-start".to_owned(),
+            blocks: vec![read, flying],
             meta: TurnMeta::default(),
             timestamp: Some(1_000),
         };
-        let runs = live_runs(&turn, 8_000);
+        // The turn is 60 s old; the run's first member started at 2 s.
+        let mut starts = HashMap::new();
+        starts.insert("read-1".to_owned(), 2_000);
+        let runs = live_runs(&turn, 61_000, &starts);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].verb, "Running");
         assert!(runs[0].running, "in flight: the row spins and ticks");
-        assert_eq!(runs[0].elapsed_ms, 7_000);
+        assert_eq!(runs[0].elapsed_ms, 59_000, "now minus the first member start");
+        assert!(runs[0].elapsed_ms <= 60_000, "never more than the turn's age");
+        // No start known: the turn timestamp is the fallback — the turn's
+        // age, still never the measured total on top of it.
+        let runs = live_runs(&turn, 61_000, &HashMap::new());
+        assert_eq!(runs[0].elapsed_ms, 60_000);
     }
 
-    /// Q1: a command the turn's approval card already shows earns no
-    /// second live run row — neither the bare `Bash` command nor the
-    /// terminal face's backticked shape.
+    /// Q1b: an approved command renders exactly one visible item — the
+    /// approval card — in the live slots: no second run row and no
+    /// separate tool card either way round the wire orders them. The
+    /// terminal face's backticked shape covers the call all the same.
     #[test]
-    fn an_approved_command_gets_no_extra_live_row() {
-        let mut flying = shell_call("Run", "cargo test");
-        flying.status = aui_protocol::ToolStatus::Running;
-        flying.duration_ms = None;
-        let approval = Block::approval(
-            "req-1",
-            "Bash",
-            "cargo test",
-            "run the suite",
-            "/tmp",
-            Vec::new(),
-            aui_protocol::ApprovalScope::ThisCommand,
-            ApprovalState::Pending,
-            None,
-        );
+    fn an_approved_command_is_only_its_approval_card() {
+        fn approval_card(id: &str, tool: &str, command: &str) -> Block {
+            Block::approval(
+                id,
+                tool,
+                command,
+                "run the suite",
+                "/tmp",
+                Vec::new(),
+                aui_protocol::ApprovalScope::ThisCommand,
+                ApprovalState::Pending,
+                None,
+            )
+        }
+        fn flying(target: &str) -> Block {
+            let mut call = shell_call("Run", target);
+            call.id = format!("call:{target}");
+            call.status = aui_protocol::ToolStatus::Running;
+            call.duration_ms = None;
+            Block::tool_call(call)
+        }
+        // Approval first, then the call it gates.
         let turn = Turn::Assistant {
             id: "turn-approved".to_owned(),
-            blocks: vec![approval, Block::tool_call(flying)],
+            blocks: vec![approval_card("req-1", "Bash", "cargo test"), flying("cargo test")],
             meta: TurnMeta::default(),
             timestamp: Some(1_000),
         };
-        assert!(live_runs(&turn, 8_000).is_empty(), "the card is the row");
-        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+        assert!(live_runs(&turn, 8_000, &HashMap::new()).is_empty(), "the card is the row");
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 1);
         assert!(matches!(
             turn_slot_at(&turn, false, &empty_toggled(), true, 0),
             Some(TurnSlot::Block(0))
         ));
+        // Live wire order: the `tool_use` cards before its `can_use_tool`.
+        let turn = Turn::Assistant {
+            id: "turn-approved-live-order".to_owned(),
+            blocks: vec![flying("cargo test"), approval_card("req-1", "Bash", "cargo test")],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        assert!(live_runs(&turn, 8_000, &HashMap::new()).is_empty(), "the card is the row");
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 1);
         assert!(matches!(
-            turn_slot_at(&turn, false, &empty_toggled(), true, 1),
+            turn_slot_at(&turn, false, &empty_toggled(), true, 0),
             Some(TurnSlot::Block(1))
         ));
         // The terminal face wraps the same command in backticks; it
         // covers the call all the same.
         let mut terminal = shell_call("Running in terminal", "echo hi");
+        terminal.id = "call:echo hi".to_owned();
         terminal.status = aui_protocol::ToolStatus::Running;
         terminal.duration_ms = None;
-        let approval = Block::approval(
-            "req-2",
-            "mcp__baaz__terminal_run",
-            "Run in terminal · `echo hi`",
-            "run it",
-            "/tmp",
-            Vec::new(),
-            aui_protocol::ApprovalScope::ThisCommand,
-            ApprovalState::Pending,
-            None,
-        );
         let turn = Turn::Assistant {
             id: "turn-approved-terminal".to_owned(),
-            blocks: vec![approval, Block::tool_call(terminal)],
+            blocks: vec![
+                approval_card("req-2", "mcp__baaz__terminal_run", "Run in terminal · `echo hi`"),
+                Block::tool_call(terminal),
+            ],
             meta: TurnMeta::default(),
             timestamp: Some(1_000),
         };
-        assert!(live_runs(&turn, 8_000).is_empty(), "the terminal card is the row");
+        assert!(live_runs(&turn, 8_000, &HashMap::new()).is_empty(), "the terminal card is the row");
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 1);
+    }
+
+    /// Q1b: approval coverage is 1:1 — one approval hides one call. A
+    /// later re-run of the same command matches no unconsumed approval,
+    /// so it keeps its own row, either way round the wire orders them.
+    /// A hidden call splits no run: quiet calls around one read as one run.
+    #[test]
+    fn a_second_run_of_the_same_command_still_shows() {
+        fn approval_card(id: &str, command: &str) -> Block {
+            Block::approval(
+                id,
+                "Bash",
+                command,
+                "run the suite",
+                "/tmp",
+                Vec::new(),
+                aui_protocol::ApprovalScope::ThisCommand,
+                ApprovalState::Pending,
+                None,
+            )
+        }
+        fn flying(id: &str, target: &str) -> Block {
+            let mut call = shell_call("Run", target);
+            call.id = id.to_owned();
+            call.status = aui_protocol::ToolStatus::Running;
+            call.duration_ms = None;
+            Block::tool_call(call)
+        }
+        // Live wire order: first run, its approval, then the re-run.
+        let turn = Turn::Assistant {
+            id: "turn-rerun".to_owned(),
+            blocks: vec![flying("c-1", "cargo test"), approval_card("req-1", "cargo test"), flying("c-2", "cargo test")],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        if let Turn::Assistant { blocks, .. } = &turn {
+            assert_eq!(covered_tool_blocks(blocks), HashSet::from([0]));
+        } else {
+            panic!("an assistant turn");
+        }
+        // The approval card stands, the re-run reads as its own live row.
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 0),
+            Some(TurnSlot::Block(1))
+        ));
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 1),
+            Some(TurnSlot::LiveRun(_))
+        ));
+        // Approval first: it covers the first matching call after it —
+        // the re-run still shows.
+        let turn = Turn::Assistant {
+            id: "turn-rerun-approval-first".to_owned(),
+            blocks: vec![approval_card("req-1", "cargo test"), flying("c-1", "cargo test"), flying("c-2", "cargo test")],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        if let Turn::Assistant { blocks, .. } = &turn {
+            assert_eq!(covered_tool_blocks(blocks), HashSet::from([1]));
+        } else {
+            panic!("an assistant turn");
+        }
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+        // The hidden call splits no run: the quiet reads around one flow
+        // as a single run past the trailing approval card.
+        let turn = Turn::Assistant {
+            id: "turn-hidden-no-split".to_owned(),
+            blocks: vec![
+                read_call("a.rs"),
+                flying("c-1", "make"),
+                search_call("fold"),
+                approval_card("req-1", "make"),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        let runs = live_runs(&turn, 8_000, &HashMap::new());
+        assert_eq!(runs.len(), 1, "one run flows around the hidden call");
+        assert_eq!(runs[0].blocks, vec![0, 2]);
     }
 
     /// B12fix: Artifact tools read as a one-line summary, never the
