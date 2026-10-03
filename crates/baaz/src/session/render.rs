@@ -502,6 +502,9 @@ impl SessionView {
             // Z6b: file-card headers shorten against this workspace.
             // Display only — the blocks keep their full targets.
             workspace_root: self.workspace.clone(),
+            // Q1b: first-seen tool-call starts for the live run rows,
+            // stamped where applied deltas materialise below.
+            tool_starts: Rc::new(self.tool_first_seen.clone()),
         }
     }
 
@@ -867,6 +870,11 @@ impl SessionView {
                 })
                 .collect();
             self.cached_turns = Rc::new(turns);
+            // Q1b: first-seen wall times for tool calls, on the frame's
+            // own clock — the live run rows tick from these, never from
+            // summed durations.
+            let now_ms = transcript::transcript_now_ms(&self.cached_turns);
+            transcript::refresh_tool_starts(&self.cached_turns, &mut self.tool_first_seen, now_ms);
         }
         // The list's rows, one per block, and the per-turn counts the next
         // `sync_virtual_list` diffs against — plus one trailing spacer below
