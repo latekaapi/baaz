@@ -1041,10 +1041,15 @@ impl ClaudeFold {
                 // per-message usage is one API request, not the turn, so
                 // the last line wins and the `result` frame stays
                 // authoritative wherever one arrives.
+                // A `<...>` placeholder (`<synthetic>` on error/synthetic
+                // messages) is not a model id: it never claims the turn,
+                // so the next source answers instead.
+                let real_model =
+                    model.as_deref().filter(|name| crate::frame::is_model_id(name));
                 if model.is_some() || usage.is_some() {
                     let usage = usage.clone().unwrap_or_default();
                     self.stored_meta.insert(turn_id.clone(), TurnMeta {
-                        model: model.clone().unwrap_or_default(),
+                        model: real_model.unwrap_or_default().to_owned(),
                         duration_ms: 0,
                         tokens_in: usage.input_tokens.saturating_add(
                             usage.cache_read_tokens.unwrap_or(0),
@@ -1060,20 +1065,17 @@ impl ClaudeFold {
                         cache_write_tokens: usage.cache_write_tokens,
                         cached_tokens: 0,
                     });
-                    if let Some(model) = model {
-                        if !model.is_empty() {
-                            self.stored_model = Some(model.clone());
-                        }
+                    if let Some(name) = real_model {
+                        self.stored_model = Some(name.to_owned());
                     }
                 }
                 // The turn's answering model: the message's own `model`,
                 // remembered per turn so the `result` frame's `modelUsage`
                 // (which also lists internal sub-call models) cannot
-                // rename the turn when it finishes.
-                if let Some(model) = model {
-                    if !model.is_empty() {
-                        self.turn_model.insert(turn_id.clone(), model.clone());
-                    }
+                // rename the turn when it finishes. Placeholders never
+                // land here (see `real_model` above).
+                if let Some(name) = real_model {
+                    self.turn_model.insert(turn_id.clone(), name.to_owned());
                 }
                 // B12: the turn's own open thinking (if any) ends where
                 // this frame begins — its duration is the gap, from the
@@ -1126,7 +1128,7 @@ impl ClaudeFold {
                     .clone()
                     .or_else(|| self.open.last().cloned())
                     .and_then(|turn| self.turn_model.get(&turn).cloned())
-                    .or_else(|| model.clone())
+                    .or_else(|| model.clone().filter(|name| crate::frame::is_model_id(name)))
                     .or_else(|| self.model.clone())
                     .unwrap_or_default();
                 let meta = TurnMeta {
@@ -4168,6 +4170,42 @@ mod tests {
         assert_eq!(metas.len(), 1, "one result finishes one turn");
         assert_eq!(metas[0].model, "claude-opus-4-1-20250822");
         assert_eq!(fold.model(), Some("opus"), "the result never rewrites the session model");
+    }
+
+    /// Q2b: a `<synthetic>` assistant message never becomes the turn
+    /// model. The message carries the placeholder while the result's
+    /// `modelUsage` names Opus — so the finished turn reads Opus, falling
+    /// back to the next source; with no result model at all it falls
+    /// further back to the session's init model.
+    #[test]
+    fn synthetic_message_model_falls_back_to_the_next_source() {
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"<synthetic>","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#.to_owned(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(
+            metas[0].model, "claude-opus-4-1-20250822",
+            "the placeholder never claims the turn, drew {:?}",
+            metas[0].model
+        );
+        assert_eq!(fold.model(), Some("opus"), "the result never rewrites the session model");
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"<synthetic>","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100}"#.to_owned(),
+        ];
+        let (_, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(
+            metas[0].model, "opus",
+            "with no model anywhere the init model answers, drew {:?}",
+            metas[0].model
+        );
     }
 
     #[test]
