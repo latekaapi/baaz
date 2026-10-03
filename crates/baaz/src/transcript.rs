@@ -918,6 +918,11 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
         // all-blank tail is not an answer — it folds away with the work.
         plan.answer = last_text;
     }
+    // Q1c: one covered call per approval card, hidden in every turn
+    // state — the approval card stands for it. The command still counts
+    // (it ran or was attempted), so the header stays honest; it takes
+    // no folded or visible row, settled or live.
+    let covered = covered_tool_blocks(blocks);
     for (index, block) in blocks.iter().enumerate() {
         if Some(index) == plan.answer {
             continue;
@@ -931,6 +936,9 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
             Block::ToolCall { .. } => {
                 let call = block.as_tool_call().expect("matched ToolCall");
                 count_call(&mut plan, &call);
+                if covered.contains(&index) {
+                    continue;
+                }
                 if call_failed(&call) && !recovered_failure(blocks, index, &call) {
                     plan.visible.push(index);
                 } else {
@@ -1329,20 +1337,10 @@ pub enum TurnSlot {
 
 /// B12fix: the block indices of a turn that take rows: every block but
 /// an empty Thinking block, which takes no row at all (live or settled).
+/// Q1c: and but an approval-covered tool call — the approval card stands
+/// for it in every state (live, settled-folded, settled-expanded, and
+/// folding off), so it takes no row or card anywhere.
 fn shown_indices(blocks: &[Block]) -> Vec<usize> {
-    blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, block)| !is_empty_thinking(block))
-        .map(|(index, _)| index)
-        .collect()
-}
-
-/// Q1b: the block indices that take rows on a LIVE turn: shown blocks
-/// minus the approval-covered calls, which render no row or card at all
-/// (the approval card stands for them). Settled turns keep
-/// [`shown_indices`] — the fold owns them, not the live mapping.
-fn live_shown_indices(blocks: &[Block]) -> Vec<usize> {
     let covered = covered_tool_blocks(blocks);
     blocks
         .iter()
@@ -1350,6 +1348,15 @@ fn live_shown_indices(blocks: &[Block]) -> Vec<usize> {
         .filter(|(index, block)| !covered.contains(index) && !is_empty_thinking(block))
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Q1b: the block indices that take rows on a LIVE turn: shown blocks
+/// minus the approval-covered calls, which render no row or card at all
+/// (the approval card stands for them). Q1c: settled turns share the
+/// same exclusion through [`shown_indices`] — the fold owns them, and
+/// the open and folding-off mappings walk the same indices.
+fn live_shown_indices(blocks: &[Block]) -> Vec<usize> {
+    shown_indices(blocks)
 }
 
 /// B12: how many rows a turn occupies under folding: the unfolded count
@@ -1496,7 +1503,14 @@ pub fn turn_slot_at(
         }
         return (silent_here && row == live_shown.len()).then_some(TurnSlot::SilentFooter);
     }
-    None
+    // Q1c: settled with folding off — one row per shown block, no
+    // header. Covered calls take no row here either (see
+    // [`shown_indices`]), so [`turn_mapped_rows`] and this mapping
+    // agree instead of leaving blank rows.
+    if row < shown.len() {
+        return Some(TurnSlot::Block(shown[row]));
+    }
+    (silent_here && row == shown.len()).then_some(TurnSlot::SilentFooter)
 }
 
 /// The reasoning tokens a finished turn billed without showing any work, if any.
@@ -4210,6 +4224,116 @@ mod tests {
         let runs = live_runs(&turn, 8_000, &HashMap::new());
         assert_eq!(runs.len(), 1, "one run flows around the hidden call");
         assert_eq!(runs[0].blocks, vec![0, 2]);
+    }
+
+    /// Q1c: every row the count promises resolves, and no row past it
+    /// does — in each settled state.
+    fn assert_slots_match_count(turn: &Turn, settled: bool, toggled: &HashSet<String>, fold_enabled: bool) {
+        let n = turn_mapped_rows(turn, settled, toggled, fold_enabled);
+        for row in 0..n {
+            assert!(
+                turn_slot_at(turn, settled, toggled, fold_enabled, row).is_some(),
+                "row {row} of {n} resolves"
+            );
+        }
+        assert!(
+            turn_slot_at(turn, settled, toggled, fold_enabled, n).is_none(),
+            "no row past the count"
+        );
+    }
+
+    /// Q1c: a denied command settles to exactly one visible item — the
+    /// approval card — folded, expanded, and with folding off. The
+    /// covered call takes no row or card anywhere, but still counts in
+    /// the header (it was attempted).
+    #[test]
+    fn a_denied_command_settles_to_only_its_approval_card() {
+        let mut denied = shell_call("Denied", "echo hi");
+        denied.status = aui_protocol::ToolStatus::Cancelled;
+        let turn = Turn::Assistant {
+            id: "turn-denied".to_owned(),
+            blocks: vec![
+                Block::tool_call(denied),
+                Block::approval(
+                    "req-1",
+                    "Bash",
+                    "echo hi",
+                    "run the suite",
+                    "/tmp",
+                    Vec::new(),
+                    aui_protocol::ApprovalScope::ThisCommand,
+                    ApprovalState::Denied,
+                    None,
+                ),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.commands, 1, "the attempted command still counts");
+        assert!(plan.folded.is_empty(), "the covered call folds nowhere");
+        assert_eq!(plan.visible, vec![1], "only the denial stays visible");
+        // Folded: header + the approval card.
+        let closed = empty_toggled();
+        assert_eq!(turn_mapped_rows(&turn, true, &closed, true), 2);
+        assert!(matches!(turn_slot_at(&turn, true, &closed, true, 0), Some(TurnSlot::FoldHeader)));
+        assert!(matches!(turn_slot_at(&turn, true, &closed, true, 1), Some(TurnSlot::Block(1))));
+        assert_slots_match_count(&turn, true, &closed, true);
+        // Expanded: header + the approval card — no second card.
+        let mut open = HashSet::new();
+        open.insert(fold_key("turn-denied"));
+        assert_eq!(turn_mapped_rows(&turn, true, &open, true), 2);
+        assert!(matches!(turn_slot_at(&turn, true, &open, true, 1), Some(TurnSlot::Block(1))));
+        assert_slots_match_count(&turn, true, &open, true);
+        // Folding off: just the approval card.
+        let off = empty_toggled();
+        assert_eq!(turn_mapped_rows(&turn, true, &off, false), 1);
+        assert!(matches!(turn_slot_at(&turn, true, &off, false, 0), Some(TurnSlot::Block(1))));
+        assert_slots_match_count(&turn, true, &off, false);
+    }
+
+    /// Q1c: an approved command settles the same way — the approval card
+    /// stands for the run everywhere, while the header still counts it.
+    #[test]
+    fn an_approved_command_settles_to_only_its_approval_card() {
+        let turn = Turn::Assistant {
+            id: "turn-allowed".to_owned(),
+            blocks: vec![
+                Block::tool_call(shell_call("Ran", "cargo test")),
+                Block::approval(
+                    "req-1",
+                    "Bash",
+                    "cargo test",
+                    "run the suite",
+                    "/tmp",
+                    Vec::new(),
+                    aui_protocol::ApprovalScope::ThisCommand,
+                    ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 9 },
+                    None,
+                ),
+            ],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let plan = fold_plan(&turn).expect("tool activity folds");
+        assert_eq!(plan.commands, 1, "the run command still counts");
+        assert_eq!(plan.folded, vec![1], "the approval folds, the call takes no row");
+        assert!(plan.visible.is_empty());
+        // Folded: just the header.
+        let closed = empty_toggled();
+        assert_eq!(turn_mapped_rows(&turn, true, &closed, true), 1);
+        assert_slots_match_count(&turn, true, &closed, true);
+        // Expanded: header + the approval card — no "Ran" card beside it.
+        let mut open = HashSet::new();
+        open.insert(fold_key("turn-allowed"));
+        assert_eq!(turn_mapped_rows(&turn, true, &open, true), 2);
+        assert!(matches!(turn_slot_at(&turn, true, &open, true, 1), Some(TurnSlot::Block(1))));
+        assert_slots_match_count(&turn, true, &open, true);
+        // Folding off: just the approval card.
+        let off = empty_toggled();
+        assert_eq!(turn_mapped_rows(&turn, true, &off, false), 1);
+        assert!(matches!(turn_slot_at(&turn, true, &off, false, 0), Some(TurnSlot::Block(1))));
+        assert_slots_match_count(&turn, true, &off, false);
     }
 
     /// B12fix: Artifact tools read as a one-line summary, never the
