@@ -723,6 +723,9 @@ impl ClaudeCodeAdapter {
         }
         if known {
             let request = fold.take_approval(approval).expect("presence checked above");
+            if choice == "deny" {
+                fold.note_denied(approval);
+            }
             let line = fold::decide_approval(&request, choice, feedback)?;
             Ok(ClaimedApproval::Known(request, line))
         } else {

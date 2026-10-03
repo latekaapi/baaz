@@ -802,6 +802,11 @@ pub struct ClaudeFold {
     /// the decision queues the answer line, the frames settle the card —
     /// deciding never moves it, only resolving does.
     approval_sites: HashMap<String, ApprovalSite>,
+    /// Requests the host answered with a deny. The CLI's error
+    /// `tool_result` for a denied call arrives long before the turn's
+    /// `permission_denials` would correct the card, so without this the
+    /// card read "Allowed once · exit 1" for the rest of the live turn.
+    denied: HashSet<String>,
     /// `tool_use` id → `request_id`, the join a result needs to settle the
     /// approval whose tool just answered. Same lifetime as `approval_sites`.
     tool_approvals: HashMap<String, String>,
@@ -980,6 +985,12 @@ impl ClaudeFold {
             site.started = Instant::now();
         }
         Some(request)
+    }
+
+    /// Record that the host denied `request_id`, so its error result
+    /// settles the card as Denied at once.
+    pub fn note_denied(&mut self, request_id: &str) {
+        self.denied.insert(request_id.to_owned());
     }
 
     /// Unknown-subtype control requests waiting on a human decision, oldest
@@ -1610,7 +1621,9 @@ impl ClaudeFold {
                 exit_code,
                 duration_ms: self.approval_duration_ms(&request_id),
             };
-            if result.is_error {
+            if result.is_error && self.denied.contains(&request_id) {
+                self.resolve_approval_card(&request_id, ApprovalState::Denied, &mut deltas);
+            } else if result.is_error {
                 self.update_approval_state(&request_id, state, &mut deltas);
             } else {
                 self.resolve_approval_card(&request_id, state, &mut deltas);
@@ -3268,6 +3281,35 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the late denial still corrects the card to denied"
+        );
+    }
+
+    /// A command the host DENIED settles its card Denied when its error
+    /// result arrives — never "Allowed once · exit 1" until the turn's
+    /// result frame corrects it.
+    #[test]
+    fn a_host_denied_command_settles_denied_on_its_error_result() {
+        let lines = fixture_lines("error.jsonl");
+        let asked_at = nth_control_request(&lines, 1).expect("the Bash ask on the wire");
+        let (mut fold, _) = fold_lines(&lines[..asked_at]);
+        let request = fold.pending_approvals()[0].clone();
+        fold.take_approval(&request.request_id).expect("the ask is answerable");
+        fold.note_denied(&request.request_id);
+        let mut rest = Vec::new();
+        for line in &lines[asked_at..] {
+            rest.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        let states: Vec<&ApprovalState> = rest
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::Approval { state, .. }, .. } => Some(state),
+                _ => None,
+            })
+            .collect();
+        assert!(states.iter().any(|state| matches!(state, ApprovalState::Denied)), "the card settles denied: {states:?}");
+        assert!(
+            !states.iter().any(|state| matches!(state, ApprovalState::AllowedOnce { .. })),
+            "a denied command never reads allowed: {states:?}"
         );
     }
 
