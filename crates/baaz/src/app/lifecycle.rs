@@ -1928,6 +1928,10 @@ impl Harness {
         // switch's open lands stale (child shut down, nothing parked), and
         // this resume proceeds as a normal click on the current provider.
         // Clicking the very view the switch was replacing just stays there.
+        // Q4b: the same holds for a pending provider reopen (no
+        // `replacing`): the epoch moves, the loading state drops with the
+        // old view's pane restored, and clicking the still-active session
+        // stays there without reopening it.
         if self.cancel_pending_switch(cx)
             && self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
         {
@@ -2818,6 +2822,11 @@ impl Harness {
         // so a newer open is never stolen by its late finish.
         self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
         let epoch = self.provider_open_epoch;
+        // Q4b: the old view's composer keeps no keystrokes while hidden —
+        // consume the focus arm at the click (the landing view arms its own
+        // through `activate`, and `on_frame` drops any arm raised
+        // mid-switch), so typing lands nowhere until the destination opens.
+        self.focus_composer = false;
         let provider_id = ProviderId::parse(&record.provider);
         if provider_id == ProviderId::Muse {
             crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
@@ -3359,9 +3368,33 @@ impl Harness {
     /// is unlocked with its chip and draft name restored, and waiting verbs
     /// are released. The caller's action then proceeds normally. Returns
     /// whether a switch was pending.
+    ///
+    /// Q4b: a pending provider *reopen* (a sidebar click whose child is
+    /// still resuming — `replacing` is None, the old view still active)
+    /// cancels the same way. The epoch moves so the late landing is
+    /// discarded, the loading state drops, and the old view's pane is
+    /// restored — so clicking the still-active session just stays there
+    /// (the caller returns without reopening it) and clicking anywhere
+    /// else proceeds with the stale open invalidated.
     pub(crate) fn cancel_pending_switch(&mut self, cx: &mut Context<Self>) -> bool {
         if self.replacing.is_none() {
-            return false;
+            if self.pending_switch_dest(cx).is_none() {
+                return false;
+            }
+            self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
+            self.session_switch_pending = false;
+            // The selection and the pane follow the restored view: the
+            // click's destination never opened, so nothing may keep naming
+            // it.
+            if let Some(view) = self.active.clone() {
+                let id = view.read(cx).session_id.clone();
+                self.pending_id = Some(id.clone());
+                self.restore_right_for_session(&id, cx);
+            } else {
+                self.pending_id = None;
+            }
+            cx.notify();
+            return true;
         }
         self.switch_epoch = self.switch_epoch.wrapping_add(1);
         self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
@@ -4061,6 +4094,12 @@ impl Harness {
                 // sees the moved epoch and starts nothing.
                 if self.replacing.is_some() {
                     self.provider_open_epoch = self.provider_open_epoch.wrapping_add(1);
+                } else {
+                    // Q4b: a provider reopen may be pending instead (no
+                    // `replacing`, the old view still active) — invalidate
+                    // it like any other navigation does, so its late
+                    // landing never steals this switch's replacement.
+                    self.cancel_pending_switch(cx);
                 }
                 self.switch_epoch = self.switch_epoch.wrapping_add(1);
                 let epoch = self.switch_epoch;
@@ -6026,12 +6065,15 @@ mod tests {
         lane_restore(state);
     }
 
-    /// Q4: while a provider reopen is pending the centre is the
-    /// destination's loading state — never the previous session's view —
-    /// and the right pane already follows the destination. After the open
-    /// lands the destination is active and the previous session parks with
-    /// its draft intact. Remove the pending gate in `render_centre` (or the
-    /// restore in `reopen_provider`) and the mid-switch asserts fail.
+    /// Q4: while a provider reopen is pending, `pending_switch_dest` names
+    /// the destination — the exact value `render_centre` branches on for
+    /// the loading centre — and the right pane already follows the
+    /// destination. After the open lands the destination is active and the
+    /// previous session parks with its draft intact. The mid-switch asserts
+    /// pin that helper plus the click-time restore (removing the restore
+    /// in `reopen_provider` fails the pane assert); they never render, so
+    /// the render branch itself is pinned through its decision value here
+    /// and at the surrounding decision sites in the Q4b tests below.
     #[gpui::test]
     fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -6131,6 +6173,461 @@ mod tests {
                     harness.layout.right_open,
                     "the landed destination keeps its own pane"
                 );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Q4b (a): a pane toggle while a provider reopen is pending saves onto
+    /// the destination — asserted at the `save_right_for_active` decision
+    /// site — and a navigation sync for the still-open session defers
+    /// instead of overwriting its stored URL. Before the fix both keyed on
+    /// the active view's id, so anything done during the load rewrote the
+    /// previous session's stored pane.
+    #[gpui::test]
+    fn q4b_pending_toggle_saves_onto_the_destination(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4b-pane");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        let a_pane = crate::sessions::RightState {
+            open: false,
+            kind: crate::layout::RightKind::Files,
+            browser_url: Some("https://a.example/".to_owned()),
+            ..Default::default()
+        };
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.set_override(&first, |meta| meta.right = Some(a_pane.clone()), cx);
+            });
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // The click on the stored session — observed before the reopen
+        // lands, so no `run_until_parked` between this and the asserts.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(
+                    harness.layout.right_open,
+                    "the live pane describes the destination at the click"
+                );
+                harness.toggle_right(cx);
+                assert!(
+                    !harness.layout.right_open,
+                    "the toggle flips the live pane"
+                );
+                assert_eq!(
+                    harness.overrides.get(&first).and_then(|meta| meta.right.clone()),
+                    Some(a_pane.clone()),
+                    "the still-open session's stored pane is untouched by the toggle"
+                );
+                assert_eq!(
+                    harness
+                        .overrides
+                        .get("s-codex-old")
+                        .and_then(|meta| meta.right.clone())
+                        .map(|right| right.open),
+                    Some(false),
+                    "the toggle lands on the destination instead"
+                );
+                // A navigation sync for the old session defers; the
+                // destination's own sync still writes.
+                harness.remember_browser_url_cheap(
+                    &first,
+                    "https://changed.example/".to_owned(),
+                    cx,
+                );
+                assert_eq!(
+                    harness
+                        .overrides
+                        .get(&first)
+                        .and_then(|meta| meta.right.clone())
+                        .and_then(|right| right.browser_url),
+                    Some("https://a.example/".to_owned()),
+                    "no sync overwrites the old session's stored URL mid-switch"
+                );
+                harness.remember_browser_url_cheap(
+                    "s-codex-old",
+                    "https://b.example/".to_owned(),
+                    cx,
+                );
+                assert_eq!(
+                    harness
+                        .overrides
+                        .get("s-codex-old")
+                        .and_then(|meta| meta.right.clone())
+                        .and_then(|right| right.browser_url),
+                    Some("https://b.example/".to_owned()),
+                    "the destination's own sync still writes"
+                );
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the destination landed");
+                assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
+                assert!(
+                    !harness.layout.right_open,
+                    "the landed destination keeps the toggled pane"
+                );
+            });
+        });
+        lane_restore(state);
+    }
+
+    /// Q4b (b): clicking the still-active session while its replacement
+    /// loads cancels the pending switch — the epoch moves, the loading
+    /// state drops — and never reopens it. Asserted at the `resume_inner`
+    /// decision site (exactly one `ResumeSession` ever dispatches, for the
+    /// discarded destination) and by the single surviving view. Before the
+    /// fix the click fell into `reopen_provider`, landing a second view
+    /// under the same id and orphaning the draft.
+    #[gpui::test]
+    fn q4b_clicking_the_active_session_cancels_without_reopening(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4b-stay");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        y2b2_set_draft(vc, &baaz, "hello unsent");
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // The click on the stored session — observed before the reopen
+        // lands, so no `run_until_parked` between this and the asserts.
+        let pending_epoch = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.resume_quiet("s-codex-old".into(), window, cx);
+                assert!(harness.session_switch_pending, "the provider switch is pending");
+                harness.provider_open_epoch
+            })
+        });
+        // Clicking the still-active session: cancel, stay, reopen nothing.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let epoch_before = harness.provider_open_epoch;
+                assert_eq!(epoch_before, pending_epoch, "no open raced the clicks");
+                harness.resume_quiet(first.clone(), window, cx);
+                assert!(
+                    harness.provider_open_epoch != epoch_before,
+                    "the cancel invalidates the in-flight open"
+                );
+                assert!(!harness.session_switch_pending, "the loading state drops");
+                assert!(
+                    harness.pending_switch_dest(cx).is_none(),
+                    "no destination outlives the cancel"
+                );
+                assert_eq!(
+                    harness.pending_id.as_deref(),
+                    Some(first.as_str()),
+                    "the selection follows the restored session"
+                );
+                let view = harness.active.clone().expect("the session stays open");
+                assert_eq!(view.read(cx).session_id, first, "still the same view");
+                assert_eq!(
+                    view.read(cx).draft_text(cx),
+                    "hello unsent",
+                    "the draft never leaves its view"
+                );
+            });
+        });
+        // The discarded open lands stale only now.
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the session is still open");
+                assert_eq!(view.read(cx).session_id, first, "no switch ever landed");
+                assert!(
+                    harness.session_cache.iter().all(|(id, _)| id != "s-codex-old"),
+                    "the discarded destination parks no view"
+                );
+                assert!(
+                    harness.session_cache.iter().all(|(id, _)| id != &first),
+                    "staying put parks nothing either: exactly one view"
+                );
+                assert_eq!(
+                    view.read(cx).draft_text(cx),
+                    "hello unsent",
+                    "the draft survives the discarded landing"
+                );
+                assert!(harness.provider_open_error.is_none(), "no inline failure");
+            });
+        });
+        let resumes: Vec<String> = commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resumes,
+            vec!["s-codex-old".to_owned()],
+            "exactly one resume dispatched — the click on the active session reopened nothing"
+        );
+        lane_restore(state);
+    }
+
+    /// Q4b (c): clicking another session while a reopen is pending
+    /// invalidates the in-flight open — asserted at the epoch decision
+    /// site — so when it lands late the newer session stays. Before the
+    /// fix the click never moved `provider_open_epoch`, and the late
+    /// landing stole the centre.
+    #[gpui::test]
+    fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4b-supersede");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, commands) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let first = vc.update(|_, cx| {
+            baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        });
+        y2b2_set_draft(vc, &baaz, "hello unsent");
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // A second stored session with the opposite pane: the click target
+        // that supersedes the first.
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.provider_sessions.insert(
+                    "s-codex-second".into(),
+                    crate::provider_sessions::ProviderSessionRecord {
+                        provider: "codex".into(),
+                        session_id: "s-codex-second".into(),
+                        workspace: None,
+                        project: None,
+                        created_ms: 1_700_000_000_001,
+                        updated_ms: 1_700_000_000_001,
+                        turns: 3,
+                        title: Some("Second inquiry".into()),
+                        first_prompt: Some("second prompt".into()),
+                        handoff_to: None,
+                        handoff_from: None,
+                        handoff_from_provider: None,
+                        handoff_title: None,
+                        display_texts: std::collections::HashMap::new(),
+                    },
+                );
+                harness.merge_provider_rows();
+                harness.set_override(
+                    "s-codex-second",
+                    |meta| {
+                        meta.right = Some(crate::sessions::RightState {
+                            open: false,
+                            ..Default::default()
+                        })
+                    },
+                    cx,
+                );
+            });
+        });
+        // The first click — observed before its reopen lands.
+        let pending_epoch = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.resume_quiet("s-codex-old".into(), window, cx);
+                assert!(harness.session_switch_pending, "the first switch is pending");
+                harness.provider_open_epoch
+            })
+        });
+        // The second click supersedes it: a newer epoch, the pane already
+        // on the newer destination, the old view still standing by.
+        let superseding_epoch = vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.resume_quiet("s-codex-second".into(), window, cx);
+                assert!(harness.session_switch_pending, "the second switch is pending");
+                assert_eq!(
+                    harness.pending_id.as_deref(),
+                    Some("s-codex-second"),
+                    "the selection follows the newer click"
+                );
+                assert!(
+                    !harness.layout.right_open,
+                    "the pane already follows the newer destination"
+                );
+                harness.provider_open_epoch
+            })
+        });
+        assert!(
+            superseding_epoch != pending_epoch,
+            "the newer click invalidates the in-flight open"
+        );
+        // Both opens land; only the newer one may take the centre.
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("a session is open");
+                assert_eq!(
+                    view.read(cx).session_id, "s-codex-second",
+                    "the newer click wins, not the late landing"
+                );
+                assert!(!harness.session_switch_pending, "the switch landed");
+                assert!(
+                    harness.pending_switch_dest(cx).is_none(),
+                    "no loading state outlives the landing"
+                );
+                assert!(
+                    !harness.layout.right_open,
+                    "the pane is the winner's, never the late landing's"
+                );
+                let parked = harness
+                    .session_cache
+                    .iter()
+                    .find(|(id, _)| id == &first)
+                    .map(|(_, view)| view.clone())
+                    .expect("the previous session parks intact");
+                assert_eq!(
+                    parked.read(cx).draft_text(cx),
+                    "hello unsent",
+                    "the previous draft survives"
+                );
+                assert!(
+                    harness.session_cache.iter().all(|(id, _)| id != "s-codex-old"),
+                    "the discarded destination parks no view"
+                );
+            });
+        });
+        let mut resumes: Vec<String> = commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .filter_map(|command| match command {
+                provider::Command::ResumeSession { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        resumes.sort();
+        assert_eq!(
+            resumes,
+            vec!["s-codex-old".to_owned(), "s-codex-second".to_owned()],
+            "both opens ran — the first landed stale and stole nothing"
+        );
+        lane_restore(state);
+    }
+
+    /// Q4b (d): while a provider reopen is pending, harness actions target
+    /// nothing — asserted at the `with_session` decision site every key
+    /// action (send included) routes through — and the hidden composer's
+    /// focus arm stays consumed, so no keystroke can reach it. Once the
+    /// destination lands, actions run again.
+    #[gpui::test]
+    fn q4b_actions_target_nothing_while_pending(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let state = lane_state("q4b-quiet");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        let (factory, _) = recording_resumable_factory();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, _| {
+                harness.provider_factory = factory;
+                harness.client = Some(dead_client());
+            });
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.select_new_provider(ProviderId::Codex, cx);
+                harness.new_session(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        y2b2_set_draft(vc, &baaz, "hello unsent");
+        vc.update(|_, cx| {
+            baaz.update(cx, z4_seed_stored_codex);
+        });
+        // The click on the stored session — observed before the reopen
+        // lands, so no `run_until_parked` between this and the asserts.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
+        });
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                assert!(harness.session_switch_pending, "the provider switch is pending");
+                assert!(
+                    !harness.focus_composer,
+                    "the click blurs the hidden composer: no refocus arm"
+                );
+                let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+                let probe = fired.clone();
+                harness.with_session(cx, move |_view, _vc| {
+                    probe.set(true);
+                });
+                assert!(
+                    !fired.get(),
+                    "no harness action reaches the hidden session while pending"
+                );
+                let view = harness.active.clone().expect("the old view is still open");
+                assert_eq!(
+                    view.read(cx).draft_text(cx),
+                    "hello unsent",
+                    "no send touched the hidden draft"
+                );
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                let view = harness.active.clone().expect("the destination landed");
+                assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
+                let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+                let probe = fired.clone();
+                harness.with_session(cx, move |_view, _vc| {
+                    probe.set(true);
+                });
+                assert!(fired.get(), "actions run again once the destination opens");
             });
         });
         lane_restore(state);

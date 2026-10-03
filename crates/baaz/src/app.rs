@@ -2329,6 +2329,14 @@ impl Harness {
         url: String,
         cx: &mut Context<Self>,
     ) {
+        // Q4b: while a provider switch is pending, a navigation sync for
+        // any session but the destination is deferred — persisting it now
+        // would overwrite the still-open session's stored URL with pane
+        // activity from the switch. The live webview keeps its URL, so the
+        // next sync after the switch lands persists it then.
+        if self.pending_switch_dest(cx).is_some_and(|dest| dest != session_id) {
+            return;
+        }
         let entry = self.overrides.entry(session_id.to_owned()).or_default();
         let mut right = entry.right.clone().unwrap_or_default();
         if right.browser_url.as_deref() == Some(url.as_str()) {
@@ -2452,9 +2460,17 @@ impl Harness {
     ///
     /// B7: the persist is the cheap debounced write above — no `rejoin`,
     /// no search rebuild, no synchronous `sessions.json` write.
+    ///
+    /// Q4b: while a provider switch is pending, the live pane already
+    /// describes the destination (restored at the click) while `active` is
+    /// still the old view — so the save lands on the destination, never
+    /// the old session. Every pane gesture funnels through here.
     pub(crate) fn save_right_for_active(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.active.clone() else { return };
-        let session_id = view.read(cx).session_id.clone();
+        let Some(session_id) = self.pending_switch_dest(cx).or_else(|| {
+            self.active.clone().map(|view| view.read(cx).session_id.clone())
+        }) else {
+            return;
+        };
         let (files_preview, files_selected, files_expanded) = match self.right_project() {
             Some((root, _)) => {
                 let preview = self.right_cache.preview_for(&root).map(|preview| preview.path.clone());
@@ -3654,7 +3670,17 @@ impl Harness {
         context
     }
 
+    /// Run `f` on the open session — unless a provider switch is pending
+    /// (Q4b): the centre shows the destination's loading state while
+    /// `active` is still the old view, so every harness action routed here
+    /// (send, steer, stop-adjacent history/picker/approval keys) targets
+    /// nothing instead of acting on the hidden session. Session verbs
+    /// already wait out the switch through `steps_ready`; Muse sessions
+    /// swap synchronously and never trip this.
     pub(crate) fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| f(view, cx));
         }
@@ -3663,6 +3689,12 @@ impl Harness {
     /// ⌘V. An image on the clipboard becomes an attachment; anything else is
     /// the textarea's own paste, which is re-dispatched rather than reimplemented.
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Q4b: like `with_session` — no paste into the hidden session
+        // while its replacement loads, and no re-dispatch either: no
+        // composer is mounted to take it.
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         let handled = self
             .active
             .clone()
@@ -4173,7 +4205,14 @@ impl Harness {
         // A deterministic capture never takes keyboard focus: a focused
         // composer paints the textarea's blinking caret, which lands on a
         // different phase every run.
-        if std::mem::take(&mut self.focus_composer) && !crate::clock::deterministic() {
+        // Q4b: never re-focus the hidden session's composer while its
+        // replacement loads — the click consumed the arm, and this drops
+        // any arm raised mid-switch. The landing view arms its own focus
+        // through `activate`.
+        if std::mem::take(&mut self.focus_composer)
+            && !crate::clock::deterministic()
+            && self.pending_switch_dest(cx).is_none()
+        {
             if let Some(view) = self.active.clone() {
                 view.update(cx, |view, cx| view.focus_composer(window, cx));
             }
@@ -4720,7 +4759,12 @@ impl Harness {
     }
 
     /// ⌃C, and Escape on an empty composer: stop and retract.
+    /// Q4b: a no-op while a provider switch is pending — the running turn,
+    /// if any, belongs to the hidden session, and ⌃C must not reach it.
     fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.interrupt(cx));
         }
