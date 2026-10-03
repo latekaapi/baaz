@@ -163,6 +163,14 @@ pub(crate) fn browser_pane_showing(pane_open: bool, kind_browser: bool) -> bool 
     pane_open && kind_browser
 }
 
+/// Whether `key`'s native view may show as its session's page: only the
+/// active session's — and never while a provider switch is pending (Q4c).
+/// The centre is then the destination's loading state, so the previous
+/// session's page must neither draw nor hit-test under it.
+pub(crate) fn browser_session_active(key: &str, active_key: &str, pending_switch: bool) -> bool {
+    !pending_switch && key == active_key
+}
+
 /// Whether a window-coordinate mouse-down outside the browser page's rect
 /// must hand the keyboard back: the page holds it and the click landed
 /// outside. Pure; the capture handler resolves the rect and the webview,
@@ -731,9 +739,13 @@ impl Harness {
         if let Some(home) = self.browser.home.clone() {
             keys.push((HOME_KEY.to_owned(), home));
         }
+        // Q4c: while a provider switch is pending no session's page shows —
+        // `browser_key` still names the previous session, and its webview
+        // must neither draw nor hit-test under the loading centre.
+        let pending_switch = self.pending_right_neutral(cx);
         for (key, state) in keys {
             let visible = browser_visible(BrowserVisibility {
-                session_active: key == active_key,
+                session_active: browser_session_active(&key, &active_key, pending_switch),
                 ..base
             });
             state.update(cx, |state, _cx| state.set_obscured(!visible));
@@ -797,6 +809,11 @@ impl Harness {
         ) {
             return;
         }
+        // Q4c: while a provider switch is pending the pane is neutral — no
+        // webview shows — so ⌘L reaches nothing.
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
         let key = self.browser_key(cx);
         let state = self.browser_for(&key, false, window, cx);
         if state.read(cx).is_editing() {
@@ -831,9 +848,10 @@ impl BrowserRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_visible, initial_url,
-        should_release_keyboard_on_mouse_down, should_remember, terminal_covers_browser, terminal_dock_bounds,
-        Annotation, BrowserVisibility, FakeWebBackend, WebviewState,
+        annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_session_active,
+        browser_visible, initial_url, should_release_keyboard_on_mouse_down, should_remember,
+        terminal_covers_browser, terminal_dock_bounds, Annotation, BrowserVisibility, FakeWebBackend,
+        WebviewState,
     };
     use aui_webview::WebBackend as _;
     use std::collections::HashMap;
@@ -1074,6 +1092,23 @@ mod tests {
         assert!(browser_pane_showing(true, true));
         assert!(!browser_pane_showing(false, true), "a closed pane eats ⌘L");
         assert!(!browser_pane_showing(true, false), "another kind eats ⌘L");
+    }
+
+    #[test]
+    fn pending_switch_hides_every_session_page() {
+        assert!(
+            browser_session_active("a", "a", false),
+            "the active session's page shows outside a switch"
+        );
+        assert!(
+            !browser_session_active("b", "a", false),
+            "a parked session's page never shows"
+        );
+        assert!(
+            !browser_session_active("a", "a", true),
+            "no page shows under the pending loading centre — not even the still-active session's"
+        );
+        assert!(!browser_session_active("b", "a", true), "nor any other session's");
     }
 
     #[test]
