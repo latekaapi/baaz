@@ -744,10 +744,17 @@ impl Harness {
         // must neither draw nor hit-test under the loading centre.
         let pending_switch = self.pending_right_neutral(cx);
         for (key, state) in keys {
-            let visible = browser_visible(BrowserVisibility {
-                session_active: browser_session_active(&key, &active_key, pending_switch),
-                ..base
-            });
+            // A blank page stays hidden: WKWebView paints about:blank white
+            // over the dark pane, and making the view transparent instead
+            // would put the dark surface under every real page that sets no
+            // background of its own. The pane's own surface shows through
+            // until a navigation gives the page a URL.
+            let blank = state.read(cx).url().as_ref() == BLANK;
+            let visible = !blank
+                && browser_visible(BrowserVisibility {
+                    session_active: browser_session_active(&key, &active_key, pending_switch),
+                    ..base
+                });
             state.update(cx, |state, _cx| state.set_obscured(!visible));
         }
     }
