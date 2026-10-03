@@ -2894,11 +2894,12 @@ mod tests {
         );
     }
 
-    /// Q2: a Claude Code wire id never reaches the footer raw — the
-    /// footer reads the humanised label, while other lanes' ids pass
-    /// through untouched.
+    /// Q2 (Q2b: renamed so the gate filter `transcript` matches the test
+    /// name as well as its module): a Claude Code wire id never reaches
+    /// the footer raw — the footer reads the humanised label, while other
+    /// lanes' ids pass through untouched.
     #[test]
-    fn the_footer_humanises_a_claude_code_wire_id() {
+    fn transcript_footer_humanises_a_claude_code_wire_id() {
         assert_eq!(footer_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(footer_model_label("claude-opus-5[1m]"), "Opus 5 · 1M");
         assert_eq!(
