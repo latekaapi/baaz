@@ -2865,17 +2865,38 @@ impl Harness {
         // answers `OpenSession` but no resume — the reopen still goes
         // through `ResumeSession` so the failure is the honest one.
         if self.client.is_none() || disabled {
-            // B4M's lazy move for this offline branch only: it never
-            // reaches the background `work` below, so it moves here,
-            // synchronously — in tests and captures the owner-side set is
-            // tiny or absent. The connected path moves inside `work`, off
-            // the UI thread.
-            crate::session_migration::ensure_session_moved(
-                &crate::session_migration::owner_home(),
-                &crate::store::support_dir(),
+            // The consent gate for this offline branch only: it never
+            // reaches the background `work` below, so its admitted move
+            // runs here, synchronously — in tests and captures the
+            // owner-side set is tiny or absent. Before the person's Move
+            // click an old session resumes from its original location
+            // and nothing moves. The connected path gates inside `work`,
+            // off the UI thread.
+            let owner = crate::session_migration::owner_home();
+            let state = crate::store::support_dir();
+            match crate::session_migration::gate_resume(
+                &owner,
+                &state,
+                &self.provider_sessions,
                 &record.provider,
                 &record.session_id,
-            );
+            ) {
+                crate::session_migration::ResumeGate::LegacyOwner => {
+                    crate::session_migration::pin_legacy_resume(&record.provider, &record.session_id);
+                }
+                crate::session_migration::ResumeGate::LazyMove => {
+                    let moved = crate::session_migration::ensure_session_moved(
+                        &owner,
+                        &state,
+                        &record.provider,
+                        &record.session_id,
+                    );
+                    if moved > 0 {
+                        crate::session_migration::clear_legacy_resume(&record.provider, &record.session_id);
+                    }
+                }
+                crate::session_migration::ResumeGate::BaazHome => {}
+            }
             use provider::ProviderAdapter as _;
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
@@ -2940,19 +2961,47 @@ impl Harness {
         // because `work` below borrows the record into the background.
         let retry_reopen = ProviderOpenRetry::Reopen(Box::new(record.clone()));
         let retry_id = record.session_id.clone();
+        // The gate reads the registry off the UI thread: cloned up front
+        // for the same reason.
+        let registry = self.provider_sessions.clone();
         let work = move || -> (Result<ProviderOpen, provider::ProviderError>, usize) {
-            // B4M's lazy move, on the background executor: a session that
-            // was never moved still has its transcript/rollout in the
-            // owner's home, where the Baaz-homed child cannot resume it —
-            // so the plan walk and any copy run here, ordered before the
-            // resume below, through the same executor the prompt uses.
-            // Sessions with nothing owner-side move nothing.
-            let moved = crate::session_migration::ensure_session_moved(
-                &crate::session_migration::owner_home(),
-                &crate::store::support_dir(),
+            // The consent gate, on the background executor: before the
+            // person's Move click an old session resumes from its
+            // original location — the one child pinned on the owner's
+            // home — and nothing moves; after it the lazy move runs
+            // here, ordered before the resume below, through the same
+            // executor the prompt uses. Sessions with nothing
+            // owner-side move nothing either way.
+            let owner = crate::session_migration::owner_home();
+            let state = crate::store::support_dir();
+            let moved = match crate::session_migration::gate_resume(
+                &owner,
+                &state,
+                &registry,
                 &record.provider,
                 &record.session_id,
-            );
+            ) {
+                crate::session_migration::ResumeGate::LegacyOwner => {
+                    crate::session_migration::pin_legacy_resume(&record.provider, &record.session_id);
+                    0
+                }
+                crate::session_migration::ResumeGate::LazyMove => {
+                    let moved = crate::session_migration::ensure_session_moved(
+                        &owner,
+                        &state,
+                        &record.provider,
+                        &record.session_id,
+                    );
+                    if moved > 0 {
+                        crate::session_migration::clear_legacy_resume(
+                            &record.provider,
+                            &record.session_id,
+                        );
+                    }
+                    moved
+                }
+                crate::session_migration::ResumeGate::BaazHome => 0,
+            };
             if moved > 0 {
                 crate::baaz_log!("provider reopen: lazy-moved {moved} file(s) for {}", record.session_id);
             }

@@ -247,6 +247,74 @@ pub fn child_env(home: &Path) -> Vec<(String, String)> {
     vec![("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())]
 }
 
+// ---------------------------------------------------------- legacy resume
+
+/// Threads pinned to resume from the owner's home instead of the Baaz
+/// home: one entry per pre-consent resume the host admitted. The
+/// [`RunningChild`](crate::child::RunningChild) session spawn already
+/// reads the owner's home when its env carries no `CODEX_HOME` (see its
+/// owner-home spawn), so a pin only has to withhold the override — the
+/// scrub still applies. Level-triggered, not one-shot, so the host
+/// clears each entry when the consented lazy move lands it (and all of
+/// them when consent itself lands).
+static LEGACY_RESUME: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Pin `session_id` to resume from the owner's home: the host's consent
+/// gate calls this for the one child it admitted, before the spawn.
+pub fn pin_legacy_resume(session_id: &str) {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.insert(session_id.to_owned());
+    }
+}
+
+/// Whether `session_id` resumes from the owner's home right now.
+pub fn is_legacy_resume(session_id: &str) -> bool {
+    LEGACY_RESUME.lock().is_ok_and(|pinned| pinned.contains(session_id))
+}
+
+/// Drop one legacy pin: what the host calls after the consented lazy
+/// move lands the thread's rollouts under the Baaz home.
+pub fn clear_legacy_resume(session_id: &str) {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.remove(session_id);
+    }
+}
+
+/// Drop every legacy pin: what the host calls when consent lands, so no
+/// later resume keeps reading the owner's home after the move was
+/// admitted.
+pub fn clear_legacy_resumes() {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.clear();
+    }
+}
+
+/// Whether `session_id` should resume from the owner's home: its
+/// rollouts still live only there (owner-side sources exist, no
+/// Baaz-side target does — a thread the move already half-carried
+/// resumes where its rollout is, under the Baaz home) and `consented`
+/// is false. Pure over explicit dirs; the host passes its own consent
+/// read, so this stays testable with temp dirs.
+pub fn legacy_home_for(
+    owner_home: &Path,
+    state_dir: &Path,
+    session_id: &str,
+    consented: bool,
+) -> Option<PathBuf> {
+    if consented {
+        return None;
+    }
+    let sources = session_sources(owner_home, session_id);
+    if sources.is_empty() {
+        return None;
+    }
+    if sources.iter().any(|entry| baaz_target(state_dir, &entry.rel).exists()) {
+        return None;
+    }
+    Some(owner_home_dir(owner_home))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +621,64 @@ mod tests {
                 "no scrubbed var survives: {name}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_resume_withholds_the_home_override_until_consent_or_a_move() {
+        let root = temp_root("legacy");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        let day = owner.join(".codex").join("sessions").join("2026").join("10").join("02");
+        std::fs::create_dir_all(&day).expect("date dir");
+        std::fs::write(day.join("rollout-2026-10-02-aaa-thread-1.jsonl"), "{}\n")
+            .expect("owner rollout");
+
+        // Unmoved and unconsented: the owner's home, and a legacy child
+        // carries no `CODEX_HOME` override — the scrub still applies.
+        assert_eq!(
+            legacy_home_for(&owner, &state, "thread-1", false),
+            Some(owner.join(".codex")),
+            "an unmoved thread resumes where its rollout is"
+        );
+        assert_eq!(
+            legacy_home_for(&owner, &state, "thread-1", true),
+            None,
+            "after consent the Baaz home answers"
+        );
+        assert_eq!(legacy_home_for(&owner, &state, "thread-absent", false), None);
+        // A thread the move already half-carried resumes under the Baaz
+        // home, where its rollout is — never a split read.
+        let target = state
+            .join("codex-home")
+            .join("sessions/2026/10/02/rollout-2026-10-02-aaa-thread-1.jsonl");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("target parent");
+        std::fs::write(&target, "{}\n").expect("moved rollout");
+        assert_eq!(
+            legacy_home_for(&owner, &state, "thread-1", false),
+            None,
+            "a moved rollout resumes under the Baaz home"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_pins_are_per_session_and_clearable() {
+        let id = format!(
+            "thread-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        );
+        assert!(!is_legacy_resume(&id));
+        pin_legacy_resume(&id);
+        assert!(is_legacy_resume(&id), "the pinned child resumes legacy");
+        assert!(!is_legacy_resume("some-other-thread"), "pins never leak across sessions");
+        clear_legacy_resume(&id);
+        assert!(!is_legacy_resume(&id), "a landed move clears its pin");
+        pin_legacy_resume(&id);
+        clear_legacy_resumes();
+        assert!(!is_legacy_resume(&id), "consent clears every pin");
     }
 }

@@ -384,21 +384,34 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// The owner's real Claude root for a pre-consent legacy resume:
+    /// the test stand-in's `.claude`, else `~/.claude` under the real
+    /// `HOME`, else the Baaz-owned home (no owner home is knowable).
+    fn owner_config_dir(&self) -> PathBuf {
+        match &self.home_override {
+            Some(owner) => crate::home::owner_config_dir(owner),
+            None => std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|owner| crate::home::owner_config_dir(&owner))
+                .unwrap_or_else(crate::home::default_home),
+        }
+    }
+
     /// Best-effort home upkeep before a spawn: re-run the absent-only
     /// owner links over the resolved Baaz home, so entries the owner
     /// created after adapter setup (`skills/`, `agents/`, …) are linked
     /// on the next spawn instead of waiting for a restart. Cheap stat
     /// checks only ([`provider::child_env::ensure_linked_dir`]); errors
     /// are ignored — the spawn below reports an unusable home honestly.
-    fn prepare_home(&self) {
+    /// Skipped for a legacy resume: that child reads the owner's home
+    /// itself, and linking the owner onto itself would plant Baaz-home
+    /// symlinks inside it.
+    fn prepare_home(&self, legacy: bool) {
+        if legacy {
+            return;
+        }
         let home = self.resolved_config_dir();
-        let owner_root = match &self.home_override {
-            Some(owner) => crate::home::owner_config_dir(owner),
-            None => std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|owner| crate::home::owner_config_dir(&owner))
-                .unwrap_or_else(crate::home::default_home),
-        };
+        let owner_root = self.owner_config_dir();
         let _ = provider::child_env::ensure_linked_dir(&home, &owner_root, crate::home::LINKED_ENTRIES);
     }
 
@@ -515,6 +528,31 @@ impl ClaudeCodeAdapter {
         self.sent_control.lock().expect("sent control mutex").clone()
     }
 
+    /// The config dir the history lookup reads for `session_id`: the
+    /// owner's home while its legacy pin stands (the transcript still
+    /// lives there — before consent nothing moved it), else the resolved
+    /// Baaz home.
+    fn config_dir_for(&self, session_id: &str) -> PathBuf {
+        if crate::home::is_legacy_resume(session_id) {
+            self.owner_config_dir()
+        } else {
+            self.resolved_config_dir()
+        }
+    }
+
+    /// The home override for one spawn: `None` while `session_id`'s
+    /// legacy pin stands (the child keeps the owner's real home — the
+    /// scrub still applies), else the Baaz home's `CLAUDE_CONFIG_DIR`
+    /// pair. Pure over the pin set plus the resolved home, so tests
+    /// drive the routing without spawning.
+    fn home_env_for(&self, session_id: &str) -> Option<Vec<(String, String)>> {
+        if crate::home::is_legacy_resume(session_id) {
+            None
+        } else {
+            Some(crate::home::child_env(&self.resolved_config_dir()))
+        }
+    }
+
     fn spawn_launch(&self, launch: &SessionLaunch) -> Result<Ack, ProviderError> {
         let mut child = self.child.lock().expect("child mutex");
         if child.is_some() {
@@ -523,12 +561,21 @@ impl ClaudeCodeAdapter {
                     .into(),
             });
         }
-        let config = self.resolved_config_dir();
-        self.prepare_home();
-        let running =
-            RunningChild::spawn(&self.program, launch, &self.hub, &config).map_err(|error| {
-                ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
-            })?;
+        // A pre-consent legacy resume spawns under the owner's real home
+        // (no override, scrub kept) so `--resume` finds the transcript
+        // where it still lives; everything else spawns Baaz-homed.
+        let home_env = self.home_env_for(&launch.session_id);
+        self.prepare_home(home_env.is_none());
+        let running = match home_env {
+            None => RunningChild::spawn_legacy(&self.program, launch, &self.hub),
+            Some(_) => {
+                let config = self.resolved_config_dir();
+                RunningChild::spawn(&self.program, launch, &self.hub, &config)
+            }
+        }
+        .map_err(|error| {
+            ProviderError::Unavailable { reason: format!("could not spawn claude: {error}") }
+        })?;
         *child = Some(running);
         // The guard drops here: `send_initialize` locks the child again to
         // write, and holding both would hang the open forever.
@@ -719,12 +766,20 @@ impl ClaudeCodeAdapter {
         // Requests the old child never answered die with it (Y1b review).
         self.hub.forget_pending();
         let launch = self.with_mcp_config(launch.clone())?;
-        let config = self.resolved_config_dir();
-        self.prepare_home();
-        let running =
-            RunningChild::spawn(&self.program, &launch, &self.hub, &config).map_err(|error| {
-                ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
-            })?;
+        // An effort-swap relaunch is still the same session: a legacy
+        // resume keeps the owner's home here too.
+        let home_env = self.home_env_for(&launch.session_id);
+        self.prepare_home(home_env.is_none());
+        let running = match home_env {
+            None => RunningChild::spawn_legacy(&self.program, &launch, &self.hub),
+            Some(_) => {
+                let config = self.resolved_config_dir();
+                RunningChild::spawn(&self.program, &launch, &self.hub, &config)
+            }
+        }
+        .map_err(|error| {
+            ProviderError::Unavailable { reason: format!("could not respawn claude: {error}") }
+        })?;
         *self.child.lock().expect("child mutex") = Some(running);
         // A relaunched child restates the whole session, catalog included.
         self.send_initialize();
@@ -798,7 +853,7 @@ impl ClaudeCodeAdapter {
         // callers answer honest unavailable. Never scan other directories
         // when the workspace is known: that would serve one workspace's
         // transcript inside another.
-        let config = self.resolved_config_dir();
+        let config = self.config_dir_for(session_id);
         let workspace = self.workspace.lock().expect("workspace mutex").clone();
         match workspace {
             Some(workspace) => history::transcript_path_for_config(&workspace, session_id, &config)
@@ -1861,6 +1916,41 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_pin_withholds_the_home_override_for_that_session_only() {
+        use std::path::PathBuf;
+        let id = format!(
+            "sess-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        );
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
+            .with_config_dir(PathBuf::from("/tmp/baaz-state/claude-home"));
+        // No pin: the Baaz home override rides.
+        let env = adapter.home_env_for("some-other-session").expect("Baaz-homed env");
+        assert!(
+            env.iter().any(|(name, value)| name == "CLAUDE_CONFIG_DIR"
+                && value == "/tmp/baaz-state/claude-home"),
+            "the child writes to the Baaz home: {env:?}"
+        );
+        // Pinned: no override at all — the child keeps the owner's real
+        // home, and history reads it too.
+        crate::home::pin_legacy_resume(&id);
+        assert!(
+            adapter.home_env_for(&id).is_none(),
+            "a legacy child carries no CLAUDE_CONFIG_DIR"
+        );
+        assert!(
+            adapter.home_env_for("some-other-session").is_some(),
+            "the pin never leaks across sessions"
+        );
+        crate::home::clear_legacy_resume(&id);
+        assert!(adapter.home_env_for(&id).is_some(), "a cleared pin resumes Baaz-homed");
+    }
+
+    #[test]
     fn without_pin_or_env_history_reads_the_test_home_then_the_baaz_home() {
         use std::path::PathBuf;
         let _guard = crate::history::tests::lock_config_env();
@@ -1899,7 +1989,7 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn")
             .with_home(owner.clone())
             .with_config_dir(state.join("claude-home"));
-        adapter.prepare_home();
+        adapter.prepare_home(false);
         let home = state.join("claude-home");
         assert!(
             std::fs::symlink_metadata(home.join("settings.json")).expect("meta").file_type().is_symlink(),
@@ -1912,14 +2002,14 @@ mod tests {
         // The owner creates skills/ later: the next spawn's re-ensure
         // picks it up without a restart.
         std::fs::create_dir_all(owner.join(".claude").join("skills")).expect("late owner skills");
-        adapter.prepare_home();
+        adapter.prepare_home(false);
         assert!(
             std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink(),
             "a late-created owner dir is linked on the next spawn"
         );
         assert!(home.join("skills").is_dir(), "the linked dir reads as a dir");
         // Idempotent: a third run changes nothing.
-        adapter.prepare_home();
+        adapter.prepare_home(false);
         assert!(
             std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink()
         );

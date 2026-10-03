@@ -138,6 +138,72 @@ pub fn child_env(home: &Path) -> Vec<(String, String)> {
     ]
 }
 
+// ---------------------------------------------------------- legacy resume
+
+/// Sessions pinned to resume from the owner's home instead of the Baaz
+/// home: one entry per pre-consent resume the host admitted (see
+/// [`legacy_home_for`]). Level-triggered, not one-shot — an effort-swap
+/// `--resume` relaunch of the same session must see the same home — so
+/// the host clears each entry when the consented lazy move lands it (and
+/// all of them when consent itself lands).
+static LEGACY_RESUME: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Pin `session_id` to resume from the owner's home: the host's consent
+/// gate calls this for the one child it admitted, before the spawn.
+pub fn pin_legacy_resume(session_id: &str) {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.insert(session_id.to_owned());
+    }
+}
+
+/// Whether `session_id` resumes from the owner's home right now.
+pub fn is_legacy_resume(session_id: &str) -> bool {
+    LEGACY_RESUME.lock().is_ok_and(|pinned| pinned.contains(session_id))
+}
+
+/// Drop one legacy pin: what the host calls after the consented lazy
+/// move lands the session's files under the Baaz home.
+pub fn clear_legacy_resume(session_id: &str) {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.remove(session_id);
+    }
+}
+
+/// Drop every legacy pin: what the host calls when consent lands, so no
+/// later resume keeps reading the owner's home after the move was
+/// admitted.
+pub fn clear_legacy_resumes() {
+    if let Ok(mut pinned) = LEGACY_RESUME.lock() {
+        pinned.clear();
+    }
+}
+
+/// Whether `session_id` should resume from the owner's home: its files
+/// still live only there (owner-side sources exist, no Baaz-side target
+/// does — a session the move already half-carried resumes where its
+/// transcript is, under the Baaz home) and `consented` is false. Pure
+/// over explicit dirs; the host passes its own consent read, so this
+/// stays testable with temp dirs.
+pub fn legacy_home_for(
+    owner_home: &Path,
+    state_dir: &Path,
+    session_id: &str,
+    consented: bool,
+) -> Option<PathBuf> {
+    if consented {
+        return None;
+    }
+    let sources = session_sources(owner_home, session_id);
+    if sources.is_empty() {
+        return None;
+    }
+    if sources.iter().any(|entry| baaz_target(state_dir, &entry.rel).exists()) {
+        return None;
+    }
+    Some(owner_config_dir(owner_home))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +376,63 @@ mod tests {
         assert!(names.contains(&"CLAUDE_SECURESTORAGE_CONFIG_DIR"));
         assert!(names.contains(&"ANTHROPIC_API_KEY"), "owner auth survives");
         assert!(names.contains(&"PATH"), "PATH survives");
+    }
+
+    #[test]
+    fn legacy_resume_points_at_the_owner_home_until_consent_or_a_move() {
+        let root = temp_root("legacy");
+        let owner = root.join("owner-home");
+        let state = root.join("state");
+        let slug = owner.join(".claude").join("projects").join("-work");
+        std::fs::create_dir_all(&slug).expect("slug dir");
+        std::fs::write(slug.join("sess-legacy.jsonl"), "{}\n").expect("owner transcript");
+
+        // Unmoved and unconsented: the owner's home.
+        assert_eq!(
+            legacy_home_for(&owner, &state, "sess-legacy", false),
+            Some(owner.join(".claude")),
+            "an unmoved session resumes where its transcript is"
+        );
+        // Consent admitted: no legacy home — the lazy move owns it now.
+        assert_eq!(
+            legacy_home_for(&owner, &state, "sess-legacy", true),
+            None,
+            "after consent the Baaz home answers"
+        );
+        // Unknown ids never route legacy.
+        assert_eq!(legacy_home_for(&owner, &state, "sess-absent", false), None);
+        // A session the move already half-carried resumes under the Baaz
+        // home, where its transcript is — never a split read.
+        let target =
+            state.join("claude-home").join("projects").join("-work").join("sess-legacy.jsonl");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("target parent");
+        std::fs::write(&target, "{}\n").expect("moved transcript");
+        assert_eq!(
+            legacy_home_for(&owner, &state, "sess-legacy", false),
+            None,
+            "a moved transcript resumes under the Baaz home"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_pins_are_per_session_and_clearable() {
+        let id = format!(
+            "sess-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        );
+        assert!(!is_legacy_resume(&id));
+        pin_legacy_resume(&id);
+        assert!(is_legacy_resume(&id), "the pinned child resumes legacy");
+        assert!(!is_legacy_resume("some-other-session"), "pins never leak across sessions");
+        clear_legacy_resume(&id);
+        assert!(!is_legacy_resume(&id), "a landed move clears its pin");
+        pin_legacy_resume(&id);
+        clear_legacy_resumes();
+        assert!(!is_legacy_resume(&id), "consent clears every pin");
     }
 }

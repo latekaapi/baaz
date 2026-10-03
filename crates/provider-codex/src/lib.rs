@@ -171,6 +171,19 @@ impl CodexAdapter {
         crate::home::child_env(&self.resolved_home())
     }
 
+    /// The env for one resume spawn: empty while `session_id`'s legacy
+    /// pin stands (the child keeps the owner's real home — no
+    /// `CODEX_HOME` override; the scrub still applies in the spawn),
+    /// else the Baaz home. Pure over the pin set, so tests drive the
+    /// routing without spawning.
+    fn resume_env_for(&self, session_id: &str) -> Vec<(String, String)> {
+        if crate::home::is_legacy_resume(session_id) {
+            Vec::new()
+        } else {
+            self.child_env()
+        }
+    }
+
     /// Best-effort home upkeep before a spawn: ensure the dir and its
     /// owner links, then re-check the rotating `auth.json` link. Errors
     /// are ignored — the spawn below reports an unusable home honestly,
@@ -388,8 +401,13 @@ impl CodexAdapter {
         // A resume names its session up front, so the bridge answers for
         // the stored id directly.
         let extra = self.spawn_args_for(session_id);
-        self.prepare_home();
-        let env = self.child_env();
+        // A pre-consent legacy resume withholds the `CODEX_HOME`
+        // override (the scrub still applies) so `thread/resume` finds
+        // the rollout where it still lives, in the owner's home.
+        let env = self.resume_env_for(session_id);
+        if !env.is_empty() {
+            self.prepare_home();
+        }
         let running =
             RunningChild::spawn_with_env(&self.program, &extra, &env, Arc::clone(&self.fold), self.tx.clone())
                 .map_err(|error| ProviderError::Unavailable {
@@ -1283,6 +1301,41 @@ with open(log, "w") as handle:
             adapter.child_env(),
             vec![("CODEX_HOME".to_owned(), "/tmp/baaz-state/codex-home".to_owned())],
             "the child writes to the Baaz home, nothing else"
+        );
+    }
+
+    #[test]
+    fn a_legacy_pin_withholds_codex_home_for_that_thread_only() {
+        let id = format!(
+            "thread-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        );
+        let adapter = CodexAdapter::new("codex-must-never-spawn");
+        adapter.set_state_dir(std::path::PathBuf::from("/tmp/baaz-state"));
+        // No pin: the Baaz home override rides.
+        assert_eq!(
+            adapter.resume_env_for("some-other-thread"),
+            vec![("CODEX_HOME".to_owned(), "/tmp/baaz-state/codex-home".to_owned())],
+            "the child writes to the Baaz home"
+        );
+        // Pinned: no override — the child keeps the owner's real home.
+        crate::home::pin_legacy_resume(&id);
+        assert!(
+            adapter.resume_env_for(&id).is_empty(),
+            "a legacy child carries no CODEX_HOME"
+        );
+        assert!(
+            !adapter.resume_env_for("some-other-thread").is_empty(),
+            "the pin never leaks across sessions"
+        );
+        crate::home::clear_legacy_resume(&id);
+        assert!(
+            !adapter.resume_env_for(&id).is_empty(),
+            "a cleared pin resumes Baaz-homed"
         );
     }
 

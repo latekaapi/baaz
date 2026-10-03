@@ -32,21 +32,49 @@ impl RunningChild {
     /// (for `ReadAccount`) and locked one line at a time, never for the
     /// whole stream.
     /// Blocking: run it on the background executor.
+    /// Spawn a pre-consent legacy child: the owner's real home, i.e. no
+    /// `CLAUDE_CONFIG_DIR` override at all. The inherited desktop-agent
+    /// env is still scrubbed ([`provider::child_env`]); only the home
+    /// stays the owner's, so a `--resume` finds the transcript where it
+    /// still lives. Blocking: run it on the background executor.
+    pub fn spawn_legacy(
+        program: &str,
+        launch: &SessionLaunch,
+        hub: &std::sync::Arc<ControlHub>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_inner(program, launch, hub, None)
+    }
+
+    /// Spawn a Baaz-homed child: `CLAUDE_CONFIG_DIR` names `claude_home`
+    /// (see [`spawn_legacy`](Self::spawn_legacy) for the pre-consent
+    /// resume without the override). Blocking: run it on the background
+    /// executor.
     pub fn spawn(
         program: &str,
         launch: &SessionLaunch,
         hub: &std::sync::Arc<ControlHub>,
         claude_home: &std::path::Path,
     ) -> std::io::Result<Self> {
+        Self::spawn_inner(program, launch, hub, Some(claude_home))
+    }
+
+    fn spawn_inner(
+        program: &str,
+        launch: &SessionLaunch,
+        hub: &std::sync::Arc<ControlHub>,
+        claude_home: Option<&std::path::Path>,
+    ) -> std::io::Result<Self> {
         // The child's `PATH` is the login-shell `PATH` with the program's
         // own directory first, so a Dock launch still runs a home install
         // and its `env`-shebang neighbours. The inherited desktop-agent
-        // env is scrubbed ([`provider::child_env`]) and the child writes
-        // to the Baaz-owned home ([`crate::home`]), never the owner's
-        // `~/.claude` — that is what keeps Baaz sessions out of the
-        // desktop app's listing. No filesystem work happens here: the
-        // adapter re-ensures the absent-only owner links before every
-        // spawn, so late-created owner dirs are linked without a restart.
+        // env is scrubbed ([`provider::child_env`]) and, unless this is a
+        // pre-consent legacy resume (`None`: no override, the owner's
+        // real home), the child writes to the Baaz-owned home
+        // ([`crate::home`]), never the owner's `~/.claude` — that is
+        // what keeps Baaz sessions out of the desktop app's listing. No
+        // filesystem work happens here: the adapter re-ensures the
+        // absent-only owner links before every Baaz-homed spawn, so
+        // late-created owner dirs are linked without a restart.
         let mut command = Command::new(program);
         command
             .args(&launch.argv)
@@ -55,8 +83,10 @@ impl RunningChild {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         provider::child_env::scrub_command(&mut command);
-        for (key, value) in crate::home::child_env(claude_home) {
-            command.env(key, value);
+        if let Some(home) = claude_home {
+            for (key, value) in crate::home::child_env(home) {
+                command.env(key, value);
+            }
         }
         if let Some(cwd) = &launch.cwd {
             command.current_dir(cwd);
