@@ -1054,7 +1054,8 @@ pub fn fold_plan_cached(turn: &Turn, settled: bool, toggled: &HashSet<String>) -
 pub struct LiveRun {
     /// The run's block indices, in turn order; the current call is last.
     pub blocks: Vec<usize>,
-    /// Present-tense verb naming the current call ("Reading").
+    /// Verb naming the current call: present tense while in flight
+    /// ("Running"), past tense once everything finished ("Ran").
     pub verb: String,
     /// What the current call works on.
     pub target: String,
@@ -1062,10 +1063,22 @@ pub struct LiveRun {
     pub earlier: usize,
     /// The run's wall-clock time, saturating at the frame's clock.
     pub elapsed_ms: u64,
+    /// Whether any member call is still in flight: the row spins and
+    /// ticks only then. An all-finished run reads past tense with its
+    /// measured total.
+    pub running: bool,
 }
 
 /// B12: present-tense verb and target naming one tool call on a live row.
+///
+/// Q1: the progressive verb ("Running") names only a call still in
+/// flight. A finished call reads in its settled tense — the card's own
+/// verb, which every fold writes past-tense on completion ("Ran",
+/// "Searched", "Read") — so a finished shell never reads "Running".
 pub fn run_verb_target(call: &ToolCall) -> (String, String) {
+    if call.status != ToolStatus::Running {
+        return (call.verb.clone(), call.target.clone());
+    }
     let target = call.target.clone();
     let verb = match &call.kind {
         ToolKind::Read => "Reading",
@@ -1110,13 +1123,18 @@ fn group_joins_run(calls: &[ToolCall]) -> bool {
     !calls.is_empty() && calls.iter().all(call_joins_run)
 }
 
-/// B12fix: present-tense verb and target naming one tool group on a live
-/// row: the group's current (last) call speaks for the run.
-fn group_verb_target(calls: &[ToolCall]) -> (String, String) {
-    match calls.last() {
-        Some(call) => run_verb_target(call),
-        None => ("Working".to_owned(), String::new()),
+/// Q1: whether an approval card already shows a shell call's command, so
+/// the call earns no separate live run row beside it. The card carries
+/// its own request id, never the tool call's, so the join is the exact
+/// command text: the bare command (`Bash`) or the terminal face's
+/// backticked shape (`Run in terminal · \`<command>\``).
+fn approval_covers(approval_command: &str, target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
     }
+    let command = approval_command.trim();
+    command == target || command == format!("Run in terminal · `{target}`")
 }
 
 /// B12fix: partition one turn's blocks into live runs: maximal runs of
@@ -1127,7 +1145,16 @@ fn group_verb_target(calls: &[ToolCall]) -> (String, String) {
 /// [`fold_plan`]).
 pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
     let Turn::Assistant { blocks, timestamp, .. } = turn else { return Vec::new() };
-    let turn_elapsed_ms = timestamp.map(|sent| now_ms.saturating_sub(sent)).unwrap_or(0);
+    // Q1: the commands the turn's approval cards already show. A shell
+    // call for one of these earns no live run row of its own — the card
+    // is the row — or every approved command doubles up.
+    let approved: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Approval { command, .. } => Some(command.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut runs = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let flush = |current: &mut Vec<usize>, runs: &mut Vec<LiveRun>| {
@@ -1135,46 +1162,48 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
             return;
         }
         let blocks_taken = std::mem::take(current);
-        let last = blocks_taken.last().copied().and_then(|i| blocks.get(i));
-        let Some(last) = last else { return };
-        let (verb, target) = match last {
-            Block::ToolCall { .. } => {
-                run_verb_target(&last.as_tool_call().expect("matched ToolCall"))
-            }
-            Block::ToolGroup { calls, .. } => group_verb_target(calls),
-            _ => ("Working".to_owned(), String::new()),
-        };
-        // B12fix: the elapsed shown is the run's own — the member calls'
-        // measured time added up — falling back to the turn's age while
-        // any member is still running unmeasured.
+        // Q1: the run's own time — member calls' measured durations added
+        // up, with a call still in flight ticking from the turn's start
+        // (an unmeasured finished call contributes nothing). A run whose
+        // calls all finished reads its measured total, never the clock.
         let mut run_ms = 0u64;
-        let mut measured = true;
+        let mut running = false;
+        let mut live_call: Option<ToolCall> = None;
+        let mut last_call: Option<ToolCall> = None;
         for index in &blocks_taken {
-            match blocks.get(*index) {
+            let member: Vec<ToolCall> = match blocks.get(*index) {
                 Some(Block::ToolCall { .. }) => {
-                    let call = blocks[*index].as_tool_call().expect("matched ToolCall");
-                    match call.duration_ms {
-                        Some(ms) => run_ms = run_ms.saturating_add(ms),
-                        None => measured = false,
-                    }
+                    vec![blocks[*index].as_tool_call().expect("matched ToolCall")]
                 }
-                Some(Block::ToolGroup { calls, .. }) => {
-                    for call in calls {
-                        match call.duration_ms {
-                            Some(ms) => run_ms = run_ms.saturating_add(ms),
-                            None => measured = false,
-                        }
+                Some(Block::ToolGroup { calls, .. }) => calls.clone(),
+                _ => Vec::new(),
+            };
+            for call in member {
+                run_ms = run_ms.saturating_add(match call.duration_ms {
+                    Some(ms) => ms,
+                    None if call.status == ToolStatus::Running => {
+                        timestamp.map(|sent| now_ms.saturating_sub(sent)).unwrap_or(0)
                     }
+                    None => 0,
+                });
+                if call.status == ToolStatus::Running {
+                    running = true;
+                    live_call = Some(call.clone());
                 }
-                _ => measured = false,
+                last_call = Some(call);
             }
         }
+        let Some(last) = last_call else { return };
+        // The last call still in flight speaks for the row; all finished
+        // reads the last call's settled (past-tense) verb.
+        let (verb, target) = run_verb_target(&live_call.unwrap_or(last));
         runs.push(LiveRun {
             earlier: blocks_taken.len() - 1,
             blocks: blocks_taken,
             verb,
             target,
-            elapsed_ms: if measured { run_ms } else { turn_elapsed_ms },
+            elapsed_ms: run_ms,
+            running,
         });
     };
     for (index, block) in blocks.iter().enumerate() {
@@ -1184,9 +1213,12 @@ pub fn live_runs(turn: &Turn, now_ms: u64) -> Vec<LiveRun> {
             continue;
         }
         let joins = match block {
-            Block::ToolCall { .. } => {
-                block.as_tool_call().is_some_and(|call| call_joins_run(&call))
-            }
+            Block::ToolCall { .. } => block.as_tool_call().is_some_and(|call| {
+                // Q1: already shown by an approval card — no second row.
+                let covered = call.kind == ToolKind::Shell
+                    && approved.iter().any(|command| approval_covers(command, &call.target));
+                !covered && call_joins_run(&call)
+            }),
             Block::ToolGroup { calls, .. } => group_joins_run(calls),
             _ => false,
         };
@@ -3587,7 +3619,10 @@ mod tests {
         let runs = live_runs(&turn, 0);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].blocks, vec![0, 1, 2]);
-        assert_eq!(runs[0].verb, "Searching");
+        // Q1: every member finished, so the row reads past tense —
+        // never a "Searching" spinner for settled work.
+        assert_eq!(runs[0].verb, "Searched");
+        assert!(!runs[0].running);
         assert_eq!(runs[0].target, "fold");
         assert_eq!(runs[0].earlier, 2);
         // The elapsed is the run's own measured time (120 + 120 + 80),
@@ -3817,8 +3852,112 @@ mod tests {
         let runs = live_runs(&turn, 0);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].blocks, vec![0, 1]);
-        assert_eq!(runs[0].verb, "Running");
+        // Q1: the finished members read past tense with their measured
+        // total (120 + 900) — a finished shell never reads "Running".
+        assert_eq!(runs[0].verb, "Ran");
+        assert!(!runs[0].running);
+        assert_eq!(runs[0].elapsed_ms, 1020);
         assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+    }
+
+    /// Q1: a finished shell call never produces a "Running" verb or a
+    /// live (spinning) row: it reads past tense with its measured total.
+    #[test]
+    fn a_finished_shell_call_never_reads_running() {
+        let mut done = shell_call("Ran", "cargo test");
+        done.duration_ms = Some(7_000);
+        let turn = Turn::Assistant {
+            id: "turn-shell-done".to_owned(),
+            blocks: vec![Block::tool_call(done)],
+            meta: TurnMeta::default(),
+            timestamp: None,
+        };
+        let runs = live_runs(&turn, 5_000);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].verb, "Ran");
+        assert_eq!(runs[0].target, "cargo test");
+        assert!(!runs[0].running, "nothing in flight: no spinner, no tick");
+        assert_eq!(runs[0].elapsed_ms, 7_000);
+    }
+
+    /// Q1: an in-flight call's elapsed is real — counted from the turn's
+    /// start, never a frozen zero.
+    #[test]
+    fn an_in_flight_call_ticks_from_the_turn_start() {
+        let mut flying = shell_call("Run", "cargo test");
+        flying.status = aui_protocol::ToolStatus::Running;
+        flying.duration_ms = None;
+        let turn = Turn::Assistant {
+            id: "turn-shell-flying".to_owned(),
+            blocks: vec![Block::tool_call(flying)],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        let runs = live_runs(&turn, 8_000);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].verb, "Running");
+        assert!(runs[0].running, "in flight: the row spins and ticks");
+        assert_eq!(runs[0].elapsed_ms, 7_000);
+    }
+
+    /// Q1: a command the turn's approval card already shows earns no
+    /// second live run row — neither the bare `Bash` command nor the
+    /// terminal face's backticked shape.
+    #[test]
+    fn an_approved_command_gets_no_extra_live_row() {
+        let mut flying = shell_call("Run", "cargo test");
+        flying.status = aui_protocol::ToolStatus::Running;
+        flying.duration_ms = None;
+        let approval = Block::approval(
+            "req-1",
+            "Bash",
+            "cargo test",
+            "run the suite",
+            "/tmp",
+            Vec::new(),
+            aui_protocol::ApprovalScope::ThisCommand,
+            ApprovalState::Pending,
+            None,
+        );
+        let turn = Turn::Assistant {
+            id: "turn-approved".to_owned(),
+            blocks: vec![approval, Block::tool_call(flying)],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        assert!(live_runs(&turn, 8_000).is_empty(), "the card is the row");
+        assert_eq!(turn_mapped_rows(&turn, false, &empty_toggled(), true), 2);
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 0),
+            Some(TurnSlot::Block(0))
+        ));
+        assert!(matches!(
+            turn_slot_at(&turn, false, &empty_toggled(), true, 1),
+            Some(TurnSlot::Block(1))
+        ));
+        // The terminal face wraps the same command in backticks; it
+        // covers the call all the same.
+        let mut terminal = shell_call("Running in terminal", "echo hi");
+        terminal.status = aui_protocol::ToolStatus::Running;
+        terminal.duration_ms = None;
+        let approval = Block::approval(
+            "req-2",
+            "mcp__baaz__terminal_run",
+            "Run in terminal · `echo hi`",
+            "run it",
+            "/tmp",
+            Vec::new(),
+            aui_protocol::ApprovalScope::ThisCommand,
+            ApprovalState::Pending,
+            None,
+        );
+        let turn = Turn::Assistant {
+            id: "turn-approved-terminal".to_owned(),
+            blocks: vec![approval, Block::tool_call(terminal)],
+            meta: TurnMeta::default(),
+            timestamp: Some(1_000),
+        };
+        assert!(live_runs(&turn, 8_000).is_empty(), "the terminal card is the row");
     }
 
     /// B12fix: Artifact tools read as a one-line summary, never the
