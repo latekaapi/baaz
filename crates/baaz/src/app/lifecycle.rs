@@ -195,6 +195,22 @@ pub(crate) fn drain_steps(steps: &mut Vec<String>) -> Vec<String> {
     std::mem::take(steps)
 }
 
+/// Whether a finished turn's model report seeds the next fresh Claude
+/// Code session's display-only chip: Claude Code reports only, and never
+/// an internal Haiku sub-call's (see
+/// [`crate::providers::claude_code_report_matches_session`]) — persisting
+/// that would paint every future fresh chip with a model nobody picked.
+/// The `ProviderTurnFinished` arm persists through here, so this is the
+/// call site's whole seed decision in pure form.
+pub(crate) fn should_seed_claude_code_model(
+    provider_kind: ProviderId,
+    report: &str,
+    known: &str,
+) -> bool {
+    provider_kind == ProviderId::ClaudeCode
+        && crate::providers::claude_code_report_matches_session(report, known)
+}
+
 /// One `--sidebar-fixture` row: the wire's shape, spelled as JSON.
 ///
 /// `label` stands in for the index title a live row would carry.
@@ -3935,15 +3951,13 @@ impl Harness {
                 // chip: display-only (the argv never sees it — see
                 // `claude_code_seed_model`), persisted beside the other
                 // stores with their hermeticity rule.
-                if provider_kind == ProviderId::ClaudeCode && !meta.model.is_empty() {
-                    // ...except an internal sub-call's: when the session
-                    // already knows its model and the report names another
-                    // family, persisting it would paint every future fresh
-                    // chip with a model nobody picked.
-                    let known = view.read(cx).model_id();
-                    if crate::providers::claude_code_report_matches_session(&meta.model, &known) {
-                        crate::providers::write_claude_code_last_reported_model(&meta.model);
-                    }
+                // ...except an internal sub-call's (see
+                // `should_seed_claude_code_model`): only a Haiku report
+                // against a non-Haiku pick is ever dropped — any other
+                // report updates the seed as before.
+                let known = view.read(cx).model_id();
+                if should_seed_claude_code_model(provider_kind, &meta.model, &known) {
+                    crate::providers::write_claude_code_last_reported_model(&meta.model);
                 }
                 let cursor =
                     view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
@@ -5523,6 +5537,65 @@ mod tests {
         assert_eq!(drain_steps(&mut holder), vec!["new".to_owned(), "wait:3000".to_owned()]);
         assert!(holder.is_empty());
         assert!(drain_steps(&mut holder).is_empty());
+    }
+
+    /// Q2b: the seed decision at the `ProviderTurnFinished` call site —
+    /// through [`should_seed_claude_code_model`], not just the providers
+    /// helper. A Sonnet fallback under a picked Opus seeds (chip and seed
+    /// update as before Q2); a Haiku report under a picked Opus never
+    /// does; a Haiku pick's own Haiku report does; other providers never
+    /// seed; and a `true` decision persists through the same write the
+    /// call site uses.
+    #[test]
+    fn lifecycle_seed_decision_drops_only_the_subcall() {
+        use crate::providers::ProviderId;
+
+        assert!(should_seed_claude_code_model(
+            ProviderId::ClaudeCode,
+            "claude-sonnet-4-5-20250822",
+            "opus"
+        ));
+        assert!(should_seed_claude_code_model(
+            ProviderId::ClaudeCode,
+            "claude-3-5-sonnet-20241022",
+            "opus"
+        ));
+        assert!(!should_seed_claude_code_model(
+            ProviderId::ClaudeCode,
+            "claude-haiku-4-5-20251001",
+            "opus"
+        ));
+        assert!(should_seed_claude_code_model(
+            ProviderId::ClaudeCode,
+            "claude-haiku-4-5-20251001",
+            "haiku"
+        ));
+        assert!(!should_seed_claude_code_model(ProviderId::Muse, "claude-sonnet-4-5", "opus"));
+        assert!(!should_seed_claude_code_model(ProviderId::ClaudeCode, "<synthetic>", "opus"));
+        assert!(!should_seed_claude_code_model(ProviderId::ClaudeCode, "", "opus"));
+
+        let _sandbox = crate::providers::TestEnvSandbox::enter("lifecycle-seed");
+        let report = "claude-sonnet-4-5-20250822";
+        if should_seed_claude_code_model(ProviderId::ClaudeCode, report, "opus") {
+            crate::providers::write_claude_code_last_reported_model(report);
+        }
+        assert_eq!(
+            crate::providers::read_claude_code_last_reported_model().as_deref(),
+            Some(report),
+            "a fallback report persists the seed"
+        );
+        if should_seed_claude_code_model(
+            ProviderId::ClaudeCode,
+            "claude-haiku-4-5-20251001",
+            "opus",
+        ) {
+            crate::providers::write_claude_code_last_reported_model("claude-haiku-4-5-20251001");
+        }
+        assert_eq!(
+            crate::providers::read_claude_code_last_reported_model().as_deref(),
+            Some(report),
+            "a dropped sub-call persists nothing"
+        );
     }
 
     // ------------------------------------------------- W2 provider-lane open
