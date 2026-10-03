@@ -756,6 +756,54 @@ pub fn claude_code_model_label(id: &str) -> String {
     label
 }
 
+/// Whether a Claude Code id names the Haiku family anywhere in the id,
+/// like the provider lane's own check: the CLI runs its internal
+/// sub-calls on Haiku, so a Haiku report is the one report that can be
+/// somebody else's.
+pub fn claude_code_is_haiku_model(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("haiku")
+}
+
+/// Whether `id` can name a model at all: non-empty and not a `<...>`
+/// placeholder such as the `<synthetic>` the CLI emits on
+/// error/synthetic messages. Placeholders never claim a turn; the next
+/// source answers instead.
+pub fn claude_code_is_model_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && !id.starts_with('<')
+}
+
+/// Whether a Claude Code turn report is an internal sub-call's rather
+/// than the session's: a Haiku report while a non-Haiku pick stands —
+/// the CLI runs its own sub-calls on Haiku, so that combination is the
+/// sub-call's, never the session's. Every other report (another family,
+/// a fallback, an unknown id) is the session's own. `None` pick means no
+/// pick stands, so nothing is a sub-call. A placeholder report is never
+/// a sub-call either — it is not a report at all (see
+/// [`claude_code_is_model_id`]).
+pub fn claude_code_is_subcall_report(report: &str, pick: Option<&str>) -> bool {
+    if !claude_code_is_model_id(report) || !claude_code_is_haiku_model(report) {
+        return false;
+    }
+    pick.map(str::trim)
+        .is_some_and(|pick| !pick.is_empty() && !claude_code_is_haiku_model(pick))
+}
+
+/// Whether a Claude Code turn report may seed future sessions' chips:
+/// always, except an internal sub-call's (see
+/// [`claude_code_is_subcall_report`]) — persisting that would paint
+/// every future fresh chip with a model nobody picked. A placeholder or
+/// empty report never seeds, and with nothing known the report is the
+/// best truth available. Unknown ids always seed: unknown is never a
+/// sub-call.
+pub fn claude_code_report_matches_session(report: &str, known: &str) -> bool {
+    if !claude_code_is_model_id(report) {
+        return false;
+    }
+    let known = known.trim();
+    !claude_code_is_subcall_report(report, if known.is_empty() { None } else { Some(known) })
+}
+
 // ------------------------------------------------- the last-chosen provider
 
 /// What the store remembers: the backend new sessions start on.
@@ -1101,6 +1149,47 @@ mod tests {
         assert_eq!(claude_code_model_label("haiku"), "Claude Haiku");
         assert_eq!(claude_code_model_label("future-model-9"), "future-model-9");
         assert_eq!(claude_code_model_label("claude-unknownthing"), "claude-unknownthing");
+    }
+
+    /// Q2b: only a Haiku report against a non-Haiku pick is a sub-call.
+    /// A Sonnet fallback (or /model switch) under a picked Opus is the
+    /// session's own; a Haiku pick's Haiku report is its own; unknown ids
+    /// are never sub-calls; placeholders never report at all.
+    #[test]
+    fn only_a_haiku_report_against_a_non_haiku_pick_is_a_subcall() {
+        assert!(claude_code_is_subcall_report("claude-haiku-4-5-20251001", Some("opus")));
+        assert!(!claude_code_is_subcall_report("claude-sonnet-4-5-20250822", Some("opus")));
+        assert!(!claude_code_is_subcall_report("claude-opus-4-1-20250822", Some("opus")));
+        assert!(!claude_code_is_subcall_report("future-model-9", Some("opus")));
+        assert!(!claude_code_is_subcall_report("claude-haiku-4-5-20251001", Some("haiku")));
+        assert!(!claude_code_is_subcall_report(
+            "claude-haiku-4-5-20251001",
+            Some("claude-haiku-4-5-20251001")
+        ));
+        assert!(!claude_code_is_subcall_report("claude-haiku-4-5-20251001", None));
+        assert!(!claude_code_is_subcall_report("claude-haiku-4-5-20251001", Some("")));
+        assert!(!claude_code_is_subcall_report("<synthetic>", Some("opus")));
+        assert!(!claude_code_is_subcall_report("", Some("opus")));
+    }
+
+    /// Q2b: a sub-call's report never seeds a future chip, while any
+    /// other report does — a Sonnet fallback under a picked Opus seeds
+    /// as before Q2, with nothing known the report is the best truth
+    /// available, and an empty or placeholder report never seeds.
+    #[test]
+    fn a_subcall_report_never_seeds_the_chip() {
+        assert!(claude_code_report_matches_session("claude-opus-5[1m]", "opus"));
+        assert!(claude_code_report_matches_session("claude-sonnet-4-5-20250822", "opus"));
+        assert!(claude_code_report_matches_session("future-model-9", "opus"));
+        assert!(claude_code_report_matches_session(
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5-20251001"
+        ));
+        assert!(!claude_code_report_matches_session("claude-haiku-4-5-20251001", "opus"));
+        assert!(claude_code_report_matches_session("claude-haiku-4-5-20251001", ""));
+        assert!(!claude_code_report_matches_session("", "opus"));
+        assert!(!claude_code_report_matches_session("<synthetic>", "opus"));
+        assert!(!claude_code_report_matches_session("  <synthetic>  ", ""));
     }
 
     #[test]

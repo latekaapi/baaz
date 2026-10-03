@@ -95,6 +95,11 @@ struct ToolSite {
     target: String,
     name: String,
     params: Vec<(String, String)>,
+    /// Wall-clock moment the `tool_use` arrived: the result's
+    /// `duration_ms` on the live path. Recorded always, read only when
+    /// live — a replay folds as fast as it reads, so its own wall gap
+    /// would be fiction, and history keeps its filed `None`.
+    started: Instant,
 }
 
 /// Where a nested (sub-agent) tool call lives inside its `Agent` card's
@@ -277,6 +282,21 @@ fn past_verb(kind: &ToolKind, open: &str) -> String {
         _ => open,
     }
     .to_owned()
+}
+
+/// Fill an unset tool-call duration with the measured wall gap: the
+/// live path's reading, applied after [`finish_tool_block`] so a
+/// result-carried duration (terminal runs) is never overwritten and
+/// non-call blocks pass through untouched.
+fn with_tool_duration(block: Block, duration_ms: u64) -> Block {
+    let mut call = match block.as_tool_call() {
+        Some(call) => call,
+        None => return block,
+    };
+    if call.duration_ms.is_none() {
+        call.duration_ms = Some(duration_ms);
+    }
+    Block::tool_call(call)
 }
 
 /// Complete any tool card from its result: the one place shell output,
@@ -757,6 +777,12 @@ pub struct ClaudeFold {
     /// The last stored line's model, in file order: the session's model
     /// when history exists, `None` on a stream-only fold.
     stored_model: Option<String>,
+    /// Main-thread assistant message model per turn (`message.model`):
+    /// the model that answered the turn. The `result` frame's `modelUsage`
+    /// also lists internal sub-call models, so the finished turn reads
+    /// this first and the result's decode only when no message named one.
+    /// Keyed by turn id, dropped as each turn finishes.
+    turn_model: HashMap<String, String>,
     model: Option<String>,
     session_id: Option<String>,
     account: AccountSnapshot,
@@ -776,6 +802,11 @@ pub struct ClaudeFold {
     /// the decision queues the answer line, the frames settle the card —
     /// deciding never moves it, only resolving does.
     approval_sites: HashMap<String, ApprovalSite>,
+    /// Requests the host answered with a deny. The CLI's error
+    /// `tool_result` for a denied call arrives long before the turn's
+    /// `permission_denials` would correct the card, so without this the
+    /// card read "Allowed once · exit 1" for the rest of the live turn.
+    denied: HashSet<String>,
     /// `tool_use` id → `request_id`, the join a result needs to settle the
     /// approval whose tool just answered. Same lifetime as `approval_sites`.
     tool_approvals: HashMap<String, String>,
@@ -786,6 +817,16 @@ pub struct ClaudeFold {
     /// B12: `request_id` → when the approval was asked, for the settled
     /// card's real duration. Wall clock: exact live, ~0 on a fast replay.
     approval_started: HashMap<String, Instant>,
+    /// Whether this fold tracks the live stream rather than a stored
+    /// replay. Live, tool starts and turn starts take wall-clock
+    /// readings (result `duration_ms`, turn `timestamp`) so the
+    /// transcript's live rows tick for real. A replay keeps its filed
+    /// zeros — `None` durations, `None` timestamps — however fast it
+    /// folds, so reopened history reads as it was. `false` by default:
+    /// fixtures and `stored_history` fold through [`ClaudeFold::new`]
+    /// unchanged; the adapter opts its stream fold in with
+    /// [`ClaudeFold::set_live`].
+    live: bool,
     /// The session cwd from the `init` frame: what a pending approval card
     /// names as where the tool would run. Empty until `init` arrives.
     session_cwd: String,
@@ -829,10 +870,31 @@ pub struct ControlOutcome {
     pub models: Vec<crate::frame::CatalogModel>,
 }
 
+/// Wall time as Unix milliseconds for live turn starts: the clock the
+/// transcript's turn ages already format against.
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 impl ClaudeFold {
     /// An empty fold.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Track the live stream (`true`) or a stored replay (`false`): what
+    /// decides whether tool starts and turn starts take wall-clock
+    /// readings. The adapter opts its stream fold in; replays stay out.
+    pub fn set_live(&mut self, live: bool) {
+        self.live = live;
+    }
+
+    /// Whether this fold takes live wall-clock readings.
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     /// The latest account reading (see [`crate::account`]).
@@ -915,7 +977,20 @@ impl ClaudeFold {
         let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
         let request = self.pending.remove(position);
         self.decided.insert(request_id.to_owned(), request.clone());
+        // Q1b: the gated command's measured time excludes the approval
+        // wait — the run starts when the person allows it, not when the
+        // `tool_use` arrived. A `tool_use` arriving after the decision
+        // stamps itself fresh on arrival, so only the waiting card moves.
+        if let Some(site) = self.tools.get_mut(&request.tool_use_id) {
+            site.started = Instant::now();
+        }
         Some(request)
+    }
+
+    /// Record that the host denied `request_id`, so its error result
+    /// settles the card as Denied at once.
+    pub fn note_denied(&mut self, request_id: &str) {
+        self.denied.insert(request_id.to_owned());
     }
 
     /// Unknown-subtype control requests waiting on a human decision, oldest
@@ -977,10 +1052,15 @@ impl ClaudeFold {
                 // per-message usage is one API request, not the turn, so
                 // the last line wins and the `result` frame stays
                 // authoritative wherever one arrives.
+                // A `<...>` placeholder (`<synthetic>` on error/synthetic
+                // messages) is not a model id: it never claims the turn,
+                // so the next source answers instead.
+                let real_model =
+                    model.as_deref().filter(|name| crate::frame::is_model_id(name));
                 if model.is_some() || usage.is_some() {
                     let usage = usage.clone().unwrap_or_default();
                     self.stored_meta.insert(turn_id.clone(), TurnMeta {
-                        model: model.clone().unwrap_or_default(),
+                        model: real_model.unwrap_or_default().to_owned(),
                         duration_ms: 0,
                         tokens_in: usage.input_tokens.saturating_add(
                             usage.cache_read_tokens.unwrap_or(0),
@@ -996,11 +1076,17 @@ impl ClaudeFold {
                         cache_write_tokens: usage.cache_write_tokens,
                         cached_tokens: 0,
                     });
-                    if let Some(model) = model {
-                        if !model.is_empty() {
-                            self.stored_model = Some(model.clone());
-                        }
+                    if let Some(name) = real_model {
+                        self.stored_model = Some(name.to_owned());
                     }
+                }
+                // The turn's answering model: the message's own `model`,
+                // remembered per turn so the `result` frame's `modelUsage`
+                // (which also lists internal sub-call models) cannot
+                // rename the turn when it finishes. Placeholders never
+                // land here (see `real_model` above).
+                if let Some(name) = real_model {
+                    self.turn_model.insert(turn_id.clone(), name.to_owned());
                 }
                 // B12: the turn's own open thinking (if any) ends where
                 // this frame begins — its duration is the gap, from the
@@ -1043,8 +1129,21 @@ impl ClaudeFold {
                 // bare `input_tokens` here would show 93 for a 30k prompt.
                 // The cache fields stay informational (never add them on
                 // top — that double-counts); the ledger reads `tokens_in`.
+                // The turn's model is the model that answered: the turn's
+                // own assistant message first, then the result's decode
+                // (already sub-call-safe), then the session's init model.
+                // The result never writes back into the session model —
+                // it only names the finished turn.
+                let answered = self
+                    .assistant_turn
+                    .clone()
+                    .or_else(|| self.open.last().cloned())
+                    .and_then(|turn| self.turn_model.get(&turn).cloned())
+                    .or_else(|| model.clone().filter(|name| crate::frame::is_model_id(name)))
+                    .or_else(|| self.model.clone())
+                    .unwrap_or_default();
                 let meta = TurnMeta {
-                    model: model.clone().or_else(|| self.model.clone()).unwrap_or_default(),
+                    model: answered,
                     duration_ms: *duration_ms,
                     tokens_in: input_tokens
                         .saturating_add(cache_read_tokens.unwrap_or(0))
@@ -1140,6 +1239,7 @@ impl ClaudeFold {
                     .or_else(|| finishing.last().cloned());
                 for turn_id in finishing {
                     self.stored_meta.remove(&turn_id);
+                    self.turn_model.remove(&turn_id);
                     let finished = if Some(&turn_id) == owner.as_ref() {
                         meta.clone()
                     } else {
@@ -1205,12 +1305,15 @@ impl ClaudeFold {
         self.started.insert(message_id.to_owned(), ());
         self.open.push(message_id.to_owned());
         self.assistant_turn = Some(message_id.to_owned());
+        // A live turn starts now (its rows tick from here); a replayed
+        // turn keeps its filed `None`.
+        let timestamp = self.live.then(epoch_ms_now);
         deltas.push(Delta::TurnStarted {
             turn: Turn::Assistant {
                 id: message_id.to_owned(),
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
-                timestamp: None,
+                timestamp,
             },
         });
         message_id.to_owned()
@@ -1328,6 +1431,7 @@ impl ClaudeFold {
                             target: site.target.clone(),
                             name: name.clone(),
                             params: site.params.clone(),
+                            started: Instant::now(),
                         });
                         deltas.push(Delta::BlockAdded {
                             turn_id: turn_id.to_owned(),
@@ -1497,6 +1601,15 @@ impl ClaudeFold {
             &result.tool_use_id,
             result,
         );
+        // Live, the card carries how long the call took, measured from
+        // its `tool_use`; a replay keeps the filed block as is. A
+        // result-carried duration (terminal runs) always wins — the wall
+        // gap only fills an unset one.
+        let block = if self.live {
+            with_tool_duration(block, wall_ms_since(site.started))
+        } else {
+            block
+        };
         let mut deltas =
             vec![Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block }];
         if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
@@ -1508,7 +1621,9 @@ impl ClaudeFold {
                 exit_code,
                 duration_ms: self.approval_duration_ms(&request_id),
             };
-            if result.is_error {
+            if result.is_error && self.denied.contains(&request_id) {
+                self.resolve_approval_card(&request_id, ApprovalState::Denied, &mut deltas);
+            } else if result.is_error {
                 self.update_approval_state(&request_id, state, &mut deltas);
             } else {
                 self.resolve_approval_card(&request_id, state, &mut deltas);
@@ -1951,12 +2066,15 @@ impl ClaudeFold {
         }
         self.started.insert(key.to_owned(), ());
         self.open.push(key.to_owned());
+        // Live control turns start now, like assistant turns; replays
+        // keep `None`.
+        let timestamp = self.live.then(epoch_ms_now);
         deltas.push(Delta::TurnStarted {
             turn: Turn::Assistant {
                 id: key.to_owned(),
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
-                timestamp: None,
+                timestamp,
             },
         });
         key.to_owned()
@@ -2694,6 +2812,18 @@ mod tests {
         (fold, deltas)
     }
 
+    /// The same fold with the live stream opted in: tool starts and turn
+    /// starts take wall-clock readings.
+    fn live_fold_lines(lines: &[String]) -> (ClaudeFold, Vec<Delta>) {
+        let mut fold = ClaudeFold::new();
+        fold.set_live(true);
+        let mut deltas = Vec::new();
+        for line in lines {
+            deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        (fold, deltas)
+    }
+
     fn text_of(block: &Block) -> Option<&str> {
         match block {
             Block::Text { text, .. } => Some(text),
@@ -3151,6 +3281,35 @@ mod tests {
                 Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Denied, .. }, .. }
             )),
             "the late denial still corrects the card to denied"
+        );
+    }
+
+    /// A command the host DENIED settles its card Denied when its error
+    /// result arrives — never "Allowed once · exit 1" until the turn's
+    /// result frame corrects it.
+    #[test]
+    fn a_host_denied_command_settles_denied_on_its_error_result() {
+        let lines = fixture_lines("error.jsonl");
+        let asked_at = nth_control_request(&lines, 1).expect("the Bash ask on the wire");
+        let (mut fold, _) = fold_lines(&lines[..asked_at]);
+        let request = fold.pending_approvals()[0].clone();
+        fold.take_approval(&request.request_id).expect("the ask is answerable");
+        fold.note_denied(&request.request_id);
+        let mut rest = Vec::new();
+        for line in &lines[asked_at..] {
+            rest.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        let states: Vec<&ApprovalState> = rest
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::Approval { state, .. }, .. } => Some(state),
+                _ => None,
+            })
+            .collect();
+        assert!(states.iter().any(|state| matches!(state, ApprovalState::Denied)), "the card settles denied: {states:?}");
+        assert!(
+            !states.iter().any(|state| matches!(state, ApprovalState::AllowedOnce { .. })),
+            "a denied command never reads allowed: {states:?}"
         );
     }
 
@@ -3817,6 +3976,177 @@ mod tests {
         }
     }
 
+    /// Q1: on the live fold a `tool_use` followed by its result completes
+    /// to a card with a measured `duration_ms`; the replay fold keeps
+    /// the filed `None`, so reopened history reads as it was.
+    #[test]
+    fn live_tool_result_carries_a_measured_duration() {
+        let session = "q1-duration";
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "model": "m", "id": "msg_1", "type": "message", "role": "assistant",
+                    "content": [{
+                        "type": "tool_use", "id": "toolu_q1",
+                        "name": "Bash",
+                        "input": {"command": "cargo test"},
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result", "tool_use_id": "toolu_q1",
+                        "content": [{"type": "text", "text": "ok"}],
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-2", "timestamp": "2026-09-27T00:00:01.000Z",
+            })
+            .to_string(),
+        ];
+        let (_, live) = live_fold_lines(&lines);
+        let completed = live
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "the result completes the card");
+        assert!(completed[0].is_some(), "live measures the call: {completed:?}");
+        let (_, replayed) = fold_lines(&lines);
+        let completed = replayed
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed, [None], "replay keeps the filed None: {completed:?}");
+    }
+
+    /// Q1b: an approved command's measured `duration_ms` excludes the
+    /// approval wait — the run starts at the decision, not at the
+    /// `tool_use`. A command approved after 3 minutes reads seconds,
+    /// never "3m 2s".
+    #[test]
+    fn approved_commands_measure_from_the_decision() {
+        let session = "q1b-approval-duration";
+        let tool_use = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "m", "id": "msg_1", "type": "message", "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "toolu_q1b",
+                    "name": "Bash",
+                    "input": {"command": "sleep 2"},
+                }],
+            },
+            "parent_tool_use_id": null, "session_id": session,
+            "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+        })
+        .to_string();
+        let result = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result", "tool_use_id": "toolu_q1b",
+                    "content": [{"type": "text", "text": "ok"}],
+                }],
+            },
+            "parent_tool_use_id": null, "session_id": session,
+            "uuid": "u-2", "timestamp": "2026-09-27T00:03:02.000Z",
+        })
+        .to_string();
+        let mut fold = ClaudeFold::new();
+        fold.set_live(true);
+        fold.apply(&decode_line(&tool_use).expect("decodes"));
+        // The person takes 3 minutes to approve: the card waited that long.
+        fold.tools.get_mut("toolu_q1b").expect("the tool_use cards").started =
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(180))
+                .expect("backdates");
+        fold.apply(&Frame::ControlRequest(ApprovalRequest {
+            request_id: "req-q1b".to_owned(),
+            tool_name: "Bash".to_owned(),
+            display_name: "Bash".to_owned(),
+            mcp_server: None,
+            input: serde_json::json!({"command": "sleep 2"}),
+            description: String::new(),
+            decision_reason: String::new(),
+            tool_use_id: "toolu_q1b".to_owned(),
+            suggestions: Vec::new(),
+        }));
+        fold.take_approval("req-q1b").expect("answerable");
+        let settled = fold.apply(&decode_line(&result).expect("decodes"));
+        let durations = settled
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(durations.len(), 1, "the result completes the card");
+        let measured = durations[0].expect("live measures the call");
+        assert!(measured < 60_000, "the 3-minute wait is excluded, got {measured} ms");
+        assert!(
+            settled.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::AllowedOnce { .. }, .. }, .. }
+            )),
+            "the result still settles the decided card to allowed"
+        );
+    }
+
+    /// Q1: a live assistant turn starts stamped (its rows tick from
+    /// there); a replayed turn keeps `None`, as today.
+    #[test]
+    fn live_turns_start_stamped_while_replays_stay_unstamped() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "m", "id": "msg_live", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+            "parent_tool_use_id": null, "session_id": "q1-stamp",
+            "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+        })
+        .to_string();
+        let (_, live) = live_fold_lines(std::slice::from_ref(&line));
+        let stamped = live
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::Assistant { timestamp, .. } } => Some(*timestamp),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stamped.len(), 1, "the turn announces once");
+        assert!(stamped[0].is_some(), "live stamps the turn start: {stamped:?}");
+        let (_, replayed) = fold_lines(&[line]);
+        let stamped = replayed
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::Assistant { timestamp, .. } } => Some(*timestamp),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stamped, [None], "replay keeps None: {stamped:?}");
+    }
+
     /// The `terminal_run` approval asks "Run in terminal · `<command>`" —
     /// never "baaz · Terminal Run (mcp__baaz__terminal_run)" (D51).
     #[test]
@@ -3864,6 +4194,60 @@ mod tests {
             assert!(meta.cost_usd > 0.0);
             assert!(meta.tokens_out > 0);
         }
+    }
+
+    /// Q2: the finished turn names the model that answered. The result's
+    /// `modelUsage` lists the Haiku sub-call first, but the assistant
+    /// message answered on Opus — so the turn's meta reads Opus, and the
+    /// session model is untouched by the result.
+    #[test]
+    fn finished_turn_names_the_answering_model_not_the_subcall() {
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"claude-opus-4-1-20250822","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":510},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":5,"outputTokens":500},"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#.to_owned(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(metas[0].model, "claude-opus-4-1-20250822");
+        assert_eq!(fold.model(), Some("opus"), "the result never rewrites the session model");
+    }
+
+    /// Q2b: a `<synthetic>` assistant message never becomes the turn
+    /// model. The message carries the placeholder while the result's
+    /// `modelUsage` names Opus — so the finished turn reads Opus, falling
+    /// back to the next source; with no result model at all it falls
+    /// further back to the session's init model.
+    #[test]
+    fn synthetic_message_model_falls_back_to_the_next_source() {
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"<synthetic>","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100,"model":null,"modelUsage":{"claude-opus-4-1-20250822":{"inputTokens":5,"outputTokens":10}}}"#.to_owned(),
+        ];
+        let (fold, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(
+            metas[0].model, "claude-opus-4-1-20250822",
+            "the placeholder never claims the turn, drew {:?}",
+            metas[0].model
+        );
+        assert_eq!(fold.model(), Some("opus"), "the result never rewrites the session model");
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus","cwd":"/tmp","tools":[]}"#.to_owned(),
+            r#"{"type":"assistant","session_id":"s","uuid":"u-1","message":{"id":"msg-1","model":"<synthetic>","content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+            r#"{"type":"result","session_id":"s","result":"done","usage":{"input_tokens":10,"output_tokens":10},"total_cost_usd":0.01,"duration_ms":100}"#.to_owned(),
+        ];
+        let (_, deltas) = fold_lines(&lines);
+        let metas = finished_metas(&deltas);
+        assert_eq!(metas.len(), 1, "one result finishes one turn");
+        assert_eq!(
+            metas[0].model, "opus",
+            "with no model anywhere the init model answers, drew {:?}",
+            metas[0].model
+        );
     }
 
     #[test]
@@ -3995,6 +4379,17 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("allow")
         );
+        // An empty reason (Deny, then Send with nothing typed) must never
+        // reach the CLI as an empty message: the API rejects the empty error
+        // tool_result and the turn dies with a 400.
+        for blank in [Some(""), Some("   ")] {
+            let line = decide_approval(&request, "deny", blank).expect("blank deny decides");
+            let written: serde_json::Value = serde_json::from_str(&line).expect("encodes JSON");
+            assert_eq!(
+                written.pointer("/response/response/message").and_then(serde_json::Value::as_str),
+                Some(crate::frame::DENY_WITHOUT_REASON)
+            );
+        }
         let deny = decide_approval(&request, "deny", Some("too risky")).expect("deny decides");
         let written: serde_json::Value = serde_json::from_str(&deny).expect("encodes JSON");
         assert_eq!(
