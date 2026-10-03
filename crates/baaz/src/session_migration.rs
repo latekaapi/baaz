@@ -732,11 +732,11 @@ pub fn prompt_detail(moves: &[PlannedMove]) -> String {
          folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them resumable \
          here and takes them out of those apps. Nothing is deleted.",
     );
-    detail.push_str(&format!("\n\nShow files ({})", moves.len()));
-    detail.push_str(
-        "\nThe full list is under Settings → Providers. \
-         Note: Codex for Mac may keep listing moved threads until they are archived there.",
-    );
+    detail.push_str(&format!(
+        "\n\n{} files in all — the list is under Settings → Providers. \
+         Codex for Mac may keep listing moved threads until you archive them there.",
+        moves.len()
+    ));
     detail
 }
 
@@ -914,6 +914,11 @@ pub fn ensure_session_moved(
     provider: &str,
     session_id: &str,
 ) -> usize {
+    // Defence in depth: whatever the caller, nothing moves before the
+    // person's Move click (plan.md decision 4).
+    if !is_consented(state_dir) {
+        return 0;
+    }
     let moves = pending_moves(state_dir, plan_single(owner_home, state_dir, provider, session_id));
     let report = execute_plan(state_dir, &moves);
     report.moved + report.copied
@@ -1391,8 +1396,8 @@ mod tests {
         assert!(detail.contains("Nothing is deleted"), "the never-deletes note: {detail}");
         assert!(detail.contains("archive"), "the Codex-for-Mac stale-entries note: {detail}");
         assert!(
-            detail.contains(&format!("Show files ({})", plan.len())),
-            "the collapsed file count, not the list: {detail}"
+            detail.contains(&format!("{} files in all", plan.len())),
+            "the file count, not the list: {detail}"
         );
         assert!(!detail.contains(".jsonl"), "no inline path list: {detail}");
         assert!(!detail.to_lowercase().contains("owner"), "no internal words: {detail}");
@@ -1489,6 +1494,13 @@ mod tests {
         homes.seed_claude("-work", "sess-1", true);
         homes.seed_codex("thread-1");
 
+        // Before the person's Move click the mover itself refuses.
+        assert_eq!(
+            ensure_session_moved(&homes.owner, &homes.state, CLAUDE_PROVIDER, "sess-1"),
+            0,
+            "nothing moves before consent, whatever the caller"
+        );
+        record_consent(&homes.state);
         let moved = ensure_session_moved(&homes.owner, &homes.state, CLAUDE_PROVIDER, "sess-1");
         assert_eq!(moved, 2, "transcript plus companion move on first resume");
         assert_eq!(
