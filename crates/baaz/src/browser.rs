@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use aui::workbench::Annotation;
+use aui_tokens::ActiveAui;
 use aui_webview::{FakeWebBackend, WebBackend, WebviewIntent, WebviewState, WryBackend};
 use gpui::{AppContext as _, Bounds, Context, Entity, Pixels, Point, Window};
 
@@ -311,7 +312,17 @@ impl Harness {
                 }
                 WebviewState::new(Box::new(backend), cx)
             } else {
-                match WryBackend::new_at(&*window, &initial, (0.0, 0.0), (0.0, 0.0)) {
+                // WebKit paints white before and beneath a page; paint the
+                // pane's own surface instead, so about:blank is not a white slab.
+                let bg = gpui::Rgba::from(cx.aui().colors.surface_1);
+                let rgba = [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                match WryBackend::new_at_with_background(
+                    &*window,
+                    &initial,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                    (rgba[0], rgba[1], rgba[2], rgba[3]),
+                ) {
                     Ok(backend) => WebviewState::new(Box::new(backend), cx),
                     Err(error) => {
                         crate::baaz_log!("browser: no WKWebView ({error}); falling back to the scripted page");
