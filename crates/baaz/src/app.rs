@@ -3423,6 +3423,55 @@ impl Harness {
         cx.notify();
     }
 
+    /// While a switch to another session is pending (Q4): the centre is the
+    /// destination's loading state — never the previous session's transcript
+    /// or composer draft. Muse opens already swap synchronously with
+    /// `mark_history_loading`, so this only ever names a provider reopen
+    /// whose child is still resuming; `replacing` (in-place provider
+    /// switch) and the inline failure keep their own views.
+    pub(crate) fn pending_switch_dest(&self, cx: &gpui::App) -> Option<String> {
+        if !self.session_switch_pending {
+            return None;
+        }
+        if self.replacing.is_some() {
+            return None;
+        }
+        if self.provider_open_error.is_some() {
+            return None;
+        }
+        let dest = self.pending_id.clone()?;
+        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == dest) {
+            return None;
+        }
+        Some(dest)
+    }
+
+    /// The centre while a provider switch is pending: the same neutral
+    /// history-loading shape a Muse reopen shows (`loading_row` + the
+    /// "Loading history…" status) — an empty pane that keeps its height,
+    /// with no transcript and no composer, so no previous-session content
+    /// can paint. No interactive controls, so no control roles are needed.
+    fn render_pending_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        v_flex()
+            .size_full()
+            .child(div().w_full().flex_1().min_h(px(0.0)))
+            .child(
+                div()
+                    .w_full()
+                    .px(px(scale::SP_4))
+                    .pb(px(scale::SP_4))
+                    .child(
+                        div()
+                            .w_full()
+                            .ui(scale::FS_12)
+                            .text_color(p.ink_3)
+                            .child("Loading history…"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The one write left in the render tree, and it only ever fires on a
         // `--replay` window's first frame: `open_replay` starts a stream
@@ -3441,8 +3490,13 @@ impl Harness {
         // `render_no_session` stays inline — there is no view to cache on,
         // and the screen is static.
         // Route::Skills: the page replaces the transcript area while open.
+        // Q4: while a switch to another session is pending, the centre is
+        // the destination's loading state — never the previous transcript.
+        let pending_dest = self.pending_switch_dest(cx);
         let body = if self.skills.open {
             self.render_skills_page(window, cx)
+        } else if pending_dest.is_some() {
+            self.render_pending_switch(cx)
         } else {
             match self.active.clone() {
             Some(view) => {
