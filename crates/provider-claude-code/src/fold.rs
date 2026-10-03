@@ -95,6 +95,11 @@ struct ToolSite {
     target: String,
     name: String,
     params: Vec<(String, String)>,
+    /// Wall-clock moment the `tool_use` arrived: the result's
+    /// `duration_ms` on the live path. Recorded always, read only when
+    /// live — a replay folds as fast as it reads, so its own wall gap
+    /// would be fiction, and history keeps its filed `None`.
+    started: Instant,
 }
 
 /// Where a nested (sub-agent) tool call lives inside its `Agent` card's
@@ -277,6 +282,21 @@ fn past_verb(kind: &ToolKind, open: &str) -> String {
         _ => open,
     }
     .to_owned()
+}
+
+/// Fill an unset tool-call duration with the measured wall gap: the
+/// live path's reading, applied after [`finish_tool_block`] so a
+/// result-carried duration (terminal runs) is never overwritten and
+/// non-call blocks pass through untouched.
+fn with_tool_duration(block: Block, duration_ms: u64) -> Block {
+    let mut call = match block.as_tool_call() {
+        Some(call) => call,
+        None => return block,
+    };
+    if call.duration_ms.is_none() {
+        call.duration_ms = Some(duration_ms);
+    }
+    Block::tool_call(call)
 }
 
 /// Complete any tool card from its result: the one place shell output,
@@ -786,6 +806,16 @@ pub struct ClaudeFold {
     /// B12: `request_id` → when the approval was asked, for the settled
     /// card's real duration. Wall clock: exact live, ~0 on a fast replay.
     approval_started: HashMap<String, Instant>,
+    /// Whether this fold tracks the live stream rather than a stored
+    /// replay. Live, tool starts and turn starts take wall-clock
+    /// readings (result `duration_ms`, turn `timestamp`) so the
+    /// transcript's live rows tick for real. A replay keeps its filed
+    /// zeros — `None` durations, `None` timestamps — however fast it
+    /// folds, so reopened history reads as it was. `false` by default:
+    /// fixtures and `stored_history` fold through [`ClaudeFold::new`]
+    /// unchanged; the adapter opts its stream fold in with
+    /// [`ClaudeFold::set_live`].
+    live: bool,
     /// The session cwd from the `init` frame: what a pending approval card
     /// names as where the tool would run. Empty until `init` arrives.
     session_cwd: String,
@@ -829,10 +859,31 @@ pub struct ControlOutcome {
     pub models: Vec<crate::frame::CatalogModel>,
 }
 
+/// Wall time as Unix milliseconds for live turn starts: the clock the
+/// transcript's turn ages already format against.
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 impl ClaudeFold {
     /// An empty fold.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Track the live stream (`true`) or a stored replay (`false`): what
+    /// decides whether tool starts and turn starts take wall-clock
+    /// readings. The adapter opts its stream fold in; replays stay out.
+    pub fn set_live(&mut self, live: bool) {
+        self.live = live;
+    }
+
+    /// Whether this fold takes live wall-clock readings.
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     /// The latest account reading (see [`crate::account`]).
@@ -1205,12 +1256,15 @@ impl ClaudeFold {
         self.started.insert(message_id.to_owned(), ());
         self.open.push(message_id.to_owned());
         self.assistant_turn = Some(message_id.to_owned());
+        // A live turn starts now (its rows tick from here); a replayed
+        // turn keeps its filed `None`.
+        let timestamp = self.live.then(epoch_ms_now);
         deltas.push(Delta::TurnStarted {
             turn: Turn::Assistant {
                 id: message_id.to_owned(),
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
-                timestamp: None,
+                timestamp,
             },
         });
         message_id.to_owned()
@@ -1328,6 +1382,7 @@ impl ClaudeFold {
                             target: site.target.clone(),
                             name: name.clone(),
                             params: site.params.clone(),
+                            started: Instant::now(),
                         });
                         deltas.push(Delta::BlockAdded {
                             turn_id: turn_id.to_owned(),
@@ -1497,6 +1552,15 @@ impl ClaudeFold {
             &result.tool_use_id,
             result,
         );
+        // Live, the card carries how long the call took, measured from
+        // its `tool_use`; a replay keeps the filed block as is. A
+        // result-carried duration (terminal runs) always wins — the wall
+        // gap only fills an unset one.
+        let block = if self.live {
+            with_tool_duration(block, wall_ms_since(site.started))
+        } else {
+            block
+        };
         let mut deltas =
             vec![Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block }];
         if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
@@ -1951,12 +2015,15 @@ impl ClaudeFold {
         }
         self.started.insert(key.to_owned(), ());
         self.open.push(key.to_owned());
+        // Live control turns start now, like assistant turns; replays
+        // keep `None`.
+        let timestamp = self.live.then(epoch_ms_now);
         deltas.push(Delta::TurnStarted {
             turn: Turn::Assistant {
                 id: key.to_owned(),
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
-                timestamp: None,
+                timestamp,
             },
         });
         key.to_owned()
@@ -2687,6 +2754,18 @@ mod tests {
 
     fn fold_lines(lines: &[String]) -> (ClaudeFold, Vec<Delta>) {
         let mut fold = ClaudeFold::new();
+        let mut deltas = Vec::new();
+        for line in lines {
+            deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
+        }
+        (fold, deltas)
+    }
+
+    /// The same fold with the live stream opted in: tool starts and turn
+    /// starts take wall-clock readings.
+    fn live_fold_lines(lines: &[String]) -> (ClaudeFold, Vec<Delta>) {
+        let mut fold = ClaudeFold::new();
+        fold.set_live(true);
         let mut deltas = Vec::new();
         for line in lines {
             deltas.extend(fold.apply(&decode_line(line).expect("decodes")));
@@ -3815,6 +3894,101 @@ mod tests {
             }
             body => panic!("a shell body, not {body:?}"),
         }
+    }
+
+    /// Q1: on the live fold a `tool_use` followed by its result completes
+    /// to a card with a measured `duration_ms`; the replay fold keeps
+    /// the filed `None`, so reopened history reads as it was.
+    #[test]
+    fn live_tool_result_carries_a_measured_duration() {
+        let session = "q1-duration";
+        let lines = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "model": "m", "id": "msg_1", "type": "message", "role": "assistant",
+                    "content": [{
+                        "type": "tool_use", "id": "toolu_q1",
+                        "name": "Bash",
+                        "input": {"command": "cargo test"},
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result", "tool_use_id": "toolu_q1",
+                        "content": [{"type": "text", "text": "ok"}],
+                    }],
+                },
+                "parent_tool_use_id": null, "session_id": session,
+                "uuid": "u-2", "timestamp": "2026-09-27T00:00:01.000Z",
+            })
+            .to_string(),
+        ];
+        let (_, live) = live_fold_lines(&lines);
+        let completed = live
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "the result completes the card");
+        assert!(completed[0].is_some(), "live measures the call: {completed:?}");
+        let (_, replayed) = fold_lines(&lines);
+        let completed = replayed
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockUpdated { block: Block::ToolCall { duration_ms, .. }, .. } => {
+                    Some(*duration_ms)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed, [None], "replay keeps the filed None: {completed:?}");
+    }
+
+    /// Q1: a live assistant turn starts stamped (its rows tick from
+    /// there); a replayed turn keeps `None`, as today.
+    #[test]
+    fn live_turns_start_stamped_while_replays_stay_unstamped() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "m", "id": "msg_live", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+            "parent_tool_use_id": null, "session_id": "q1-stamp",
+            "uuid": "u-1", "timestamp": "2026-09-27T00:00:00.000Z", "request_id": "req_1",
+        })
+        .to_string();
+        let (_, live) = live_fold_lines(&[line.clone()]);
+        let stamped = live
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::Assistant { timestamp, .. } } => Some(*timestamp),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stamped.len(), 1, "the turn announces once");
+        assert!(stamped[0].is_some(), "live stamps the turn start: {stamped:?}");
+        let (_, replayed) = fold_lines(&[line]);
+        let stamped = replayed
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::TurnStarted { turn: Turn::Assistant { timestamp, .. } } => Some(*timestamp),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stamped, [None], "replay keeps None: {stamped:?}");
     }
 
     /// The `terminal_run` approval asks "Run in terminal · `<command>`" —
