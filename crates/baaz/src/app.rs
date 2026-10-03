@@ -2329,12 +2329,12 @@ impl Harness {
         url: String,
         cx: &mut Context<Self>,
     ) {
-        // Q4b: while a provider switch is pending, a navigation sync for
-        // any session but the destination is deferred — persisting it now
-        // would overwrite the still-open session's stored URL with pane
-        // activity from the switch. The live webview keeps its URL, so the
-        // next sync after the switch lands persists it then.
-        if self.pending_switch_dest(cx).is_some_and(|dest| dest != session_id) {
+        // Q4c: while a provider switch is pending, every navigation sync
+        // is deferred — the pane is neutral and describes neither session,
+        // so persisting now would write pane activity onto a session the
+        // pane is not showing. The live webviews keep their URLs, so the
+        // next sync after the switch lands persists them then.
+        if self.pending_switch_dest(cx).is_some() {
             return;
         }
         let entry = self.overrides.entry(session_id.to_owned()).or_default();
@@ -2461,14 +2461,17 @@ impl Harness {
     /// B7: the persist is the cheap debounced write above — no `rejoin`,
     /// no search rebuild, no synchronous `sessions.json` write.
     ///
-    /// Q4b: while a provider switch is pending, the live pane already
-    /// describes the destination (restored at the click) while `active` is
-    /// still the old view — so the save lands on the destination, never
-    /// the old session. Every pane gesture funnels through here.
+    /// Q4c: while a provider switch is pending the pane is neutral — it
+    /// describes neither session — so no gesture persists onto either
+    /// record. The destination's pane restores when it lands, the previous
+    /// session's on cancel. Every pane gesture funnels through here.
     pub(crate) fn save_right_for_active(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.pending_switch_dest(cx).or_else(|| {
+        if self.pending_switch_dest(cx).is_some() {
+            return;
+        }
+        let Some(session_id) =
             self.active.clone().map(|view| view.read(cx).session_id.clone())
-        }) else {
+        else {
             return;
         };
         let (files_preview, files_selected, files_expanded) = match self.right_project() {
@@ -3462,6 +3465,17 @@ impl Harness {
         Some(dest)
     }
 
+    /// Whether the right pane must stay neutral this frame (Q4c): while a
+    /// provider switch is pending the centre is the destination's loading
+    /// state, so the pane keeps its width — the centre never resizes —
+    /// but shows nothing session-specific and no webview. Closing the pane
+    /// instead would grow the centre for the switch's duration and snap it
+    /// back on landing; the neutral body avoids that flicker. The render
+    /// and the browser sync both gate on this.
+    pub(crate) fn pending_right_neutral(&self, cx: &gpui::App) -> bool {
+        self.pending_switch_dest(cx).is_some()
+    }
+
     /// The centre while a provider switch is pending: the same neutral
     /// history-loading shape a Muse reopen shows (`loading_row` + the
     /// "Loading history…" status) — an empty pane that keeps its height,
@@ -4285,6 +4299,11 @@ impl Render for Harness {
             // key/invalidation to avoid going stale — while the subtree
             // rebuild itself is cheap once the reads are gone.
             let right_project = self.right_project();
+            // Q4c: while a provider switch is pending the pane is neutral
+            // (see `pending_right_neutral`): no webview is created or
+            // shown for the still-active session, so its page can neither
+            // draw nor hit-test under the loading centre.
+            let pending_neutral = self.pending_right_neutral(cx);
             // Z7a2: the Browser kind draws the active session's live
             // webview (created lazily here, where the window is at
             // hand), every other kind draws from the read cache as
@@ -4295,7 +4314,9 @@ impl Render for Harness {
             // while closing (or while Settings hides the pane) the existing
             // webview passes through without creating, so the last page
             // snapshot slides out instead of the "Opening the page" placeholder.
-            let browser = if kind == layout::RightKind::Browser {
+            let browser = if pending_neutral {
+                None
+            } else if kind == layout::RightKind::Browser {
                 if right_open {
                     Some(self.ensure_browser_person(window, cx))
                 } else {
@@ -4314,6 +4335,7 @@ impl Render for Harness {
             // (so a steady frame never dirties it either). Empty when no
             // session is open.
             let shows_changes = right_open
+                && !pending_neutral
                 && matches!(
                     kind,
                     layout::RightKind::Changes | layout::RightKind::Diff | layout::RightKind::Git
@@ -4332,15 +4354,23 @@ impl Render for Harness {
             } else {
                 Vec::new()
             };
-            let right = right::render(
-                kind,
-                &self.right_cache,
-                right_project,
-                &session_edits,
-                browser.as_ref(),
-                right_open,
-                cx,
-            );
+            // Q4c: the neutral body — an empty pane that keeps its width,
+            // so the centre never resizes mid-switch. `right_open` still
+            // rides the live layout into the shell, which is what holds
+            // the width steady.
+            let right = if pending_neutral {
+                v_flex().size_full().into_any_element()
+            } else {
+                right::render(
+                    kind,
+                    &self.right_cache,
+                    right_project,
+                    &session_edits,
+                    browser.as_ref(),
+                    right_open,
+                    cx,
+                )
+            };
             let shell = app_shell("shell")
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
