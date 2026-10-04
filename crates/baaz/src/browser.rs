@@ -850,6 +850,111 @@ impl Harness {
         }
         state.update(cx, |state, cx| state.begin_editing(window, cx));
     }
+
+    /// `page-focus`: give the active browser page the keyboard, focusing the
+    /// pane's own focus handle — the same hand-over an explicit person open
+    /// performs. Free: no turn, no wire.
+    pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.browser_key(cx);
+        let state = self.browser_for(&key, false, window, cx);
+        let focus = state.read(cx).focus_handle().clone();
+        window.focus(&focus, cx);
+        if state.read(cx).holds_keyboard() {
+            crate::baaz_log!("browser: page focused");
+        } else {
+            crate::baaz_log!("browser: page-focus: page did not take the keyboard");
+        }
+    }
+
+    /// Deliver one keystroke routed out of a focused Chromium page: first
+    /// hand the keyboard back to the gpui window through the existing
+    /// hand-back path (the active browser's `release_keyboard`), then
+    /// dispatch the keystroke into the window — so ⌘L ends with the address
+    /// field focused, exactly as if gpui had seen the key. Blocked Chromium
+    /// command ids drained here are logged for later mapping.
+    ///
+    /// Not behind the `cef` feature alone: the delivery (hand-back plus
+    /// deferred dispatch) is plain gpui, and the regression test drives it
+    /// without a page. Only the blocked-command drain needs CEF.
+    #[cfg(any(test, feature = "cef"))]
+    pub(crate) fn deliver_cef_keystroke(
+        &mut self,
+        keystroke: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.existing_browser(cx) {
+            state.update(cx, |state, _| state.release_keyboard());
+        }
+        #[cfg(feature = "cef")]
+        for id in aui_cef::take_blocked_commands() {
+            crate::baaz_log!("browser: blocked Chromium command {id}");
+        }
+        match gpui::Keystroke::parse(keystroke) {
+            Ok(parsed) => {
+                crate::baaz_log!("browser: page routed {keystroke}");
+                // Deferred, never inline: `dispatch_keystroke` runs action
+                // listeners synchronously, and every Harness listener
+                // re-enters Harness — dispatching here would nest an update
+                // inside this one and panic ("already being updated").
+                // `Window::defer` runs the dispatch after this update's
+                // lease on Harness has ended.
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_keystroke(parsed, cx);
+                });
+            }
+            Err(_) => {
+                crate::baaz_log!("browser: ignoring unparseable routed keystroke {keystroke:?}");
+            }
+        }
+    }
+
+    /// Install the Chromium key router for this window: `claims` is membership
+    /// in the current claimed-set snapshot (a thread-local, never gpui state,
+    /// which the CEF callback must not borrow) and `deliver` posts into a
+    /// channel that one task drains through [`Self::deliver_cef_keystroke`].
+    /// Still called where each shell window is created (`open_shell_window`),
+    /// never from `cef_backend` — the router must exist before the first page
+    /// takes the keyboard — but installed once per process: a second window
+    /// re-installing would let its close strand every claimed key. Delivery
+    /// resolves the window per keystroke (the active shell window), so the
+    /// installing window closing never strands the rest.
+    #[cfg(feature = "cef")]
+    pub(crate) fn install_cef_key_router(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+        aui_cef::set_key_router(crate::keymap::claims_keystroke, move |keystroke| {
+            let _ = tx.unbounded_send(keystroke);
+        });
+        // One task awaiting the channel — no polling timer, no idle wakeups.
+        // A `spawn`, not a `spawn_in`: the drain resolves the window on every
+        // keystroke instead of pinning the installing one.
+        let task = cx.spawn(async move |weak, cx| {
+            use futures::StreamExt as _;
+            while let Some(keystroke) = rx.next().await {
+                let Some(harness) = weak.upgrade() else {
+                    crate::baaz_log!("browser: routed {keystroke} after the window closed; dropping");
+                    break;
+                };
+                cx.update(|cx| {
+                    let Some(target) = cx.active_window() else {
+                        crate::baaz_log!("browser: routed {keystroke} with no live window; dropping");
+                        return;
+                    };
+                    let _ = target.update(cx, |_, window, cx| {
+                        harness.update(cx, |this, cx| {
+                            this.deliver_cef_keystroke(&keystroke, window, cx);
+                        });
+                    });
+                });
+            }
+        });
+        self.tasks.push(task);
+    }
 }
 
 /// All webviews a [`Harness`](crate::app::Harness) holds. Kept here so the
@@ -1263,5 +1368,134 @@ mod tests {
             stored["session-b"].browser_url.as_deref(),
             Some("https://b.example/")
         );
+    }
+
+    /// A bootable [`crate::Args`] pointed at a hermetic state dir, mirroring
+    /// the app tests' helper: no store read or write escapes the temp dir.
+    fn routing_args(dir: &std::path::Path) -> crate::Args {
+        crate::Args {
+            workspace: dir.to_path_buf(),
+            workspace_explicit: true,
+            provider: "echo".into(),
+            provider_explicit: false,
+            program: "muse".into(),
+            theme: aui_tokens::ThemeKind::Dark,
+            screenshot: None,
+            delay: std::time::Duration::from_millis(500),
+            session: None,
+            send: None,
+            offline: true,
+            replay: None,
+            steps: Vec::new(),
+            tier: None,
+            print_tier: false,
+            approval_mode: None,
+            login: crate::LoginSample::SignedIn,
+            login_steps: Vec::new(),
+            bench: None,
+            bench_cadence: std::time::Duration::from_millis(4),
+            bench_scroll: crate::bench::BenchScroll::Sweep,
+            bench_frames: 600,
+            bench_open_turn: false,
+            bench_bare: false,
+            bench_shell: false,
+            bench_out: None,
+            sidebar_fixture: None,
+            no_project: false,
+            terminal_socket_dir: Some(crate::terminal::service::test_socket_dir()),
+        }
+    }
+
+    /// A hermetic state dir for the routed-keystroke test: the store lock
+    /// plus `BAAZ_STATE_DIR` pointed at a throwaway dir.
+    fn routing_state(
+        name: &str,
+    ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-route-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe state dir");
+        let guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        (guard, old, dir)
+    }
+
+    /// Undo [`routing_state`]: drop the throwaway dir and hand the
+    /// environment back.
+    fn routing_restore(
+        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
+    ) {
+        let (guard, old, dir) = state;
+        let _ = std::fs::remove_dir_all(&dir);
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        drop(guard);
+    }
+
+    /// A page-routed keystroke dispatches after the Harness lease ends: the
+    /// delivery runs inside a Harness update — the drain task's old
+    /// `update_in` shape, which held the lease across the dispatch — first
+    /// with ⌘L, then with ⌘,. Neither panics ("already being updated"),
+    /// the address edit lands and Settings opens.
+    #[gpui::test]
+    fn routed_page_keystrokes_dispatch_after_the_harness_lease(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("lease");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        // Show the Browser pane and build its (scripted) page. Focus stays
+        // where Harness parks it on the first frame (its root): parking it
+        // on the page's own handle would resolve outside the rendered tree
+        // and gpui would fall back above every handler.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.layout.right_open = true;
+                harness.layout.right_kind = Some(crate::layout::RightKind::Browser);
+                harness.prewarm_browser_in(window, cx);
+            });
+        });
+        vc.run_until_parked();
+        // Past the login screen (the `SignedIn` sample boots that way): it
+        // owns the whole window, so the routed keys would resolve against
+        // it instead of the shell.
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).existing_browser(cx).is_some()),
+            "the pane built a page to hand the keyboard back from"
+        );
+        // ⌘L first: an open Settings page swallows it.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.deliver_cef_keystroke("cmd-l", window, cx);
+            });
+        });
+        vc.run_until_parked();
+        let editing = vc.update(|_, cx| {
+            baaz
+                .read(cx)
+                .existing_browser(cx)
+                .map(|page| page.read(cx).is_editing())
+                .unwrap_or(false)
+        });
+        assert!(editing, "⌘L from the page begins editing the address");
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.deliver_cef_keystroke("cmd-,", window, cx);
+            });
+        });
+        vc.run_until_parked();
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).settings_page.open),
+            "⌘, from the page opens Settings"
+        );
+        routing_restore(state);
     }
 }
