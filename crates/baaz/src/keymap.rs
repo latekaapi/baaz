@@ -111,7 +111,6 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ConfirmRename", keystroke: "enter", context: Some(crate::app::RENAME_CONTEXT), category: "sidebar", label: "Confirm rename" },
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
     KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
-    KeymapEntry { action: "ToggleRightPane", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Toggle right pane" },
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Browser in the right pane" },
@@ -219,6 +218,125 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
+}
+
+/// The library's own app-level keys, bound by `aui::keys::bind` with no
+/// context (see `../agentic-ui/crates/aui/src/keys.rs`): they are not part of
+/// the loaded keymap below, so the claimed set adds them explicitly. The
+/// library's `tab`/`shift-tab` (`AuiRoot`) and `escape` (menu contexts) stay
+/// out through the modifier rule in [`claimable_keystroke`], exactly as if
+/// they had been table rows.
+pub(crate) const AUI_ROOT_KEYS: &[&str] = &["cmd-b", "cmd-k", "cmd-\\"];
+
+/// Keystrokes the Chromium page keeps even when the host claims app keys:
+/// editing (cut/copy/paste/select-all) and undo/redo belong to the focused
+/// field or page, never to a host shortcut — and so does ⌃C, which terminals
+/// and editors in web pages use. The host's own ⌃C binding still fires while
+/// gpui holds the keyboard; the page simply never hands it over. Compared
+/// structurally (parsed on both sides), never as strings.
+const PAGE_OWNED: &[&str] = &["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z", "ctrl-c"];
+
+/// Whether a parsed keystroke is app-level while a page holds the keyboard:
+/// it carries ⌘, ⌃ or ⌥ (plain and shift-only keys are typing and must reach
+/// the page) and it is not one of [`PAGE_OWNED`].
+fn claimable_keystroke(keystroke: &gpui::Keystroke) -> bool {
+    let modified =
+        keystroke.modifiers.control || keystroke.modifiers.alt || keystroke.modifiers.platform;
+    if !modified {
+        return false;
+    }
+    !PAGE_OWNED.iter().any(|owned| {
+        gpui::Keystroke::parse(owned).is_ok_and(|parsed| parsed == *keystroke)
+    })
+}
+
+/// The app-level keystrokes claimed while a Chromium page holds the keyboard:
+/// [`AUI_ROOT_KEYS`] first, then the single-keystroke bindings from
+/// `bindings` (the loaded keymap — defaults plus the user file) whose context
+/// is global (`None`) or `AuiRoot`, minus [`PAGE_OWNED`] and typing keys.
+/// The library keys seed the set before the bindings run so the user file
+/// still gets the last word: a `null` eviction removes a library key exactly
+/// like a table row. Pure and not behind the `cef` feature, so unit tests
+/// pin it without a page.
+pub(crate) fn claimed_shortcuts(bindings: &[gpui::KeyBinding]) -> Vec<gpui::Keystroke> {
+    let mut claimed: Vec<gpui::Keystroke> = Vec::new();
+    for keystroke in AUI_ROOT_KEYS {
+        if let Ok(parsed) = gpui::Keystroke::parse(keystroke) {
+            if claimable_keystroke(&parsed) && !claimed.contains(&parsed) {
+                claimed.push(parsed);
+            }
+        }
+    }
+    for binding in bindings {
+        if binding.keystrokes().len() != 1 {
+            continue;
+        }
+        let app_level = match binding.predicate() {
+            None => true,
+            Some(predicate) => predicate.to_string() == aui::keys::ROOT_CONTEXT,
+        };
+        if !app_level {
+            continue;
+        }
+        // `inner` is the parsed keystroke the binding matches; comparing it
+        // structurally (not the source spelling) is what lets `shift-cmd-t`
+        // match a `cmd-shift-t` row.
+        let Some(keystroke) = binding.keystrokes().first() else {
+            continue;
+        };
+        let parsed = keystroke.inner().clone();
+        // A `null` user entry loads as a trailing `NoAction` binding that wins
+        // the tie by order and consumes the keystroke — the same mechanism
+        // the terminal rows use. It evicts the key from the claimed set, so
+        // an unbound shortcut stays with the page.
+        if binding.action().name().rsplit("::").next() == Some("NoAction") {
+            claimed.retain(|claimed| claimed != &parsed);
+            continue;
+        }
+        if claimable_keystroke(&parsed) && !claimed.contains(&parsed) {
+            claimed.push(parsed);
+        }
+    }
+    claimed
+}
+
+thread_local! {
+    /// The current claimed set, as the CEF key router sees it: refreshed by
+    /// [`refresh_claimed_keys`] whenever the keymap is (re)installed and by
+    /// [`refresh_claimed_from_disk`] after a binding is set or cleared. The
+    /// `claims` closure reads this snapshot instead of borrowing gpui state,
+    /// which it must not do from inside the CEF callback.
+    static CLAIMED_KEYS: std::cell::RefCell<Vec<gpui::Keystroke>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Recompute the claimed-set snapshot from freshly installed bindings.
+/// Called by [`crate::app::bind_keys`], so every (re)install refreshes it.
+pub(crate) fn refresh_claimed_keys(bindings: &[gpui::KeyBinding]) {
+    CLAIMED_KEYS.with(|slot| *slot.borrow_mut() = claimed_shortcuts(bindings));
+}
+
+/// Recompute the claimed-set snapshot from disk, after a binding is set,
+/// cleared, unbound or restored. The Settings page reloads the live bindings
+/// through [`crate::app::bind_keys`] right after, which refreshes again —
+/// this covers writers that never reinstall.
+pub(crate) fn refresh_claimed_from_disk() {
+    refresh_claimed_keys(&load().bindings);
+}
+
+/// Whether the CEF page should swallow `keystroke` (a
+/// `gpui::Keystroke::parse`-compatible string like `cmd-k`) for the host:
+/// membership in the current claimed-set snapshot, compared structurally so
+/// modifier order never matters. Unparseable input claims nothing.
+///
+/// Only built where something reads it: the `cef` router and the unit tests.
+/// Without either it would be dead code, and `-D warnings` says so loudly.
+#[cfg(any(test, feature = "cef"))]
+pub(crate) fn claims_keystroke(keystroke: &str) -> bool {
+    let Ok(incoming) = gpui::Keystroke::parse(keystroke) else {
+        return false;
+    };
+    CLAIMED_KEYS.with(|slot| slot.borrow().contains(&incoming))
 }
 
 /// A keystroke the user may not bind, in any context, to any action — not
@@ -616,6 +734,7 @@ pub fn set_binding(action: &str, keystroke: &str, context: Option<&str>) -> Resu
     }
     prune_blocks(&mut blocks);
     let _ = write_blocks(&path, &blocks);
+    refresh_claimed_from_disk();
     Ok(())
 }
 
@@ -656,6 +775,7 @@ pub fn clear_binding(action: &str, context: Option<&str>) -> Result<(), KeymapEr
     if changed {
         let _ = write_blocks(&path, &blocks);
     }
+    refresh_claimed_from_disk();
     Ok(())
 }
 
@@ -663,10 +783,12 @@ pub fn clear_binding(action: &str, context: Option<&str>) -> Result<(), KeymapEr
 /// Shortcuts page's "Restore defaults". Removes the user file when one
 /// exists; `false` is "already default".
 pub fn restore_defaults() -> bool {
-    match std::fs::remove_file(path()) {
+    let restored = match std::fs::remove_file(path()) {
         Ok(()) => true,
         Err(_) => false,
-    }
+    };
+    refresh_claimed_from_disk();
+    restored
 }
 
 /// Unbind an action in a context: write `null` at its current effective
@@ -713,6 +835,7 @@ pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapE
     }
     prune_blocks(&mut blocks);
     let _ = write_blocks(&path, &blocks);
+    refresh_claimed_from_disk();
     Ok(())
 }
 
@@ -1336,5 +1459,84 @@ mod tests {
         let blocks: Vec<serde_json::Value> = serde_json::from_str(&text).expect("complete JSON, never half a write");
         assert_eq!(blocks.len(), 2, "the seed block and the write are both there: {text}");
         assert!(text.contains("cmd-o") && text.contains("cmd-t"), "both bindings survive: {text}");
+    }
+
+    /// Whether the claimed set holds `keystroke`, parsed structurally.
+    fn claimed_has(claimed: &[gpui::Keystroke], keystroke: &str) -> bool {
+        let parsed = gpui::Keystroke::parse(keystroke).expect("the test's own keystroke parses");
+        claimed.contains(&parsed)
+    }
+
+    /// The claimed set carries the app shortcuts a focused page must hand
+    /// back: Baaz rows at the root (`cmd-l`, `cmd-n`, `cmd-,`, `cmd-shift-b`)
+    /// and the library's own (`cmd-k`, `cmd-\`), in one set.
+    #[test]
+    fn claimed_set_contains_app_shortcuts() {
+        let claimed = super::claimed_shortcuts(&super::build_bindings());
+        for keystroke in ["cmd-k", "cmd-l", "cmd-n", "cmd-,", "cmd-shift-b", "cmd-\\"] {
+            assert!(claimed_has(&claimed, keystroke), "{keystroke:?} must be claimed");
+        }
+    }
+
+    /// The claimed set never takes what belongs to the page or the typing:
+    /// editing keys (`cmd-c`, `cmd-v`, `cmd-a`, `cmd-z`), ⌃C (terminals and
+    /// editors in web pages), bare keys (`enter`, `a`), shift-only keys
+    /// (`shift-a`) — and `cmd-alt-b`, which no row binds anymore.
+    #[test]
+    fn claimed_set_excludes_page_and_typing_keys() {
+        let claimed = super::claimed_shortcuts(&super::build_bindings());
+        for keystroke in
+            ["cmd-c", "cmd-v", "cmd-a", "cmd-z", "ctrl-c", "enter", "a", "shift-a", "cmd-alt-b"]
+        {
+            assert!(!claimed_has(&claimed, keystroke), "{keystroke:?} must not be claimed");
+        }
+    }
+
+    /// A user rebinding moves the key in the set: unbinding ⌘N and binding
+    /// ⌘T to NewSession swaps one for the other, through the same loader
+    /// the app installs.
+    #[test]
+    fn user_rebinding_moves_the_key_in_the_claimed_set() {
+        let path = user_file(
+            "reclaim",
+            r#"[{ "context": "AuiRoot", "bindings": { "cmd-n": null } },
+                { "context": "AuiRoot", "bindings": { "cmd-t": "NewSession" } }]"#,
+        );
+        let loaded = super::load_from_path(&path, false);
+        assert!(loaded.warnings.is_empty(), "the rebind warns nothing: {:?}", loaded.warnings);
+        let claimed = super::claimed_shortcuts(&loaded.bindings);
+        assert!(!claimed_has(&claimed, "cmd-n"), "the unbound ⌘N leaves the set");
+        assert!(claimed_has(&claimed, "cmd-t"), "the rebound ⌘T joins the set");
+    }
+
+    /// Unbinding a library key hands it back too: the library keys seed the
+    /// claimed set before the bindings run, so a user `null` evicts ⌘K
+    /// instead of the seed re-adding it afterwards — while the rest of the
+    /// set stands untouched.
+    #[test]
+    fn user_unbind_of_a_library_key_leaves_it_with_the_page() {
+        let path = user_file("unbind-library", r#"[{ "context": "AuiRoot", "bindings": { "cmd-k": null } }]"#);
+        let loaded = super::load_from_path(&path, false);
+        assert!(loaded.warnings.is_empty(), "unbinding warns nothing: {:?}", loaded.warnings);
+        let claimed = super::claimed_shortcuts(&loaded.bindings);
+        assert!(!claimed_has(&claimed, "cmd-k"), "the unbound library ⌘K stays with the page");
+        assert!(claimed_has(&claimed, "cmd-l"), "the rest of the set is untouched");
+    }
+
+    /// The thread-local snapshot the CEF router reads: refreshed from the
+    /// defaults it claims ⌘K structurally (`shift-cmd-d` matches the
+    /// `cmd-shift-d` row) and refuses the page's keys and garbage.
+    #[test]
+    fn claims_snapshot_matches_structurally_not_as_strings() {
+        super::refresh_claimed_keys(&super::build_bindings());
+        assert!(super::claims_keystroke("cmd-k"), "⌘K is claimed");
+        assert!(
+            super::claims_keystroke("shift-cmd-d"),
+            "modifier order never matters: the ⌘⇧D row matches"
+        );
+        assert!(!super::claims_keystroke("cmd-c"), "the page keeps ⌘C");
+        assert!(!super::claims_keystroke("a"), "typing reaches the page");
+        assert!(!super::claims_keystroke("cmd-alt-b"), "⌥⌘B is free");
+        assert!(!super::claims_keystroke("not-a-keystroke-["), "garbage claims nothing");
     }
 }
