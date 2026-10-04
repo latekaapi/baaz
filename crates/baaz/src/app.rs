@@ -780,7 +780,7 @@ pub struct Harness {
     /// with no terminal route — the bridge rides `session/start` and
     /// `session/resume` only on the grant.
     session_mcp: bool,
-    focus_root: FocusHandle,
+    pub(crate) focus_root: FocusHandle,
     /// Whether an overlay stood open on the previous frame. The edge from
     /// true to false is when focus has to be parked back on the root; see
     /// the comment at that check in `render`. Settings open/close and
