@@ -119,7 +119,10 @@ const BROWSER_NAV_PX: f32 = 38.0;
 /// it is read from a mouse handler); the viewport is valid at any time and,
 /// outside paint, is exactly what the mask falls back to.
 fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
-    Bounds { origin: Point::default(), size: window.viewport_size() }
+    Bounds {
+        origin: Point::default(),
+        size: window.viewport_size(),
+    }
 }
 
 /// The browser pane's rectangle in window coordinates, derived from the
@@ -145,7 +148,10 @@ pub(crate) fn terminal_dock_bounds(
     height: Pixels,
 ) -> Bounds<Pixels> {
     Bounds {
-        origin: Point { x: centre_left, y: content.origin.y + content.size.height - height },
+        origin: Point {
+            x: centre_left,
+            y: content.origin.y + content.size.height - height,
+        },
         size: gpui::size(centre_right - centre_left, height),
     }
 }
@@ -162,7 +168,10 @@ pub(crate) fn terminal_covers_browser(
     dock: Option<Bounds<Pixels>>,
     pane: Option<Bounds<Pixels>>,
 ) -> bool {
-    terminal_open && dock.zip(pane).is_some_and(|(dock, pane)| dock.intersects(&pane))
+    terminal_open
+        && dock
+            .zip(pane)
+            .is_some_and(|(dock, pane)| dock.intersects(&pane))
 }
 
 /// Whether the frame shows the live browser: the right pane stands open
@@ -195,15 +204,38 @@ pub(crate) fn should_release_keyboard_on_mouse_down(
 /// The draft text a `SendAnnotations` intent appends: the URL plus one line
 /// per pin (`<index>. <element path> — <note>`). Never auto-sent; the person
 /// reviews the draft first.
-pub(crate) fn annotations_draft_block(
-    annotations: &[Annotation],
-    url: &str,
-) -> String {
+pub(crate) fn annotations_draft_block(annotations: &[Annotation], url: &str) -> String {
     let mut out = format!("Browser annotations — {url}");
     for annotation in annotations {
-        out.push_str(&format!("\n{}. {} — {}", annotation.index, annotation.selector, annotation.note));
+        out.push_str(&format!(
+            "\n{}. {} — {}",
+            annotation.index, annotation.selector, annotation.note
+        ));
     }
     out
+}
+
+/// Whether the window counts as active for the shown page: the OS window
+/// is active, or the currently SHOWN page holds the keyboard. Only the
+/// shown tab's page ever counts — a hidden or obscured page holding the
+/// keyboard (a click into a background Chromium page makes it key while
+/// the gpui window goes inactive) must never keep the window "active",
+/// or its native view would show under an overlay. Pure over a snapshot
+/// of who holds the keyboard, so tests drive it without a webview.
+pub(crate) fn shown_window_active(
+    window_active: bool,
+    shown: Option<TabId>,
+    holds_keyboard: &HashMap<TabId, bool>,
+) -> bool {
+    window_active || shown.is_some_and(|id| holds_keyboard.get(&id).copied().unwrap_or(false))
+}
+
+/// Whether a middle release on `id` closes it: the press started on this
+/// same tab — never press-less, never after a press that began elsewhere.
+/// Pure so tests drive the pairing without a window; the row's release
+/// handler clears the recorded press either way.
+pub(crate) fn middle_release_closes(pressed: Option<TabId>, released: TabId) -> bool {
+    pressed == Some(released)
 }
 
 /// Whether `current` is a real navigation worth persisting: non-empty, not
@@ -240,7 +272,11 @@ fn cef_backend(window: &Window, url: &str, rgba: (u8, u8, u8, u8)) -> Option<Box
 }
 
 #[cfg(not(feature = "cef"))]
-fn cef_backend(_window: &Window, _url: &str, _rgba: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+fn cef_backend(
+    _window: &Window,
+    _url: &str,
+    _rgba: (u8, u8, u8, u8),
+) -> Option<Box<dyn WebBackend>> {
     None
 }
 
@@ -249,8 +285,9 @@ pub(crate) const MAX_SCREENSHOTS: usize = 20;
 /// This run's page screenshots live here: `$BAAZ_STATE_DIR/attachments/browser/`
 /// (else the system temp dir), away from the composer's own attachments.
 fn screenshot_dir() -> Option<PathBuf> {
-    let base =
-        std::env::var_os("BAAZ_STATE_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("BAAZ_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     Some(base.join("attachments").join("browser"))
 }
 
@@ -285,8 +322,11 @@ pub(crate) fn prune_screenshot_dir(dir: &std::path::Path, keep: usize) {
             if !name.starts_with("browser-") || !name.ends_with(".png") {
                 return None;
             }
-            let modified =
-                entry.metadata().ok()?.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let modified = entry
+                .metadata()
+                .ok()?
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             Some((modified, entry.path()))
         })
         .collect();
@@ -375,7 +415,10 @@ impl Harness {
             Owner::Person => None,
         };
         let space = self.current_project_id();
-        let id = self.browser.tabs.open(space, owner.clone(), initial_url(stored.as_deref()), None);
+        let id = self
+            .browser
+            .tabs
+            .open(space, owner.clone(), initial_url(stored.as_deref()), None);
         self.schedule_tabs_write(cx);
         id
     }
@@ -395,16 +438,22 @@ impl Harness {
     /// window only mark dirty (no re-arm), which is the max-delay cap: a
     /// constantly-changing title lands on disk at most 750 ms after the
     /// spell starts instead of postponing the write forever. The write
-    /// itself runs off the UI thread, like the sessions write.
+    /// itself runs off the UI thread, like the sessions write. Each armed
+    /// snapshot carries a monotonic generation, and the writer skips a
+    /// snapshot older than the last written — two saves finishing out of
+    /// order can never let the older state win.
     pub(crate) fn schedule_tabs_write(&mut self, cx: &mut Context<Self>) {
         if self.browser.tabs_save_pending {
             return;
         }
-        self.browser.tabs_save_epoch += 1;
         self.browser.tabs_save_pending = true;
+        self.browser.tabs_save_epoch += 1;
         let epoch = self.browser.tabs_save_epoch;
+        let generation = tabs::next_tabs_generation();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(750)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(750))
+                .await;
             let snapshot = this
                 .update(cx, |this, _| {
                     if this.browser.tabs_save_epoch != epoch {
@@ -419,25 +468,29 @@ impl Harness {
             };
             cx.background_executor()
                 .spawn(async move {
-                    snapshot.save();
+                    tabs::write_tabs_snapshot_generation(generation, &snapshot);
                 })
                 .await;
         })
         .detach();
     }
 
-    /// Land a pending tabs write synchronously: the quit and window-close
-    /// durability point, next to the layout/sessions flushes — up to
-    /// 750 ms of tab state never dies with the process. A no-op when
-    /// nothing is pending, so plain quits write nothing. The in-flight
-    /// debounce is cancelled: the disk already leads it.
+    /// Land the tabs durably, synchronously: the quit and window-close
+    /// durability point, next to the layout/sessions flushes. Writes the
+    /// CURRENT model under a generation newer than any armed snapshot —
+    /// a save still in flight can never land after this and win — then
+    /// cancels the armed debounce, whose snapshot is stale by definition.
+    /// A no-op when the tabs never loaded, so a quit that never touched
+    /// the browser still writes nothing; otherwise the in-memory-only
+    /// `last_shown` stamps land here at the latest.
     pub(crate) fn flush_tabs_save(&mut self) {
-        if !self.browser.tabs_save_pending {
+        self.browser.tabs_save_epoch += 1;
+        self.browser.tabs_save_pending = false;
+        if !self.browser.tabs_loaded {
             return;
         }
-        self.browser.tabs_save_epoch += 1;
-        self.browser.tabs.save();
-        self.browser.tabs_save_pending = false;
+        let generation = tabs::next_tabs_generation();
+        tabs::write_tabs_snapshot_generation(generation, &self.browser.tabs);
     }
 
     /// The webview for `key`, creating it on first use. `key` names an
@@ -447,7 +500,13 @@ impl Harness {
     /// person open (`focus_fresh`) takes the keyboard into a fresh blank
     /// URL field, so ⌘L is already where the person looks. Activation,
     /// restore and `browse:` steps pass `false`: the composer keeps focus.
-    fn browser_for(&mut self, key: &str, focus_fresh: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
+    fn browser_for(
+        &mut self,
+        key: &str,
+        focus_fresh: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WebviewState> {
         self.ensure_tabs_loaded(cx);
         let owner = self.tab_owner_for_key(key);
         let id = self.ensure_owner_tab(&owner, cx);
@@ -455,7 +514,12 @@ impl Harness {
             self.register_tab_page(key, id, &state);
             return state;
         }
-        let url = self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_else(|| BLANK.to_owned());
+        let url = self
+            .browser
+            .tabs
+            .get(id)
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
         let fresh_blank = initial == BLANK;
         // Explicit boot flag, never environment sniffed in render: captures
@@ -473,15 +537,24 @@ impl Harness {
                 // WebKit paints white before and beneath a page; paint the
                 // pane's own surface instead, so about:blank is not a white slab.
                 let bg = gpui::Rgba::from(cx.aui().colors.surface_1);
-                let rgba = [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let rgba =
+                    [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
                 let rgba = (rgba[0], rgba[1], rgba[2], rgba[3]);
                 if let Some(backend) = cef_backend(&*window, initial, rgba) {
                     return WebviewState::new(backend, cx);
                 }
-                match WryBackend::new_at_with_background(&*window, initial, (0.0, 0.0), (0.0, 0.0), rgba) {
+                match WryBackend::new_at_with_background(
+                    &*window,
+                    initial,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                    rgba,
+                ) {
                     Ok(backend) => WebviewState::new(Box::new(backend), cx),
                     Err(error) => {
-                        crate::baaz_log!("browser: no WKWebView ({error}); falling back to the scripted page");
+                        crate::baaz_log!(
+                            "browser: no WKWebView ({error}); falling back to the scripted page"
+                        );
                         let mut backend = FakeWebBackend::new();
                         if backend.url().as_ref() != initial {
                             backend.navigate(initial);
@@ -513,7 +586,10 @@ impl Harness {
         }
         let owner = self.shown_tab_owner(cx);
         let space = self.owner_space(&owner);
-        self.browser.tabs.active_of(&owner, space.as_deref()).and_then(|id| self.browser.states.get(&id).cloned())
+        self.browser
+            .tabs
+            .active_of(&owner, space.as_deref())
+            .and_then(|id| self.browser.states.get(&id).cloned())
     }
 
     /// The session's live page: its active tab's state, when built. The
@@ -522,7 +598,10 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn session_page(&self, session_id: &str) -> Option<Entity<WebviewState>> {
         let owner = Owner::Session(session_id.to_owned());
-        self.browser.tabs.active_of(&owner, None).and_then(|id| self.browser.states.get(&id).cloned())
+        self.browser
+            .tabs
+            .active_of(&owner, None)
+            .and_then(|id| self.browser.states.get(&id).cloned())
     }
 
     /// Whether this session key has a live page: its active tab's state
@@ -541,7 +620,8 @@ impl Harness {
     /// focuses: focus rides only on the person's own open through
     /// [`Self::ensure_browser_person`].
     pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
-        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
+        {
             return;
         }
         if !(self.browser.fake || cfg!(test)) {
@@ -553,8 +633,12 @@ impl Harness {
         if self.browser.states.contains_key(&id) {
             return;
         }
-        let url =
-            self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_else(|| BLANK.to_owned());
+        let url = self
+            .browser
+            .tabs
+            .get(id)
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
         self.browser_builds += 1;
         let state = cx.new(|cx| {
@@ -578,7 +662,8 @@ impl Harness {
     /// existing one is reused), never focused: focus rides only on the
     /// person's own open through [`Self::ensure_browser_person`].
     pub(crate) fn prewarm_browser_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser {
+        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
+        {
             return;
         }
         let key = self.browser_key(cx);
@@ -735,8 +820,12 @@ impl Harness {
             self.register_tab_page(key, id, &state);
             return state;
         }
-        let url =
-            self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_else(|| BLANK.to_owned());
+        let url = self
+            .browser
+            .tabs
+            .get(id)
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
         self.browser_builds += 1;
         let fake = self.browser.fake || cfg!(test);
@@ -749,15 +838,24 @@ impl Harness {
                 WebviewState::new(Box::new(backend), cx)
             } else {
                 let bg = gpui::Rgba::from(cx.aui().colors.surface_1);
-                let rgba = [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let rgba =
+                    [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
                 let rgba = (rgba[0], rgba[1], rgba[2], rgba[3]);
                 if let Some(backend) = cef_backend(&*window, initial, rgba) {
                     return WebviewState::new(backend, cx);
                 }
-                match WryBackend::new_at_with_background(&*window, initial, (0.0, 0.0), (0.0, 0.0), rgba) {
+                match WryBackend::new_at_with_background(
+                    &*window,
+                    initial,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                    rgba,
+                ) {
                     Ok(backend) => WebviewState::new(Box::new(backend), cx),
                     Err(error) => {
-                        crate::baaz_log!("browser: no WKWebView ({error}); falling back to the scripted page");
+                        crate::baaz_log!(
+                            "browser: no WKWebView ({error}); falling back to the scripted page"
+                        );
                         let mut backend = FakeWebBackend::new();
                         if backend.url().as_ref() != initial {
                             backend.navigate(initial);
@@ -774,7 +872,12 @@ impl Harness {
 
     /// `tab-select:<n>`: select the n-th tab of the shown strip (1-based).
     /// Unknown or out-of-range records a step failure. Free.
-    pub(crate) fn step_tab_select(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_tab_select(
+        &mut self,
+        rest: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.strip_tab_at(rest, cx) {
             Some((key, id)) => self.select_tab(&key, id, window, cx),
             None => crate::steps::record_step_failure(&format!("tab-select:{rest}")),
@@ -784,7 +887,12 @@ impl Harness {
     /// `tab-close:<n>`: close the n-th tab of the shown strip (1-based),
     /// activating its neighbour. Unknown or out-of-range records a step
     /// failure. Free.
-    pub(crate) fn step_tab_close(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn step_tab_close(
+        &mut self,
+        rest: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((key, id)) = self.strip_tab_at(rest, cx) else {
             crate::steps::record_step_failure(&format!("tab-close:{rest}"));
             return;
@@ -802,7 +910,12 @@ impl Harness {
         }
         let owner = self.shown_tab_owner(cx);
         let space = self.owner_space(&owner);
-        let id = self.browser.tabs.ordered_tabs(&owner, space.as_deref()).get(n - 1).map(|tab| tab.id)?;
+        let id = self
+            .browser
+            .tabs
+            .ordered_tabs(&owner, space.as_deref())
+            .get(n - 1)
+            .map(|tab| tab.id)?;
         Some((self.browser_key(cx), id))
     }
 
@@ -830,16 +943,48 @@ impl Harness {
 
     /// Select the strip tab `id` (click): the shown owner's key resolves
     /// here, through [`Self::select_tab`].
-    pub(crate) fn select_browser_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_browser_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let key = self.browser_key(cx);
         self.select_tab(&key, id, window, cx);
     }
 
     /// Close the strip tab `id` (× or middle-click), through
     /// [`Self::close_tab`].
-    pub(crate) fn close_browser_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_browser_tab(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let key = self.browser_key(cx);
         self.close_tab(&key, id, window, cx);
+    }
+
+    /// Record a middle press on the strip tab `id`: the release closes it
+    /// only when it lands on this same tab.
+    pub(crate) fn note_strip_middle_press(&mut self, id: TabId) {
+        self.browser.middle_pressed = Some(id);
+    }
+
+    /// A middle release on the strip tab `id`: close it when the press
+    /// started on this same tab, never when the press began elsewhere (or
+    /// never began — a press-less release closes nothing). Clears the
+    /// recorded press either way, so no press survives its release.
+    pub(crate) fn close_strip_middle_release(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pressed = self.browser.middle_pressed.take();
+        if middle_release_closes(pressed, id) {
+            self.close_browser_tab(id, window, cx);
+        }
     }
 
     /// Close `id`: the closed page is dropped; only when the closed tab
@@ -850,13 +995,26 @@ impl Harness {
     /// clears its stored `browser_url`, so the tab never resurrects from
     /// the old restore — and the migration runs only once per session, so
     /// it stays closed.
-    pub(crate) fn close_tab(&mut self, key: &str, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(
+        &mut self,
+        key: &str,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ensure_tabs_loaded(cx);
         let Some(tab) = self.browser.tabs.get(id).cloned() else {
             return;
         };
-        let space = self.owner_space(&tab.owner);
-        let was_active = self.browser.tabs.active_of(&tab.owner, space.as_deref()) == Some(id);
+        // The tab's OWN owner+space: [`Tabs::close`] keys the active
+        // pointer on them, and the current project's space is wrong when
+        // the close arrives from another space (a person tab closed while
+        // a different project is current).
+        let was_active = self
+            .browser
+            .tabs
+            .active_of(&tab.owner, tab.space.as_deref())
+            == Some(id);
         let next = self.browser.tabs.close(id);
         self.browser.states.remove(&id);
         self.schedule_tabs_write(cx);
@@ -887,7 +1045,11 @@ impl Harness {
     /// through the cheap debounced write — never the session-list settle.
     /// A no-op when the stored URL is already gone.
     fn clear_session_browser_url(&mut self, session: &str, cx: &mut Context<Self>) {
-        let mut right = match self.overrides.get(session).and_then(|meta| meta.right.clone()) {
+        let mut right = match self
+            .overrides
+            .get(session)
+            .and_then(|meta| meta.right.clone())
+        {
             Some(right) => right,
             None => return,
         };
@@ -983,7 +1145,11 @@ impl Harness {
                 }
             }
             WebviewIntent::Annotate(_) => {}
-            WebviewIntent::SendAnnotations { annotations, screenshot, url } => {
+            WebviewIntent::SendAnnotations {
+                annotations,
+                screenshot,
+                url,
+            } => {
                 if let Some(bytes) = screenshot {
                     self.attach_browser_screenshot(bytes, cx);
                 }
@@ -997,7 +1163,8 @@ impl Harness {
                     }
                     None => {
                         self.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Browser", "No open session to attach the annotations to.");
+                            overlays
+                                .toast("Browser", "No open session to attach the annotations to.");
                         });
                         cx.notify();
                     }
@@ -1017,8 +1184,7 @@ impl Harness {
         let active = self.browser.tabs.active_of(&owner, space.as_deref());
         // One ordering for every owner: pinned first, then model order.
         let rows = self.browser.tabs.ordered_tabs(&owner, space.as_deref());
-        rows
-            .iter()
+        rows.iter()
             .map(|tab| StripTab {
                 id: tab.id,
                 title: tabs::tab_label(&tab.title, &tab.url),
@@ -1055,7 +1221,11 @@ impl Harness {
             let last = self.browser.tabs.get(id).and_then(|tab| tab.last_shown);
             // Forced (`tab-discard-now`) drops every hidden page at once;
             // the frame only drops tabs idle past the timeout.
-            let due = if force { true } else { tabs::should_discard(now, last, audible, false) };
+            let due = if force {
+                true
+            } else {
+                tabs::should_discard(now, last, audible, false)
+            };
             if due {
                 dropped.push(id);
             }
@@ -1083,9 +1253,18 @@ impl Harness {
     /// Set every live page's obscured flag from the shown tab: the shown
     /// tab's page shows, every other page hides. Blank pages stay hidden
     /// (WKWebView paints `about:blank` white over the dark pane).
-    fn apply_page_visibility(&mut self, shown: Option<TabId>, frame_live: bool, cx: &mut Context<Self>) {
-        let pages: Vec<(TabId, Entity<WebviewState>)> =
-            self.browser.states.iter().map(|(id, state)| (*id, state.clone())).collect();
+    fn apply_page_visibility(
+        &mut self,
+        shown: Option<TabId>,
+        frame_live: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let pages: Vec<(TabId, Entity<WebviewState>)> = self
+            .browser
+            .states
+            .iter()
+            .map(|(id, state)| (*id, state.clone()))
+            .collect();
         for (id, state) in pages {
             let blank = matches!(state.read(cx).url().as_ref(), "" | BLANK);
             let visible = frame_live && Some(id) == shown && !blank;
@@ -1199,7 +1378,10 @@ impl Harness {
         // beside the sidebar, tooltips seat on the header, and the
         // queue/steer strips render inline in the composer — none of them
         // covers the right pane, so the `+` menu is the only extra input.
-        let plus_open = self.active.as_ref().is_some_and(|view| view.read(cx).plus_open());
+        let plus_open = self
+            .active
+            .as_ref()
+            .is_some_and(|view| view.read(cx).plus_open());
         let kind = crate::layout::right_kind(&self.layout);
         // Covering is geometric, not "the dock stands open": the dock
         // lives in the centre column and the pane on the right, so their
@@ -1213,7 +1395,11 @@ impl Harness {
             .then(|| browser_page_bounds(content, gpui::px(self.right_resize.width)));
         let dock = self.layout.terminal_open.then(|| {
             let left = content.origin.x
-                + (if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) });
+                + (if self.sidebar_open {
+                    gpui::px(self.resize.width)
+                } else {
+                    gpui::px(0.0)
+                });
             let right = content.origin.x + content.size.width
                 - (if self.layout.right_open {
                     gpui::px(self.right_resize.width)
@@ -1221,7 +1407,10 @@ impl Harness {
                     gpui::px(0.0)
                 });
             let centre_height = f32::from(window.bounds().size.height).max(0.0) - HEADER_PX;
-            let want = self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
+            let want = self
+                .layout
+                .terminal_height
+                .unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
             terminal_dock_bounds(
                 content,
                 left,
@@ -1229,26 +1418,6 @@ impl Harness {
                 gpui::px(crate::terminal::clamp_dock_height(want, centre_height)),
             )
         });
-        let base = BrowserVisibility {
-            pane_open: self.layout.right_open,
-            kind_browser: kind == RightKind::Browser,
-            session_active: false,
-            settings_open,
-            palette_open,
-            menu_open,
-            plus_open,
-            account_menu_open,
-            dialog_open,
-            drop_cover: self.browser.drop_cover,
-            terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
-            // A Chromium page is its own child window: clicking it makes
-            // the page key and the gpui window inactive. Counting that as
-            // inactive hid the page, which handed the keyboard back, so a
-            // click could never focus the page (B1b, live). The window is
-            // active while it or one of its pages holds the keyboard.
-            window_active: window.is_window_active()
-                || self.browser.states.values().any(|state| state.read(cx).holds_keyboard()),
-        };
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
         // must neither draw nor hit-test under the loading centre.
@@ -1266,15 +1435,52 @@ impl Harness {
         // is pending, not even that one.
         let shown_space = self.owner_space(&shown_owner);
         let shown = browser_session_active(&shown_key, &active_key, pending_switch)
-            .then(|| self.browser.tabs.active_of(&shown_owner, shown_space.as_deref()))
+            .then(|| {
+                self.browser
+                    .tabs
+                    .active_of(&shown_owner, shown_space.as_deref())
+            })
             .flatten();
+        let base = BrowserVisibility {
+            pane_open: self.layout.right_open,
+            kind_browser: kind == RightKind::Browser,
+            session_active: false,
+            settings_open,
+            palette_open,
+            menu_open,
+            plus_open,
+            account_menu_open,
+            dialog_open,
+            drop_cover: self.browser.drop_cover,
+            terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
+            // A Chromium page is its own child window: clicking it makes
+            // the page key and the gpui window inactive. Counting that as
+            // inactive hid the page, which handed the keyboard back, so a
+            // click could never focus the page (B1b, live). The window is
+            // active while it or the currently SHOWN page holds the
+            // keyboard — a hidden or obscured page can never keep it
+            // "active", or its native view would show under an overlay.
+            window_active: {
+                let holds: HashMap<TabId, bool> = self
+                    .browser
+                    .states
+                    .iter()
+                    .map(|(id, state)| (*id, state.read(cx).holds_keyboard()))
+                    .collect();
+                shown_window_active(window.is_window_active(), shown, &holds)
+            },
+        };
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
         // is the frame owner's active tab (or nothing while pending).
-        let frame_live = browser_visible(BrowserVisibility { session_active: true, ..base });
+        let frame_live = browser_visible(BrowserVisibility {
+            session_active: true,
+            ..base
+        });
         self.apply_page_visibility(shown, frame_live, cx);
         // The shown page stamps its tab when it really shows (never a
-        // blank), so discard measures real hiding.
+        // blank), so discard measures real hiding — in memory only, never
+        // a write on its own.
         if frame_live {
             if let Some(id) = shown {
                 let blank = self
@@ -1283,8 +1489,8 @@ impl Harness {
                     .get(&id)
                     .map(|state| matches!(state.read(cx).url().as_ref(), "" | BLANK))
                     .unwrap_or(true);
-                if !blank && self.browser.tabs.mark_shown(id, tabs::now_ms()) {
-                    tabs_dirty = true;
+                if !blank {
+                    self.browser.tabs.mark_shown(id, tabs::now_ms());
                 }
             }
         }
@@ -1315,14 +1521,19 @@ impl Harness {
         ) {
             return;
         }
-        let Some(state) = self.existing_browser(cx) else { return };
+        let Some(state) = self.existing_browser(cx) else {
+            return;
+        };
         let content = window_content_bounds(window);
         // The live page sits under the webview's nav row: a press on the
         // row itself is outside the page and takes the keyboard back too.
         let pane = browser_page_bounds(content, gpui::px(self.right_resize.width));
         let page = gpui::Bounds::new(
             gpui::point(pane.origin.x, pane.origin.y + gpui::px(BROWSER_NAV_PX)),
-            gpui::size(pane.size.width, (pane.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.))),
+            gpui::size(
+                pane.size.width,
+                (pane.size.height - gpui::px(BROWSER_NAV_PX)).max(gpui::px(0.)),
+            ),
         );
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
@@ -1416,11 +1627,15 @@ impl Harness {
                 // ⌘L after clicking the page opened nothing).
                 cx.spawn_in(window, async move |this, cx| {
                     for _ in 0..20 {
-                        let key = cx.update(|window, _| window.is_window_active()).unwrap_or(true);
+                        let key = cx
+                            .update(|window, _| window.is_window_active())
+                            .unwrap_or(true);
                         if key {
                             break;
                         }
-                        cx.background_executor().timer(std::time::Duration::from_millis(10)).await;
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(10))
+                            .await;
                     }
                     // With gpui focus stale (the address field unmounted when
                     // the page took the keyboard) a keystroke reaches no key
@@ -1476,12 +1691,16 @@ impl Harness {
             use futures::StreamExt as _;
             while let Some(keystroke) = rx.next().await {
                 let Some(harness) = weak.upgrade() else {
-                    crate::baaz_log!("browser: routed {keystroke} after the window closed; dropping");
+                    crate::baaz_log!(
+                        "browser: routed {keystroke} after the window closed; dropping"
+                    );
                     break;
                 };
                 cx.update(|cx| {
                     let Some(target) = cx.active_window() else {
-                        crate::baaz_log!("browser: routed {keystroke} with no live window; dropping");
+                        crate::baaz_log!(
+                            "browser: routed {keystroke} with no live window; dropping"
+                        );
                         return;
                     };
                     let _ = target.update(cx, |_, window, cx| {
@@ -1522,6 +1741,10 @@ pub(crate) struct BrowserRegistry {
     /// The tab the agent tools act on per session key, so discard never
     /// drops the agent's active tab and switches re-register it.
     pub agent_tabs: HashMap<String, TabId>,
+    /// The strip tab holding a middle press: set on middle mouse down,
+    /// compared on middle mouse up (only the same tab closes), cleared on
+    /// every middle up. Never rendered — pure press/release pairing.
+    pub middle_pressed: Option<TabId>,
 }
 
 impl BrowserRegistry {
@@ -1538,19 +1761,20 @@ impl BrowserRegistry {
             tabs_save_epoch: 0,
             tabs_save_pending: false,
             agent_tabs: HashMap::new(),
+            middle_pressed: None,
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         annotations_draft_block, browser_page_bounds, browser_pane_showing, browser_session_active,
-        browser_visible, initial_url, should_release_keyboard_on_mouse_down, should_remember,
-        terminal_covers_browser, terminal_dock_bounds, Annotation, BrowserVisibility, FakeWebBackend,
-        WebviewState,
+        browser_visible, initial_url, middle_release_closes, should_release_keyboard_on_mouse_down,
+        should_remember, shown_window_active, terminal_covers_browser, terminal_dock_bounds,
+        Annotation, BrowserVisibility, FakeWebBackend, WebviewState,
     };
+    use super::{Owner, TabId};
     use aui_webview::WebBackend as _;
     use std::collections::HashMap;
 
@@ -1574,6 +1798,49 @@ mod tests {
     #[test]
     fn native_view_shows_only_with_pane_open_on_active_browser() {
         assert!(browser_visible(all_clear()));
+    }
+
+    #[test]
+    fn only_the_shown_page_keeps_the_window_active() {
+        let shown = TabId(1);
+        let hidden = TabId(2);
+        let mut holds = HashMap::new();
+        holds.insert(hidden, true);
+        // A hidden page holding the keyboard never keeps the window
+        // "active": only the shown tab's page counts.
+        assert!(!shown_window_active(false, Some(shown), &holds));
+        assert!(
+            !shown_window_active(false, None, &holds),
+            "nothing shown, nothing counts"
+        );
+        holds.insert(shown, true);
+        assert!(
+            shown_window_active(false, Some(shown), &holds),
+            "the shown page still carries B1b"
+        );
+        assert!(!shown_window_active(false, Some(shown), &HashMap::new()));
+        assert!(
+            shown_window_active(true, None, &HashMap::new()),
+            "an active window needs no page"
+        );
+    }
+
+    #[test]
+    fn middle_release_closes_only_its_own_press() {
+        let pressed = TabId(7);
+        let other = TabId(8);
+        assert!(
+            middle_release_closes(Some(pressed), pressed),
+            "press and release on the same tab close"
+        );
+        assert!(
+            !middle_release_closes(Some(pressed), other),
+            "a release on another tab closes nothing"
+        );
+        assert!(
+            !middle_release_closes(None, pressed),
+            "a press-less release closes nothing"
+        );
     }
 
     /// One truth-table row: which input a case flips off (or on, for covers).
@@ -1638,7 +1905,10 @@ mod tests {
             }),
         ];
         for (name, flip) in cases {
-            assert!(!browser_visible(flip(all_clear())), "{name} must obscure the native view");
+            assert!(
+                !browser_visible(flip(all_clear())),
+                "{name} must obscure the native view"
+            );
         }
     }
 
@@ -1681,20 +1951,34 @@ mod tests {
         // off the right edge. Their rects never meet, so the page stays
         // live: dock open + pane open, no overlap → visible.
         let covering = terminal_covers_browser(true, Some(dock_rect()), Some(beside_pane_rect()));
-        assert!(!covering, "an open centre-column dock never covers the right pane");
+        assert!(
+            !covering,
+            "an open centre-column dock never covers the right pane"
+        );
         let mut inputs = all_clear();
         inputs.terminal_covering = covering;
-        assert!(browser_visible(inputs), "dock open + pane open, no overlap → the native view shows");
+        assert!(
+            browser_visible(inputs),
+            "dock open + pane open, no overlap → the native view shows"
+        );
     }
 
     #[test]
     fn full_width_dock_still_covers_the_page() {
         assert!(
-            terminal_covers_browser(true, Some(full_width_dock_rect()), Some(overlapping_pane_rect())),
+            terminal_covers_browser(
+                true,
+                Some(full_width_dock_rect()),
+                Some(overlapping_pane_rect())
+            ),
             "a dock under the pane keeps the input meaningful"
         );
         assert!(
-            !terminal_covers_browser(false, Some(full_width_dock_rect()), Some(overlapping_pane_rect())),
+            !terminal_covers_browser(
+                false,
+                Some(full_width_dock_rect()),
+                Some(overlapping_pane_rect())
+            ),
             "a closed dock covers nothing even where it would overlap"
         );
         assert!(
@@ -1716,7 +2000,8 @@ mod tests {
         assert_eq!(f32::from(pane.origin.x), 1040.0);
         assert_eq!(f32::from(pane.origin.y), 44.0);
         assert_eq!(f32::from(pane.size.width), 400.0);
-        let dock = terminal_dock_bounds(content, gpui::px(260.0), gpui::px(1040.0), gpui::px(260.0));
+        let dock =
+            terminal_dock_bounds(content, gpui::px(260.0), gpui::px(1040.0), gpui::px(260.0));
         assert_eq!(f32::from(dock.origin.y), 640.0);
         assert!(
             !terminal_covers_browser(true, Some(dock), Some(pane)),
@@ -1730,9 +2015,21 @@ mod tests {
         let inside = gpui::point(gpui::px(1200.0), gpui::px(200.0));
         assert!(beside_pane_rect().contains(&inside));
         assert!(!beside_pane_rect().contains(&outside));
-        assert!(should_release_keyboard_on_mouse_down(true, outside, Some(beside_pane_rect())));
-        assert!(!should_release_keyboard_on_mouse_down(true, inside, Some(beside_pane_rect())));
-        assert!(!should_release_keyboard_on_mouse_down(false, outside, Some(beside_pane_rect())));
+        assert!(should_release_keyboard_on_mouse_down(
+            true,
+            outside,
+            Some(beside_pane_rect())
+        ));
+        assert!(!should_release_keyboard_on_mouse_down(
+            true,
+            inside,
+            Some(beside_pane_rect())
+        ));
+        assert!(!should_release_keyboard_on_mouse_down(
+            false,
+            outside,
+            Some(beside_pane_rect())
+        ));
         assert!(!should_release_keyboard_on_mouse_down(true, outside, None));
     }
 
@@ -1806,7 +2103,10 @@ mod tests {
             !browser_session_active("a", "a", true),
             "no page shows under the pending loading centre — not even the still-active session's"
         );
-        assert!(!browser_session_active("b", "a", true), "nor any other session's");
+        assert!(
+            !browser_session_active("b", "a", true),
+            "nor any other session's"
+        );
     }
 
     #[test]
@@ -1832,17 +2132,29 @@ mod tests {
     #[test]
     fn only_real_navigations_persist() {
         assert!(should_remember("https://example.com", None));
-        assert!(should_remember("https://example.com/v2", Some("https://example.com")));
-        assert!(!should_remember("https://example.com", Some("https://example.com")));
+        assert!(should_remember(
+            "https://example.com/v2",
+            Some("https://example.com")
+        ));
+        assert!(!should_remember(
+            "https://example.com",
+            Some("https://example.com")
+        ));
         assert!(!should_remember("", None));
-        assert!(!should_remember("about:blank", None), "showing the pane is not a navigation");
+        assert!(
+            !should_remember("about:blank", None),
+            "showing the pane is not a navigation"
+        );
         assert!(!should_remember("about:blank", Some("https://example.com")));
     }
 
     #[test]
     fn fresh_webviews_open_blank() {
         assert_eq!(initial_url(None), "about:blank");
-        assert_eq!(initial_url(Some("https://example.com")), "https://example.com");
+        assert_eq!(
+            initial_url(Some("https://example.com")),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -1892,7 +2204,11 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         kept.sort();
-        assert_eq!(kept.len(), 21, "twenty screenshots plus the untouched neighbour");
+        assert_eq!(
+            kept.len(),
+            21,
+            "twenty screenshots plus the untouched neighbour"
+        );
         assert!(kept.contains(&"draft-image.png".to_owned()));
         for index in 0..5 {
             assert!(
@@ -1919,7 +2235,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        stored.insert("session-b".to_owned(), crate::sessions::RightState::default());
+        stored.insert(
+            "session-b".to_owned(),
+            crate::sessions::RightState::default(),
+        );
         // B navigates; A's URL is untouched.
         if let Some(state) = stored.get_mut("session-b") {
             state.browser_url = Some("https://b.example/".to_owned());
@@ -1974,7 +2293,11 @@ mod tests {
     /// plus `BAAZ_STATE_DIR` pointed at a throwaway dir.
     fn routing_state(
         name: &str,
-    ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
+    ) -> (
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+        std::path::PathBuf,
+    ) {
         let dir = std::env::temp_dir().join(format!("baaz-route-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("probe state dir");
@@ -1987,7 +2310,11 @@ mod tests {
     /// Undo [`routing_state`]: drop the throwaway dir and hand the
     /// environment back.
     fn routing_restore(
-        state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
+        state: (
+            std::sync::MutexGuard<'static, ()>,
+            Option<std::ffi::OsString>,
+            std::path::PathBuf,
+        ),
     ) {
         let (guard, old, dir) = state;
         let _ = std::fs::remove_dir_all(&dir);
@@ -2043,11 +2370,11 @@ mod tests {
         });
         // Delivery waits (≤ 200 ms) for the window to be key before it
         // dispatches; the test clock only moves when advanced.
-        vc.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
         vc.run_until_parked();
         let editing = vc.update(|_, cx| {
-            baaz
-                .read(cx)
+            baaz.read(cx)
                 .existing_browser(cx)
                 .map(|page| page.read(cx).is_editing())
                 .unwrap_or(false)
@@ -2060,7 +2387,8 @@ mod tests {
         });
         // Delivery waits (≤ 200 ms) for the window to be key before it
         // dispatches; the test clock only moves when advanced.
-        vc.executor().advance_clock(std::time::Duration::from_millis(300));
+        vc.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
         vc.run_until_parked();
         assert!(
             vc.update(|_, cx| baaz.read(cx).settings_page.open),
@@ -2092,9 +2420,17 @@ mod tests {
             baaz.update(cx, |harness, cx| {
                 harness.ensure_tabs_loaded(cx);
                 let owner = super::Owner::Session("tab-probe".to_owned());
-                let first = harness.browser.tabs.open(None, owner.clone(), "https://a.example/", None);
-                let second =
-                    harness.browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first));
+                let first =
+                    harness
+                        .browser
+                        .tabs
+                        .open(None, owner.clone(), "https://a.example/", None);
+                let second = harness.browser.tabs.open(
+                    None,
+                    owner.clone(),
+                    "https://b.example/",
+                    Some(first),
+                );
                 let page_first = harness.ensure_tab_page("tab-probe", first, window, cx);
                 let page_second = harness.ensure_tab_page("tab-probe", second, window, cx);
                 assert!(page_first != page_second, "each tab holds its own page");
@@ -2198,23 +2534,25 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                let first = harness.browser.tabs.open(None, owner.clone(), "https://a.example/", None);
-                let second =
-                    harness.browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first));
-                let page_second = harness.ensure_tab_page("tab-close", second, window, cx);
-                assert_eq!(
-                    harness.browser.tabs.active_of(&owner, None),
-                    Some(second)
+                let first =
+                    harness
+                        .browser
+                        .tabs
+                        .open(None, owner.clone(), "https://a.example/", None);
+                let second = harness.browser.tabs.open(
+                    None,
+                    owner.clone(),
+                    "https://b.example/",
+                    Some(first),
                 );
+                let page_second = harness.ensure_tab_page("tab-close", second, window, cx);
+                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
                 // Closing the background tab: its page drops, and nothing
                 // else moves — no rebuild, no re-registration.
                 harness.close_tab("tab-close", first, window, cx);
                 assert!(!harness.browser.states.contains_key(&first));
                 assert_eq!(harness.browser.states.len(), 1);
-                assert_eq!(
-                    harness.browser.tabs.active_of(&owner, None),
-                    Some(second)
-                );
+                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-close"),
                     Some(page_second.clone()),
@@ -2225,7 +2563,10 @@ mod tests {
                 harness.close_tab("tab-close", second, window, cx);
                 assert!(harness.browser.states.is_empty());
                 assert!(
-                    harness.terminal_service.test_browser_state("tab-close").is_none(),
+                    harness
+                        .terminal_service
+                        .test_browser_state("tab-close")
+                        .is_none(),
                     "no page survives the last close through the agent tools"
                 );
                 assert!(
@@ -2236,6 +2577,73 @@ mod tests {
                         .and_then(|right| right.browser_url)
                         .is_none(),
                     "the last close clears the stored browser_url"
+                );
+            });
+        });
+        vc.run_until_parked();
+        routing_restore(state);
+    }
+
+    /// B2a-H1c: closing a person tab while another project is current still
+    /// reads `was_active` off the tab's OWN space. The old code asked the
+    /// current project's space, so an active tab closed from elsewhere
+    /// looked like a background close: the neighbour never built and the
+    /// agent tools stayed pointed at the dead tab.
+    #[gpui::test]
+    fn closing_a_person_tab_from_another_space_follows_its_own_space(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("tabs-space");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.ensure_tabs_loaded(cx);
+                let owner = Owner::Person;
+                let first = harness.browser.tabs.open(
+                    Some("p1".into()),
+                    owner.clone(),
+                    "https://a.example/",
+                    None,
+                );
+                let second = harness.browser.tabs.open(
+                    Some("p1".into()),
+                    owner.clone(),
+                    "https://b.example/",
+                    Some(first),
+                );
+                assert_eq!(
+                    harness.browser.tabs.active_of(&owner, Some("p1")),
+                    Some(second)
+                );
+                let page_first = harness.ensure_tab_page("home", first, window, cx);
+                let _page_second = harness.ensure_tab_page("home", second, window, cx);
+                // Switch projects: the strip now shows p2 (empty), but the
+                // close still targets p1's active tab.
+                harness.current_project = Some("p2".into());
+                harness.close_tab("home", second, window, cx);
+                assert_eq!(
+                    harness.browser.tabs.active_of(&owner, Some("p1")),
+                    Some(first),
+                    "the model neighbours within the tab's own space"
+                );
+                assert_eq!(
+                    harness.browser.agent_tabs.get("home"),
+                    Some(&first),
+                    "the neighbour takes the agent registration even closed from another space"
+                );
+                assert_eq!(
+                    harness.terminal_service.test_browser_state("home"),
+                    Some(page_first),
+                    "the agent tools point at the live neighbour, never the dead tab"
                 );
             });
         });
