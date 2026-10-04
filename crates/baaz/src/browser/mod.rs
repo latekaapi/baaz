@@ -2041,6 +2041,9 @@ mod tests {
                 harness.deliver_cef_keystroke("cmd-l", window, cx);
             });
         });
+        // Delivery waits (≤ 200 ms) for the window to be key before it
+        // dispatches; the test clock only moves when advanced.
+        vc.executor().advance_clock(std::time::Duration::from_millis(300));
         vc.run_until_parked();
         let editing = vc.update(|_, cx| {
             baaz
@@ -2055,6 +2058,9 @@ mod tests {
                 harness.deliver_cef_keystroke("cmd-,", window, cx);
             });
         });
+        // Delivery waits (≤ 200 ms) for the window to be key before it
+        // dispatches; the test clock only moves when advanced.
+        vc.executor().advance_clock(std::time::Duration::from_millis(300));
         vc.run_until_parked();
         assert!(
             vc.update(|_, cx| baaz.read(cx).settings_page.open),
