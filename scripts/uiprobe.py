@@ -131,6 +131,11 @@ ENTRIES = {
     # the entry captures deterministically like `right-browser` does.
     "right-browser-page":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:browser;browse:https://example.com"]},
+    # The pane tab strip: two session tabs (person tabs with no session
+    # open), back on the first. Captures always run the fake page, never a
+    # native view. No baselines — capture and look.
+    "right-tabs":           {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:520;right:browser;tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-select:1"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",

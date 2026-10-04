@@ -4369,7 +4369,11 @@ impl Render for Harness {
                     &self.right_cache,
                     right_project,
                     &session_edits,
-                    browser.as_ref(),
+                    crate::right::BrowserPane {
+                        state: browser.as_ref(),
+                        tabs: &self.browser_strip(cx),
+                        window: &mut *window,
+                    },
                     right_open,
                     cx,
                 )
@@ -5105,8 +5109,7 @@ mod tests {
         });
         draw_shell(&mut *vc, &baaz);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()
-                && baaz.read(cx).browser.home.is_none()),
+            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()),
             "boot draws no webview"
         );
         // A session switch with no Browser state: the activate tail —
@@ -5120,8 +5123,7 @@ mod tests {
         });
         draw_shell(&mut *vc, &baaz);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()
-                && baaz.read(cx).browser.home.is_none()),
+            vc.update(|_, cx| baaz.read(cx).browser.states.is_empty()),
             "a switch with no Browser state creates no webview"
         );
         restore_state(state);
@@ -5165,10 +5167,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let url_focus = vc.update(|_, cx| {
             baaz.read(cx)
-                .browser
-                .states
-                .get("s-1")
-                .cloned()
+                .session_page("s-1")
                 .expect("restore onto Browser creates the webview")
                 .read(cx)
                 .focus_handle()
@@ -5213,10 +5212,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let url_focus = vc.update(|_, cx| {
             baaz.read(cx)
-                .browser
-                .states
-                .get("s-1")
-                .cloned()
+                .session_page("s-1")
                 .expect("opening Browser creates the webview")
                 .read(cx)
                 .focus_handle()
@@ -5458,7 +5454,7 @@ mod tests {
         // any frame — never as a render side effect.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Browser, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.contains_key("s-1")),
+            vc.update(|_, cx| baaz.read(cx).session_has_page("s-1")),
             "opening on Browser prepares the webview off the render path"
         );
         assert_eq!(
@@ -5570,7 +5566,7 @@ mod tests {
             "the open action constructs the webview before any frame"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).browser.states.contains_key("s-1")),
+            vc.update(|_, cx| baaz.read(cx).session_has_page("s-1")),
             "the webview exists before render runs"
         );
         // Frames reuse: render never constructs.
@@ -6060,14 +6056,14 @@ mod tests {
         crate::right::reset_io_count();
         for kind in crate::layout::RightKind::ALL {
             for _ in 0..2 {
-                vc.update(|_, cx| {
+                vc.update(|window, cx| {
                     baaz.update(cx, |harness, cx| {
                         let _ = crate::right::render(
                             kind,
                             &harness.right_cache,
                             project.clone(),
                             &[],
-                            None,
+                            crate::right::BrowserPane { state: None, tabs: &[], window: &mut *window },
                             true,
                             cx,
                         );
@@ -6207,11 +6203,8 @@ mod tests {
                 crate::layout::RightKind::Browser,
                 "the link opens the pane on Browser"
             );
-            let url = harness
-                .browser
-                .states
-                .get("s-1")
-                .map(|state| state.read(cx).url().to_string());
+            let url =
+                harness.session_page("s-1").map(|state| state.read(cx).url().to_string());
             assert_eq!(url.as_deref(), Some("https://example.com/page"), "the fake page navigates");
             assert!(
                 !harness.browser_url_focus_armed,

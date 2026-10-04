@@ -6383,7 +6383,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 assert!(
-                    !harness.browser.states.contains_key(&first),
+                    !harness.session_has_page(&first),
                     "no webview is built for the still-open session while pending"
                 );
                 assert_eq!(

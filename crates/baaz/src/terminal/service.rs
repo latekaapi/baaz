@@ -502,6 +502,14 @@ impl TerminalService {
         self.shared.browsers.lock().expect("browser registry").insert(session.to_owned(), state);
     }
 
+    /// The webview `browser_*` tools currently act on for `session`, if
+    /// one is registered. Test-only: the tab switch test pins that the
+    /// agent registration follows the active tab.
+    #[cfg(test)]
+    pub(crate) fn test_browser_state(&self, session: &str) -> Option<Entity<WebviewState>> {
+        self.shared.browsers.lock().expect("browser registry").get(session).cloned()
+    }
+
     /// Remember that `from` (a provider open's spawn-time request id) is now
     /// served as `to` (the lane's thread id): later tool calls naming `from`
     /// resolve to `to`. Called on the UI thread when the lane's thread id
