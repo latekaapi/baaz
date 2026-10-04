@@ -1,0 +1,21 @@
+# The executable inside Baaz's five CEF helper apps (renderer, GPU, network
+# and the rest). Its own workspace on purpose: building it pulls in CEF, so
+# `cargo build --workspace` and CI never touch it; `scripts/bundle.sh` does.
+[package]
+name = "baaz-cef-helper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "baaz-cef-helper"
+path = "src/main.rs"
+
+[dependencies]
+aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21" }
+
+[profile.release]
+strip = true

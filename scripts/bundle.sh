@@ -11,6 +11,8 @@
 # (`sh.baaz.app`) and assembles `target/bundle/Baaz.app`:
 #
 #   Baaz.app/Contents/{Info.plist,MacOS/{Baaz,mcp-bridge},Resources/Baaz.icns}
+#   + Frameworks/{Chromium Embedded Framework.framework, Baaz Helper*.app}
+#     when CEF is on disk (see below)
 #
 # `mcp-bridge` rides beside the baaz binary: it is the terminal relay every
 # provider route spawns (`config.mcpServers`, `--mcp-config`, `-c
@@ -35,7 +37,22 @@ if [ ! -f "$SRC" ]; then
     exit 1
 fi
 
-cargo build --release -p baaz -p mcp-bridge
+# Chromium (docs/25-browser-design.md): embedded when the CEF binary
+# distribution is on disk. CEF_PATH names it (default ~/.local/share/cef,
+# which cef-rs's `export-cef-dir` fills); BAAZ_CEF=0 builds a WebKit-only app.
+CEF_DIR="${CEF_PATH:-$HOME/.local/share/cef}"
+if [ "${BAAZ_CEF:-1}" != "0" ] && [ -d "$CEF_DIR/Chromium Embedded Framework.framework" ]; then
+    WITH_CEF=1
+    export CEF_PATH="$CEF_DIR"
+    cargo build --release -p baaz -p mcp-bridge --features baaz/cef
+    # The helper is its own workspace (CI never builds CEF); share the target
+    # dir so the CEF wrapper compiles once.
+    cargo build --release --manifest-path "$ROOT/crates/baaz-cef-helper/Cargo.toml" --target-dir "$ROOT/target"
+else
+    WITH_CEF=0
+    echo "bundle: no CEF at $CEF_DIR (or BAAZ_CEF=0): the browser pane stays on WKWebView"
+    cargo build --release -p baaz -p mcp-bridge
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -53,6 +70,59 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$ROOT/target/release/baaz" "$CONTENTS/MacOS/Baaz"
 cp "$ROOT/target/release/mcp-bridge" "$CONTENTS/MacOS/mcp-bridge"
 cp "$WORK/Baaz.icns" "$CONTENTS/Resources/Baaz.icns"
+
+# The CEF framework and its five helper apps, named the way CEF derives them
+# from the main bundle (`<Name> Helper (Renderer).app`, …).
+rm -rf "$CONTENTS/Frameworks"
+if [ "$WITH_CEF" = 1 ]; then
+    mkdir -p "$CONTENTS/Frameworks"
+    ditto "$CEF_DIR/Chromium Embedded Framework.framework" "$CONTENTS/Frameworks/Chromium Embedded Framework.framework"
+    for kind in "" "GPU" "Renderer" "Plugin" "Alerts"; do
+        if [ -n "$kind" ]; then
+            name="Baaz Helper ($kind)"
+            id="sh.baaz.app.helper.$(echo "$kind" | tr '[:upper:]' '[:lower:]')"
+        else
+            name="Baaz Helper"
+            id="sh.baaz.app.helper"
+        fi
+        helper="$CONTENTS/Frameworks/$name.app/Contents"
+        mkdir -p "$helper/MacOS"
+        cp "$ROOT/target/release/baaz-cef-helper" "$helper/MacOS/$name"
+        cat >"$helper/Info.plist" <<HELPER
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>$name</string>
+    <key>CFBundleIdentifier</key>
+    <string>$id</string>
+    <key>CFBundleName</key>
+    <string>$name</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${VERSION}</string>
+    <key>LSUIElement</key>
+    <string>1</string>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>MallocNanoZone</key>
+        <string>0</string>
+    </dict>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>A page in Baaz's browser asked for the camera.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>A page in Baaz's browser asked for the microphone.</string>
+</dict>
+</plist>
+HELPER
+    done
+fi
 cat >"$CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -76,6 +146,11 @@ cat >"$CONTENTS/Info.plist" <<EOF
     <string>${VERSION}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>MallocNanoZone</key>
+        <string>0</string>
+    </dict>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
 </dict>
