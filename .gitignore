@@ -37,3 +37,10 @@ __pycache__/
 # The old phase-by-phase internal diary; superseded by the root CHANGELOG.md.
 /docs/CHANGELOG.md
 !/design/baseline/**/*.png
+# The browser work's research, plans, spikes and design (docs 24*, 25*): kept
+# private by the owner (2026-10-05) — they carry machine, budget and
+# strategy details. Like docs 14/15, on disk for whoever maintains this
+# checkout, never tracked.
+/docs/24*
+/docs/25*
+/spikes/

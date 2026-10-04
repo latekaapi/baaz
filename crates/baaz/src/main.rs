@@ -717,6 +717,21 @@ fn main() {
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();
+    // The Chromium page engine, when the bundle carries it (docs/25 §2):
+    // mapped before anything else allocates in earnest, initialised lazily on
+    // the first page. Without it the browser pane stays on WKWebView.
+    #[cfg(feature = "cef")]
+    if aui_cef::preload() {
+        let dir = crate::store::support_dir().join("Browser");
+        aui_cef::configure(aui_cef::Config {
+            cache_dir: dir.join("Chromium"),
+            // Ad-hoc signed builds re-prompt for the keychain item on every
+            // re-sign; a signed release sets BAAZ_CEF_KEYCHAIN.
+            mock_keychain: std::env::var_os("BAAZ_CEF_KEYCHAIN").is_none(),
+            log_file: Some(dir.join("cef.log")),
+        });
+        crate::log::boot_mark("cef-loaded");
+    }
     // The provider status service (Y4): read the cache, log the statuses,
     // and probe every backend in the background — never gating the window.
     crate::provider_status::boot();
@@ -772,6 +787,10 @@ fn main() {
         crate::log::boot_mark("window-open-requested");
         let (handle, capture) = open_shell_window(&args, cx);
         crate::log::boot_mark("window-shown");
+        // Chromium starts on the next main-queue turn, outside any gpui update,
+        // so the first browser page finds it ready (B1a, live).
+        #[cfg(feature = "cef")]
+        aui_cef::warm_up_soon();
         cx.on_app_quit(|cx| {
             // B7fix2: a quit that bypasses the menu's `QuitApp` (the Dock,
             // a signal-driven quit) still lands pending pane state first.
@@ -792,6 +811,9 @@ fn main() {
                             .ok()
                     });
             }
+            // Pages close and Chromium shuts down before the process goes.
+            #[cfg(feature = "cef")]
+            aui_cef::shutdown(std::time::Duration::from_secs(3));
             async {
                 crate::tier::cleanup_probes();
                 crate::browser::cleanup_screenshots();

@@ -213,6 +213,28 @@ pub(crate) fn initial_url(stored: Option<&str>) -> &str {
 
 /// How many page screenshots one run keeps: enough to re-read the last
 /// few captures, bounded so a long session never fills the disk.
+/// The Chromium page engine for a new pane page, when the bundle carries CEF
+/// and `BAAZ_BROWSER_ENGINE=webkit` does not ask for WebKit. `None` means
+/// "use WKWebView": CEF unavailable, or it failed to open a page (logged).
+#[cfg(feature = "cef")]
+fn cef_backend(window: &Window, url: &str, rgba: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+    if !aui_cef::available() || std::env::var("BAAZ_BROWSER_ENGINE").as_deref() == Ok("webkit") {
+        return None;
+    }
+    match aui_cef::CefBackend::new_at(window, url, (0.0, 0.0), (0.0, 0.0), rgba) {
+        Ok(backend) => Some(Box::new(backend)),
+        Err(error) => {
+            crate::baaz_log!("browser: no Chromium page ({error}); falling back to WKWebView");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "cef"))]
+fn cef_backend(_window: &Window, _url: &str, _rgba: (u8, u8, u8, u8)) -> Option<Box<dyn WebBackend>> {
+    None
+}
+
 pub(crate) const MAX_SCREENSHOTS: usize = 20;
 
 /// This run's page screenshots live here: `$BAAZ_STATE_DIR/attachments/browser/`
@@ -324,13 +346,11 @@ impl Harness {
                 // pane's own surface instead, so about:blank is not a white slab.
                 let bg = gpui::Rgba::from(cx.aui().colors.surface_1);
                 let rgba = [bg.r, bg.g, bg.b, bg.a].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-                match WryBackend::new_at_with_background(
-                    &*window,
-                    &initial,
-                    (0.0, 0.0),
-                    (0.0, 0.0),
-                    (rgba[0], rgba[1], rgba[2], rgba[3]),
-                ) {
+                let rgba = (rgba[0], rgba[1], rgba[2], rgba[3]);
+                if let Some(backend) = cef_backend(&*window, &initial, rgba) {
+                    return WebviewState::new(backend, cx);
+                }
+                match WryBackend::new_at_with_background(&*window, &initial, (0.0, 0.0), (0.0, 0.0), rgba) {
                     Ok(backend) => WebviewState::new(Box::new(backend), cx),
                     Err(error) => {
                         crate::baaz_log!("browser: no WKWebView ({error}); falling back to the scripted page");

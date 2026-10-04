@@ -53,6 +53,10 @@ aui-tokens = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21" 
 aui-icons = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21" }
 aui-terminal = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21", features = ["pty", "tui"] }
 aui-webview = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21", features = ["wry"] }
+# The Chromium backend (docs/25-browser-design.md). Optional in `baaz` behind
+# the `cef` feature: building it downloads CEF and runs cmake, which tests
+# and CI never need. `scripts/bundle.sh` turns it on.
+aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.3.21" }
 
 # Internal crates
 muse-client = { path = "crates/muse-client" }

@@ -14,6 +14,10 @@ description = "Baaz: a macOS chat interface to Meta's Muse Code agent, built on 
 # distributed as a signed .app bundle, not a library).
 publish = false
 
+[features]
+# The Chromium page engine; without it the browser pane is WKWebView.
+cef = ["dep:aui-cef"]
+
 [dependencies]
 # `test-support` exposes `Window::render_to_image`, which `--screenshot` uses,
 # exactly as the gallery's own capture path does.
@@ -27,6 +31,7 @@ aui-tokens.workspace = true
 aui-icons.workspace = true
 aui-terminal.workspace = true
 aui-webview.workspace = true
+aui-cef = { workspace = true, optional = true }
 muse-client.workspace = true
 muse-adapter.workspace = true
 # C1b: the connection and command path speak the provider seam; the session
