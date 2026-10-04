@@ -1409,9 +1409,38 @@ impl Harness {
                 // inside this one and panic ("already being updated").
                 // `Window::defer` runs the dispatch after this update's
                 // lease on Harness has ended.
-                window.defer(cx, move |window, cx| {
-                    window.dispatch_keystroke(parsed, cx);
-                });
+                // And only once AppKit has made the gpui window key again:
+                // handing the keyboard back is asynchronous, and a dispatch
+                // that lands first has its focus (⌘L's address field) reset
+                // when the window's key change arrives (B1b, live: the second
+                // ⌘L after clicking the page opened nothing).
+                cx.spawn_in(window, async move |this, cx| {
+                    for _ in 0..20 {
+                        let key = cx.update(|window, _| window.is_window_active()).unwrap_or(true);
+                        if key {
+                            break;
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_millis(10)).await;
+                    }
+                    // With gpui focus stale (the address field unmounted when
+                    // the page took the keyboard) a keystroke reaches no key
+                    // context and no binding: the second ⌘L after clicking the
+                    // page did nothing (B1b, live). Focus the root first so
+                    // `AuiRoot` bindings resolve. The handle is cloned out
+                    // first: dispatching inside a Harness update re-enters it.
+                    let root = this.update(cx, |this, _| this.focus_root.clone()).ok();
+                    let _ = cx.update(|window, cx| {
+                        // Unconditionally: the keystroke came from a page, so
+                        // whatever gpui still calls focused is stale — often the
+                        // unmounted address input, which `focused()` reports
+                        // but no rendered node carries, so it matched nothing.
+                        if let Some(root) = &root {
+                            window.focus(root, cx);
+                        }
+                        window.dispatch_keystroke(parsed, cx);
+                    });
+                })
+                .detach();
             }
             Err(_) => {
                 crate::baaz_log!("browser: ignoring unparseable routed keystroke {keystroke:?}");
