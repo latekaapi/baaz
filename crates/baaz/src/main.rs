@@ -667,6 +667,11 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
             let args = args.clone();
             move |window, cx| {
                 let view = cx.new(|cx| app::Harness::new(args.clone(), capture.clone(), window, cx));
+                // The Chromium key router lives here, where the window is
+                // created — before any page can take the keyboard — not
+                // where `cef_backend` first builds a page.
+                #[cfg(feature = "cef")]
+                view.update(cx, |this, cx| this.install_cef_key_router(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             }
         })
