@@ -419,7 +419,7 @@ impl Tabs {
             .collect();
         sessions.sort();
         for (session, project, url) in sessions {
-            if self.migrated.iter().any(|id| *id == session) {
+            if self.migrated.contains(&session) {
                 continue;
             }
             self.migrated.push(session.clone());
@@ -917,6 +917,7 @@ mod tests {
         let back = load();
         assert!(back.tabs.is_empty(), "a capture never reads the owner's tabs");
         // … and a save writes nothing.
+        let _ = std::fs::remove_file(path());
         let mut model = tabs();
         model.open(None, session("s"), "https://capture.example/", None);
         model.save();
