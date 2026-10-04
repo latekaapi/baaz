@@ -31,13 +31,27 @@ pub(crate) enum Owner {
     Session(String),
 }
 
-/// The map key for [`Tabs::active`]: `"person"` or `"session:<id>"`.
+/// What a fresh webview opens on: the blank default, never persisted.
+pub(crate) const BLANK: &str = "about:blank";
+
+/// The map key for [`Tabs::active`]: `"person:<space>"` for the person's
+/// per-project tabs (`""` with no project open) or `"session:<id>"` for a
+/// session (a session already belongs to one project, so the id suffices).
 /// A plain string (not the enum) so the map serialises as JSON.
-pub(crate) fn owner_key(owner: &Owner) -> String {
+pub(crate) fn active_key(owner: &Owner, space: Option<&str>) -> String {
     match owner {
-        Owner::Person => "person".to_owned(),
+        Owner::Person => format!("person:{}", space.unwrap_or("")),
         Owner::Session(id) => format!("session:{id}"),
     }
+}
+
+/// Whether the tab store must stay untouched: under
+/// `BAAZ_DETERMINISTIC=1` (every capture) the tab model neither reads nor
+/// writes `tabs.json` — exactly like `layout::read` returns defaults — so
+/// captures are repeatable and never touch the owner's tabs. Read from the
+/// environment on every call (not cached) so tests can flip it.
+pub(crate) fn deterministic() -> bool {
+    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
 /// One browser tab: where it lives, who owns it, and what it shows.
@@ -86,7 +100,7 @@ pub(crate) struct Tabs {
     /// Every open tab, in strip order.
     #[serde(default)]
     pub tabs: Vec<Tab>,
-    /// Each owner's active tab, keyed by [`owner_key`].
+    /// Each owner's active tab, keyed by [`active_key`].
     #[serde(default)]
     pub active: HashMap<String, TabId>,
     /// The next [`TabId`] to hand out; monotonic, never reused.
@@ -95,6 +109,11 @@ pub(crate) struct Tabs {
     /// Recently closed tabs, oldest first, capped at [`CLOSED_CAP`].
     #[serde(default)]
     pub closed: Vec<Tab>,
+    /// Session ids whose `browser_url` migration already ran: the
+    /// migration runs only once per session, so a closed last tab never
+    /// resurrects from a stale `browser_url`.
+    #[serde(default)]
+    pub migrated: Vec<String>,
 }
 
 impl Tabs {
@@ -109,6 +128,7 @@ impl Tabs {
     ) -> TabId {
         let id = TabId(self.next_id);
         self.next_id += 1;
+        let key = active_key(&owner, space.as_deref());
         let tab =
             Tab { id, space, owner: owner.clone(), url: url.to_owned(), title: url.to_owned(), pinned: false, last_shown: None };
         let at = after
@@ -116,35 +136,41 @@ impl Tabs {
             .map(|index| index + 1)
             .unwrap_or(self.tabs.len());
         self.tabs.insert(at.min(self.tabs.len()), tab);
-        self.active.insert(owner_key(&owner), id);
+        self.active.insert(key, id);
         id
     }
 
     /// Close `id`, keeping it for [`Self::reopen_last`]. Answers with the
-    /// neighbour to activate: the next tab of the same owner, else the
-    /// previous one, else nothing (the owner has no tabs left). The
-    /// owner's active pointer follows the answer.
+    /// tab to show now, and only when the closed tab was its owner's
+    /// active tab: the display-order neighbour after it, else the one
+    /// before it, else nothing (the owner has no tabs left). Closing a
+    /// background tab answers nothing and leaves the active pointer —
+    /// and every registration — exactly alone, so the caller rebuilds
+    /// nothing. The owner's active pointer follows the answer.
     pub(crate) fn close(&mut self, id: TabId) -> Option<TabId> {
         let index = self.tabs.iter().position(|tab| tab.id == id)?;
+        // The display-order siblings around the closed tab: the one after
+        // it in [`Self::ordered_tabs`], else the one before it. Owned ids
+        // only — the removal below ends every borrow.
+        let (owner, space) = {
+            let tab = &self.tabs[index];
+            (tab.owner.clone(), tab.space.clone())
+        };
+        let siblings: Vec<TabId> =
+            self.ordered_tabs(&owner, space.as_deref()).iter().map(|sibling| sibling.id).collect();
+        let at = siblings.iter().position(|sibling| *sibling == id);
         let tab = self.tabs.remove(index);
         self.closed.push(tab.clone());
         while self.closed.len() > CLOSED_CAP {
             self.closed.remove(0);
         }
-        // The neighbour that slid into (or already stood behind) the
-        // removed tab's slot: the first sibling at or after the removal
-        // index, else the last sibling before it.
-        let next = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, other)| other.owner == tab.owner)
-            .filter_map(|(i, other)| (i >= index).then_some(other.id))
-            .next()
-            .or_else(|| {
-                self.tabs.iter().filter(|other| other.owner == tab.owner).map(|other| other.id).next_back()
-            });
-        let key = owner_key(&tab.owner);
+        let key = active_key(&tab.owner, tab.space.as_deref());
+        if self.active.get(&key) != Some(&id) {
+            return None;
+        }
+        let next = at
+            .and_then(|at| siblings.get(at + 1).or_else(|| (at > 0).then(|| &siblings[at - 1])))
+            .copied();
         match next {
             Some(id) => {
                 self.active.insert(key, id);
@@ -167,7 +193,7 @@ impl Tabs {
         // A live tab can never carry the id: ids are never reused, and a
         // reopened tab left the live set when it closed.
         debug_assert!(!self.tabs.iter().any(|live| live.id == id));
-        self.active.insert(owner_key(&tab.owner), id);
+        self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
         self.tabs.push(tab);
         Some(id)
     }
@@ -176,7 +202,8 @@ impl Tabs {
     pub(crate) fn activate(&mut self, id: TabId) -> bool {
         match self.tabs.iter().find(|tab| tab.id == id) {
             Some(tab) => {
-                self.active.insert(owner_key(&tab.owner), id);
+                let tab = tab.clone();
+                self.active.insert(active_key(&tab.owner, tab.space.as_deref()), id);
                 true
             }
             None => false,
@@ -188,26 +215,44 @@ impl Tabs {
         self.tabs.iter().find(|tab| tab.id == id)
     }
 
-    /// The owner's active tab, when it has one still open.
-    pub(crate) fn active_of(&self, owner: &Owner) -> Option<TabId> {
-        let id = self.active.get(&owner_key(owner))?;
+    /// The owner's active tab, when it has one still open. Person tabs
+    /// are per project: `space` is the project asking, and switching
+    /// project shows that project's active person tab (or none).
+    /// Sessions already belong to one project, so `space` is ignored
+    /// for them.
+    pub(crate) fn active_of(&self, owner: &Owner, space: Option<&str>) -> Option<TabId> {
+        let id = self.active.get(&active_key(owner, space))?;
         self.tabs.iter().any(|tab| &tab.id == id).then_some(*id)
     }
 
     /// Every open tab of `owner`, in strip order.
+    #[allow(dead_code)]
     pub(crate) fn tabs_of(&self, owner: &Owner) -> Vec<&Tab> {
         self.tabs.iter().filter(|tab| &tab.owner == owner).collect()
     }
 
-    /// The person's tabs in `space`, pinned first, in strip order.
-    pub(crate) fn person_tabs(&self, space: Option<&str>) -> Vec<&Tab> {
+    /// The ONE display ordering behind the strip, `strip_tab_at` (so
+    /// `tab-select:n`/`tab-close:n` hit the n-th tab ON SCREEN), the
+    /// close-neighbour choice, and future sidebars: pinned first, then
+    /// model order. Person tabs are per project; sessions already belong
+    /// to one project, so every session tab shows regardless of `space`.
+    pub(crate) fn ordered_tabs(&self, owner: &Owner, space: Option<&str>) -> Vec<&Tab> {
         let mut tabs: Vec<&Tab> = self
             .tabs
             .iter()
-            .filter(|tab| tab.owner == Owner::Person && tab.space.as_deref() == space)
+            .filter(|tab| {
+                tab.owner == *owner
+                    && (tab.owner != Owner::Person || tab.space.as_deref() == space)
+            })
             .collect();
         tabs.sort_by_key(|tab| (!tab.pinned, self.tabs.iter().position(|t| t.id == tab.id)));
         tabs
+    }
+
+    /// The person's tabs in `space`, pinned first, in strip order.
+    #[allow(dead_code)]
+    pub(crate) fn person_tabs(&self, space: Option<&str>) -> Vec<&Tab> {
+        self.ordered_tabs(&Owner::Person, space)
     }
 
     /// Every session's tabs in `space`, grouped by session id in first-seen
@@ -246,9 +291,10 @@ impl Tabs {
         }
         self.tabs[index].owner = owner.clone();
         // The old owner falls back like a close; the new owner selects.
+        let space = self.tabs[index].space.clone();
         let siblings: Vec<TabId> =
             self.tabs.iter().filter(|tab| tab.owner == old).map(|tab| tab.id).collect();
-        let key = owner_key(&old);
+        let key = active_key(&old, space.as_deref());
         match siblings.last() {
             Some(id) => {
                 self.active.insert(key, *id);
@@ -257,21 +303,32 @@ impl Tabs {
                 self.active.remove(&key);
             }
         }
-        self.active.insert(owner_key(&owner), id);
+        self.active.insert(active_key(&owner, space.as_deref()), id);
         true
     }
 
-    /// Pin or unpin `id`. False for an unknown tab. (Next tasks: the pin
-    /// control on the strip.)
+    /// Pin or unpin `id`, moving it to the end of the pinned block (when
+    /// pinning: behind the last pinned tab) or the start of the unpinned
+    /// block (when unpinning: ahead of the first unpinned tab) — so the
+    /// model order already reads like the strip. False for an unknown tab.
+    /// (Next tasks: the pin control on the strip.)
     #[allow(dead_code)]
     pub(crate) fn set_pinned(&mut self, id: TabId, pinned: bool) -> bool {
-        match self.tabs.iter_mut().find(|tab| tab.id == id) {
-            Some(tab) => {
-                tab.pinned = pinned;
-                true
-            }
-            None => false,
-        }
+        let from = match self.tabs.iter().position(|tab| tab.id == id) {
+            Some(from) => from,
+            None => return false,
+        };
+        let mut tab = self.tabs.remove(from);
+        tab.pinned = pinned;
+        let at = if pinned {
+            // Behind the last pinned tab (or the front when none).
+            self.tabs.iter().rposition(|tab| tab.pinned).map(|last| last + 1).unwrap_or(0)
+        } else {
+            // Ahead of the first unpinned tab (or the end when none).
+            self.tabs.iter().position(|tab| !tab.pinned).unwrap_or(self.tabs.len())
+        };
+        self.tabs.insert(at, tab);
+        true
     }
 
     /// Move `id` to strip position `index` (clamped). False for unknown.
@@ -289,13 +346,24 @@ impl Tabs {
     }
 
     /// Record a live page's URL and title on `id`. Answers whether either
-    /// changed (the caller persists only on change).
+    /// changed (the caller persists only on change). A fresh page's blank
+    /// report never clobbers a real URL: when the tab already holds one,
+    /// an empty or `about:blank` URL (and an empty title) is skipped, so
+    /// a rebuild does not overwrite the saved page with blank.
     pub(crate) fn set_url_title(&mut self, id: TabId, url: &str, title: &str) -> bool {
         match self.tabs.iter_mut().find(|tab| tab.id == id) {
             Some(tab) => {
-                let changed = tab.url != url || tab.title != title;
-                tab.url = url.to_owned();
-                tab.title = title.to_owned();
+                let mut changed = false;
+                if super::should_remember(url, Some(tab.url.as_str())) {
+                    tab.url = url.to_owned();
+                    // A navigation without a title yet reads as its URL,
+                    // like [`Self::open`]: the strip never shows stale text.
+                    tab.title = if title.is_empty() { url.to_owned() } else { title.to_owned() };
+                    changed = true;
+                } else if url == tab.url && !title.is_empty() && title != tab.title {
+                    tab.title = title.to_owned();
+                    changed = true;
+                }
                 changed
             }
             None => false,
@@ -303,21 +371,26 @@ impl Tabs {
     }
 
     /// Write the store atomically. Best-effort: losing tabs is a nuisance,
-    /// never a loss — the sessions and their URLs survive elsewhere.
+    /// never a loss — the sessions and their URLs survive elsewhere. A
+    /// no-op under `BAAZ_DETERMINISTIC=1`: captures never touch the
+    /// owner's tabs.
     pub(crate) fn save(&self) {
+        if deterministic() {
+            return;
+        }
         if let Ok(text) = serde_json::to_vec_pretty(self) {
             let _ = crate::store::write_atomic(&path(), &text);
         }
     }
 
-    /// Stamp `id` as the just-shown page, at minute granularity so the
+    /// Stamp `id` as the just-shown page, at second granularity so the
     /// per-frame sync does not persist every frame. Answers whether the
     /// stamp moved (the caller persists on true).
     pub(crate) fn mark_shown(&mut self, id: TabId, now: u64) -> bool {
         match self.tabs.iter_mut().find(|tab| tab.id == id) {
             Some(tab) => {
                 let stale =
-                    tab.last_shown.is_none_or(|last| now.saturating_sub(last) >= 60_000);
+                    tab.last_shown.is_none_or(|last| now.saturating_sub(last) >= 1_000);
                 if stale {
                     tab.last_shown = Some(now);
                 }
@@ -330,6 +403,9 @@ impl Tabs {
     /// Give every session with a stored `browser_url` and no tabs yet one
     /// session tab with that URL (space from the session's project).
     /// Answers whether any tab was created; the caller persists on true.
+    /// Each session migrates only once ([`Tabs::migrated`]): a session
+    /// whose last tab closed stays closed instead of resurrecting from a
+    /// stale `browser_url`.
     pub(crate) fn migrate_from_overrides(&mut self, overrides: &crate::sessions::Overrides) -> bool {
         let mut made = false;
         let mut sessions: Vec<(String, Option<String>, String)> = overrides
@@ -343,6 +419,10 @@ impl Tabs {
             .collect();
         sessions.sort();
         for (session, project, url) in sessions {
+            if self.migrated.iter().any(|id| *id == session) {
+                continue;
+            }
+            self.migrated.push(session.clone());
             let owner = Owner::Session(session);
             if self.tabs.iter().any(|tab| tab.owner == owner) {
                 continue;
@@ -361,9 +441,25 @@ pub(crate) fn path() -> std::path::PathBuf {
 }
 
 /// Read the store; best-effort like every store read — a missing or
-/// unparseable file is an empty model, and migration refills it.
+/// unparseable file is an empty model, and migration refills it. Under
+/// `BAAZ_DETERMINISTIC=1` the store is never read: captures boot an empty
+/// model. Repairs `next_id` past every id the file holds (live and
+/// closed), so a hand-edited or older file can never hand out a duplicate.
 pub(crate) fn load() -> Tabs {
-    crate::store::read_json(&path())
+    if deterministic() {
+        return Tabs::default();
+    }
+    let mut tabs: Tabs = crate::store::read_json(&path());
+    let max = tabs
+        .tabs
+        .iter()
+        .map(|tab| tab.id.0)
+        .chain(tabs.closed.iter().map(|tab| tab.id.0))
+        .max();
+    if let Some(max) = max {
+        tabs.next_id = tabs.next_id.max(max + 1);
+    }
+    tabs
 }
 
 /// Now, as ms since the epoch: the clock behind `last_shown`.
@@ -406,9 +502,15 @@ pub(crate) fn should_discard(
     !audible && !is_agent_active && discard_due(now_ms, last_shown_ms)
 }
 
-/// The strip row's label: the title, or the URL's host (or the whole URL
-/// when it has no host, e.g. `about:blank`) while the page has no title.
+/// The strip row's label: `New tab` while the page is blank
+/// (`about:blank`, whatever the backend reports), else the title, else the
+/// URL's host (or the whole URL when it has no host) while the page has no
+/// title. The aria label uses this same visible text; an empty title falls
+/// back to the host.
 pub(crate) fn tab_label(title: &str, url: &str) -> String {
+    if url.is_empty() || url == BLANK {
+        return "New tab".to_owned();
+    }
     if !title.is_empty() {
         return title.to_owned();
     }
@@ -453,10 +555,10 @@ mod tests {
         let mut model = tabs();
         let first = model.open(None, session("s"), "https://a.example/", None);
         let second = model.open(None, session("s"), "https://b.example/", None);
-        assert_eq!(model.active_of(&session("s")), Some(second));
+        assert_eq!(model.active_of(&session("s"), None), Some(second));
         assert_eq!(model.tabs_of(&session("s")).iter().map(|tab| tab.id).collect::<Vec<_>>(), vec![first, second]);
         assert!(model.activate(first));
-        assert_eq!(model.active_of(&session("s")), Some(first));
+        assert_eq!(model.active_of(&session("s"), None), Some(first));
         assert!(!model.activate(TabId(99)));
     }
 
@@ -476,17 +578,57 @@ mod tests {
         let first = model.open(None, session("s"), "https://a.example/", None);
         let second = model.open(None, session("s"), "https://b.example/", None);
         let third = model.open(None, session("s"), "https://c.example/", None);
-        // Closing the middle activates the next sibling.
+        // Closing the active middle tab activates the next sibling.
+        assert!(model.activate(second));
         assert_eq!(model.close(second), Some(third));
-        assert_eq!(model.active_of(&session("s")), Some(third));
-        // Closing the last activates the previous sibling.
+        assert_eq!(model.active_of(&session("s"), None), Some(third));
+        // Closing the active last tab activates the previous sibling.
         assert_eq!(model.close(third), Some(first));
-        assert_eq!(model.active_of(&session("s")), Some(first));
+        assert_eq!(model.active_of(&session("s"), None), Some(first));
         // Closing the only tab clears the owner.
         assert_eq!(model.close(first), None);
-        assert_eq!(model.active_of(&session("s")), None);
+        assert_eq!(model.active_of(&session("s"), None), None);
         // Unknown ids close nothing.
         assert_eq!(model.close(TabId(77)), None);
+    }
+
+    #[test]
+    fn closing_a_background_tab_keeps_the_active_tab() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        assert_eq!(model.active_of(&session("s"), None), Some(third));
+        // The closed background tab answers nothing: the active pointer
+        // stays, so the caller rebuilds and re-registers nothing.
+        assert_eq!(model.close(first), None);
+        assert_eq!(model.active_of(&session("s"), None), Some(third));
+        assert_eq!(model.close(second), None);
+        assert_eq!(model.active_of(&session("s"), None), Some(third));
+        // The neighbour rule still holds for the active tab itself.
+        assert_eq!(model.close(third), None);
+        assert_eq!(model.active_of(&session("s"), None), None);
+    }
+
+    #[test]
+    fn person_active_tabs_are_per_project() {
+        let mut model = tabs();
+        let p1 = model.open(Some("p1".into()), Owner::Person, "https://a.example/", None);
+        let p2 = model.open(Some("p2".into()), Owner::Person, "https://b.example/", None);
+        // Each project shows its own active person tab: opening in p2 must
+        // not steal p1's, and switching project flips between them.
+        assert_eq!(model.active_of(&Owner::Person, Some("p1")), Some(p1));
+        assert_eq!(model.active_of(&Owner::Person, Some("p2")), Some(p2));
+        assert!(model.activate(p1));
+        assert_eq!(model.active_of(&Owner::Person, Some("p1")), Some(p1));
+        assert_eq!(model.active_of(&Owner::Person, Some("p2")), Some(p2));
+        // A project with no person tabs shows none.
+        assert_eq!(model.active_of(&Owner::Person, Some("p3")), None);
+        assert_eq!(model.active_of(&Owner::Person, None), None);
+        // Closing in one project leaves the other's active tab alone.
+        assert_eq!(model.close(p1), None);
+        assert_eq!(model.active_of(&Owner::Person, Some("p1")), None);
+        assert_eq!(model.active_of(&Owner::Person, Some("p2")), Some(p2));
     }
 
     #[test]
@@ -495,8 +637,8 @@ mod tests {
         let mine = model.open(None, session("s"), "https://a.example/", None);
         let other = model.open(None, session("t"), "https://b.example/", None);
         assert_eq!(model.close(mine), None);
-        assert_eq!(model.active_of(&session("s")), None);
-        assert_eq!(model.active_of(&session("t")), Some(other));
+        assert_eq!(model.active_of(&session("s"), None), None);
+        assert_eq!(model.active_of(&session("t"), None), Some(other));
     }
 
     #[test]
@@ -512,7 +654,7 @@ mod tests {
         assert_eq!(model.closed.len(), CLOSED_CAP, "reopen history is capped");
         let newest = model.reopen_last().expect("a closed tab");
         assert_eq!(model.get(newest).map(|tab| tab.url.as_str()), Some("https://24.example/"));
-        assert_eq!(model.active_of(&session("s")), Some(newest));
+        assert_eq!(model.active_of(&session("s"), None), Some(newest));
     }
 
     #[test]
@@ -521,8 +663,8 @@ mod tests {
         let id = model.open(None, session("s"), "https://a.example/", None);
         assert!(model.move_to(id, Owner::Person));
         assert!(model.tabs_of(&session("s")).is_empty());
-        assert_eq!(model.active_of(&session("s")), None);
-        assert_eq!(model.active_of(&Owner::Person), Some(id));
+        assert_eq!(model.active_of(&session("s"), None), None);
+        assert_eq!(model.active_of(&Owner::Person, None), Some(id));
         assert!(!model.move_to(TabId(404), Owner::Person));
     }
 
@@ -640,8 +782,180 @@ mod tests {
     fn strip_labels_fall_back_to_hosts_and_initials() {
         assert_eq!(tab_label("Ledger", "https://localhost:5173/"), "Ledger");
         assert_eq!(tab_label("", "https://www.wikipedia.org/wiki/X"), "wikipedia.org");
-        assert_eq!(tab_label("", "about:blank"), "about:blank");
+        assert_eq!(tab_label("", "https://docs.rs/"), "docs.rs");
         assert_eq!(tab_initial("", "https://docs.rs/"), "D");
-        assert_eq!(tab_initial("", "about:blank"), "A");
+    }
+
+    #[test]
+    fn a_blank_tab_reads_new_tab_whatever_the_backend_reports() {
+        // The strip and the aria label share this visible text.
+        assert_eq!(tab_label("", "about:blank"), "New tab");
+        assert_eq!(tab_label("about:blank", "about:blank"), "New tab");
+        assert_eq!(tab_label("Something", "about:blank"), "New tab");
+        assert_eq!(tab_label("", ""), "New tab");
+        assert_eq!(tab_initial("", "about:blank"), "N");
+        // An empty title still falls back to the host on a real page.
+        assert_eq!(tab_label("", "https://www.wikipedia.org/wiki/X"), "wikipedia.org");
+    }
+
+    #[test]
+    fn blank_reports_never_clobber_a_real_url() {
+        let mut model = tabs();
+        let id = model.open(None, session("s"), "https://a.example/", None);
+        assert!(model.set_url_title(id, "https://a.example/", "A"));
+        // A fresh page's blank report (rebuild, first paint) is skipped:
+        // the saved URL and title survive, and nothing looks changed.
+        assert!(!model.set_url_title(id, "about:blank", ""));
+        assert!(!model.set_url_title(id, "", ""));
+        let tab = model.get(id).expect("the tab");
+        assert_eq!(tab.url, "https://a.example/");
+        assert_eq!(tab.title, "A");
+        // An empty title alone never clears a real one either.
+        assert!(!model.set_url_title(id, "https://a.example/", ""));
+        assert_eq!(model.get(id).expect("the tab").title, "A");
+        // A real navigation still lands — and an untitled one reads as
+        // its URL, like a fresh open.
+        assert!(model.set_url_title(id, "https://b.example/", ""));
+        let tab = model.get(id).expect("the tab");
+        assert_eq!(tab.url, "https://b.example/");
+        assert_eq!(tab.title, "https://b.example/");
+        // A blank tab still adopts its first real page.
+        let blank = model.open(None, session("s"), "about:blank", None);
+        assert!(model.set_url_title(blank, "https://c.example/", "C"));
+        assert_eq!(model.get(blank).expect("the tab").url, "https://c.example/");
+    }
+
+    #[test]
+    fn the_display_order_is_pinned_first_then_model_order() {
+        let mut model = tabs();
+        let first = model.open(None, session("s"), "https://a.example/", None);
+        let second = model.open(None, session("s"), "https://b.example/", None);
+        let third = model.open(None, session("s"), "https://c.example/", None);
+        let shown: Vec<TabId> =
+            model.ordered_tabs(&session("s"), None).iter().map(|tab| tab.id).collect();
+        assert_eq!(shown, vec![first, second, third]);
+        // Pinning moves the tab to the end of the pinned block …
+        assert!(model.set_pinned(third, true));
+        let shown: Vec<TabId> =
+            model.ordered_tabs(&session("s"), None).iter().map(|tab| tab.id).collect();
+        assert_eq!(shown, vec![third, first, second]);
+        assert_eq!(
+            model.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![third, first, second],
+            "the model order already reads like the strip"
+        );
+        assert!(model.set_pinned(first, true));
+        let shown: Vec<TabId> =
+            model.ordered_tabs(&session("s"), None).iter().map(|tab| tab.id).collect();
+        assert_eq!(shown, vec![third, first, second]);
+        // … and unpinning moves it to the start of the unpinned block.
+        assert!(model.set_pinned(third, false));
+        let shown: Vec<TabId> =
+            model.ordered_tabs(&session("s"), None).iter().map(|tab| tab.id).collect();
+        assert_eq!(shown, vec![first, third, second]);
+        // The close neighbour follows the same on-screen order: with the
+        // second tab active, closing it lands on the third.
+        assert!(model.activate(second));
+        assert_eq!(model.close(second), Some(third));
+    }
+
+    #[test]
+    fn shown_stamps_move_at_second_granularity() {
+        let mut model = tabs();
+        let id = model.open(None, session("s"), "https://a.example/", None);
+        assert!(model.mark_shown(id, 10_000));
+        assert!(!model.mark_shown(id, 10_000), "the same frame stamps nothing twice");
+        assert!(!model.mark_shown(id, 10_500), "half a second later is still quiet");
+        assert!(model.mark_shown(id, 11_000), "a second later stamps again");
+        assert!(!model.mark_shown(TabId(77), 12_000));
+    }
+
+    #[test]
+    fn load_repairs_next_id_past_every_stored_tab() {
+        let _guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        let dir = std::env::temp_dir().join(format!("baaz-tabs-nextid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        std::env::remove_var("BAAZ_DETERMINISTIC");
+        let mut model = tabs();
+        let live = model.open(None, session("s"), "https://a.example/", None);
+        model.open(None, session("s"), "https://b.example/", None);
+        model.close(live);
+        // Simulate an older file whose counter fell behind its tabs.
+        model.next_id = 1;
+        model.save();
+        let back = load();
+        assert_eq!(back.next_id, 2, "past every live and closed id");
+        let fresh = {
+            let mut back = back;
+            back.open(None, session("s"), "https://c.example/", None)
+        };
+        assert_eq!(fresh, TabId(2), "the next id is never a duplicate");
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deterministic_runs_neither_read_nor_write_the_store() {
+        let _guard = crate::store::test_env_lock();
+        let old_dir = std::env::var_os("BAAZ_STATE_DIR");
+        let old_det = std::env::var_os("BAAZ_DETERMINISTIC");
+        let dir = std::env::temp_dir().join(format!("baaz-tabs-det-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        std::env::set_var("BAAZ_DETERMINISTIC", "1");
+        // A file on disk is ignored …
+        let mut seeded = tabs();
+        seeded.open(None, session("s"), "https://owner.example/", None);
+        std::env::remove_var("BAAZ_DETERMINISTIC");
+        seeded.save();
+        std::env::set_var("BAAZ_DETERMINISTIC", "1");
+        let back = load();
+        assert!(back.tabs.is_empty(), "a capture never reads the owner's tabs");
+        // … and a save writes nothing.
+        let mut model = tabs();
+        model.open(None, session("s"), "https://capture.example/", None);
+        model.save();
+        assert!(!path().exists(), "a capture never touches tabs.json");
+        match old_dir {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        match old_det {
+            Some(value) => std::env::set_var("BAAZ_DETERMINISTIC", value),
+            None => std::env::remove_var("BAAZ_DETERMINISTIC"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_runs_only_once_per_session() {
+        let _guard = crate::store::test_env_lock();
+        let mut model = tabs();
+        let mut overrides = crate::sessions::Overrides::new();
+        overrides.insert(
+            "s-1".into(),
+            crate::sessions::SessionMeta {
+                project: Some("p1".into()),
+                right: Some(crate::sessions::RightState {
+                    browser_url: Some("https://a.example/".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(model.migrate_from_overrides(&overrides));
+        assert_eq!(model.tabs_of(&session("s-1")).len(), 1);
+        // The session's last tab closes …
+        let id = model.tabs_of(&session("s-1"))[0].id;
+        assert!(model.activate(id));
+        assert_eq!(model.close(id), None);
+        // … and the stale browser_url migrates nothing: the tab stays dead.
+        assert!(!model.migrate_from_overrides(&overrides));
+        assert!(model.tabs_of(&session("s-1")).is_empty());
     }
 }

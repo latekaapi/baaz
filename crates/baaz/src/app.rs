@@ -405,7 +405,12 @@ pub fn set_menus(cx: &mut App) {
                             root.view()
                                 .clone()
                                 .downcast::<Harness>()
-                                .map(|harness| harness.update(cx, |this, _| this.flush_right_save()))
+                                .map(|harness| {
+                                    harness.update(cx, |this, _| {
+                                        this.flush_right_save();
+                                        this.flush_tabs_save();
+                                    })
+                                })
                                 .unwrap_or(())
                         })
                         .ok()
@@ -2359,7 +2364,7 @@ impl Harness {
     /// lands inside the window is on disk, not overwritten by stale state.
     /// Arming clones nothing: Files expand/select/navigation only bump the
     /// generation, and the single surviving write clones once.
-    fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
         self.right_save_epoch += 1;
         self.right_save_pending = true;
         let epoch = self.right_save_epoch;
