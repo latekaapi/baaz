@@ -1241,7 +1241,13 @@ impl Harness {
             dialog_open,
             drop_cover: self.browser.drop_cover,
             terminal_covering: terminal_covers_browser(self.layout.terminal_open, dock, pane),
-            window_active: window.is_window_active(),
+            // A Chromium page is its own child window: clicking it makes
+            // the page key and the gpui window inactive. Counting that as
+            // inactive hid the page, which handed the keyboard back, so a
+            // click could never focus the page (B1b, live). The window is
+            // active while it or one of its pages holds the keyboard.
+            window_active: window.is_window_active()
+                || self.browser.states.values().any(|state| state.read(cx).holds_keyboard()),
         };
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
@@ -1348,9 +1354,10 @@ impl Harness {
         }
         let key = self.browser_key(cx);
         let state = self.browser_for(&key, false, window, cx);
-        if state.read(cx).is_editing() {
-            return;
-        }
+        // Always (re)focus, even when the field still says it is editing: a
+        // click into a Chromium page moves no gpui focus, so the field never
+        // blurs and stays "editing" — returning early made every later ⌘L a
+        // no-op (B1b, live). `begin_editing` reuses the open input.
         state.update(cx, |state, cx| state.begin_editing(window, cx));
     }
 
