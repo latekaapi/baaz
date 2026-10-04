@@ -810,7 +810,10 @@ fn main() {
                                     .clone()
                                     .downcast::<crate::app::Harness>()
                                     .map(|harness| {
-                                        harness.update(cx, |this, _| this.flush_right_save())
+                                        harness.update(cx, |this, _| {
+                                            this.flush_right_save();
+                                            this.flush_tabs_save();
+                                        })
                                     })
                                     .unwrap_or(())
                             })

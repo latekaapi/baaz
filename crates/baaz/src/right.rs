@@ -2410,7 +2410,9 @@ fn browser_strip_tab(
         )
         .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().child(title))
         .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
-        .on_mouse_down(gpui::MouseButton::Middle, move |_, window, cx| {
+        // Middle-click closes on mouse UP over the tab: a press that drags
+        // off the row releases elsewhere and closes nothing.
+        .on_mouse_up(gpui::MouseButton::Middle, move |_, window, cx| {
             close_tab_action(&middle, id_tab, window, cx);
         });
     if tab.active || flags.hovered {
@@ -2426,7 +2428,12 @@ fn browser_strip_tab(
                 .aria_label(label)
                 .cursor_pointer()
                 .child(icon(IconName::X).size(px(12.0)).color(ink))
-                .on_click(move |_, window, cx| close_tab_action(&close, id_tab, window, cx)),
+                // The × stops propagation: the click must never also
+                // select the tab through the row's own handler.
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    close_tab_action(&close, id_tab, window, cx);
+                }),
         );
     }
     row.into_any_element()

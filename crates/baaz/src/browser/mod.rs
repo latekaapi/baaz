@@ -348,11 +348,22 @@ impl Harness {
         }
     }
 
+    /// The space an owner's active tab lives in: the current project for
+    /// the person's per-project tabs, nothing for a session (a session
+    /// already belongs to one project).
+    fn owner_space(&self, owner: &Owner) -> Option<String> {
+        match owner {
+            Owner::Person => self.current_project_id(),
+            Owner::Session(_) => None,
+        }
+    }
+
     /// The owner's active tab, opening its first when it has none: a
     /// session restores its last URL, everyone starts blank. The strip
     /// shows only when the owner has at least one tab.
     fn ensure_owner_tab(&mut self, owner: &Owner, cx: &mut Context<Self>) -> TabId {
-        if let Some(id) = self.browser.tabs.active_of(owner) {
+        let space = self.owner_space(owner);
+        if let Some(id) = self.browser.tabs.active_of(owner, space.as_deref()) {
             return id;
         }
         let stored = match owner {
@@ -377,10 +388,18 @@ impl Harness {
         self.browser.agent_tabs.insert(key.to_owned(), id);
     }
 
-    /// Arm the debounced `tabs.json` write: only the latest generation
-    /// fires, serialising the CURRENT tabs then — a switch inside the
-    /// window lands on disk instead of being overwritten by stale state.
+    /// Arm the debounced `tabs.json` write: the first change in a dirty
+    /// spell arms one 750 ms window, and the window serialises the CURRENT
+    /// tabs when it fires — a switch inside the window lands on disk
+    /// instead of being overwritten by stale state. Changes inside the
+    /// window only mark dirty (no re-arm), which is the max-delay cap: a
+    /// constantly-changing title lands on disk at most 750 ms after the
+    /// spell starts instead of postponing the write forever. The write
+    /// itself runs off the UI thread, like the sessions write.
     pub(crate) fn schedule_tabs_write(&mut self, cx: &mut Context<Self>) {
+        if self.browser.tabs_save_pending {
+            return;
+        }
         self.browser.tabs_save_epoch += 1;
         self.browser.tabs_save_pending = true;
         let epoch = self.browser.tabs_save_epoch;
@@ -398,9 +417,27 @@ impl Harness {
             let Some(snapshot) = snapshot else {
                 return;
             };
-            snapshot.save();
+            cx.background_executor()
+                .spawn(async move {
+                    snapshot.save();
+                })
+                .await;
         })
         .detach();
+    }
+
+    /// Land a pending tabs write synchronously: the quit and window-close
+    /// durability point, next to the layout/sessions flushes — up to
+    /// 750 ms of tab state never dies with the process. A no-op when
+    /// nothing is pending, so plain quits write nothing. The in-flight
+    /// debounce is cancelled: the disk already leads it.
+    pub(crate) fn flush_tabs_save(&mut self) {
+        if !self.browser.tabs_save_pending {
+            return;
+        }
+        self.browser.tabs_save_epoch += 1;
+        self.browser.tabs.save();
+        self.browser.tabs_save_pending = false;
     }
 
     /// The webview for `key`, creating it on first use. `key` names an
@@ -475,7 +512,8 @@ impl Harness {
             return None;
         }
         let owner = self.shown_tab_owner(cx);
-        self.browser.tabs.active_of(&owner).and_then(|id| self.browser.states.get(&id).cloned())
+        let space = self.owner_space(&owner);
+        self.browser.tabs.active_of(&owner, space.as_deref()).and_then(|id| self.browser.states.get(&id).cloned())
     }
 
     /// The session's live page: its active tab's state, when built. The
@@ -484,7 +522,7 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn session_page(&self, session_id: &str) -> Option<Entity<WebviewState>> {
         let owner = Owner::Session(session_id.to_owned());
-        self.browser.tabs.active_of(&owner).and_then(|id| self.browser.states.get(&id).cloned())
+        self.browser.tabs.active_of(&owner, None).and_then(|id| self.browser.states.get(&id).cloned())
     }
 
     /// Whether this session key has a live page: its active tab's state
@@ -549,7 +587,7 @@ impl Harness {
             && self
                 .browser
                 .tabs
-                .active_of(&owner)
+                .active_of(&owner, self.owner_space(&owner).as_deref())
                 .is_some_and(|id| self.browser.states.contains_key(&id));
         if exists {
             return;
@@ -618,7 +656,7 @@ impl Harness {
             && self
                 .browser
                 .tabs
-                .active_of(&owner)
+                .active_of(&owner, self.owner_space(&owner).as_deref())
                 .is_some_and(|id| self.browser.states.contains_key(&id));
         let state = self.browser_for(&key, focus, window, cx);
         if focus && existed && state.read(cx).url() == BLANK {
@@ -650,7 +688,8 @@ impl Harness {
         if state.read(cx).url().as_ref() != url {
             let title = state.read(cx).title().to_string();
             state.update(cx, |state, _cx| state.navigate(url));
-            if let Some(id) = self.browser.tabs.active_of(&owner) {
+            let space = self.owner_space(&owner);
+            if let Some(id) = self.browser.tabs.active_of(&owner, space.as_deref()) {
                 if self.browser.tabs.set_url_title(id, url, &title) {
                     self.schedule_tabs_write(cx);
                 }
@@ -672,7 +711,7 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
         let space = self.current_project_id();
-        let after = self.browser.tabs.active_of(&owner);
+        let after = self.browser.tabs.active_of(&owner, space.as_deref());
         let id = self.browser.tabs.open(space, owner.clone(), url, after);
         self.schedule_tabs_write(cx);
         let key = self.browser_key(cx);
@@ -762,7 +801,8 @@ impl Harness {
             return None;
         }
         let owner = self.shown_tab_owner(cx);
-        let id = self.browser.tabs.tabs_of(&owner).get(n - 1).map(|tab| tab.id)?;
+        let space = self.owner_space(&owner);
+        let id = self.browser.tabs.ordered_tabs(&owner, space.as_deref()).get(n - 1).map(|tab| tab.id)?;
         Some((self.browser_key(cx), id))
     }
 
@@ -802,26 +842,63 @@ impl Harness {
         self.close_tab(&key, id, window, cx);
     }
 
-    /// Close `id`: the model picks the neighbour to activate, the closed
-    /// page is dropped, and the agent tools follow the neighbour (or lose
-    /// the session's page when none is left).
+    /// Close `id`: the closed page is dropped; only when the closed tab
+    /// was its owner's active tab does anything else move — the model
+    /// picks the neighbour to activate and the agent tools follow it (or
+    /// lose the session's page when none is left). Closing a background
+    /// tab rebuilds and re-registers nothing. A session's last tab also
+    /// clears its stored `browser_url`, so the tab never resurrects from
+    /// the old restore — and the migration runs only once per session, so
+    /// it stays closed.
     pub(crate) fn close_tab(&mut self, key: &str, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
-        if self.browser.tabs.get(id).is_none() {
+        let Some(tab) = self.browser.tabs.get(id).cloned() else {
             return;
-        }
+        };
+        let space = self.owner_space(&tab.owner);
+        let was_active = self.browser.tabs.active_of(&tab.owner, space.as_deref()) == Some(id);
         let next = self.browser.tabs.close(id);
         self.browser.states.remove(&id);
         self.schedule_tabs_write(cx);
+        if !was_active {
+            cx.notify();
+            return;
+        }
         match next {
             Some(next) => {
                 self.ensure_tab_page(key, next, window, cx);
             }
             None => {
                 self.browser.agent_tabs.remove(key);
+                self.terminal_service.unregister_browser(key);
+                if let Owner::Session(session) = tab.owner {
+                    if session != key {
+                        self.browser.agent_tabs.remove(&session);
+                        self.terminal_service.unregister_browser(&session);
+                    }
+                    self.clear_session_browser_url(&session, cx);
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Forget a session's stored browser URL (its last tab just closed),
+    /// through the cheap debounced write — never the session-list settle.
+    /// A no-op when the stored URL is already gone.
+    fn clear_session_browser_url(&mut self, session: &str, cx: &mut Context<Self>) {
+        let mut right = match self.overrides.get(session).and_then(|meta| meta.right.clone()) {
+            Some(right) => right,
+            None => return,
+        };
+        if right.browser_url.is_none() {
+            return;
+        }
+        right.browser_url = None;
+        if let Some(meta) = self.overrides.get_mut(session) {
+            meta.right = Some(right);
+        }
+        self.schedule_overrides_write(cx);
     }
 
     /// Open a blank tab for the shown owner and focus its address field:
@@ -830,7 +907,7 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
         let space = self.current_project_id();
-        let after = self.browser.tabs.active_of(&owner);
+        let after = self.browser.tabs.active_of(&owner, space.as_deref());
         let id = self.browser.tabs.open(space, owner, BLANK, after);
         self.schedule_tabs_write(cx);
         let key = self.browser_key(cx);
@@ -845,7 +922,8 @@ impl Harness {
     pub(crate) fn step_tab_discard_now(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
         let owner = self.shown_tab_owner(cx);
-        let shown = self.browser.tabs.active_of(&owner);
+        let space = self.owner_space(&owner);
+        let shown = self.browser.tabs.active_of(&owner, space.as_deref());
         self.discard_hidden_tabs(true, shown, cx);
         cx.notify();
     }
@@ -935,12 +1013,10 @@ impl Harness {
             return Vec::new();
         }
         let owner = self.shown_tab_owner(cx);
-        let active = self.browser.tabs.active_of(&owner);
-        let rows = match &owner {
-            // The person's strip leads with pinned tabs.
-            Owner::Person => self.browser.tabs.person_tabs(self.current_project_id().as_deref()),
-            _ => self.browser.tabs.tabs_of(&owner),
-        };
+        let space = self.owner_space(&owner);
+        let active = self.browser.tabs.active_of(&owner, space.as_deref());
+        // One ordering for every owner: pinned first, then model order.
+        let rows = self.browser.tabs.ordered_tabs(&owner, space.as_deref());
         rows
             .iter()
             .map(|tab| StripTab {
@@ -984,8 +1060,23 @@ impl Harness {
                 dropped.push(id);
             }
         }
-        for id in dropped {
-            self.browser.states.remove(&id);
+        for id in &dropped {
+            self.browser.states.remove(id);
+        }
+        // A discarded page can never stay registered with the agent tools:
+        // agent tabs are spared above, so this fires only if that ever
+        // stops holding — and then the registration dies with the page.
+        let dropped: std::collections::HashSet<TabId> = dropped.into_iter().collect();
+        let stale: Vec<String> = self
+            .browser
+            .agent_tabs
+            .iter()
+            .filter(|(_, id)| dropped.contains(id))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.browser.agent_tabs.remove(&key);
+            self.terminal_service.unregister_browser(&key);
         }
     }
 
@@ -1076,10 +1167,11 @@ impl Harness {
         let pending: Vec<String> = self.browser.shot_pending.iter().cloned().collect();
         for key in pending {
             let owner = self.tab_owner_for_key(&key);
+            let space = self.owner_space(&owner);
             let bytes = self
                 .browser
                 .tabs
-                .active_of(&owner)
+                .active_of(&owner, space.as_deref())
                 .and_then(|id| self.browser.states.get(&id))
                 .and_then(|state| state.read(cx).screenshot().map(<[u8]>::to_vec));
             if let Some(bytes) = bytes {
@@ -1166,8 +1258,9 @@ impl Harness {
         };
         // Only its owner's page ever shows — and, while a provider switch
         // is pending, not even that one.
+        let shown_space = self.owner_space(&shown_owner);
         let shown = browser_session_active(&shown_key, &active_key, pending_switch)
-            .then(|| self.browser.tabs.active_of(&shown_owner))
+            .then(|| self.browser.tabs.active_of(&shown_owner, shown_space.as_deref()))
             .flatten();
         // The frame shows a page exactly when the pane stands open on the
         // Browser kind with nothing over it; ownership rides `shown`, which
@@ -1969,7 +2062,7 @@ mod tests {
                     "two tabs in one session are two live pages"
                 );
                 // The newest tab is active; the agent tools point at it.
-                assert_eq!(harness.browser.tabs.active_of(&owner), Some(second));
+                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(second));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-probe"),
                     Some(page_second.clone()),
@@ -1988,7 +2081,7 @@ mod tests {
                 // Switching tabs re-registers the agent tools and swaps
                 // which page is live.
                 harness.select_tab("tab-probe", first, window, cx);
-                assert_eq!(harness.browser.tabs.active_of(&owner), Some(first));
+                assert_eq!(harness.browser.tabs.active_of(&owner, None), Some(first));
                 assert_eq!(
                     harness.terminal_service.test_browser_state("tab-probe"),
                     Some(page_first.clone()),
@@ -2025,6 +2118,82 @@ mod tests {
                     harness.terminal_service.test_browser_state("tab-probe"),
                     Some(page_first.clone()),
                     "the spared page is still the agent's tab"
+                );
+            });
+        });
+        vc.run_until_parked();
+        routing_restore(state);
+    }
+
+    /// B2a-H1b: closing a background tab drops only its page — the active
+    /// tab, its page and the agent registration stay exactly put — and
+    /// closing a session's last tab unregisters the agent tools and clears
+    /// the stored `browser_url`, so the tab never resurrects.
+    #[gpui::test]
+    fn closing_tabs_follows_only_the_active_tab(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(|cx| cx.bind_keys(crate::keymap::build_bindings()));
+        let state = routing_state("tabs-close");
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(
+                routing_args(&state.2),
+                crate::shot::CaptureToken::default(),
+                window,
+                cx,
+            )
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.ensure_tabs_loaded(cx);
+                let owner = super::Owner::Session("tab-close".to_owned());
+                harness.overrides.insert(
+                    "tab-close".to_owned(),
+                    crate::sessions::SessionMeta {
+                        right: Some(crate::sessions::RightState {
+                            browser_url: Some("https://seed.example/".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                );
+                let first = harness.browser.tabs.open(None, owner.clone(), "https://a.example/", None);
+                let second =
+                    harness.browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first));
+                let page_second = harness.ensure_tab_page("tab-close", second, window, cx);
+                assert_eq!(
+                    harness.browser.tabs.active_of(&owner, None),
+                    Some(second)
+                );
+                // Closing the background tab: its page drops, and nothing
+                // else moves — no rebuild, no re-registration.
+                harness.close_tab("tab-close", first, window, cx);
+                assert!(!harness.browser.states.contains_key(&first));
+                assert_eq!(harness.browser.states.len(), 1);
+                assert_eq!(
+                    harness.browser.tabs.active_of(&owner, None),
+                    Some(second)
+                );
+                assert_eq!(
+                    harness.terminal_service.test_browser_state("tab-close"),
+                    Some(page_second.clone()),
+                    "a background close never re-registers"
+                );
+                // Closing the active last tab: the agent tools lose the
+                // session's page and the stored URL is forgotten.
+                harness.close_tab("tab-close", second, window, cx);
+                assert!(harness.browser.states.is_empty());
+                assert!(
+                    harness.terminal_service.test_browser_state("tab-close").is_none(),
+                    "no page survives the last close through the agent tools"
+                );
+                assert!(
+                    harness
+                        .overrides
+                        .get("tab-close")
+                        .and_then(|meta| meta.right.clone())
+                        .and_then(|right| right.browser_url)
+                        .is_none(),
+                    "the last close clears the stored browser_url"
                 );
             });
         });
