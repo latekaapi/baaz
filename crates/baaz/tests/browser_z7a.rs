@@ -1,11 +1,12 @@
 //! Z7a: the browser pane runs a real engine (`aui-webview`) per session.
 //!
 //! Baaz is a binary, so this suite cannot call its functions: the behaviour
-//! lives in `browser.rs` unit tests (`browser_visible` truth table over all
+//! lives in `browser/` unit tests (`browser_visible` truth table over all
 //! eleven inputs, `SendAnnotations` draft text, URL persistence round-trip,
-//! per-session isolation — all real calls, no window) and in `right.rs`
-//! `gpui::test`s (the pane's state drives the nav row on the scripted
-//! backend). What remains here is the source contract plus pins, below.
+//! per-session isolation, the pure tab model — all real calls, no window)
+//! and in `right.rs` `gpui::test`s (the pane's state drives the nav row on
+//! the scripted backend). What remains here is the source contract plus
+//! pins, below.
 
 use std::path::{Path, PathBuf};
 
@@ -73,36 +74,44 @@ fn browser_pane_renders_the_session_webview() {
 
 /// The fake backend never reaches production render: the registry picks it
 /// only behind the boot flag (captures) or in tests. Grep-level pin; the
-/// real proof is `browser.rs` (flag-gated construction) plus the capture
+/// real proof is `browser/` (flag-gated construction) plus the capture
 /// entries below.
 #[test]
 fn fake_backend_only_behind_the_boot_flag() {
-    let browser = source("browser.rs");
+    let browser = source("browser/mod.rs");
     assert!(browser.contains("self.browser.fake || cfg!(test)"), "fake is flag- or test-gated");
     assert!(browser.contains("WryBackend::new_at"), "production path builds WKWebView");
     assert!(browser.contains("set_obscured"), "the host hides the native view under overlays");
     assert!(browser.contains("browser_visible"), "visibility runs through the pure predicate");
 }
 
-/// Per-session memory: the registry is keyed by session id (plus a home
-/// key), the URL persists on `RightState`, and `browse:` drives navigation.
+/// Tab memory (B2a-H1): live pages are keyed by tab, the tab model owns
+/// tabs per session and per project, the session's active tab keeps
+/// writing its URL onto `RightState`, and the tab verbs drive the strip.
 #[test]
 fn per_session_state_and_verbs_are_wired() {
-    let browser = source("browser.rs");
-    assert!(browser.contains("browser.states"), "one live state per session");
-    assert!(browser.contains("browser.home"), "a home webview with no session open");
+    let browser = source("browser/mod.rs");
+    assert!(browser.contains("states: HashMap<TabId"), "live pages are keyed by tab");
+    assert!(browser.contains("register_tab_page"), "agent tools follow the active tab");
+    let tabs = source("browser/tabs.rs");
+    assert!(tabs.contains("pub(crate) struct Tabs"), "the tab model owns tabs per session and per project");
+    assert!(tabs.contains("should_discard"), "hidden pages are discarded by the pure decision");
     let sessions = source("sessions.rs");
     assert!(sessions.contains("pub browser_url: Option<String>"), "RightState remembers the URL");
     let steps = source("steps.rs");
     assert!(steps.contains("verb: \"browse\""), "`browse:<url>` is a window verb");
     assert!(steps.contains("step_browse"), "the verb navigates the active/home browser");
+    assert!(steps.contains("verb: \"tab-new\""), "`tab-new:<url>` is a window verb");
+    assert!(steps.contains("verb: \"tab-select\""), "`tab-select:<n>` is a window verb");
+    assert!(steps.contains("verb: \"tab-close\""), "`tab-close:<n>` is a window verb");
+    assert!(steps.contains("verb: \"tab-discard-now\""), "`tab-discard-now` is a window verb");
 }
 
 /// Intents land in the draft, never auto-send: screenshots attach as images,
 /// annotations append text, Console toasts.
 #[test]
 fn intents_land_in_the_draft() {
-    let browser = source("browser.rs");
+    let browser = source("browser/mod.rs");
     assert!(browser.contains("attach_screenshot"), "Screenshot attaches the PNG to the draft");
     assert!(browser.contains("append_draft_block"), "SendAnnotations appends pin text to the draft");
     assert!(browser.contains("Console is not available yet"), "Console toasts");
@@ -112,8 +121,9 @@ fn intents_land_in_the_draft() {
     assert!(composer.contains("fn append_draft_block"), "text-append entry point exists");
 }
 
-/// The visual surface: `right-browser` still captures deterministically and
-/// `right-browser-page` drives the fake backend through `browse:`.
+/// The visual surface: `right-browser` still captures deterministically,
+/// `right-browser-page` drives the fake backend through `browse:`, and
+/// `right-tabs` opens two tabs and selects back to the first.
 #[test]
 fn probe_entries_cover_blank_and_loaded_browser() {
     let probe = workspace_source("scripts/uiprobe.py");
@@ -125,5 +135,10 @@ fn probe_entries_cover_blank_and_loaded_browser() {
     assert!(
         probe.contains("browse:https://example.com"),
         "the loaded entry navigates the fake backend to example.com"
+    );
+    assert!(probe.contains("\"right-tabs\""), "two-tab strip entry exists");
+    assert!(
+        probe.contains("tab-new:https://www.wikipedia.org/;tab-new:https://docs.rs/;tab-select:1"),
+        "the strip entry opens two tabs and selects back to the first"
     );
 }

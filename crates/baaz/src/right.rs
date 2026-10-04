@@ -27,7 +27,9 @@ use aui::workbench::{
     doc_pane, file_card, file_tree, pr_form, ArtifactKind, DocBlock, DocPage, FileNode,
     FileTreeAction, GitAction, PrAction, PrDescription,
 };
-use aui_icons::FileType;
+use aui::util::{interaction_flags, TrackInteraction};
+use aui_icons::{icon, FileType, IconName};
+use aui_tokens::{scale, ActiveAui, AuiStyled};
 use aui_protocol::{ChangeKind, Diff, DiffKind, DiffLine, FileChange, Hunk};
 use gpui::{
     div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, ScrollHandle, SharedString,
@@ -36,6 +38,7 @@ use gpui::{
 use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
+use crate::browser::{StripTab, TabId};
 use crate::layout::RightKind;
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
@@ -515,20 +518,38 @@ pub(crate) fn browser_placeholder_for(pane_open: bool, has_webview: bool) -> Bro
     }
 }
 
+/// What [`render`] needs for the Browser kind: the live page when one
+/// exists, the shown owner's strip rows, and the window tab hover runs on.
+pub(crate) struct BrowserPane<'a> {
+    /// The shown tab's live page; `None` draws the loading/closed states.
+    pub state: Option<&'a Entity<aui_webview::WebviewState>>,
+    /// The shown owner's tabs; empty draws no strip.
+    pub tabs: &'a [StripTab],
+    /// The window, for tab hover tracking.
+    pub window: &'a mut Window,
+}
+
 pub(crate) fn render(
     kind: RightKind,
     cache: &RightCache,
     project: Option<(PathBuf, String)>,
     session_edits: &[String],
-    browser: Option<&Entity<aui_webview::WebviewState>>,
+    browser: BrowserPane<'_>,
     pane_open: bool,
     cx: &mut Context<Harness>,
 ) -> AnyElement {
     let notify = toast_sink(cx.weak_entity());
     let harness = cx.weak_entity();
     match kind {
-        RightKind::Browser => match browser_placeholder_for(pane_open, browser.is_some()) {
-            BrowserPlaceholder::Page => browser_pane(browser.expect("has_webview means Some"), cx),
+        RightKind::Browser => match browser_placeholder_for(pane_open, browser.state.is_some()) {
+            BrowserPlaceholder::Page => {
+                browser_pane(
+                    browser.state.expect("has_webview means Some"),
+                    browser.tabs,
+                    browser.window,
+                    cx,
+                )
+            }
             BrowserPlaceholder::Loading => loading_state(
                 "right-browser-loading",
                 "Browser",
@@ -2271,8 +2292,14 @@ fn text_doc_pane(doc: &TextDoc, harness: WeakEntity<Harness>) -> AnyElement {
 /// come labelled from the library. Intents forward to the harness:
 /// screenshots and annotations land in the active session's composer draft,
 /// Console toasts.
-fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harness>) -> AnyElement {
+fn browser_pane(
+    state: &Entity<aui_webview::WebviewState>,
+    tabs: &[StripTab],
+    window: &mut Window,
+    cx: &mut Context<Harness>,
+) -> AnyElement {
     let harness = cx.weak_entity();
+    let strip_harness = harness.clone();
     let pane = aui_webview::webview_pane("right-browser", state).on_intent(
         move |intent, window, cx| {
             if let Some(harness) = harness.upgrade() {
@@ -2282,13 +2309,170 @@ fn browser_pane(state: &Entity<aui_webview::WebviewState>, cx: &mut Context<Harn
             }
         },
     );
-    v_flex()
+    let mut column = v_flex()
         .id("right-browser-pane")
         .role(gpui::Role::Group)
         .aria_label("Browser")
-        .size_full()
-        .child(pane)
+        .size_full();
+    if !tabs.is_empty() {
+        column = column.child(browser_tab_strip(tabs, &strip_harness, window, cx));
+    }
+    column.child(pane).into_any_element()
+}
+
+/// How many title chars a strip tab shows before the ellipsis. The row
+/// itself also clips, so a wide pane never stretches the strip.
+const TAB_TITLE_CHARS: usize = 24;
+
+/// The pane's one-line tab strip (B2a-H1): a 30 px row above the page
+/// listing the shown owner's tabs — an initial tile, an ellipsized title,
+/// a close × on hover/active, and a `+` at the end. Clicking selects,
+/// middle-click closes, `+` opens a blank tab with the address focused.
+fn browser_tab_strip(
+    tabs: &[StripTab],
+    harness: &WeakEntity<Harness>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let p = cx.aui().colors;
+    let mut row = h_flex()
+        .id("right-browser-tabs")
+        .h(px(30.0))
+        .items_center()
+        .px(px(4.0))
+        .gap(px(2.0))
+        .bg(p.surface_1)
+        .border_b_1()
+        .border_color(p.line);
+    for tab in tabs {
+        row = row.child(browser_strip_tab(tab, harness, p, window, cx));
+    }
+    row = row.child(browser_new_tab(harness, p));
+    row.into_any_element()
+}
+
+/// One strip tab: the tile, the title, and the close × while hovered or
+/// active. Selecting a tab that closed meanwhile is a no-op (the model
+/// guards it), so a × click racing the row's own select never resurrects
+/// the tab.
+fn browser_strip_tab(
+    tab: &StripTab,
+    harness: &WeakEntity<Harness>,
+    p: aui_tokens::Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let id: ElementId = format!("right-browser-tab:{}", tab.id.0).into();
+    let (tracked, flags) = interaction_flags(id.clone(), window, cx);
+    let ground = if tab.active {
+        p.surface_3
+    } else if flags.hovered {
+        p.surface_2
+    } else {
+        p.surface_1
+    };
+    let ink = if tab.active { p.ink } else { p.ink_2 };
+    let select = harness.clone();
+    let middle = harness.clone();
+    let id_tab = tab.id;
+    let title = ellipsize_tab_title(&tab.title);
+    let mut row = h_flex()
+        .id(id)
+        .flex_1()
+        .min_w(px(0.0))
+        .items_center()
+        .h(px(22.0))
+        .px(px(6.0))
+        .gap(px(6.0))
+        .rounded(px(scale::R_SM))
+        .bg(ground)
+        .text_color(ink)
+        .ui(scale::FS_12)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .cursor_pointer()
+        .track_interaction(&tracked)
+        .role(gpui::Role::Tab)
+        .aria_label(format!("{} tab", tab.title))
+        .child(
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(scale::R_XS))
+                .border_1()
+                .border_color(p.line_strong)
+                .text_color(p.ink_2)
+                .ui(scale::FS_11)
+                .child(tab.initial.clone()),
+        )
+        .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().child(title))
+        .on_click(move |_, window, cx| select_tab_action(&select, id_tab, window, cx))
+        .on_mouse_down(gpui::MouseButton::Middle, move |_, window, cx| {
+            close_tab_action(&middle, id_tab, window, cx);
+        });
+    if tab.active || flags.hovered {
+        let close = harness.clone();
+        let label = format!("Close {}", tab.title);
+        row = row.child(
+            div()
+                .id(format!("right-browser-tab-close:{}", id_tab.0))
+                .flex_none()
+                .p(px(2.0))
+                .rounded(px(scale::R_XS))
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .cursor_pointer()
+                .child(icon(IconName::X).size(px(12.0)).color(ink))
+                .on_click(move |_, window, cx| close_tab_action(&close, id_tab, window, cx)),
+        );
+    }
+    row.into_any_element()
+}
+
+/// The strip's `+`: a blank tab with the address field focused.
+fn browser_new_tab(harness: &WeakEntity<Harness>, p: aui_tokens::Palette) -> AnyElement {
+    let plus = harness.clone();
+    div()
+        .id("right-browser-tab-new")
+        .flex_none()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(scale::R_SM))
+        .text_color(p.ink_2)
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("New tab")
+        .child(icon(IconName::Plus).size(px(12.0)).color(p.ink_2))
+        .on_click(move |_, window, cx| {
+            let _ = plus.update(cx, |this, cx| this.new_blank_tab(window, cx));
+        })
         .into_any_element()
+}
+
+/// A strip title in at most [`TAB_TITLE_CHARS`] chars, ending in ….
+fn ellipsize_tab_title(title: &str) -> String {
+    if title.chars().count() <= TAB_TITLE_CHARS {
+        return title.to_owned();
+    }
+    let mut out: String = title.chars().take(TAB_TITLE_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
+/// The row's click: select the tab through the harness (which resolves
+/// the owner's key itself).
+fn select_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.select_browser_tab(id, window, cx));
+}
+
+/// The × or middle-click: close the tab through the harness.
+fn close_tab_action(harness: &WeakEntity<Harness>, id: TabId, window: &mut Window, cx: &mut App) {
+    let _ = harness.update(cx, |this, cx| this.close_browser_tab(id, window, cx));
 }
 
 /// One section heading inside the merged Changes view: a labelled row, so
