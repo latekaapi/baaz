@@ -850,6 +850,83 @@ impl Harness {
         }
         state.update(cx, |state, cx| state.begin_editing(window, cx));
     }
+
+    /// `page-focus`: give the active browser page the keyboard, focusing the
+    /// pane's own focus handle — the same hand-over an explicit person open
+    /// performs. Free: no turn, no wire.
+    pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.browser_key(cx);
+        let state = self.browser_for(&key, false, window, cx);
+        let focus = state.read(cx).focus_handle().clone();
+        window.focus(&focus, cx);
+    }
+
+    /// Deliver one keystroke routed out of a focused Chromium page: first
+    /// hand the keyboard back to the gpui window through the existing
+    /// hand-back path (the active browser's `set_focused(false)`), then
+    /// dispatch the keystroke into the window — so ⌘L ends with the address
+    /// field focused, exactly as if gpui had seen the key. Blocked Chromium
+    /// command ids drained here are logged for later mapping.
+    #[cfg(feature = "cef")]
+    pub(crate) fn deliver_cef_keystroke(
+        &mut self,
+        keystroke: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.existing_browser(cx) {
+            state.update(cx, |state, _| state.release_keyboard());
+        }
+        for id in aui_cef::take_blocked_commands() {
+            crate::baaz_log!("browser: blocked Chromium command {id}");
+        }
+        match gpui::Keystroke::parse(keystroke) {
+            Ok(parsed) => {
+                window.dispatch_keystroke(parsed, cx);
+            }
+            Err(_) => {
+                crate::baaz_log!("browser: ignoring unparseable routed keystroke {keystroke:?}");
+            }
+        }
+    }
+
+    /// Install the Chromium key router for this window: `claims` is membership
+    /// in the current claimed-set snapshot (a thread-local, never gpui state,
+    /// which the CEF callback must not borrow) and `deliver` posts into a
+    /// channel that a task on this window drains through
+    /// [`Self::deliver_cef_keystroke`]. Called once per shell window where
+    /// the window is created (`open_shell_window`), never from `cef_backend`
+    /// — the router must exist before the first page takes the keyboard.
+    #[cfg(feature = "cef")]
+    pub(crate) fn install_cef_key_router(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<String>();
+        aui_cef::set_key_router(crate::keymap::claims_keystroke, move |keystroke| {
+            let _ = tx.send(keystroke);
+        });
+        // A `spawn`, not a `spawn_in`: the same shape as `run_steps` — the
+        // drain resolves the window through the entity on every tick.
+        let task = cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(20)).await;
+                let mut pending = Vec::new();
+                while let Ok(keystroke) = rx.try_recv() {
+                    pending.push(keystroke);
+                }
+                if pending.is_empty() {
+                    continue;
+                }
+                let live = weak.update_in(cx, |this, window, cx| {
+                    for keystroke in &pending {
+                        this.deliver_cef_keystroke(keystroke, window, cx);
+                    }
+                });
+                if live.is_err() {
+                    break;
+                }
+            }
+        });
+        self.tasks.push(task);
+    }
 }
 
 /// All webviews a [`Harness`](crate::app::Harness) holds. Kept here so the

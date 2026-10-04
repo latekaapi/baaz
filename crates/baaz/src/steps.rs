@@ -129,6 +129,8 @@
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `baaz: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `baaz: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
+//! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names record a step failure, free |
+//! | `page-focus` | give the active browser page the keyboard, free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
 //! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
@@ -335,6 +337,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         verb: "transcript",
         run: |this, rest, window, cx| this.step_transcript_fold(rest, window, cx),
     },
+    WindowVerb { verb: "key", run: |this, rest, _, _| this.step_key(rest) },
+    WindowVerb { verb: "page-focus", run: |this, _, window, cx| this.step_page_focus(window, cx) },
 ];
 
 impl Harness {
@@ -470,6 +474,175 @@ impl Harness {
         }
         cx.notify();
     }
+
+    /// `key:<keystroke>`: post a real keypress for that keystroke — down and
+    /// up, through CoreGraphics into Baaz's own pid, so it travels through
+    /// AppKit to whatever window is key exactly like a person's keypress. An
+    /// unparseable or unsupported keystroke records a step failure instead of
+    /// pressing nothing. Free: no turn, no wire.
+    pub(crate) fn step_key(&mut self, rest: &str) {
+        match key_event_parts(rest) {
+            Some((code, flags)) => post_key_event(code, flags),
+            None => {
+                record_step_failure(&format!("key:{rest}"));
+                crate::baaz_log!("unknown key step `key:{rest}`");
+            }
+        }
+    }
+}
+
+/// Parse a `gpui::Keystroke::parse` keystroke into a macOS virtual-key code
+/// plus `CGEvent` flags: the modifiers plus every key
+/// `aui_cef::keystroke_of` produces (letters, digits, punctuation, enter,
+/// escape, tab, backspace, delete, space, arrows, home/end/page-up/page-down,
+/// f1–f12). Pure, so the unit tests pin it without posting anything.
+pub(crate) fn key_event_parts(keystroke: &str) -> Option<(u16, u64)> {
+    let parsed = gpui::Keystroke::parse(keystroke.trim()).ok()?;
+    let mut flags: u64 = 0;
+    if parsed.modifiers.control {
+        flags |= 1 << 18;
+    }
+    if parsed.modifiers.alt {
+        flags |= 1 << 19;
+    }
+    if parsed.modifiers.shift {
+        flags |= 1 << 17;
+    }
+    if parsed.modifiers.platform {
+        flags |= 1 << 20;
+    }
+    if parsed.modifiers.function {
+        flags |= 1 << 23;
+    }
+    mac_key_code(&parsed.key).map(|code| (code, flags))
+}
+
+/// The macOS virtual-key code for a parsed key name (already lowercased by
+/// [`gpui::Keystroke::parse`): letters, digits, punctuation and the named
+/// keys above. `None` is "no such key" — the step fails rather than pressing
+/// a neighbour.
+fn mac_key_code(key: &str) -> Option<u16> {
+    let code = match key {
+        "a" => 0,
+        "s" => 1,
+        "d" => 2,
+        "f" => 3,
+        "h" => 4,
+        "g" => 5,
+        "z" => 6,
+        "x" => 7,
+        "c" => 8,
+        "v" => 9,
+        "b" => 11,
+        "q" => 12,
+        "w" => 13,
+        "e" => 14,
+        "r" => 15,
+        "y" => 16,
+        "t" => 17,
+        "1" => 18,
+        "2" => 19,
+        "3" => 20,
+        "4" => 21,
+        "6" => 22,
+        "5" => 23,
+        "=" => 24,
+        "9" => 25,
+        "7" => 26,
+        "-" => 27,
+        "8" => 28,
+        "0" => 29,
+        "]" => 30,
+        "o" => 31,
+        "u" => 32,
+        "[" => 33,
+        "i" => 34,
+        "p" => 35,
+        "enter" => 36,
+        "l" => 37,
+        "j" => 38,
+        "'" => 39,
+        "k" => 40,
+        ";" => 41,
+        "\\" => 42,
+        "," => 43,
+        "/" => 44,
+        "n" => 45,
+        "m" => 46,
+        "." => 47,
+        "tab" => 48,
+        "space" => 49,
+        "`" => 50,
+        "backspace" => 51,
+        "escape" => 53,
+        "f5" => 96,
+        "f6" => 97,
+        "f7" => 98,
+        "f3" => 99,
+        "f8" => 100,
+        "f9" => 101,
+        "f11" => 103,
+        "f10" => 109,
+        "f12" => 111,
+        "home" => 115,
+        "pageup" => 116,
+        "delete" => 117,
+        "f4" => 118,
+        "end" => 119,
+        "f2" => 120,
+        "pagedown" => 121,
+        "f1" => 122,
+        "left" => 123,
+        "right" => 124,
+        "down" => 125,
+        "up" => 126,
+        _ => return None,
+    };
+    Some(code)
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn CGEventCreateKeyboardEvent(
+        source: *const std::ffi::c_void,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+    fn CGEventPostToPid(pid: i32, event: *mut std::ffi::c_void);
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+/// Post a down-and-up keypress for a virtual-key code with flags, into
+/// Baaz's own pid — no new crate, just the framework. macOS only; elsewhere
+/// the `key:` step logs and presses nothing.
+#[cfg(target_os = "macos")]
+fn post_key_event(code: u16, flags: u64) {
+    unsafe {
+        let pid = libc::getpid();
+        for key_down in [true, false] {
+            let event = CGEventCreateKeyboardEvent(std::ptr::null(), code, key_down);
+            if event.is_null() {
+                crate::baaz_log!("key: CoreGraphics refused virtual-key {code}");
+                return;
+            }
+            CGEventSetFlags(event, flags);
+            CGEventPostToPid(pid, event);
+            CFRelease(event);
+        }
+    }
+}
+
+/// Nowhere to post outside macOS: the step logs and presses nothing.
+#[cfg(not(target_os = "macos"))]
+fn post_key_event(code: u16, _flags: u64) {
+    crate::baaz_log!("key: no CoreGraphics here; not posting virtual-key {code}");
 }
 
 /// The open session's `--steps` verbs.
@@ -1130,5 +1303,34 @@ mod tests {
             Some(aui::shell::RIGHT_MIN_WIDTH)
         );
         restore_state(state);
+    }
+
+    /// The mac virtual-keycode table: modifiers become `CGEvent` flags and
+    /// the key becomes its code — `cmd-k`, `cmd-shift-t`, `alt-cmd-b`,
+    /// `enter`, `escape`, `f5` — while unknown names map to nothing.
+    #[test]
+    fn key_code_table_maps_shortcuts_and_named_keys() {
+        const CMD: u64 = 1 << 20;
+        const ALT: u64 = 1 << 19;
+        const SHIFT: u64 = 1 << 17;
+        assert_eq!(super::key_event_parts("cmd-k"), Some((40, CMD)));
+        assert_eq!(super::key_event_parts("cmd-shift-t"), Some((17, CMD | SHIFT)));
+        assert_eq!(super::key_event_parts("shift-cmd-t"), Some((17, CMD | SHIFT)));
+        assert_eq!(super::key_event_parts("alt-cmd-b"), Some((11, ALT | CMD)));
+        assert_eq!(super::key_event_parts("enter"), Some((36, 0)));
+        assert_eq!(super::key_event_parts("escape"), Some((53, 0)));
+        assert_eq!(super::key_event_parts("f5"), Some((96, 0)));
+        assert_eq!(super::key_event_parts("cmd-f13"), None, "f13 is parseable but off the table");
+        assert_eq!(super::key_event_parts("cmd-["), Some((33, CMD)));
+        assert_eq!(super::key_event_parts("bogus-key"), None);
+        assert_eq!(super::key_event_parts(""), None);
+    }
+
+    /// `key:` and `page-focus` run against the window, like the other window
+    /// verbs — no open session needed.
+    #[test]
+    fn key_and_page_focus_are_window_steps() {
+        assert!(super::all_window_steps(&["key:cmd-k".into(), "page-focus".into()]));
+        assert!(super::all_window_steps(&["page-focus".into(), "wait:100".into()]));
     }
 }

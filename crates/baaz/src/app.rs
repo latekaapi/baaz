@@ -150,7 +150,7 @@ actions!(
         ConfirmRename,
         /// Toggle the terminal dock (⌃`).
         ToggleTerminal,
-        /// Toggle the right pane (⌘⌥B).
+        /// Toggle the right pane (⌘-backslash, from the library; ⌥⌘B is free).
         ToggleRightPane,
         /// Show Changes in the right pane (⌘⇧D).
         ShowRightChanges,
@@ -306,6 +306,9 @@ pub fn bind_keys(cx: &mut App) {
     for warning in &loaded.warnings {
         crate::baaz_log!("{warning}");
     }
+    // The Chromium key router reads this snapshot, not gpui state — refresh
+    // it on every (re)install so a rebinding moves the claimed keys too.
+    crate::keymap::refresh_claimed_keys(&loaded.bindings);
     cx.bind_keys(loaded.bindings);
 }
 
