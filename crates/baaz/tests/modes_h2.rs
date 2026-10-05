@@ -59,8 +59,8 @@ fn browse_toggle_row_is_bound_claimed_and_categorised() {
         "the row builds a real binding"
     );
     assert!(
-        keymap.contains("predicate.to_string() == aui::keys::ROOT_CONTEXT"),
-        "the claimed set picks up AuiRoot rows automatically"
+        keymap.contains("context == aui::keys::ROOT_CONTEXT || context == crate::app::BROWSE_CONTEXT"),
+        "the claimed set picks up AuiRoot and BaazBrowse rows automatically"
     );
 }
 
@@ -108,7 +108,8 @@ fn probe_entries_cover_both_modes() {
 
 /// The switch row sits at the top of the sidebar with counts, roles and
 /// labels; the rail carries the labelled toggle; the body slides on the
-/// Layout spring inside a clip; the Browse list is marked for B2a-H3.
+/// Layout spring inside a clip; the Browse list is the real B2a-H3 body
+/// (the placeholder is gone).
 #[test]
 fn sidebar_carries_the_switch_and_the_slide() {
     let sidebar = source("sidebar_view.rs");
@@ -135,8 +136,20 @@ fn sidebar_carries_the_switch_and_the_slide() {
         "the slide is clipped to the column"
     );
     assert!(
-        sidebar.contains("B2a-H3 replaces this with the real Browse sidebar"),
-        "the placeholder list is marked for B2a-H3"
+        sidebar.contains("the Tabs list, From sessions, and the open tab's right-click"),
+        "the real Browse sidebar replaced the placeholder"
+    );
+    assert!(
+        sidebar.contains("\"browse-pinned\""),
+        "the pinned tiles render"
+    );
+    assert!(
+        sidebar.contains("\"tab-menu\""),
+        "the tab menu renders"
+    );
+    assert!(
+        sidebar.contains("\"browse-agent\""),
+        "the Agents strip renders"
     );
 }
 
