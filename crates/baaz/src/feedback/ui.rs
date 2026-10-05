@@ -70,6 +70,15 @@ pub(crate) const FEEDBACK_STEP_WAIT: Duration = Duration::from_secs(2);
 pub(crate) const FEEDBACK_BAR_ZONE_H: f32 = 64.0;
 /// The note popover's fixed width, matching its render.
 pub(crate) const FEEDBACK_POPOVER_W: f32 = 300.0;
+/// The note field's inner width: the 300 px popover minus its 12 px side
+/// padding each side, the textarea's own insets and border — what one
+/// visual row of text actually fills before it wraps.
+pub(crate) const FEEDBACK_FIELD_INNER_W: f32 = 252.0;
+/// The average glyph width the wrap estimate divides by: between the chip's
+/// 6.9 px mono advance and a proportional UI face at this size.
+pub(crate) const FEEDBACK_GLYPH_W: f32 = 7.0;
+/// How long the Done confirmation lingers in the header slot.
+pub(crate) const FEEDBACK_SAVED_FLASH: Duration = Duration::from_secs(4);
 
 /// How long a first Discard click stays armed waiting for its confirm.
 const DISCARD_ARM: Duration = Duration::from_secs(4);
@@ -122,6 +131,20 @@ pub struct PendingNote {
     pub full: Option<RgbaImage>,
     /// The field holding the owner's words.
     pub field: Entity<TextareaState>,
+    /// Where the app was when the note was captured (taken in
+    /// [`crate::app::Harness::begin_note_capture`], never refreshed): a
+    /// Pause or mode switch before Save must not rewrite it.
+    pub context: ScreenContext,
+}
+
+/// A finished Done write's brief header confirmation, while fresh.
+pub struct SavedFlash {
+    /// When the write landed, bounding the ~4 s show.
+    pub at: Instant,
+    /// How many notes the report held, for `Saved · N notes`.
+    pub notes: usize,
+    /// The report dir path the toast also carries (and the clipboard holds).
+    pub path: String,
 }
 
 /// A click that hit-tested nothing: the tree may still be cold, so the
@@ -197,6 +220,16 @@ pub struct FeedbackUi {
     /// [`FEEDBACK_HOVER_THROTTLE`] of it skip the next one, so hover costs
     /// at most one hit-test per ~30 ms.
     pub hover_tested_at: Option<Instant>,
+    /// The latest pointer position seen while throttled: the trailing edge
+    /// the per-frame poll hit-tests once the window above has passed, so
+    /// the outline always settles on the last position after the pointer
+    /// stops.
+    pub hover_dirty: Option<Point<Pixels>>,
+    /// The "Feedback mode is off" toast's id, while it is up: entering
+    /// Active dismisses it so it never goes stale.
+    pub off_toast: Option<String>,
+    /// A finished Done write's brief header confirmation, while fresh.
+    pub saved_flash: Option<SavedFlash>,
     /// Where the left button went down, while it is down.
     pub press: Option<Point<Pixels>>,
     /// Where the pointer is now, while a drag is live.
@@ -208,8 +241,10 @@ pub struct FeedbackUi {
     /// popover for a note that has since been cancelled.
     pub capture_seq: u64,
     /// The target waiting for its capture to land, with the field already
-    /// built so opening the popover is synchronous when it does.
-    pub capture_pending: Option<(Target, Entity<TextareaState>)>,
+    /// built so opening the popover is synchronous when it does — plus
+    /// the screen context taken the moment the note began, so saving it
+    /// later never re-reads a screen the owner has since left.
+    pub capture_pending: Option<(Target, Entity<TextareaState>, ScreenContext)>,
     /// The capture's 120 ms timer bound. One slot, never a queue:
     /// starting a capture replaces the previous timer (dropping cancels
     /// it), so timers can never stack on `wire_tasks`.
@@ -255,6 +290,9 @@ impl FeedbackUi {
             hover_point: None,
             hover_since: None,
             hover_tested_at: None,
+            hover_dirty: None,
+            off_toast: None,
+            saved_flash: None,
             press: None,
             drag: None,
             capturing: false,
@@ -301,6 +339,7 @@ impl FeedbackUi {
         self.hover = None;
         self.hover_point = None;
         self.hover_since = None;
+        self.hover_dirty = None;
         self.press = None;
         self.drag = None;
         self.pending_click = None;
@@ -315,6 +354,7 @@ impl FeedbackUi {
         self.hover = None;
         self.hover_point = None;
         self.hover_since = None;
+        self.hover_dirty = None;
     }
 
     /// Whether anything is shown.
@@ -381,9 +421,26 @@ impl FeedbackUi {
     }
 
     /// Done is clickable in Active or Paused with notes to save — never
-    /// while a write is in flight.
-    pub fn done_enabled(&self) -> bool {
-        !self.saving && self.phase != FeedbackPhase::Off && !self.draft.is_empty()
+    /// while a write is in flight. An open popover holding non-empty text
+    /// counts: Done files it first, so the button the bar and the pill
+    /// render must already read enabled for it.
+    pub fn done_enabled(&self, cx: &gpui::App) -> bool {
+        if self.saving || self.phase == FeedbackPhase::Off {
+            return false;
+        }
+        if !self.draft.is_empty() {
+            return true;
+        }
+        self.popover.as_ref().is_some_and(|note| !note.field.read(cx).value().trim().is_empty())
+    }
+
+    /// While Active, menu-bar dispatches must not run app actions: the F2b
+    /// `NoAction` rows stop gpui keybindings, but a native menu equivalent
+    /// dispatches its action straight into the tree. Every menu-bar action
+    /// handler early-returns on this except `ToggleFeedback`, `QuitApp`
+    /// and the feedback/note actions.
+    pub(crate) fn blocks_chrome_action(&self) -> bool {
+        self.phase == FeedbackPhase::Active
     }
 
     /// ⌃⌥⌘F / the menu item: setting off stays Off; Off → Active (a fresh
@@ -426,10 +483,15 @@ impl FeedbackUi {
 
     /// Escape, the Pause button: Active → Paused, anywhere else a no-op —
     /// and always a no-op while [`Self::saving`]. The open popover (with
-    /// its typed text) survives: Resume brings it back.
+    /// its typed text) survives: Resume brings it back. Queued steps die
+    /// with it — their popovers will never open — failing loudly under
+    /// their own step names like the pump's expiry does.
     pub fn pause(&mut self) {
         if self.phase == FeedbackPhase::Active && !self.saving {
             self.clear_transient();
+            while let Some((queued, _)) = self.step_queue.pop_front() {
+                crate::steps::record_step_failure(queued.step());
+            }
             self.disarm_discard();
             self.phase = FeedbackPhase::Paused;
         }
@@ -519,6 +581,34 @@ impl FeedbackUi {
         }
     }
 
+    /// The target for a hit at `point`: the element itself — unless its
+    /// rect covers more than 40 % of the window, when naming the whole
+    /// area (a click on a web page hit-tested as `Browse (Group)`,
+    /// 1188×856) is useless. Then it becomes a 60×40 area around the
+    /// point with `region = near <label>` — or `"web page"` when the hit
+    /// is the page stand-in itself (an `AXGroup` or an unlabelled hit).
+    /// Pure, so tests drive the edges directly.
+    pub(crate) fn note_target_for_hit(
+        hit: ElementHit,
+        point: Point<Pixels>,
+        win: gpui::Size<Pixels>,
+    ) -> Target {
+        let area = f32::from(win.width) * f32::from(win.height);
+        if area > 0.0 && hit.rect.w * hit.rect.h > 0.4 * area {
+            let Target::Area { rect, .. } = FeedbackUi::click_target(None, point, win) else {
+                unreachable!("click_target(None, ..) is always an area")
+            };
+            let region = if hit.role == "AXGroup" || hit.label.is_empty() {
+                "web page".to_owned()
+            } else {
+                format!("near {}", hit.label)
+            };
+            Target::Area { rect, region: Some(region) }
+        } else {
+            Target::Element(hit)
+        }
+    }
+
     /// The dragged box from `start` to `current`, normalised so dragging
     /// up-left works. `None` when either axis runs under 6 px: the release
     /// counts as a click instead.
@@ -558,9 +648,10 @@ impl FeedbackUi {
     /// Where the hover name chip sits: centred on the target, above it by
     /// default, below it near the top — and never with its top edge inside
     /// the bar zone (then below the element too). Clamped horizontally and
-    /// vertically into the window. When the element is taller than the
-    /// window, the chip pins inside its top-left instead. Pure, so tests
-    /// drive the edges directly.
+    /// vertically into the window. When the element is taller than ~60 % of
+    /// the window (a page-sized hit whose bottom edge is unreachable), the
+    /// chip pins inside its top-left instead. Pure, so tests drive the
+    /// edges directly.
     pub(crate) fn feedback_chip_pos(
         rect: Rect,
         est_w: f32,
@@ -568,9 +659,9 @@ impl FeedbackUi {
         win_w: f32,
         win_h: f32,
     ) -> (f32, f32) {
-        if rect.h >= win_h {
-            let x = (rect.x + 4.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
-            return (x, rect.y + 4.0);
+        if rect.h >= win_h * 0.6 {
+            let x = (rect.x + 8.0).clamp(8.0, (win_w - est_w - 8.0).max(8.0));
+            return (x, rect.y + 8.0);
         }
         let centre = rect.x + rect.w / 2.0;
         let x = (centre - est_w / 2.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
@@ -588,6 +679,24 @@ impl FeedbackUi {
     pub(crate) fn feedback_popover_height(rows: usize) -> f32 {
         let rows = rows.clamp(3, 8) as f32;
         12.0 + 20.0 + 2.0 + 16.0 + 9.0 + rows * 20.0 + 9.0 + 28.0 + 9.0 + 16.0 + 12.0
+    }
+
+    /// The textarea's real visual row count for `text`: logical lines add
+    /// their wrapped rows (a long single line grows the field), an empty
+    /// line still takes one row, and a trailing newline counts — so
+    /// `"a\n"` is two rows, not one. `TextareaState` exposes no row or line
+    /// layout, so wrapping is estimated from the field's inner width
+    /// ([`FEEDBACK_FIELD_INNER_W`]) over an average glyph width
+    /// ([`FEEDBACK_GLYPH_W`]). Pure, so tests drive the edges directly.
+    pub(crate) fn feedback_visual_rows(text: &str) -> usize {
+        let per_row = (FEEDBACK_FIELD_INNER_W / FEEDBACK_GLYPH_W).floor().max(1.0) as usize;
+        text.split('\n')
+            .map(|line| {
+                let chars = line.chars().count();
+                ((chars + per_row - 1) / per_row).max(1)
+            })
+            .sum::<usize>()
+            .max(1)
     }
 
     /// Where the note popover sits: right of the target (left when there
@@ -615,10 +724,28 @@ impl FeedbackUi {
         (x, y.clamp(FEEDBACK_BAR_ZONE_H, hi))
     }
 
-    /// One `(rect, 1-based index)` per draft note, in order: what the
-    /// layer draws one pin per.
-    pub(crate) fn pin_rects(&self) -> Vec<(Rect, usize)> {
-        self.draft.notes.iter().map(|note| (Self::target_rect(&note.target), note.index)).collect()
+    /// Whether a note's stored context names the current screen: same
+    /// mode, same session id (Sessions) or same page URL (Browse), same
+    /// right-pane kind, same Settings section. Pure, so tests drive the
+    /// matrix directly.
+    pub(crate) fn pin_context_matches(current: &ScreenContext, note: &ScreenContext) -> bool {
+        current.mode == note.mode
+            && current.session_id == note.session_id
+            && current.page_url == note.page_url
+            && current.right_pane == note.right_pane
+            && current.settings_section == note.settings_section
+    }
+
+    /// One `(rect, 1-based index)` per draft note on `current`'s screen, in
+    /// order: pins from other screens (another mode, session, page, pane
+    /// or Settings section) never draw. The layer renders this.
+    pub(crate) fn visible_pin_rects(&self, current: &ScreenContext) -> Vec<(Rect, usize)> {
+        self.draft
+            .notes
+            .iter()
+            .filter(|note| FeedbackUi::pin_context_matches(current, &note.context))
+            .map(|note| (Self::target_rect(&note.target), note.index))
+            .collect()
     }
 }
 
@@ -694,9 +821,10 @@ impl crate::app::Harness {
         }
         match self.feedback.toggle(self.layout.feedback_mode) {
             ToggleOutcome::NeedsSetting => {
-                self.overlays.update(cx, |o, _| {
+                let id = self.overlays.update(cx, |o, _| {
                     o.toast("Feedback mode is off", "Turn it on in Settings → General.")
                 });
+                self.feedback.off_toast = Some(id);
                 cx.notify();
             }
             ToggleOutcome::EnteredActive | ToggleOutcome::Resumed => {
@@ -715,6 +843,13 @@ impl crate::app::Harness {
     /// a later frame, take focus so typing never reaches the composer,
     /// and repaint.
     pub(crate) fn enter_feedback_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The "mode is off" toast goes stale the moment the mode is on:
+        // dismiss it by id on the way in.
+        if let Some(id) = self.feedback.off_toast.take() {
+            self.overlays.update(cx, |overlays, _| {
+                overlays.dismiss_toast(&id);
+            });
+        }
         self.overlays.update(cx, |overlays, _| {
             overlays.palette = None;
             overlays.menu = None;
@@ -817,7 +952,7 @@ impl crate::app::Harness {
         if self.feedback.capture_pending.is_some() {
             self.feedback.cancel_note();
         }
-        if !self.feedback.done_enabled() {
+        if !self.feedback.done_enabled(cx) {
             return;
         }
         self.feedback.saving = true;
@@ -841,6 +976,8 @@ impl crate::app::Harness {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
                         let unit = if note_count == 1 { "note" } else { "notes" };
                         this.feedback.done_applied();
+                        this.feedback.saved_flash =
+                            Some(SavedFlash { at: Instant::now(), notes: note_count, path: path.clone() });
                         this.overlays.update(cx, |o, _| {
                             o.toast(format!("Feedback saved · {note_count} {unit}"), path)
                         });
@@ -1101,42 +1238,71 @@ impl crate::app::Harness {
         cx.notify();
     }
 
+    /// The mode name the report prints verbatim: `Sessions` / `Browse`.
+    pub(crate) fn feedback_mode_name(&self) -> String {
+        match self.mode {
+            crate::layout::Mode::Sessions => "Sessions".to_owned(),
+            crate::layout::Mode::Browse => "Browse".to_owned(),
+        }
+    }
+
+    /// The open session's raw id, when a session is open.
+    pub(crate) fn feedback_session_id(&self, cx: &gpui::App) -> Option<String> {
+        self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+    }
+
+    /// The human right-pane name (`Browser`, `Files`, …), only while open.
+    pub(crate) fn feedback_right_pane(&self) -> Option<String> {
+        self.layout
+            .right_open
+            .then(|| crate::layout::right_kind(&self.layout).label().to_owned())
+    }
+
+    /// The shown page's URL (only while a page shows): in Browse the centre
+    /// tab's page, otherwise the pane's page. Empty and `about:blank`
+    /// never count as a page.
+    pub(crate) fn feedback_page_url(&self, cx: &gpui::App) -> Option<String> {
+        let state = if self.mode == crate::layout::Mode::Browse {
+            self.browse_centre_state()
+        } else {
+            self.existing_browser(cx)
+        };
+        state
+            .map(|state| state.read(cx).url().to_string())
+            .filter(|url| !url.is_empty() && url != "about:blank")
+    }
+
+    /// The settings section in view, only while Settings is open.
+    pub(crate) fn feedback_settings_section(&self) -> Option<String> {
+        self.settings_page
+            .open
+            .then(|| self.settings_page.section.clone())
+            .filter(|section| !section.is_empty())
+    }
+
     /// Where the app was, for a note's [`ScreenContext`]: the mode, the
     /// current project, the open session and its title, the right pane
     /// (only while open), the shown page's URL (only while a page shows),
     /// the settings section (only while Settings is open), the window
-    /// size and scale, and the theme. F3 calls this per note.
+    /// size and scale, and the theme. Taken when the note begins, never
+    /// refreshed at save time. The mode and pane read exactly as the
+    /// report prints them (`Sessions` / `Browse`, `Browser`, `Files`, …);
+    /// a session with no title reads `New session`, never a raw id.
     pub(crate) fn feedback_context(&self, window: &mut Window, cx: &gpui::App) -> ScreenContext {
-        let mode = match self.mode {
-            crate::layout::Mode::Sessions => "sessions".to_owned(),
-            crate::layout::Mode::Browse => "browse".to_owned(),
-        };
         let project = self.current_project().map(|p| p.name.clone());
-        let session_id = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-        let session_title = session_id
-            .as_ref()
-            .and_then(|id| self.collapsed_head_label(&self.chain_head(id), cx));
-        let right_pane = self.layout.right_open.then(|| {
-            crate::layout::right_kind(&self.layout).label().to_owned()
+        let session_id = self.feedback_session_id(cx);
+        let session_title = session_id.as_ref().map(|id| {
+            self.browse_chip_session_name(&self.chain_head(id), cx)
         });
-        let page_url = self
-            .existing_browser(cx)
-            .map(|state| state.read(cx).url().to_string())
-            .filter(|url| !url.is_empty() && url != "about:blank");
-        let settings_section = self
-            .settings_page
-            .open
-            .then(|| self.settings_page.section.clone())
-            .filter(|section| !section.is_empty());
         let size = window.viewport_size();
         ScreenContext {
-            mode,
+            mode: self.feedback_mode_name(),
             project,
             session_id,
             session_title,
-            right_pane,
-            page_url,
-            settings_section,
+            right_pane: self.feedback_right_pane(),
+            page_url: self.feedback_page_url(cx),
+            settings_section: self.feedback_settings_section(),
             window_w: f32::from(size.width),
             window_h: f32::from(size.height),
             scale: window.scale_factor(),
@@ -1144,13 +1310,36 @@ impl crate::app::Harness {
         }
     }
 
+    /// The current screen as a [`ScreenContext`] for pin matching: the same
+    /// five fields [`Self::feedback_context`] stores per note (mode,
+    /// session, page URL, right pane, settings section). Window-only
+    /// fields stay empty — pins compare screens, not sizes.
+    pub(crate) fn current_pin_context(&self, cx: &gpui::App) -> ScreenContext {
+        ScreenContext {
+            mode: self.feedback_mode_name(),
+            project: None,
+            session_id: self.feedback_session_id(cx),
+            session_title: None,
+            right_pane: self.feedback_right_pane(),
+            page_url: self.feedback_page_url(cx),
+            settings_section: self.feedback_settings_section(),
+            window_w: 0.0,
+            window_h: 0.0,
+            scale: 1.0,
+            theme: String::new(),
+        }
+    }
+
     /// The pointer moved while Active with the left button up: refresh the
     /// hover outline. The mouse-move handler and the `hover:` step verb
-    /// both land here. Moves under 2 px skip the hit-test, and so do moves
-    /// inside ~30 ms of the last one; while a popover is open, while
-    /// capturing, or with the button down, hovers stay off. The hit-test
-    /// never enriches (that serialises the whole debug tree) — enrichment
-    /// waits for [`Self::begin_note_capture`].
+    /// both land here. Moves under 2 px skip the hit-test, and moves
+    /// inside ~30 ms of the last one park the position as the trailing
+    /// edge instead of hit-testing: the per-frame poll runs it once the
+    /// window has passed, so the outline settles on the last position
+    /// after the pointer stops. While a popover is open, while capturing,
+    /// or with the button down, hovers stay off. The hit-test never
+    /// enriches (that serialises the whole debug tree) — enrichment waits
+    /// for [`Self::begin_note_capture`].
     pub(crate) fn feedback_hover_at(
         &mut self,
         point: Point<Pixels>,
@@ -1172,12 +1361,30 @@ impl crate::app::Harness {
         }
         if let Some(tested) = self.feedback.hover_tested_at {
             if tested.elapsed() < FEEDBACK_HOVER_THROTTLE {
+                self.feedback.hover_dirty = Some(point);
+                window.request_animation_frame();
+                cx.notify();
                 return;
             }
         }
+        self.hover_hit_test(point, window, cx);
+    }
+
+    /// Run the hover hit-test at `point` now: probe (never enriching),
+    /// record the position and the time, and settle the outline — or park
+    /// the cold-tree retry when nothing hit. The move handler calls this
+    /// past the throttle; the per-frame poll calls it for the trailing
+    /// edge once the window has passed.
+    pub(crate) fn hover_hit_test(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let hit = self.feedback.probe.hit(window, point);
         self.feedback.hover_point = Some(point);
         self.feedback.hover_tested_at = Some(Instant::now());
+        self.feedback.hover_dirty = None;
         if hit.is_some() {
             self.feedback.hover_since = None;
             self.feedback.hover = hit;
@@ -1312,7 +1519,11 @@ impl crate::app::Harness {
             }
         }
         match self.feedback.probe.hit(window, point) {
-            Some(hit) => self.begin_note_capture(Target::Element(hit), window, cx),
+            Some(hit) => {
+                let win = window.viewport_size();
+                let target = FeedbackUi::note_target_for_hit(hit, point, win);
+                self.begin_note_capture(target, window, cx);
+            }
             None => {
                 self.feedback.pending_click =
                     Some(PendingClick { point, since: Instant::now() });
@@ -1323,10 +1534,11 @@ impl crate::app::Harness {
 
     /// The layer's per-frame poll (it renders every frame while Active):
     /// first drain queued steps (a `note:` waiting for its popover, a
-    /// `click:`/`drag:` waiting for the idle shell), then retry a parked
-    /// click's hit-test while the tree may still be cold, falling back to
-    /// the 60×40 area; and retry a cleared hover the same way so the
-    /// outline appears when the tree warms.
+    /// `click:`/`drag:` waiting for the idle shell), then run the hover
+    /// trailing edge once its throttle window has passed, then retry a
+    /// parked click's hit-test while the tree may still be cold, falling
+    /// back to the 60×40 area; and retry a cleared hover the same way so
+    /// the outline appears when the tree warms.
     pub(crate) fn feedback_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.phase != FeedbackPhase::Active {
             return;
@@ -1340,10 +1552,25 @@ impl crate::app::Harness {
         {
             return;
         }
+        if let Some(point) = self.feedback.hover_dirty {
+            if self.feedback.press.is_none() {
+                match self.feedback.hover_tested_at {
+                    Some(tested) if tested.elapsed() < FEEDBACK_HOVER_THROTTLE => {
+                        window.request_animation_frame();
+                    }
+                    _ => {
+                        self.hover_hit_test(point, window, cx);
+                        return;
+                    }
+                }
+            }
+        }
         if let Some(pending) = self.feedback.pending_click {
             if let Some(hit) = self.feedback.probe.hit(window, pending.point) {
                 self.feedback.pending_click = None;
-                self.begin_note_capture(Target::Element(hit), window, cx);
+                let win = window.viewport_size();
+                let target = FeedbackUi::note_target_for_hit(hit, pending.point, win);
+                self.begin_note_capture(target, window, cx);
                 return;
             }
             if pending.since.elapsed() >= FEEDBACK_PROBE_WARM {
@@ -1390,6 +1617,7 @@ impl crate::app::Harness {
         self.feedback.hover = None;
         self.feedback.hover_point = None;
         self.feedback.hover_since = None;
+        self.feedback.hover_dirty = None;
         self.feedback.press = None;
         self.feedback.drag = None;
         self.feedback.pending_click = None;
@@ -1400,10 +1628,14 @@ impl crate::app::Harness {
         let field = cx.new(|cx| {
             aui::composer::composer_state_rows("What should change?", 3, 8, window, cx)
         });
+        // The note carries the screen it was captured on: anything the
+        // owner does before Save (Pause, a mode switch, a session switch)
+        // must not rewrite it.
+        let context = self.feedback_context(window, cx);
         self.feedback.capturing = true;
         self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
         let seq = self.feedback.capture_seq;
-        self.feedback.capture_pending = Some((target, field));
+        self.feedback.capture_pending = Some((target, field, context));
         window.refresh();
         cx.notify();
         let weak = cx.entity().downgrade();
@@ -1435,7 +1667,8 @@ impl crate::app::Harness {
         }
         self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
         self.feedback.capture_task = None;
-        let (target, field) = self.feedback.capture_pending.take().expect("pending checked");
+        let (target, field, context) =
+            self.feedback.capture_pending.take().expect("pending checked");
         self.feedback.capturing = false;
         let rect = FeedbackUi::target_rect(&target);
         let scale = window.scale_factor();
@@ -1446,7 +1679,7 @@ impl crate::app::Harness {
                 (None, None)
             }
         };
-        self.feedback.popover = Some(PendingNote { target, crop, full, field });
+        self.feedback.popover = Some(PendingNote { target, crop, full, field, context });
         if let Some(note) = &self.feedback.popover {
             let focus = note.field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -1455,7 +1688,9 @@ impl crate::app::Harness {
     }
 
     /// Save the open popover's text as a note. Empty text keeps the
-    /// popover open; afterwards focus returns to the layer.
+    /// popover open; afterwards focus returns to the layer. The note keeps
+    /// the context captured when it began — never a fresh one, which would
+    /// name whatever screen the owner has since moved to.
     pub(crate) fn save_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(note) = self.feedback.popover.as_ref() else {
             return;
@@ -1465,8 +1700,7 @@ impl crate::app::Harness {
             return;
         }
         let note = self.feedback.popover.take().expect("popover checked");
-        let context = self.feedback_context(window, cx);
-        self.feedback.draft.add(note.target, text, context, note.crop, note.full);
+        self.feedback.draft.add(note.target, text, note.context, note.crop, note.full);
         self.feedback.hover = None;
         window.focus(&self.feedback.focus, cx);
         cx.notify();
@@ -1557,10 +1791,12 @@ impl crate::app::Harness {
         self.feedback.expire_discard();
         self.feedback_poll(window, cx);
         // Keep frames coming while anything is waiting on one: a parked
-        // cold-tree click, a cold hover retry, an in-flight capture, or a
-        // queued step all stall forever in an idle window otherwise.
+        // cold-tree click, a cold hover retry, a throttled hover trailing
+        // edge, an in-flight capture, or a queued step all stall forever
+        // in an idle window otherwise.
         if self.feedback.pending_click.is_some()
             || self.feedback.hover_since.is_some()
+            || self.feedback.hover_dirty.is_some()
             || self.feedback.capture_pending.is_some()
             || !self.feedback.step_queue.is_empty()
         {
@@ -1705,10 +1941,11 @@ impl crate::app::Harness {
         )
     }
 
-    /// One pin per draft note: a 1.5 px accent outline at ~55 % opacity
-    /// around its rect and a 22 px numbered badge at the rect's top-right.
-    /// Active only, hidden while capturing. Decorative: no role,
-    /// pointer-transparent.
+    /// One pin per draft note on this screen: a 1.5 px accent outline at
+    /// ~55 % opacity around its rect and a 22 px numbered badge at the
+    /// rect's top-right. Active only, hidden while capturing. Notes from
+    /// other screens (another mode, session, page, pane or Settings
+    /// section) draw no pin. Decorative: no role, pointer-transparent.
     fn render_feedback_pins(
         &self,
         cx: &mut Context<Self>,
@@ -1721,9 +1958,10 @@ impl crate::app::Harness {
         let accent = feedback_accent(cx);
         let on_accent = feedback_on_accent(cx);
         let line = gpui::Hsla { a: 0.55, ..accent };
+        let current = self.current_pin_context(cx);
         let pins = self
             .feedback
-            .pin_rects()
+            .visible_pin_rects(&current)
             .into_iter()
             .map(|(rect, index)| {
                 let badge_x = (rect.x + rect.w - 11.0).clamp(0.0, (win_w - 22.0).max(0.0));
@@ -1762,9 +2000,12 @@ impl crate::app::Harness {
         Some(div().children(pins).into_any_element())
     }
 
-    /// The floating chrome: the bar while Active, the pill while Paused,
-    /// nothing while Off — and nothing while capturing, when the window
-    /// must read clean.
+    /// The floating chrome: the bar while Active, nothing otherwise — and
+    /// nothing while capturing, when the window must read clean. While
+    /// Paused the shell lives in the window's header row (see
+    /// [`Self::render_feedback_header_slot`]): native pages paint above
+    /// gpui, so a floating pill sits under the page and its clicks hit the
+    /// page instead.
     pub(crate) fn render_feedback_chrome(
         &mut self,
         window: &mut Window,
@@ -1774,10 +2015,116 @@ impl crate::app::Harness {
             return None;
         }
         match self.feedback.phase {
-            FeedbackPhase::Off => None,
+            FeedbackPhase::Off | FeedbackPhase::Paused => None,
             FeedbackPhase::Active => Some(self.render_feedback_bar(window, cx)),
-            FeedbackPhase::Paused => Some(self.render_feedback_pill(cx)),
         }
+    }
+
+    /// The Paused shell (and the Done confirmation) in the window's top
+    /// header row, just left of its icon buttons — a region native pages
+    /// never cover. While Paused: dot · N notes · Resume · Done, compact
+    /// (the height of a header button). After Done lands: `Saved · N
+    /// notes — path copied` for ~4 s, so the confirmation is visible even
+    /// when a page covers the toast area. Anywhere else: nothing.
+    pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.feedback.capturing {
+            return None;
+        }
+        if self.feedback.phase == FeedbackPhase::Paused {
+            return Some(self.render_feedback_head_pill(cx));
+        }
+        if self.feedback.phase == FeedbackPhase::Off {
+            let fresh = self
+                .feedback
+                .saved_flash
+                .as_ref()
+                .is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH);
+            if !fresh {
+                return None;
+            }
+            let flash = self.feedback.saved_flash.as_ref().expect("fresh checked");
+            let unit = if flash.notes == 1 { "note" } else { "notes" };
+            let p = cx.aui().colors;
+            let accent = feedback_accent(cx);
+            return Some(
+                h_flex()
+                    .id("feedback-saved")
+                    .occlude()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(28.0))
+                    .px(px(10.0))
+                    .rounded(px(scale::R_SM))
+                    .bg(p.surface_1)
+                    .border_1()
+                    .border_color(p.line_strong)
+                    .role(gpui::Role::Group)
+                    .aria_label(format!("Feedback saved to {}", flash.path))
+                    .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
+                    .child(
+                        div()
+                            .flex_none()
+                            .mono(scale::FS_12)
+                            .text_color(p.ink_2)
+                            .whitespace_nowrap()
+                            .child(format!("Saved · {} {unit} — path copied", flash.notes)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
+    /// The Paused pill for the header slot: dot · N notes · Resume · Done,
+    /// compact at header-button height. Done is the same accent button as
+    /// the bar's, one line.
+    fn render_feedback_head_pill(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let accent = feedback_accent(cx);
+        let notes = self.feedback.notes_label();
+        let resume = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.resume_feedback(window, cx);
+        });
+        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
+            this.finish_feedback(window, cx);
+        });
+        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
+        let done_button =
+            self.render_feedback_done("feedback-done", done_label, false, cx, move |window, cx| {
+                done(&(), window, cx);
+            });
+        h_flex()
+            .id("feedback-pill")
+            .occlude()
+            .flex_none()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .px(px(10.0))
+            .rounded(px(scale::R_SM))
+            .bg(p.surface_1)
+            .border_1()
+            .border_color(p.line_strong)
+            .shadow(p.shadow(1))
+            .role(gpui::Role::Group)
+            .aria_label("Feedback paused")
+            .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
+            .child(
+                div()
+                    .flex_none()
+                    .mono(scale::FS_12)
+                    .text_color(p.ink_3)
+                    .whitespace_nowrap()
+                    .child(notes),
+            )
+            .child(
+                button("feedback-resume", "Resume")
+                    .accessibility_label("Resume feedback")
+                    .on_click(move |_, window, cx| resume(&(), window, cx)),
+            )
+            .child(done_button)
+            .into_any_element()
     }
 
     /// The accent Done button both the bar and the pill share: feedback
@@ -1802,7 +2149,7 @@ impl crate::app::Harness {
         let sub = gpui::Hsla { a: 0.75, ..on_accent };
         let faint_border = gpui::Hsla { a: 0.45, ..accent };
         let faint_text = gpui::Hsla { a: 0.55, ..accent };
-        let enabled = self.feedback.done_enabled();
+        let enabled = self.feedback.done_enabled(cx);
         div()
             .id(id)
             .flex_none()
@@ -1874,10 +2221,11 @@ impl crate::app::Harness {
         let win = window.viewport_size();
         let (win_w, win_h) = (f32::from(win.width), f32::from(win.height));
         let rect = FeedbackUi::target_rect(&target);
-        // The popover's full height at the field's current row count, so
-        // the position keeps all of it — including Save — on screen,
-        // flipping above the target when there is no room below.
-        let rows = note.field.read(cx).value().lines().count();
+        // The popover's full height at the field's current visual row
+        // count (wrapped lines, so a long single line grows it), so the
+        // position keeps all of it — including Save — on screen, flipping
+        // above the target when there is no room below.
+        let rows = FeedbackUi::feedback_visual_rows(&note.field.read(cx).value());
         let pop_h = FeedbackUi::feedback_popover_height(rows);
         let (x, y) = FeedbackUi::feedback_popover_pos(rect, pop_h, win_w, win_h);
         let title = Self::feedback_note_title(&target);
@@ -2087,62 +2435,6 @@ impl crate::app::Harness {
         .into_any_element()
     }
 
-    /// The Paused pill, bottom-right: dot · N notes · Resume · Done.
-    /// It never blocks the app. Shown even with 0 notes (Resume live,
-    /// Done disabled). Done is the same accent button as the bar's, one
-    /// line.
-    fn render_feedback_pill(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
-        let notes = self.feedback.notes_label();
-        let resume = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.resume_feedback(window, cx);
-        });
-        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.finish_feedback(window, cx);
-        });
-        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
-        let done_button =
-            self.render_feedback_done("feedback-done", done_label, false, cx, move |window, cx| {
-                done(&(), window, cx);
-            });
-        let pill = h_flex()
-            .id("feedback-pill")
-            .occlude()
-            .role(gpui::Role::Group)
-            .aria_label("Feedback paused")
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
-            .rounded(px(10.0))
-            .shadow(p.shadow(2))
-            .px(px(12.0))
-            .py(px(6.0))
-            .gap(px(10.0))
-            .items_center()
-            .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
-            .child(
-                div()
-                    .flex_none()
-                    .mono(scale::FS_12)
-                    .text_color(p.ink_3)
-                    .child(notes),
-            )
-            .child(
-                button("feedback-resume", "Resume")
-                    .accessibility_label("Resume feedback")
-                    .on_click(move |_, window, cx| resume(&(), window, cx)),
-            )
-            .child(done_button);
-        popover_layer(
-            div()
-                .absolute()
-                .bottom(px(12.0))
-                .right(px(12.0))
-                .child(pill),
-        )
-        .into_any_element()
-    }
 }
 
 #[cfg(test)]
@@ -2264,17 +2556,17 @@ mod tests {
     fn done_gates_on_phase_and_notes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let mut shell = live_shell(cx);
-            assert!(!shell.done_enabled(), "Off never saves");
+            assert!(!shell.done_enabled(cx), "Off never saves");
             shell.toggle(true);
-            assert!(!shell.done_enabled(), "Active with 0 notes never saves");
+            assert!(!shell.done_enabled(cx), "Active with 0 notes never saves");
             note_on(&mut shell, "one");
-            assert!(shell.done_enabled());
+            assert!(shell.done_enabled(cx));
             shell.pause();
-            assert!(shell.done_enabled(), "Paused saves too");
+            assert!(shell.done_enabled(cx), "Paused saves too");
             shell.done_applied();
             assert_eq!(shell.phase, FeedbackPhase::Off);
             assert!(shell.draft.is_empty());
-            assert!(!shell.done_enabled());
+            assert!(!shell.done_enabled(cx));
         });
     }
 
@@ -2433,7 +2725,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = hermetic_harness(vc, &state.2);
         let ctx = vc.update(|window, cx| baaz.read(cx).feedback_context(window, cx));
-        assert_eq!(ctx.mode, "sessions");
+        assert_eq!(ctx.mode, "Sessions");
         assert_eq!(ctx.theme, "dark");
         assert!(ctx.window_w > 0.0 && ctx.window_h > 0.0, "the window has a size");
         assert!(ctx.scale > 0.0, "the window has a scale");
@@ -2510,7 +2802,7 @@ mod tests {
             shell.toggle(true);
             note_on(&mut shell, "one");
             shell.saving = true;
-            assert!(!shell.done_enabled(), "no second Done while saving");
+            assert!(!shell.done_enabled(cx), "no second Done while saving");
             shell.pause();
             assert_eq!(shell.phase, FeedbackPhase::Active, "pause waits out the save");
             shell.resume();
@@ -2521,8 +2813,10 @@ mod tests {
         });
     }
 
-    /// The layer element exists only while Active; the chrome exists while
-    /// Active (bar) or Paused (pill), never while Off.
+    /// The layer element exists only while Active; the floating chrome
+    /// exists only while Active (the bar). While Paused the shell lives
+    /// in the header slot instead — native pages paint above a floating
+    /// pill — and while Off nothing renders unless a Done flash is fresh.
     #[gpui::test]
     fn layer_and_chrome_follow_the_phase(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("layer-phase");
@@ -2536,14 +2830,22 @@ mod tests {
                 baaz.update(cx, |h, cx| h.render_feedback_chrome(window, cx).is_some())
             })
         };
+        let slot = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some()))
+        };
         assert!(!layer(vc), "Off renders no layer");
         assert!(!chrome(vc), "Off renders no chrome");
+        assert!(!slot(vc), "Off renders no header slot");
         enter_active(&baaz, vc);
         assert!(layer(vc), "Active renders the layer");
         assert!(chrome(vc), "Active renders the bar");
+        assert!(!slot(vc), "Active needs no header slot");
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
         assert!(!layer(vc), "Paused renders no layer");
-        assert!(chrome(vc), "Paused renders the pill");
+        assert!(!chrome(vc), "Paused renders no floating chrome");
+        assert!(slot(vc), "Paused renders the header pill");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume_feedback(window, cx)));
+        assert!(!slot(vc), "back Active clears the header slot");
         restore_state(state);
     }
 
@@ -2933,8 +3235,11 @@ mod tests {
     }
 
     /// Hover never enriches (the debug-tree parse waits for the note's
-    /// target) and hit-tests at most one per ~30 ms: an immediate second
-    /// move keeps the old outline, an aged one re-tests.
+    /// target) and hit-tests at most once per ~30 ms — but the outline
+    /// still settles on the LAST position: a move inside the window parks
+    /// the trailing edge, and the frame poll hit-tests it once the window
+    /// has passed (driven here by a real draw plus the clock, never by
+    /// calling the poll by hand).
     #[gpui::test]
     fn hover_throttles_and_never_enriches(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("f3-hover-throttle");
@@ -2956,7 +3261,8 @@ mod tests {
         );
         assert_eq!(calls.get(), 0, "hover never enriches");
         // An immediate move onto the other hit is throttled: no re-test,
-        // the old outline stays, and still no enrichment.
+        // the old outline stays, the position parks as the trailing edge,
+        // and still no enrichment.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(310.0, 310.0), window, cx)));
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
@@ -2964,19 +3270,30 @@ mod tests {
             "the throttled move keeps the last outline"
         );
         assert_eq!(calls.get(), 0, "the throttled move enriches nothing either");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.hover_dirty.is_some()),
+            "the throttled move parks the trailing edge"
+        );
+        // The pointer stops. Once the window elapses, a real frame's poll
+        // runs the parked hit-test and the outline reaches the last
+        // position.
         vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
                 h.feedback.hover_tested_at =
                     Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1));
             })
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(310.0, 310.0), window, cx)));
+        draw_frame(vc);
         assert_eq!(
             vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
             Some("Footer".to_owned()),
-            "past the throttle the move re-hit-tests"
+            "after the window the outline reaches the last position"
         );
-        assert_eq!(calls.get(), 0, "even a real re-test never enriches");
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.hover_dirty.is_none()),
+            "the poll consumes the trailing edge"
+        );
+        assert_eq!(calls.get(), 0, "even the trailing re-test never enriches");
         restore_state(state);
     }
 
@@ -3139,7 +3456,7 @@ mod tests {
             let note = &harness.feedback.draft.notes[0];
             assert_eq!(note.index, 1);
             assert_eq!(note.text, "quieter header");
-            assert_eq!(note.context.mode, "sessions", "the context is filled per note");
+            assert_eq!(note.context.mode, "Sessions", "the context is filled per note");
             assert!(note.context.window_w > 0.0, "the context carries the window");
             assert!(harness.feedback.popover.is_none(), "saving closes the popover");
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
@@ -3186,13 +3503,17 @@ mod tests {
         restore_state(state);
     }
 
-    /// One pin per note: the pin rects match the note targets in order.
+    /// One pin per note on this screen: the pin rects match the note
+    /// targets in order, and notes from other screens draw nothing — a
+    /// different mode, session, page URL, right pane or Settings section
+    /// each hides its pin.
     #[gpui::test]
-    fn pins_match_the_notes(cx: &mut gpui::TestAppContext) {
+    fn pins_match_the_notes_on_this_screen(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let mut shell = live_shell(cx);
             shell.toggle(true);
-            assert!(shell.pin_rects().is_empty(), "no notes, no pins");
+            let current = crate::feedback::test_context();
+            assert!(shell.visible_pin_rects(&current).is_empty(), "no notes, no pins");
             note_on(&mut shell, "one");
             shell.draft.add(
                 Target::Element(f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")),
@@ -3201,12 +3522,33 @@ mod tests {
                 None,
                 None,
             );
-            let pins = shell.pin_rects();
+            let pins = shell.visible_pin_rects(&current);
             assert_eq!(pins.len(), 2, "one pin per note");
             assert_eq!(pins[0].0, Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 });
             assert_eq!(pins[0].1, 1);
             assert_eq!(pins[1].0, Rect { x: 10.0, y: 10.0, w: 100.0, h: 30.0 });
             assert_eq!(pins[1].1, 2);
+
+            // The matrix: each screen field on its own hides the pin.
+            let mut other = current.clone();
+            other.mode = "Browse".to_owned();
+            assert!(shell.visible_pin_rects(&other).is_empty(), "another mode hides every pin");
+            let mut other = current.clone();
+            other.session_id = Some("other-session".to_owned());
+            assert!(shell.visible_pin_rects(&other).is_empty(), "another session hides every pin");
+            let mut other = current.clone();
+            other.page_url = Some("https://example.com/other".to_owned());
+            assert!(shell.visible_pin_rects(&other).is_empty(), "another page hides every pin");
+            let mut other = current.clone();
+            other.right_pane = Some("Browser".to_owned());
+            assert!(shell.visible_pin_rects(&other).is_empty(), "another pane hides every pin");
+            let mut other = current.clone();
+            other.settings_section = Some("General".to_owned());
+            assert!(shell.visible_pin_rects(&other).is_empty(), "another section hides every pin");
+            assert!(
+                FeedbackUi::pin_context_matches(&current, &current),
+                "the same screen matches"
+            );
         });
     }
 
@@ -3425,7 +3767,25 @@ mod tests {
             win_w,
             win_h,
         );
-        assert_eq!((x, y), (54.0, 4.0), "a taller-than-window chip pins inside its top-left");
+        assert_eq!((x, y), (58.0, 8.0), "a taller-than-window chip pins inside its top-left");
+        // Past ~60 % of the window height the bottom edge is unreachable,
+        // so the chip moves inside even when the element fits on screen.
+        let (x, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 100.0, y: 100.0, w: 800.0, h: 500.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!((x, y), (108.0, 108.0), "a taller-than-60 % chip pins inside its top-left");
+        let (_, y) = FeedbackUi::feedback_chip_pos(
+            Rect { x: 100.0, y: 100.0, w: 800.0, h: 400.0 },
+            150.0,
+            24.0,
+            win_w,
+            win_h,
+        );
+        assert_eq!(y, 72.0, "below 60 % the chip still sits above the element");
 
         assert!(
             FeedbackUi::feedback_popover_height(8) > FeedbackUi::feedback_popover_height(3),
@@ -3514,9 +3874,12 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.fill_feedback_note("file me on Done", window, cx))
         });
+        // Done reads enabled through the same predicate the button
+        // renders with: the open popover holds text, so Done will file it
+        // first even though the draft is still empty.
         assert!(
-            vc.update(|_, cx| !baaz.read(cx).feedback.done_enabled()),
-            "the draft is still empty with the note unsaved"
+            vc.update(|_, cx| baaz.read(cx).feedback.done_enabled(cx)),
+            "an open note with text enables Done with an empty draft"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         vc.run_until_parked();
@@ -3598,6 +3961,299 @@ mod tests {
             crate::steps::step_failures(),
             failures_before + 4,
             "off-phase, unparseable and empty pointing subs all fail"
+        );
+        restore_state(state);
+    }
+
+    /// Pausing with steps queued fails them loudly under their own names
+    /// instead of leaving them behind: their popovers will never open.
+    #[gpui::test]
+    fn pause_fails_its_queued_steps(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-pause-queue");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx)));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| h.step_feedback("note:queued behind the capture", window, cx))
+        });
+        assert!(
+            vc.update(|_, cx| !baaz.read(cx).feedback.step_queue.is_empty()),
+            "the note waits behind the in-flight capture"
+        );
+        let failures_before = crate::steps::step_failures();
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
+            assert!(harness.feedback.step_queue.is_empty(), "pause clears the queue");
+        });
+        assert_eq!(
+            crate::steps::step_failures(),
+            failures_before + 1,
+            "the queued note fails loudly on pause"
+        );
+        assert!(
+            crate::steps::step_failure_names().iter().any(|name| name.contains("queued behind the capture")),
+            "the failure carries the queued step's own name"
+        );
+        restore_state(state);
+    }
+
+    /// A note keeps the screen it began on: begin Active, move to another
+    /// mode before Save, and the filed note still names the original one.
+    #[gpui::test]
+    fn note_keeps_the_screen_it_began_on(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-stale-context");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.feedback_press_at(f3_point(20.0, 20.0), window, cx);
+                h.feedback_release_at(f3_point(20.0, 20.0), window, cx);
+            })
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.capture_pending.is_some()),
+            "the click starts a capture"
+        );
+        // The owner switches screens before the capture lands.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.mode = crate::layout::Mode::Browse;
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                let seq = h.feedback.capture_seq;
+                h.finish_note_capture(window, cx, seq);
+                h.fill_feedback_note("kept words", window, cx);
+                h.save_feedback_note(window, cx);
+            })
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.note_count(), 1);
+            assert_eq!(
+                harness.feedback.draft.notes[0].context.mode, "Sessions",
+                "the note keeps the screen it began on, not the switched-to one"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// The visual row count: a long single line wraps into several rows, a
+    /// trailing newline counts, and empty text is one row — so the height
+    /// estimate keeps Save on screen for wrapped text.
+    #[gpui::test]
+    fn visual_rows_count_wrapped_lines_and_trailing_newlines() {
+        assert_eq!(FeedbackUi::feedback_visual_rows("hi"), 1);
+        assert_eq!(FeedbackUi::feedback_visual_rows(""), 1, "empty text is one row");
+        assert_eq!(FeedbackUi::feedback_visual_rows("a\n"), 2, "a trailing newline counts");
+        assert_eq!(FeedbackUi::feedback_visual_rows("a\nb\n"), 3);
+        let long = "x".repeat(100);
+        assert_eq!(
+            FeedbackUi::feedback_visual_rows(&long),
+            3,
+            "a 100-char single line wraps into 3 rows at ~36 chars each"
+        );
+        assert!(
+            FeedbackUi::feedback_popover_height(FeedbackUi::feedback_visual_rows(&long))
+                > FeedbackUi::feedback_popover_height(FeedbackUi::feedback_visual_rows("hi")),
+            "wrapped text grows the popover"
+        );
+        assert_eq!(
+            FeedbackUi::feedback_popover_height(FeedbackUi::feedback_visual_rows("a\n")),
+            FeedbackUi::feedback_popover_height(3),
+            "two visual rows still clamp to the field minimum"
+        );
+    }
+
+    /// A hit covering more than 40 % of the window becomes a 60×40 area
+    /// around the point: `near <label>` for a widget, `"web page"` for
+    /// the page stand-in. Smaller hits stay elements.
+    #[gpui::test]
+    fn big_hits_become_nearby_areas() {
+        let win = gpui::size(gpui::px(1000.0), gpui::px(800.0));
+        let mut page = f3_hit(0.0, 0.0, 1000.0, 800.0, "Browse");
+        page.role = "AXGroup".to_owned();
+        match FeedbackUi::note_target_for_hit(page, f3_point(500.0, 400.0), win) {
+            Target::Area { rect, region } => {
+                assert_eq!(rect, Rect { x: 470.0, y: 380.0, w: 60.0, h: 40.0 });
+                assert_eq!(region, Some("web page".to_owned()));
+            }
+            other => panic!("the page-sized group becomes a web-page area, got {other:?}"),
+        }
+        let big = f3_hit(0.0, 0.0, 1000.0, 800.0, "Canvas");
+        match FeedbackUi::note_target_for_hit(big, f3_point(500.0, 400.0), win) {
+            Target::Area { region, .. } => {
+                assert_eq!(region, Some("near Canvas".to_owned()));
+            }
+            other => panic!("a page-sized widget becomes a nearby area, got {other:?}"),
+        }
+        let small = f3_hit(10.0, 10.0, 100.0, 30.0, "Headers");
+        match FeedbackUi::note_target_for_hit(small, f3_point(20.0, 20.0), win) {
+            Target::Element(hit) => assert_eq!(hit.label, "Headers"),
+            other => panic!("a small hit stays an element, got {other:?}"),
+        }
+    }
+
+    /// A click on a page-sized hit files a web-page area note end to end:
+    /// the step handler, parked tasks plus painted frames, then the
+    /// popover points at a 60×40 area with `region = "web page"`.
+    #[gpui::test]
+    fn click_on_a_page_sized_hit_files_a_web_page_area(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-page-hit");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        let mut page = f3_hit(0.0, 0.0, 2000.0, 2000.0, "Browse");
+        page.role = "AXGroup".to_owned();
+        inject_hits(&baaz, vc, vec![page]);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx)));
+        drive_frames(vc);
+        match f3_popover_target(&baaz, vc) {
+            Some(Target::Area { rect, region }) => {
+                assert_eq!(rect, Rect { x: 170.0, y: 180.0, w: 60.0, h: 40.0 });
+                assert_eq!(region, Some("web page".to_owned()));
+            }
+            other => panic!("the page click files a web-page area, got {other:?}"),
+        }
+        restore_state(state);
+    }
+
+    /// Menu-bar dispatches die while Active and work again when Paused:
+    /// ⌘N (and Settings…, the palette) dispatched the way the native menu
+    /// does — straight into the tree, past the `NoAction` key rows.
+    #[gpui::test]
+    fn menu_actions_die_while_active_and_return_when_paused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-menu-guard");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        let sessions_before = vc.update(|_, cx| baaz.read(cx).sessions.len());
+        vc.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::app::NewSession), cx);
+        });
+        vc.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::app::OpenSettings), cx);
+        });
+        vc.update(|window, cx| {
+            window.dispatch_action(Box::new(aui::keys::TogglePalette), cx);
+        });
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.sessions.len(), sessions_before, "⌘N opens no session while Active");
+            assert!(harness.active.is_none(), "⌘N opens no draft while Active");
+            assert!(!harness.settings_page.open, "Settings… stays closed while Active");
+            assert!(harness.overlays.read(cx).palette.is_none(), "the palette stays closed while Active");
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        vc.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::app::OpenSettings), cx);
+        });
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).settings_page.open),
+            "Settings… works again when Paused"
+        );
+        restore_state(state);
+    }
+
+    /// The "Feedback mode is off" toast never goes stale: entering Active
+    /// dismisses it by id.
+    #[gpui::test]
+    fn stale_off_toast_dismisses_on_entering_active(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-off-toast");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| {
+                baaz.read(cx)
+                    .overlays
+                    .read(cx)
+                    .toasts
+                    .iter()
+                    .any(|t| t.title.to_string() == "Feedback mode is off")
+            }),
+            "the toast shows while the setting is off"
+        );
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.layout.feedback_mode = true;
+            })
+        });
+        enter_active(&baaz, vc);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert!(
+                !harness
+                    .overlays
+                    .read(cx)
+                    .toasts
+                    .iter()
+                    .any(|t| t.title.to_string() == "Feedback mode is off"),
+                "entering Active dismisses the stale toast"
+            );
+        });
+        restore_state(state);
+    }
+
+    /// Session titles never show a raw id: a session with no title reads
+    /// `New session`, through the same ↩ chip rule the Browse header
+    /// wears — which is also what notes store.
+    #[gpui::test]
+    fn chip_session_name_never_shows_a_raw_id(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-chip-name");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            let name = harness.browse_chip_session_name("local-draft-b0d3f00d", cx);
+            assert_eq!(name, "New session", "a title-less session never reads as a raw id");
+            assert!(!name.contains("local-draft"), "no raw id leaks into the name");
+        });
+        restore_state(state);
+    }
+
+    /// Done leaves a brief confirmation in the header slot: Off with a
+    /// fresh flash renders it, so the save is visible even when a page
+    /// covers the toast area.
+    #[gpui::test]
+    fn done_flash_lingers_in_the_header_slot(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("f3c-done-flash");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
+                        region: None,
+                    },
+                    "flash me".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
+            assert!(harness.feedback.saved_flash.is_some(), "Done arms the header flash");
+        });
+        assert!(
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some())),
+            "the fresh flash renders in the header slot"
         );
         restore_state(state);
     }

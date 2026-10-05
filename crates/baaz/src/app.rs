@@ -392,6 +392,30 @@ pub fn set_menus(cx: &mut App) {
     // cleanup as the window-close and app-quit hooks.
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         crate::baaz_log!("CloseWindow");
+        // Feedback Active swallows the menu-bar close the way the layer
+        // swallows its keys (the same shared guard as the window
+        // handlers below, read off each window's shell here).
+        let blocked = cx.windows().iter().any(|window| {
+            window
+                .downcast::<Root>()
+                .and_then(|handle| {
+                    handle
+                        .update(cx, |root, _, cx| {
+                            root.view()
+                                .clone()
+                                .downcast::<Harness>()
+                                .map(|harness| {
+                                    harness.read(cx).feedback.phase == feedback_ui::FeedbackPhase::Active
+                                })
+                                .unwrap_or(false)
+                        })
+                        .ok()
+                })
+                .unwrap_or(false)
+        });
+        if blocked {
+            return;
+        }
         crate::tier::cleanup_probes();
         // Same as the red dot: hide the app rather than remove the window,
         // so the session and the `muse serve` child survive and the Dock
@@ -3870,6 +3894,11 @@ impl Harness {
         if let Some(downloads) = downloads {
             cell = cell.child(downloads);
         }
+        // F3c: the Paused feedback pill (or the Done confirmation), just
+        // left of the header icon buttons — the region pages never cover.
+        if let Some(slot) = self.render_feedback_header_slot(cx) {
+            cell = cell.child(slot);
+        }
         let cell = cell.child(extensions).child(more).child(self.right_toggle(cx));
         // The 2 px accent progress line along the bottom of the header,
         // driven by the page's progress: a proportional fill while loading.
@@ -4960,11 +4989,18 @@ impl Harness {
         if let Some(chip) = chip {
             row = row.child(chip);
         }
-        row.child(self.browse_back_button(cx))
+        let row = row
+            .child(self.browse_back_button(cx))
             .child(self.browse_forward_button(cx))
             .child(self.browse_reload_button(cx))
-            .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx))
-            .child(more)
+            .child(self.browse_minimal_address_field(url, title, blank, security, zoom, window, cx));
+        // F3c: the Paused feedback pill (or the Done confirmation), just
+        // left of the header icon buttons — the region pages never cover.
+        let row = match self.render_feedback_header_slot(cx) {
+            Some(slot) => row.child(slot),
+            None => row,
+        };
+        row.child(more)
             .child(
                 div()
                     .id("hd-minimal-new-tab")
@@ -5583,6 +5619,10 @@ impl Harness {
             }
         }
         let title: AnyElement = title.into_any_element();
+        // F3c: the Paused feedback pill (or the Done confirmation) sits
+        // here, just left of the header icon buttons — the one header
+        // region native pages never cover.
+        let feedback_slot = self.render_feedback_header_slot(cx);
         // No expand button: the header row stands still while the sidebar
         // collapses, so the toggle in the sidebar header stays put and the
         // centre cell never slides under the native lights.
@@ -5605,8 +5645,12 @@ impl Harness {
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
+        let cell = cell.child(title);
+        let cell = match feedback_slot {
+            Some(slot) => cell.child(slot),
+            None => cell,
+        };
         cell
-            .child(title)
             .child(term_button)
             .child(
                 div()
@@ -7497,8 +7541,18 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
-                .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+                .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.toggle_sidebar(cx)
+                }))
                 .on_action(cx.listener(|this, _: &NewSession, window, cx| {
+                    // Feedback Active swallows menu-bar dispatches the way
+                    // the layer swallows its keys (one shared guard).
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
                     // ⌘T lands on the new-tab page with the field focused
                     // (B2a-H4): in Browse it opens a blank person tab,
                     // never a chat session.
@@ -7511,22 +7565,65 @@ impl Render for Harness {
                     // that starts nothing keeps the page.
                     this.new_session(window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
+                .on_action(cx.listener(|this, _: &AddProject, window, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.open_projects(false, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
-                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)))
-                .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
-                .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
-                .on_action(cx.listener(|_, _: &ToggleTheme, window, cx| AuiTheme::toggle_kind(Some(window), cx)))
+                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.open_search(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MinimizeWindow, window, _| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    window.minimize_window()
+                }))
+                .on_action(cx.listener(|this, _: &ZoomWindow, window, _| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    window.zoom_window()
+                }))
+                .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    AuiTheme::toggle_kind(Some(window), cx)
+                }))
                 .on_action(cx.listener(|this, _: &ToggleFeedback, window, cx| this.toggle_feedback(window, cx)))
                 .on_action(cx.listener(|this, _: &FeedbackEscape, window, cx| this.escape_feedback(window, cx)))
-                .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
+                .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.show_about(cx)
+                }))
                 // ⌘, (and File → Settings…): the last-visited section this
                 // run, General on first open — an empty target spells that
                 // (`normalize_settings_target`). Never a toggle.
-                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings_page("", cx)))
-                .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
+                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.open_settings_page("", cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowDocs, _, _| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
+                    this.show_docs()
+                }))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
                     this.open_palette(PaletteKind::Commands, cx)
                 }))
                 // `aui::keys` binds ⌘\ to *its own* `ToggleRightPane`, a
@@ -7545,6 +7642,9 @@ impl Render for Harness {
                 // page holds the keyboard (the keymap claims it at the
                 // CEF router, and this root binding carries it there).
                 .on_action(cx.listener(|this, _: &ToggleBrowseMode, window, cx| {
+                    if this.feedback.blocks_chrome_action() {
+                        return;
+                    }
                     this.toggle_browse_mode(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &NewBrowserTab, window, cx| {
