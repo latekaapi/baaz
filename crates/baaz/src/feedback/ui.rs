@@ -1507,10 +1507,8 @@ impl crate::app::Harness {
         if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
             return None;
         }
-        let (target, field) = match &self.feedback.popover {
-            Some(note) => (note.target.clone(), note.field.clone()),
-            None => return None,
-        };
+        let note = self.feedback.popover.as_ref()?;
+        let (target, field) = (note.target.clone(), note.field.clone());
         let p = cx.aui().colors;
         let accent = feedback_accent(cx);
         let on_accent = feedback_on_accent(cx);
