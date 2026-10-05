@@ -1,5 +1,5 @@
 //! F2 feedback mode shell: the setting-driven capture state, the capture
-//! layer, and the bar + pill chrome around the F1 model.
+//! layer, and the header-slot chrome around the F1 model.
 //!
 //! The F1 [`crate::feedback`] module owns the data ([`Draft`](crate::feedback::Draft),
 //! [`ElementProbe`](crate::feedback::ElementProbe), [`write_report`](crate::feedback::write_report));
@@ -7,9 +7,11 @@
 //! lives on [`Harness`](crate::app::Harness) as `feedback`.
 //!
 //! Phases: `Off` (nothing shown) → `Active` (the capture layer blocks the
-//! app and the bar floats on top) → `Paused` (the app is usable, the pill
-//! floats bottom-right). ⌃⌥⌘F toggles Off→Active→Paused→Active; Escape
-//! pauses; Done writes the report and goes Off.
+//! app; the header icon reads tinted) → `Paused` (the app is usable, the
+//! icon untinted, notes kept). ⌃⌥⌘F — or the header icon — toggles
+//! Off→Active→Paused→Active; Escape pauses; Done writes the report and
+//! goes Off. The header slot is the only chrome: setting off shows
+//! nothing.
 //!
 //! F3 hook: hover/click/drag note-taking attaches to the capture layer
 //! built by [`FeedbackUi::layer_base`] — add handlers there, next to the
@@ -18,8 +20,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use aui::data::button;
+use aui::data::{button, icon_content_button, ButtonSize};
 use aui::overlay::popover_layer;
+use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable, Point, Pixels, Window};
 use gpui_kit::base::input::TextareaState;
@@ -65,9 +68,9 @@ pub(crate) const FEEDBACK_HOVER_THROTTLE: Duration = Duration::from_millis(30);
 /// (or the idle shell) before it fails loudly instead of racing the
 /// async capture.
 pub(crate) const FEEDBACK_STEP_WAIT: Duration = Duration::from_secs(2);
-/// The top strip the Active bar floats in: the hover chip never parks its
+/// The top strip the header slot lives in: the hover chip never parks its
 /// top edge inside it.
-pub(crate) const FEEDBACK_BAR_ZONE_H: f32 = 64.0;
+pub(crate) const FEEDBACK_HEADER_ZONE_H: f32 = 64.0;
 /// The note popover's fixed width, matching its render.
 pub(crate) const FEEDBACK_POPOVER_W: f32 = 300.0;
 /// The note field's inner width: the 300 px popover minus its 12 px side
@@ -89,9 +92,9 @@ pub enum FeedbackPhase {
     /// Nothing shown; the app is untouched.
     #[default]
     Off,
-    /// The capture layer blocks the app; the bar floats on top.
+    /// The capture layer blocks the app; the header icon reads tinted.
     Active,
-    /// The app is usable; the pill floats bottom-right.
+    /// The app is usable; the header icon reads untinted, notes kept.
     Paused,
 }
 
@@ -349,14 +352,6 @@ impl FeedbackUi {
         self.capturing = false;
     }
 
-    /// Clear the hover outline, for the bar's mouse-move catcher.
-    pub fn clear_hover(&mut self) {
-        self.hover = None;
-        self.hover_point = None;
-        self.hover_since = None;
-        self.hover_dirty = None;
-    }
-
     /// Whether anything is shown.
     pub fn is_open(&self) -> bool {
         self.phase != FeedbackPhase::Off
@@ -405,16 +400,6 @@ impl FeedbackUi {
             && self.discard_armed_at.is_some_and(|at| at.elapsed() <= DISCARD_ARM)
     }
 
-    /// The Discard button's label: `Discard`, or `Discard N notes?` while
-    /// the confirm is armed.
-    pub fn discard_label(&self) -> String {
-        if self.discard_armed_live() {
-            format!("Discard {}?", self.notes_label())
-        } else {
-            "Discard".to_owned()
-        }
-    }
-
     /// Discard is clickable only with notes to drop.
     pub fn discard_enabled(&self) -> bool {
         !self.draft.is_empty()
@@ -422,8 +407,8 @@ impl FeedbackUi {
 
     /// Done is clickable in Active or Paused with notes to save — never
     /// while a write is in flight. An open popover holding non-empty text
-    /// counts: Done files it first, so the button the bar and the pill
-    /// render must already read enabled for it.
+    /// counts: Done files it first, so the header's Done icon must
+    /// already read enabled for it.
     pub fn done_enabled(&self, cx: &gpui::App) -> bool {
         if self.saving || self.phase == FeedbackPhase::Off {
             return false;
@@ -481,11 +466,12 @@ impl FeedbackUi {
         }
     }
 
-    /// Escape, the Pause button: Active → Paused, anywhere else a no-op —
-    /// and always a no-op while [`Self::saving`]. The open popover (with
-    /// its typed text) survives: Resume brings it back. Queued steps die
-    /// with it — their popovers will never open — failing loudly under
-    /// their own step names like the pump's expiry does.
+    /// Escape, or the header icon while Active: Active → Paused, anywhere
+    /// else a no-op — and always a no-op while [`Self::saving`]. The open
+    /// popover (with its typed text) survives: resuming brings it back.
+    /// Queued steps die with it — their popovers will never open —
+    /// failing loudly under their own step names like the pump's expiry
+    /// does.
     pub fn pause(&mut self) {
         if self.phase == FeedbackPhase::Active && !self.saving {
             self.clear_transient();
@@ -497,8 +483,8 @@ impl FeedbackUi {
         }
     }
 
-    /// The Resume button / `resume` verb: Paused → Active, else a no-op —
-    /// and always a no-op while [`Self::saving`].
+    /// The header icon while Paused, or the `resume` verb: Paused →
+    /// Active, else a no-op — and always a no-op while [`Self::saving`].
     pub fn resume(&mut self) {
         if self.phase == FeedbackPhase::Paused && !self.saving {
             self.disarm_discard();
@@ -650,7 +636,7 @@ impl FeedbackUi {
 
     /// Where the hover name chip sits: centred on the target, above it by
     /// default, below it near the top — and never with its top edge inside
-    /// the bar zone (then below the element too). Clamped horizontally and
+    /// the header zone (then below the element too). Clamped horizontally and
     /// vertically into the window. When the element is taller than ~60 % of
     /// the window (a page-sized hit whose bottom edge is unreachable), the
     /// chip pins inside its top-left instead. Pure, so tests drive the
@@ -669,7 +655,7 @@ impl FeedbackUi {
         let centre = rect.x + rect.w / 2.0;
         let x = (centre - est_w / 2.0).clamp(4.0, (win_w - est_w - 4.0).max(4.0));
         let mut y = if rect.y <= 30.0 { rect.y + rect.h + 4.0 } else { rect.y - 28.0 };
-        if y < FEEDBACK_BAR_ZONE_H {
+        if y < FEEDBACK_HEADER_ZONE_H {
             y = rect.y + rect.h + 4.0;
         }
         (x, y.clamp(4.0, (win_h - chip_h - 4.0).max(4.0)))
@@ -702,7 +688,7 @@ impl FeedbackUi {
     /// Where the note popover sits: right of the target (left when there
     /// is no room), top-aligned with it — flipped above the target when
     /// there is no room below, so the whole popover including Save stays
-    /// on screen and below the bar. Pure, so tests drive the edges
+    /// on screen and below the header. Pure, so tests drive the edges
     /// directly.
     pub(crate) fn feedback_popover_pos(
         rect: Rect,
@@ -720,8 +706,8 @@ impl FeedbackUi {
         if y + pop_h > win_h - 8.0 {
             y = rect.y - pop_h - 8.0;
         }
-        let hi = (win_h - 8.0 - pop_h).max(FEEDBACK_BAR_ZONE_H);
-        (x, y.clamp(FEEDBACK_BAR_ZONE_H, hi))
+        let hi = (win_h - 8.0 - pop_h).max(FEEDBACK_HEADER_ZONE_H);
+        (x, y.clamp(FEEDBACK_HEADER_ZONE_H, hi))
     }
 
     /// Whether a note's stored context names the current screen: same
@@ -881,28 +867,7 @@ impl crate::app::Harness {
         }
     }
 
-    /// The bar's Pause button. A no-op while saving.
-    pub(crate) fn pause_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.saving {
-            return;
-        }
-        self.feedback.pause();
-        window.focus(&self.focus_root, cx);
-        cx.notify();
-    }
-
-    /// The pill's Resume button. A no-op while saving.
-    pub(crate) fn resume_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.saving {
-            return;
-        }
-        if self.feedback.phase == FeedbackPhase::Paused {
-            self.feedback.resume();
-            self.enter_feedback_active(window, cx);
-        }
-    }
-
-    /// The bar's Discard button: arm, then clear on the confirm. A stale
+    /// The header's Discard icon: arm, then clear on the confirm. A stale
     /// arm disarms itself on a timer so the label falls back. At most one
     /// disarm task is ever pending: re-arming replaces the previous one.
     /// A no-op while saving. Afterwards the layer keeps the keyboard when
@@ -1487,7 +1452,7 @@ impl crate::app::Harness {
 
     /// The pointer moved while Active: with the left button down it is a
     /// drag, otherwise a hover. When a press is armed but the button is no
-    /// longer down, the mouse-up landed on the bar, the popover or outside
+    /// longer down, the mouse-up landed on the header, the popover or outside
     /// the window and never reached the layer: clear the stale press and
     /// drag without filing a note, then hover on so the outline revives.
     /// The layer's mouse-move handler lands here.
@@ -1891,7 +1856,7 @@ impl crate::app::Harness {
     /// The hover outline (3 px outside the hit rect, accent border plus a
     /// 14 % accent fill) and its name chip (`<human role> · <label>`,
     /// accent background, on-accent mono text), above the rect or below it
-    /// near the top — clamped into the window and out from under the bar.
+    /// near the top — clamped into the window and out from under the header.
     /// Decorative: no role, pointer-transparent.
     fn render_feedback_hover(
         &self,
@@ -2042,200 +2007,182 @@ impl crate::app::Harness {
         Some(div().children(pins).into_any_element())
     }
 
-    /// The floating chrome: the bar while Active, nothing otherwise — and
-    /// nothing while capturing, when the window must read clean. While
-    /// Paused the shell lives in the window's header row (see
-    /// [`Self::render_feedback_header_slot`]): native pages paint above
-    /// gpui, so a floating pill sits under the page and its clicks hit the
-    /// page instead.
-    pub(crate) fn render_feedback_chrome(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.feedback.capturing {
-            return None;
-        }
-        match self.feedback.phase {
-            FeedbackPhase::Off | FeedbackPhase::Paused => None,
-            FeedbackPhase::Active => Some(self.render_feedback_bar(window, cx)),
-        }
-    }
-
-    /// The Paused shell (and the Done confirmation) in the window's top
-    /// header row, just left of its icon buttons — a region native pages
-    /// never cover. While Paused: dot · N notes · Resume · Done, compact
-    /// (the height of a header button). After Done lands: `Saved · N
-    /// notes — path copied` for ~4 s, so the confirmation is visible even
-    /// when a page covers the toast area. Anywhere else: nothing.
+    /// The header slot is the only chrome: setting off shows nothing, and
+    /// nothing shows while capturing, when the window must read clean.
+    /// The three header variants all call this just left of their icon
+    /// buttons — a region native pages never cover, so unlike a floating
+    /// pill its clicks always land. Setting on: always the toggle icon;
+    /// while Active or with notes in the draft, the `N notes` count plus
+    /// the Done and Discard icons follow it; a fresh Done flash replaces
+    /// the count and the actions for its ~4 s.
     pub(crate) fn render_feedback_header_slot(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.feedback.capturing {
             return None;
         }
-        if self.feedback.phase == FeedbackPhase::Paused {
-            return Some(self.render_feedback_head_pill(cx));
+        if !(self.layout.feedback_mode || self.feedback.forced_on) {
+            return None;
         }
-        if self.feedback.phase == FeedbackPhase::Off {
-            let fresh = self
+        let active = self.feedback.phase == FeedbackPhase::Active;
+        let flashing = !active
+            && self
                 .feedback
                 .saved_flash
                 .as_ref()
                 .is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH);
-            if !fresh {
-                return None;
-            }
-            let flash = self.feedback.saved_flash.as_ref().expect("fresh checked");
-            let unit = if flash.notes == 1 { "note" } else { "notes" };
-            let p = cx.aui().colors;
-            let accent = feedback_accent(cx);
-            return Some(
-                h_flex()
-                    .id("feedback-saved")
-                    .occlude()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(scale::R_SM))
-                    .bg(p.surface_1)
-                    .border_1()
-                    .border_color(p.line_strong)
-                    .role(gpui::Role::Group)
-                    .aria_label(format!("Feedback saved to {}", flash.path))
-                    .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
-                    .child(
-                        div()
-                            .flex_none()
-                            .mono(scale::FS_12)
-                            .text_color(p.ink_2)
-                            .whitespace_nowrap()
-                            .child(format!("Saved · {} {unit} — path copied", flash.notes)),
-                    )
-                    .into_any_element(),
-            );
-        }
-        None
-    }
-
-    /// The Paused pill for the header slot: dot · N notes · Resume · Done,
-    /// compact at header-button height. Done is the same accent button as
-    /// the bar's, one line.
-    fn render_feedback_head_pill(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
-        let notes = self.feedback.notes_label();
-        let resume = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.resume_feedback(window, cx);
-        });
-        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.finish_feedback(window, cx);
-        });
-        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
-        let done_button =
-            self.render_feedback_done("feedback-done", done_label, false, cx, move |window, cx| {
-                done(&(), window, cx);
-            });
-        h_flex()
-            .id("feedback-pill")
+        let mut row = h_flex()
+            .id("feedback-header")
             .occlude()
             .flex_none()
             .items_center()
             .gap(px(8.0))
+            .child(self.render_feedback_toggle(cx, active));
+        if flashing {
+            row = row.child(self.render_feedback_flash(cx));
+        } else if active || !self.feedback.draft.is_empty() {
+            row = row
+                .child(
+                    div()
+                        .flex_none()
+                        .mono(11.5)
+                        .text_color(cx.aui().colors.ink_3)
+                        .whitespace_nowrap()
+                        .child(self.feedback.notes_label()),
+                )
+                .child(self.render_feedback_done(cx))
+                .child(self.render_feedback_discard(cx));
+        }
+        Some(row.into_any_element())
+    }
+
+    /// The header's feedback icon: the same ghost small icon button as the
+    /// neighbouring header buttons, toggling exactly like ⌃⌥⌘F (Off or
+    /// Paused → Active, Active → Paused). While Active the glyph reads
+    /// tinted on an accent-soft wash, and the toggled state names it for
+    /// the accessibility tree.
+    fn render_feedback_toggle(&self, cx: &mut Context<Self>, active: bool) -> AnyElement {
+        let accent = feedback_accent(cx);
+        let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.toggle_feedback(window, cx);
+        });
+        let glyph = if active {
+            icon(IconName::MessagePlus).size(px(14.0)).color(accent)
+        } else {
+            icon(IconName::MessagePlus).size(px(14.0))
+        };
+        let toggled = if active { gpui::Toggled::True } else { gpui::Toggled::False };
+        div()
+            .id("feedback-toggle")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(scale::R_SM))
+            .when(active, |this| this.bg(gpui::Hsla { a: 0.14, ..accent }))
+            .role(gpui::Role::Button)
+            .aria_label("Feedback mode")
+            .aria_toggled(toggled)
+            .tooltip(|_, cx| cx.new(|_| FeedbackTip::toggle()).into())
+            .child(
+                icon_content_button("feedback-toggle-button", glyph)
+                    .ghost()
+                    .size(ButtonSize::Sm)
+                    .accessibility_label("Feedback mode")
+                    .on_click(toggle),
+            )
+            .into_any_element()
+    }
+
+    /// The header's Done icon: accent ink, dimmed while there is nothing
+    /// to save, writing the report and copying its path like the old Done
+    /// button did.
+    fn render_feedback_done(&self, cx: &mut Context<Self>) -> AnyElement {
+        let accent = feedback_accent(cx);
+        let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.finish_feedback(window, cx);
+        });
+        div()
+            .id("feedback-done")
+            .flex_none()
+            .role(gpui::Role::Button)
+            .aria_label("Done — save feedback report")
+            .tooltip(|_, cx| cx.new(|_| FeedbackTip::done()).into())
+            .child(
+                icon_content_button(
+                    "feedback-done-button",
+                    icon(IconName::Check).size(px(14.0)).color(accent),
+                )
+                .ghost()
+                .size(ButtonSize::Sm)
+                .accessibility_label("Done — save feedback report")
+                .disabled(!self.feedback.done_enabled(cx))
+                .on_click(done),
+            )
+            .into_any_element()
+    }
+
+    /// The header's Discard icon: the first click arms it (danger ink,
+    /// naming the notes the second click drops) for 4 s; the second click
+    /// inside the window clears the draft, staying in phase.
+    fn render_feedback_discard(&self, cx: &mut Context<Self>) -> AnyElement {
+        let armed = self.feedback.discard_armed_live();
+        let tip = if armed {
+            format!("Click again to discard {}", self.feedback.notes_label())
+        } else {
+            "Discard feedback notes".to_owned()
+        };
+        let discard = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+            this.discard_feedback(window, cx);
+        });
+        let mut button = icon_content_button("feedback-discard-button", icon(IconName::Trash).size(px(14.0)))
+            .ghost()
+            .size(ButtonSize::Sm)
+            .accessibility_label("Discard feedback notes")
+            .disabled(!self.feedback.discard_enabled())
+            .on_click(discard);
+        if armed {
+            button = button.danger();
+        }
+        div()
+            .id("feedback-discard")
+            .flex_none()
+            .role(gpui::Role::Button)
+            .aria_label("Discard feedback notes")
+            .tooltip(move |_, cx| cx.new(|_| FeedbackTip { text: tip.clone() }).into())
+            .child(button)
+            .into_any_element()
+    }
+
+    /// After Done lands: `Saved · N notes — path copied` for ~4 s, so the
+    /// save is visible even when a page covers the toast area. Replaces
+    /// the count and the action icons for its show.
+    fn render_feedback_flash(&self, cx: &mut Context<Self>) -> AnyElement {
+        let flash = self.feedback.saved_flash.as_ref().expect("flash checked");
+        let unit = if flash.notes == 1 { "note" } else { "notes" };
+        let p = cx.aui().colors;
+        let accent = feedback_accent(cx);
+        h_flex()
+            .id("feedback-saved")
+            .occlude()
+            .flex_none()
+            .items_center()
+            .gap(px(6.0))
             .h(px(28.0))
             .px(px(10.0))
             .rounded(px(scale::R_SM))
             .bg(p.surface_1)
             .border_1()
             .border_color(p.line_strong)
-            .shadow(p.shadow(1))
             .role(gpui::Role::Group)
-            .aria_label("Feedback paused")
+            .aria_label(format!("Feedback saved to {}", flash.path))
             .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
             .child(
                 div()
                     .flex_none()
                     .mono(scale::FS_12)
-                    .text_color(p.ink_3)
+                    .text_color(p.ink_2)
                     .whitespace_nowrap()
-                    .child(notes),
+                    .child(format!("Saved · {} {unit} — path copied", flash.notes)),
             )
-            .child(
-                button("feedback-resume", "Resume")
-                    .accessibility_label("Resume feedback")
-                    .on_click(move |_, window, cx| resume(&(), window, cx)),
-            )
-            .child(done_button)
-            .into_any_element()
-    }
-
-    /// The accent Done button both the bar and the pill share: feedback
-    /// accent fill with on-accent text (never Baaz's purple primary) while
-    /// enabled; while disabled a transparent background with a 1 px accent
-    /// border at ~45 % and accent text at ~55 % (both lines in the bar).
-    /// A styled div with the aui md metrics (28 px height, 11 px side
-    /// padding, small radius), a Button role and label, hover and disabled
-    /// states.
-    fn render_feedback_done(
-        &self,
-        id: &'static str,
-        label: &str,
-        two_line: bool,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
-    ) -> AnyElement {
-        let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
-        let on_accent = feedback_on_accent(cx);
-        let hover = gpui::Hsla { l: (accent.l - 0.06).max(0.0), ..accent };
-        let sub = gpui::Hsla { a: 0.75, ..on_accent };
-        let faint_border = gpui::Hsla { a: 0.45, ..accent };
-        let faint_text = gpui::Hsla { a: 0.55, ..accent };
-        let enabled = self.feedback.done_enabled(cx);
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .px(px(11.0))
-            .py(if two_line { px(4.0) } else { px(0.0) })
-            .h(if two_line { px(44.0) } else { px(28.0) })
-            .rounded(px(scale::R_SM))
-            .border_1()
-            .border_color(if enabled { gpui::transparent_black() } else { faint_border })
-            .bg(if enabled { accent } else { gpui::transparent_black() })
-            .when(enabled, |this| {
-                this.hover(|this| this.bg(hover)).cursor_pointer()
-            })
-            .text_color(if enabled { on_accent } else { faint_text })
-            .role(gpui::Role::Button)
-            .aria_label("Done — save feedback report")
-            .on_click(move |_, window, cx| {
-                if enabled {
-                    on_click(window, cx);
-                }
-            })
-            .child(
-                div()
-                    .ui(scale::FS_13)
-                    .semibold()
-                    .line_height(gpui::relative(1.0))
-                    .whitespace_nowrap()
-                    .child(label.to_owned()),
-            )
-            .when(two_line, |this| {
-                this.child(
-                    div()
-                        .ui(scale::FS_11)
-                        .line_height(gpui::relative(1.0))
-                        .text_color(if enabled { sub } else { faint_text })
-                        .whitespace_nowrap()
-                        .child("Saves the report and copies its path"),
-                )
-            })
-            .shadow(p.shadow(1))
             .into_any_element()
     }
 
@@ -2244,7 +2191,7 @@ impl crate::app::Harness {
     /// 300 px wide, 12 px right of the target (left when there is no room),
     /// top-aligned and flipped above the target when there is no room
     /// below, so the whole popover including Save stays on screen below
-    /// the bar: header, field, Cancel/Save, hints. Save reads disabled
+    /// the header: header, field, Cancel/Save, hints. Save reads disabled
     /// while the text is empty.
     pub(crate) fn render_feedback_popover(
         &mut self,
@@ -2382,101 +2329,42 @@ impl crate::app::Harness {
         )
     }
 
-    /// The Active bar, top-centre: dot · Feedback · N notes · help ·
-    /// Pause · Discard · Done (one two-line button: the caption lives
-    /// inside it). Above the capture layer, below toasts. Moving over the
-    /// bar clears the hover outline beneath it.
-    fn render_feedback_bar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.feedback.expire_discard();
-        let p = cx.aui().colors;
-        let accent = feedback_accent(cx);
-        let notes = self.feedback.notes_label();
-        let discard_label = self.feedback.discard_label();
-        let discard_enabled = self.feedback.discard_enabled();
-        let pause = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.pause_feedback(window, cx);
-        });
-        let discard = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.discard_feedback(window, cx);
-        });
-        let done = cx.listener(|this: &mut Self, _: &(), window, cx| {
-            this.finish_feedback(window, cx);
-        });
-        let done_label = if self.feedback.saving { "Saving…" } else { "Done" };
-        let done_button =
-            self.render_feedback_done("feedback-done", done_label, true, cx, move |window, cx| {
-                done(&(), window, cx);
-            });
-        let bar = h_flex()
-            .id("feedback-bar")
-            .occlude()
-            .role(gpui::Role::Group)
-            .aria_label("Feedback mode")
-            .on_mouse_move(cx.listener(|this: &mut Self, _: &gpui::MouseMoveEvent, _, cx| {
-                if this.feedback.hover.is_some() {
-                    this.feedback.clear_hover();
-                    cx.notify();
-                }
-            }))
-            .bg(p.surface_1)
-            .border_1()
-            .border_color(p.line_strong)
-            .rounded(px(10.0))
-            .shadow(p.shadow(2))
-            .pl(px(12.0))
-            .pr(px(6.0))
-            .py(px(6.0))
-            .gap(px(10.0))
-            .items_center()
-            .child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
-            .child(
-                div()
-                    .flex_none()
-                    .ui(scale::FS_13)
-                    .semibold()
-                    .text_color(p.ink)
-                    .child("Feedback"),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .mono(scale::FS_12)
-                    .text_color(p.ink_3)
-                    .child(notes),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .ui(scale::FS_12)
-                    .text_color(p.ink_3)
-                    .child("Click an element or drag an area"),
-            )
-            .child(
-                button("feedback-pause", "Pause")
-                    .accessibility_label("Pause feedback")
-                    .on_click(move |_, window, cx| pause(&(), window, cx)),
-            )
-            .child(
-                button("feedback-discard", discard_label)
-                    .ghost()
-                    .disabled(!discard_enabled)
-                    .accessibility_label("Discard feedback notes")
-                    .on_click(move |_, window, cx| discard(&(), window, cx)),
-            )
-            .child(done_button);
-        popover_layer(
-            div()
-                .absolute()
-                .top(px(8.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(bar),
-        )
-        .into_any_element()
+}
+
+/// A one-line hover label for the header's feedback controls, in the same
+/// overlay bubble the other header tips use.
+struct FeedbackTip {
+    /// The line the bubble shows.
+    text: String,
+}
+
+impl FeedbackTip {
+    /// The toggle's tip: `Feedback mode (⌃⌥⌘F)`.
+    fn toggle() -> Self {
+        Self { text: "Feedback mode (⌃⌥⌘F)".to_owned() }
     }
 
+    /// The Done tip: `Done — saves the report and copies its path`.
+    fn done() -> Self {
+        Self { text: "Done — saves the report and copies its path".to_owned() }
+    }
+}
+
+impl gpui::Render for FeedbackTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let p = cx.aui().colors;
+        div()
+            .px(px(scale::SP_3))
+            .py(px(scale::SP_2))
+            .rounded(px(scale::R_SM))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.overlay)
+            .text_color(p.ink)
+            .ui(scale::FS_12)
+            .whitespace_nowrap()
+            .child(self.text.clone())
+    }
 }
 
 #[cfg(test)]
@@ -2570,24 +2458,23 @@ mod tests {
             shell.toggle(true);
             assert_eq!(shell.discard_press(), DiscardOutcome::Disabled);
             assert!(!shell.discard_enabled());
-            assert_eq!(shell.discard_label(), "Discard");
+            assert!(!shell.discard_armed_live());
 
             note_on(&mut shell, "one");
             note_on(&mut shell, "two");
             assert!(shell.discard_enabled());
             assert_eq!(shell.discard_press(), DiscardOutcome::Armed);
-            assert_eq!(shell.discard_label(), "Discard 2 notes?");
+            assert!(shell.discard_armed_live(), "the first click arms the confirm");
             assert_eq!(shell.discard_press(), DiscardOutcome::Cleared);
             assert_eq!(shell.note_count(), 0);
             assert_eq!(shell.phase, FeedbackPhase::Active, "clearing stays in phase");
-            assert_eq!(shell.discard_label(), "Discard");
+            assert!(!shell.discard_armed_live());
 
             // A stale arm reads as a first click again.
             note_on(&mut shell, "three");
             assert_eq!(shell.discard_press(), DiscardOutcome::Armed);
             shell.discard_armed_at = Some(Instant::now() - DISCARD_ARM - Duration::from_secs(1));
             assert!(!shell.discard_armed_live());
-            assert_eq!(shell.discard_label(), "Discard", "a stale arm falls back");
             assert_eq!(shell.discard_press(), DiscardOutcome::Armed, "stale arms re-arm");
             assert_eq!(shell.note_count(), 1, "nothing cleared on the re-arm");
         });
@@ -2810,7 +2697,7 @@ mod tests {
     }
 
     /// The cover predicate follows the phase: Active covers, Paused leaves
-    /// pages live (so `browser_visible` stays true under the pill).
+    /// pages live (no floating chrome covers them).
     #[gpui::test]
     fn covers_app_is_active_only(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -2855,39 +2742,150 @@ mod tests {
         });
     }
 
-    /// The layer element exists only while Active; the floating chrome
-    /// exists only while Active (the bar). While Paused the shell lives
-    /// in the header slot instead — native pages paint above a floating
-    /// pill — and while Off nothing renders unless a Done flash is fresh.
+    /// The layer element exists only while Active; the header slot is the
+    /// only chrome — there is no floating bar anymore. Setting off shows
+    /// nothing; setting on shows the toggle icon in every phase, with the
+    /// count and the action icons while Active or holding notes.
     #[gpui::test]
-    fn layer_and_chrome_follow_the_phase(cx: &mut gpui::TestAppContext) {
+    fn layer_and_header_slot_follow_the_phase(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("layer-phase");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         let layer = |vc: &mut gpui::VisualTestContext| {
             vc.update(|window, cx| baaz.update(cx, |h, cx| h.render_feedback_layer(window, cx).is_some()))
         };
-        let chrome = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|window, cx| {
-                baaz.update(cx, |h, cx| h.render_feedback_chrome(window, cx).is_some())
-            })
-        };
         let slot = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some()))
         };
         assert!(!layer(vc), "Off renders no layer");
-        assert!(!chrome(vc), "Off renders no chrome");
-        assert!(!slot(vc), "Off renders no header slot");
+        assert!(!slot(vc), "setting off renders no header slot");
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.layout.feedback_mode = true));
+        assert!(slot(vc), "setting on renders the toggle icon while Off");
         enter_active(&baaz, vc);
         assert!(layer(vc), "Active renders the layer");
-        assert!(chrome(vc), "Active renders the bar");
-        assert!(!slot(vc), "Active needs no header slot");
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        assert!(slot(vc), "Active renders the header slot, never a bar");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(!layer(vc), "Paused renders no layer");
-        assert!(!chrome(vc), "Paused renders no floating chrome");
-        assert!(slot(vc), "Paused renders the header pill");
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume_feedback(window, cx)));
-        assert!(!slot(vc), "back Active clears the header slot");
+        assert!(slot(vc), "Paused keeps the header slot");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(layer(vc), "toggling back renders the layer again");
+        assert!(slot(vc), "back Active keeps the header slot");
+        restore_state(state);
+    }
+
+    /// The header icon toggles exactly like ⌃⌥⌘F: the click listener calls
+    /// `toggle_feedback`, so driving that handler is driving the click —
+    /// Off/Paused → Active, Active → Paused.
+    #[gpui::test]
+    fn header_icon_click_toggles_active_and_paused(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("header-toggle");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = window_harness(cx, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, _| h.layout.feedback_mode = true));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            "the icon activates from Off"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "the icon pauses from Active"
+        );
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            "the icon resumes from Paused"
+        );
+        restore_state(state);
+    }
+
+    /// The slot's controls name themselves for the accessibility tree: the
+    /// toggle icon always (setting on), the Done and Discard icons once
+    /// Active or holding notes — read off a real shell draw through the
+    /// AX probe, like the transcript controls.
+    #[gpui::test]
+    fn header_slot_names_its_controls(cx: &mut gpui::TestAppContext) {
+        use gpui::IntoElement as _;
+        let state = hermetic_state("header-ax");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| {
+                crate::app::Harness::new(
+                    test_args(&state.2),
+                    crate::shot::CaptureToken::default(),
+                    window,
+                    cx,
+                )
+            })
+        });
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.args.login = crate::LoginSample::SignedIn;
+                h.apply_login_sample(window, cx);
+                h.layout.feedback_mode = true;
+            })
+        });
+        let draw = |vc: &mut gpui::VisualTestContext| {
+            aui::data::arm_ax_probe(true);
+            vc.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(1440.), gpui::px(900.)),
+                |_, _| baaz.clone().into_any_element(),
+            );
+            let labels = aui::data::take_ax_labels();
+            aui::data::arm_ax_probe(false);
+            labels
+        };
+        let off_labels = draw(vc);
+        assert!(off_labels.contains(&"Feedback mode".to_owned()), "the icon names itself: {off_labels:?}");
+        assert!(
+            !off_labels.contains(&"Done — save feedback report".to_owned()),
+            "icon only while Off with no notes"
+        );
+        assert!(
+            !off_labels.contains(&"Discard feedback notes".to_owned()),
+            "no Discard while Off with no notes"
+        );
+        enter_active(&baaz, vc);
+        let active_labels = draw(vc);
+        assert!(active_labels.contains(&"Feedback mode".to_owned()), "Active keeps the icon");
+        assert!(
+            active_labels.contains(&"Done — save feedback report".to_owned()),
+            "Active shows Done, disabled with no notes: {active_labels:?}"
+        );
+        assert!(
+            active_labels.contains(&"Discard feedback notes".to_owned()),
+            "Active shows Discard: {active_labels:?}"
+        );
+        // Paused with notes: the icon plus the count and both actions.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, _| {
+                h.feedback.draft.add(
+                    Target::Area {
+                        rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
+                        region: None,
+                    },
+                    "kept note".to_owned(),
+                    crate::feedback::test_context(),
+                    None,
+                    None,
+                );
+            })
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
+        assert!(
+            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            "the toggle pauses"
+        );
+        let paused_labels = draw(vc);
+        for label in ["Feedback mode", "Done — save feedback report", "Discard feedback notes"] {
+            assert!(
+                paused_labels.contains(&label.to_owned()),
+                "Paused with notes shows {label}: {paused_labels:?}"
+            );
+        }
         restore_state(state);
     }
 
@@ -3065,7 +3063,7 @@ mod tests {
                 );
             })
         });
-        // The bar button's own handler, exactly as the click calls it.
+        // The Discard icon's own handler, exactly as the click calls it.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         vc.simulate_keystrokes("escape");
         assert!(
@@ -3734,7 +3732,7 @@ mod tests {
         restore_state(state);
     }
 
-    /// A press whose mouse-up landed on the bar, the popover or outside
+    /// A press whose mouse-up landed on the header, the popover or outside
     /// the window never reaches the layer: the next button-up move clears
     /// the stale press and drag without filing a note, and hover revives.
     #[gpui::test]
@@ -3772,7 +3770,7 @@ mod tests {
     /// The pure clamp geometry: the chip sits below a top-edge target,
     /// above a mid-window one, on screen at the bottom edge, and pinned
     /// inside an element taller than the window; the popover drops below
-    /// the bar at the top edge and flips above a bottom-edge target so
+    /// the header at the top edge and flips above a bottom-edge target so
     /// Save stays on screen, growing with the field's row count.
     #[gpui::test]
     fn chip_and_popover_clamps() {
@@ -3849,7 +3847,7 @@ mod tests {
             win_w,
             win_h,
         );
-        assert_eq!(y, FEEDBACK_BAR_ZONE_H, "a top-edge popover drops below the bar");
+        assert_eq!(y, FEEDBACK_HEADER_ZONE_H, "a top-edge popover drops below the header");
         let (_, y) = FeedbackUi::feedback_popover_pos(
             Rect { x: 100.0, y: 740.0, w: 200.0, h: 40.0 },
             250.0,
@@ -3858,7 +3856,7 @@ mod tests {
         );
         assert_eq!(y, 482.0, "a bottom-edge popover flips above the target");
         assert!(y + 250.0 <= win_h - 8.0, "the whole popover including Save stays on screen");
-        assert!(y >= FEEDBACK_BAR_ZONE_H);
+        assert!(y >= FEEDBACK_HEADER_ZONE_H);
     }
 
     /// Pause keeps a note-in-progress (popover plus typed text) and Resume
@@ -3877,13 +3875,13 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.fill_feedback_note("half-typed words", window, cx))
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
             assert!(harness.feedback.popover.is_some(), "pause keeps the popover");
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume_feedback(window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 assert_eq!(h.feedback.phase, FeedbackPhase::Active);
@@ -4025,7 +4023,16 @@ mod tests {
             "the note waits behind the in-flight capture"
         );
         let failures_before = crate::steps::step_failures();
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        // The shell's own pause (what Escape and the `pause` verb drive):
+        // the ⌃⌥⌘F toggle parks the queue silently, only this path fails
+        // each waiter loudly under its own step name.
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.feedback.pause();
+                window.focus(&h.focus_root, cx);
+                cx.notify();
+            })
+        });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
@@ -4226,7 +4233,7 @@ mod tests {
             assert!(harness.overlays.read(cx).palette.is_none(), "the palette stays closed while Active");
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.pause_feedback(window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|window, cx| {
             window.dispatch_action(Box::new(crate::app::OpenSettings), cx);
         });
